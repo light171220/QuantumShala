@@ -1,0 +1,1051 @@
+---
+title: "Natural Gradient Descent"
+description: "Master natural gradient descent for variational quantum circuits, understanding how it improves convergence by respecting parameter space geometry."
+keywords: ["natural-gradient", "optimization", "vqc-training", "convergence", "regularization", "parameterization-invariance"]
+---
+
+# Natural Gradient Descent
+
+Natural gradient descent adapts optimization to the geometry of quantum state space, often achieving faster and more stable convergence than standard gradient descent for variational quantum algorithms.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Implement natural gradient descent for VQCs
+- Compare convergence with standard gradient descent
+- Handle QFI matrix inversion challenges
+- Apply regularization techniques for stability
+- Understand parameterization invariance
+- Optimize learning rate selection
+
+---
+
+## 1. Natural Gradient Update Rule
+
+The natural gradient modifies parameter updates to account for the curvature of the loss landscape in quantum state space.
+
+<Definition term="Natural Gradient Descent">
+The natural gradient update for variational quantum circuits:
+$$\theta_{t+1} = \theta_t - \eta \cdot F_Q^{-1}(\theta_t) \nabla_\theta \mathcal{L}(\theta_t)$$
+
+where $F_Q$ is the Quantum Fisher Information matrix and $\nabla_\theta \mathcal{L}$ is the standard gradient.
+</Definition>
+
+### Implementation
+
+```python
+import numpy as np
+
+class NaturalGradientDescent:
+    """
+    Natural gradient descent optimizer for variational quantum circuits.
+    """
+
+    def __init__(self, circuit_fn, loss_fn, n_params):
+        """
+        Args:
+            circuit_fn: Function returning quantum state given parameters
+            loss_fn: Loss function to minimize
+            n_params: Number of parameters
+        """
+        self.circuit_fn = circuit_fn
+        self.loss_fn = loss_fn
+        self.n_params = n_params
+
+        # Hyperparameters
+        self.learning_rate = 0.1
+        self.damping = 1e-4  # Regularization for QFI inversion
+
+        # History
+        self.loss_history = []
+        self.param_history = []
+        self.qfi_condition_history = []
+
+    def compute_gradient(self, params, eps=1e-5):
+        """Compute gradient of loss using finite differences."""
+        gradient = np.zeros(self.n_params)
+
+        for i in range(self.n_params):
+            params_plus = params.copy()
+            params_plus[i] += eps
+
+            params_minus = params.copy()
+            params_minus[i] -= eps
+
+            gradient[i] = (self.loss_fn(params_plus) - self.loss_fn(params_minus)) / (2 * eps)
+
+        return gradient
+
+    def compute_qfi(self, params, eps=1e-5):
+        """Compute Quantum Fisher Information matrix."""
+        psi = self.circuit_fn(params)
+
+        # Compute state derivatives
+        dpsi = []
+        for i in range(self.n_params):
+            params_plus = params.copy()
+            params_plus[i] += eps
+
+            params_minus = params.copy()
+            params_minus[i] -= eps
+
+            dpsi_i = (self.circuit_fn(params_plus) - self.circuit_fn(params_minus)) / (2 * eps)
+            dpsi.append(dpsi_i)
+
+        # Build QFI matrix
+        qfi = np.zeros((self.n_params, self.n_params))
+
+        for i in range(self.n_params):
+            for j in range(self.n_params):
+                term1 = np.vdot(dpsi[i], dpsi[j])
+                term2 = np.vdot(dpsi[i], psi) * np.vdot(psi, dpsi[j])
+                qfi[i, j] = 4 * np.real(term1 - term2)
+
+        return qfi
+
+    def natural_gradient(self, params):
+        """Compute natural gradient: F_Q^(-1) @ grad."""
+        gradient = self.compute_gradient(params)
+        qfi = self.compute_qfi(params)
+
+        # Add damping for numerical stability
+        qfi_damped = qfi + self.damping * np.eye(self.n_params)
+
+        # Compute condition number for monitoring
+        eigenvalues = np.linalg.eigvalsh(qfi_damped)
+        condition = np.max(eigenvalues) / np.max(np.min(eigenvalues), 1e-10)
+        self.qfi_condition_history.append(condition)
+
+        # Solve linear system instead of explicit inversion
+        nat_grad = np.linalg.solve(qfi_damped, gradient)
+
+        return nat_grad
+
+    def step(self, params):
+        """Perform one natural gradient step."""
+        nat_grad = self.natural_gradient(params)
+        new_params = params - self.learning_rate * nat_grad
+
+        # Record history
+        loss = self.loss_fn(new_params)
+        self.loss_history.append(loss)
+        self.param_history.append(new_params.copy())
+
+        return new_params
+
+    def optimize(self, initial_params, n_steps=100, verbose=True):
+        """Run optimization."""
+        params = initial_params.copy()
+
+        for step in range(n_steps):
+            params = self.step(params)
+
+            if verbose and step % 10 == 0:
+                print(f"Step {step}: Loss = {self.loss_history[-1]:.6f}, "
+                      f"QFI Cond = {self.qfi_condition_history[-1]:.2f}")
+
+        return params
+
+
+class StandardGradientDescent:
+    """Standard gradient descent for comparison."""
+
+    def __init__(self, loss_fn, n_params, learning_rate=0.01):
+        self.loss_fn = loss_fn
+        self.n_params = n_params
+        self.learning_rate = learning_rate
+        self.loss_history = []
+
+    def compute_gradient(self, params, eps=1e-5):
+        gradient = np.zeros(self.n_params)
+        for i in range(self.n_params):
+            params_p = params.copy()
+            params_p[i] += eps
+            params_m = params.copy()
+            params_m[i] -= eps
+            gradient[i] = (self.loss_fn(params_p) - self.loss_fn(params_m)) / (2 * eps)
+        return gradient
+
+    def optimize(self, initial_params, n_steps=100):
+        params = initial_params.copy()
+        for _ in range(n_steps):
+            grad = self.compute_gradient(params)
+            params = params - self.learning_rate * grad
+            self.loss_history.append(self.loss_fn(params))
+        return params
+
+
+# Example: VQE optimization
+def create_vqe_problem(n_qubits=2):
+    """Create a simple VQE problem."""
+    dim = 2 ** n_qubits
+
+    # Hamiltonian: Z⊗Z + 0.5(X⊗I + I⊗X)
+    Z = np.array([[1, 0], [0, -1]])
+    X = np.array([[0, 1], [1, 0]])
+    I = np.eye(2)
+
+    H = np.kron(Z, Z) + 0.5 * (np.kron(X, I) + np.kron(I, X))
+    exact_gs = np.min(np.linalg.eigvalsh(H))
+
+    def circuit(params):
+        """Hardware-efficient ansatz."""
+        psi = np.zeros(dim, dtype=complex)
+        psi[0] = 1.0
+
+        # Layer 1: RY rotations
+        for q in range(n_qubits):
+            theta = params[q]
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            new_psi = np.zeros(dim, dtype=complex)
+            for i in range(dim):
+                bit = (i >> q) & 1
+                i_flip = i ^ (1 << q)
+                if bit == 0:
+                    new_psi[i] += c * psi[i]
+                    new_psi[i_flip] += s * psi[i]
+                else:
+                    new_psi[i] += c * psi[i]
+                    new_psi[i_flip] -= s * psi[i]
+            psi = new_psi
+
+        # CNOT
+        new_psi = np.zeros(dim, dtype=complex)
+        for i in range(dim):
+            if (i >> 0) & 1:
+                new_psi[i ^ 2] = psi[i]
+            else:
+                new_psi[i] = psi[i]
+        psi = new_psi
+
+        # Layer 2: RY rotations
+        for q in range(n_qubits):
+            theta = params[n_qubits + q]
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            new_psi = np.zeros(dim, dtype=complex)
+            for i in range(dim):
+                bit = (i >> q) & 1
+                i_flip = i ^ (1 << q)
+                if bit == 0:
+                    new_psi[i] += c * psi[i]
+                    new_psi[i_flip] += s * psi[i]
+                else:
+                    new_psi[i] += c * psi[i]
+                    new_psi[i_flip] -= s * psi[i]
+            psi = new_psi
+
+        return psi
+
+    def loss(params):
+        psi = circuit(params)
+        return np.real(psi.conj() @ H @ psi)
+
+    return circuit, loss, H, exact_gs
+
+
+# Run comparison
+circuit, loss, H, exact_gs = create_vqe_problem()
+n_params = 4
+initial_params = np.random.randn(n_params) * 0.1
+
+print("VQE Optimization Comparison")
+print("="*60)
+print(f"Exact ground state: {exact_gs:.6f}")
+
+# Natural gradient
+ngd = NaturalGradientDescent(circuit, loss, n_params)
+ngd.learning_rate = 0.5
+nat_result = ngd.optimize(initial_params.copy(), n_steps=30, verbose=False)
+
+# Standard gradient
+sgd = StandardGradientDescent(loss, n_params, learning_rate=0.1)
+std_result = sgd.optimize(initial_params.copy(), n_steps=30)
+
+print(f"\nAfter 30 steps:")
+print(f"Natural gradient: {ngd.loss_history[-1]:.6f} (error: {ngd.loss_history[-1] - exact_gs:.6f})")
+print(f"Standard gradient: {sgd.loss_history[-1]:.6f} (error: {sgd.loss_history[-1] - exact_gs:.6f})")
+```
+
+<Tip>
+Natural gradient often allows much larger learning rates than standard gradient descent because it automatically scales step sizes based on parameter sensitivity.
+</Tip>
+
+---
+
+## 2. Regularization Techniques
+
+The QFI matrix can become singular or ill-conditioned, requiring regularization for stable inversion.
+
+<Formula>
+Common Regularization Methods:
+- **Tikhonov**: $\tilde{F}_Q = F_Q + \lambda I$
+- **Truncated SVD**: Keep eigenvalues $> \epsilon$
+- **Block diagonal**: Approximate $F_Q$ with block structure
+</Formula>
+
+### Implementation
+
+```python
+class RegularizedNaturalGradient:
+    """
+    Natural gradient with various regularization strategies.
+    """
+
+    def __init__(self, circuit_fn, loss_fn, n_params):
+        self.circuit_fn = circuit_fn
+        self.loss_fn = loss_fn
+        self.n_params = n_params
+        self.lr = 0.1
+
+    def compute_qfi(self, params, eps=1e-5):
+        """Compute QFI matrix."""
+        psi = self.circuit_fn(params)
+        dpsi = []
+
+        for i in range(self.n_params):
+            p_plus = params.copy()
+            p_plus[i] += eps
+            p_minus = params.copy()
+            p_minus[i] -= eps
+            dpsi.append((self.circuit_fn(p_plus) - self.circuit_fn(p_minus)) / (2 * eps))
+
+        qfi = np.zeros((self.n_params, self.n_params))
+        for i in range(self.n_params):
+            for j in range(self.n_params):
+                t1 = np.vdot(dpsi[i], dpsi[j])
+                t2 = np.vdot(dpsi[i], psi) * np.vdot(psi, dpsi[j])
+                qfi[i, j] = 4 * np.real(t1 - t2)
+
+        return qfi
+
+    def compute_gradient(self, params, eps=1e-5):
+        """Compute loss gradient."""
+        grad = np.zeros(self.n_params)
+        for i in range(self.n_params):
+            p_plus = params.copy()
+            p_plus[i] += eps
+            p_minus = params.copy()
+            p_minus[i] -= eps
+            grad[i] = (self.loss_fn(p_plus) - self.loss_fn(p_minus)) / (2 * eps)
+        return grad
+
+    def tikhonov_regularization(self, qfi, lam=1e-4):
+        """
+        Tikhonov regularization: F_Q + λI
+
+        Simple and effective for most cases.
+        """
+        return qfi + lam * np.eye(self.n_params)
+
+    def adaptive_damping(self, qfi, min_eigenvalue=1e-4):
+        """
+        Adaptive damping based on smallest eigenvalue.
+
+        Adds just enough regularization to ensure invertibility.
+        """
+        eigenvalues = np.linalg.eigvalsh(qfi)
+        min_eig = np.min(eigenvalues)
+
+        if min_eig < min_eigenvalue:
+            damping = min_eigenvalue - min_eig + 1e-6
+            return qfi + damping * np.eye(self.n_params)
+
+        return qfi
+
+    def truncated_svd_inverse(self, qfi, threshold=1e-4):
+        """
+        Truncated SVD pseudo-inverse.
+
+        Ignores small singular values to avoid amplifying noise.
+        """
+        U, S, Vh = np.linalg.svd(qfi)
+
+        # Truncate small singular values
+        S_inv = np.zeros_like(S)
+        for i, s in enumerate(S):
+            if s > threshold:
+                S_inv[i] = 1.0 / s
+
+        # Pseudo-inverse
+        qfi_inv = Vh.T @ np.diag(S_inv) @ U.T
+
+        return qfi_inv
+
+    def natural_gradient_step(self, params, regularization='tikhonov', **kwargs):
+        """
+        Compute natural gradient with specified regularization.
+        """
+        gradient = self.compute_gradient(params)
+        qfi = self.compute_qfi(params)
+
+        if regularization == 'tikhonov':
+            lam = kwargs.get('lam', 1e-4)
+            qfi_reg = self.tikhonov_regularization(qfi, lam)
+            nat_grad = np.linalg.solve(qfi_reg, gradient)
+
+        elif regularization == 'adaptive':
+            min_eig = kwargs.get('min_eigenvalue', 1e-4)
+            qfi_reg = self.adaptive_damping(qfi, min_eig)
+            nat_grad = np.linalg.solve(qfi_reg, gradient)
+
+        elif regularization == 'truncated_svd':
+            threshold = kwargs.get('threshold', 1e-4)
+            qfi_inv = self.truncated_svd_inverse(qfi, threshold)
+            nat_grad = qfi_inv @ gradient
+
+        else:
+            raise ValueError(f"Unknown regularization: {regularization}")
+
+        return params - self.lr * nat_grad
+
+    def optimize(self, initial_params, n_steps=50, regularization='tikhonov', **kwargs):
+        """Run optimization with specified regularization."""
+        params = initial_params.copy()
+        losses = []
+
+        for step in range(n_steps):
+            params = self.natural_gradient_step(params, regularization, **kwargs)
+            losses.append(self.loss_fn(params))
+
+        return params, losses
+
+
+# Compare regularization methods
+circuit, loss, H, exact_gs = create_vqe_problem()
+n_params = 4
+initial = np.random.randn(n_params) * 0.1
+
+reg_ngd = RegularizedNaturalGradient(circuit, loss, n_params)
+reg_ngd.lr = 0.3
+
+print("Regularization Comparison")
+print("="*60)
+
+methods = ['tikhonov', 'adaptive', 'truncated_svd']
+for method in methods:
+    _, losses = reg_ngd.optimize(initial.copy(), n_steps=30, regularization=method)
+    print(f"{method:15s}: Final loss = {losses[-1]:.6f}")
+```
+
+<Warning>
+Excessive regularization (large λ) reduces natural gradient to standard gradient. Too little regularization causes numerical instability. Adaptive methods balance this automatically.
+</Warning>
+
+---
+
+## 3. Parameterization Invariance
+
+A key advantage of natural gradient is invariance to parameter reparameterization.
+
+<Definition term="Parameterization Invariance">
+Natural gradient descent produces identical trajectories in state space regardless of how parameters are defined. If $\phi = g(\theta)$ is a reparameterization, the optimization path in quantum state space remains the same.
+</Definition>
+
+### Demonstration
+
+```python
+class ParameterizationInvariance:
+    """
+    Demonstrate parameterization invariance of natural gradient.
+    """
+
+    def __init__(self, n_qubits=1):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+
+    def circuit_standard(self, theta):
+        """Standard parameterization: Ry(θ)|0⟩."""
+        psi = np.array([np.cos(theta[0]/2), np.sin(theta[0]/2)], dtype=complex)
+        return psi
+
+    def circuit_scaled(self, phi):
+        """Scaled parameterization: Ry(2φ)|0⟩."""
+        # θ = 2φ, so this is a reparameterization
+        theta = 2 * phi[0]
+        psi = np.array([np.cos(theta/2), np.sin(theta/2)], dtype=complex)
+        return psi
+
+    def circuit_nonlinear(self, xi):
+        """Nonlinear parameterization: Ry(arctan(ξ))|0⟩."""
+        # θ = arctan(ξ)
+        theta = np.arctan(xi[0])
+        psi = np.array([np.cos(theta/2), np.sin(theta/2)], dtype=complex)
+        return psi
+
+    def target_state(self):
+        """Target: |+⟩ = (|0⟩ + |1⟩)/√2."""
+        return np.array([1, 1], dtype=complex) / np.sqrt(2)
+
+    def loss(self, psi):
+        """Infidelity loss."""
+        target = self.target_state()
+        fidelity = np.abs(np.vdot(target, psi))**2
+        return 1 - fidelity
+
+    def run_optimization(self, circuit_fn, initial_param, n_steps=20, lr=0.1, damping=1e-4):
+        """Run natural gradient optimization."""
+        param = np.array([initial_param])
+        states = [circuit_fn(param)]
+        losses = [self.loss(states[-1])]
+
+        for _ in range(n_steps):
+            # Compute gradient
+            eps = 1e-5
+            loss_plus = self.loss(circuit_fn(param + eps))
+            loss_minus = self.loss(circuit_fn(param - eps))
+            grad = (loss_plus - loss_minus) / (2 * eps)
+
+            # Compute QFI
+            psi = circuit_fn(param)
+            psi_plus = circuit_fn(param + eps)
+            psi_minus = circuit_fn(param - eps)
+            dpsi = (psi_plus - psi_minus) / (2 * eps)
+
+            t1 = np.vdot(dpsi, dpsi)
+            t2 = np.abs(np.vdot(psi, dpsi))**2
+            qfi = 4 * np.real(t1 - t2)
+
+            # Natural gradient update
+            qfi_reg = qfi + damping
+            nat_grad = grad / qfi_reg
+            param = param - lr * np.array([nat_grad])
+
+            states.append(circuit_fn(param))
+            losses.append(self.loss(states[-1]))
+
+        return states, losses
+
+    def compare_parameterizations(self):
+        """Compare optimization trajectories."""
+        # Same initial state for all parameterizations
+        # Standard: θ = 0.5
+        # Scaled: φ = 0.25 (so 2φ = 0.5)
+        # Nonlinear: ξ = tan(0.5) ≈ 0.546
+
+        initial_theta = 0.5
+        initial_phi = initial_theta / 2
+        initial_xi = np.tan(initial_theta)
+
+        states_std, losses_std = self.run_optimization(
+            self.circuit_standard, initial_theta)
+        states_scaled, losses_scaled = self.run_optimization(
+            self.circuit_scaled, initial_phi)
+        states_nonlin, losses_nonlin = self.run_optimization(
+            self.circuit_nonlinear, initial_xi)
+
+        return {
+            'standard': (states_std, losses_std),
+            'scaled': (states_scaled, losses_scaled),
+            'nonlinear': (states_nonlin, losses_nonlin)
+        }
+
+
+# Demonstrate invariance
+demo = ParameterizationInvariance()
+results = demo.compare_parameterizations()
+
+print("Parameterization Invariance Demonstration")
+print("="*60)
+print("All three parameterizations should produce similar state trajectories")
+print()
+
+for name, (states, losses) in results.items():
+    final_fidelity = 1 - losses[-1]
+    print(f"{name:12s}: Final fidelity = {final_fidelity:.6f}")
+
+# Compare state trajectories
+print("\nState trajectory comparison (first 5 steps):")
+print("-" * 60)
+for step in range(min(5, len(results['standard'][0]))):
+    states_at_step = []
+    for name in ['standard', 'scaled', 'nonlinear']:
+        psi = results[name][0][step]
+        # Represent state by probability of |1⟩
+        p1 = np.abs(psi[1])**2
+        states_at_step.append(p1)
+
+    print(f"Step {step}: P(|1⟩) = {states_at_step[0]:.4f}, {states_at_step[1]:.4f}, {states_at_step[2]:.4f}")
+```
+
+<Tip>
+While natural gradient is parameterization invariant in exact arithmetic, numerical errors can cause small differences. The invariance becomes more accurate with smaller step sizes.
+</Tip>
+
+---
+
+## 4. Learning Rate Selection
+
+Natural gradient changes the optimal learning rate compared to standard gradient descent.
+
+<Formula>
+Learning Rate Guidelines:
+- Standard GD: $\eta \sim 1/L$ where $L$ is Lipschitz constant
+- Natural GD: $\eta \sim 1$ often works well
+- With good QFI estimation, $\eta \in [0.1, 1.0]$ is typical
+</Formula>
+
+### Implementation
+
+```python
+class LearningRateAnalysis:
+    """
+    Analyze learning rate selection for natural gradient.
+    """
+
+    def __init__(self, circuit_fn, loss_fn, n_params):
+        self.circuit_fn = circuit_fn
+        self.loss_fn = loss_fn
+        self.n_params = n_params
+
+    def compute_natural_gradient(self, params, damping=1e-4):
+        """Compute natural gradient."""
+        eps = 1e-5
+
+        # Gradient
+        grad = np.zeros(self.n_params)
+        for i in range(self.n_params):
+            p_plus = params.copy()
+            p_plus[i] += eps
+            p_minus = params.copy()
+            p_minus[i] -= eps
+            grad[i] = (self.loss_fn(p_plus) - self.loss_fn(p_minus)) / (2 * eps)
+
+        # QFI
+        psi = self.circuit_fn(params)
+        dpsi = []
+        for i in range(self.n_params):
+            p_plus = params.copy()
+            p_plus[i] += eps
+            p_minus = params.copy()
+            p_minus[i] -= eps
+            dpsi.append((self.circuit_fn(p_plus) - self.circuit_fn(p_minus)) / (2 * eps))
+
+        qfi = np.zeros((self.n_params, self.n_params))
+        for i in range(self.n_params):
+            for j in range(self.n_params):
+                t1 = np.vdot(dpsi[i], dpsi[j])
+                t2 = np.vdot(dpsi[i], psi) * np.vdot(psi, dpsi[j])
+                qfi[i, j] = 4 * np.real(t1 - t2)
+
+        qfi_reg = qfi + damping * np.eye(self.n_params)
+        nat_grad = np.linalg.solve(qfi_reg, grad)
+
+        return nat_grad, grad
+
+    def line_search(self, params, direction, max_lr=2.0, n_points=20):
+        """
+        Line search along natural gradient direction.
+        """
+        lrs = np.linspace(0, max_lr, n_points)
+        losses = []
+
+        for lr in lrs:
+            new_params = params - lr * direction
+            losses.append(self.loss_fn(new_params))
+
+        return lrs, losses
+
+    def find_optimal_lr(self, params):
+        """Find approximately optimal learning rate."""
+        nat_grad, std_grad = self.compute_natural_gradient(params)
+
+        # Line search for natural gradient
+        lrs_nat, losses_nat = self.line_search(params, nat_grad)
+        optimal_lr_nat = lrs_nat[np.argmin(losses_nat)]
+
+        # Line search for standard gradient
+        lrs_std, losses_std = self.line_search(params, std_grad)
+        optimal_lr_std = lrs_std[np.argmin(losses_std)]
+
+        return {
+            'natural': {'optimal_lr': optimal_lr_nat, 'losses': losses_nat},
+            'standard': {'optimal_lr': optimal_lr_std, 'losses': losses_std}
+        }
+
+    def lr_sweep(self, initial_params, learning_rates, n_steps=30):
+        """
+        Compare convergence for different learning rates.
+        """
+        results = {}
+
+        for lr in learning_rates:
+            params = initial_params.copy()
+            losses = []
+
+            for _ in range(n_steps):
+                nat_grad, _ = self.compute_natural_gradient(params)
+                params = params - lr * nat_grad
+                losses.append(self.loss_fn(params))
+
+            results[lr] = losses
+
+        return results
+
+
+# Learning rate analysis
+circuit, loss, H, exact_gs = create_vqe_problem()
+n_params = 4
+initial = np.random.randn(n_params) * 0.1
+
+lr_analyzer = LearningRateAnalysis(circuit, loss, n_params)
+
+print("Learning Rate Analysis for Natural Gradient")
+print("="*60)
+
+# Compare different learning rates
+learning_rates = [0.05, 0.1, 0.3, 0.5, 1.0]
+results = lr_analyzer.lr_sweep(initial.copy(), learning_rates, n_steps=30)
+
+print(f"{'LR':>6s} {'Final Loss':>12s} {'Steps to 0.1':>14s}")
+print("-" * 34)
+
+for lr, losses in results.items():
+    final = losses[-1]
+    steps_to_threshold = next((i for i, l in enumerate(losses) if l < 0.1), len(losses))
+    print(f"{lr:>6.2f} {final:>12.6f} {steps_to_threshold:>14d}")
+
+# Optimal LR comparison
+print("\nOptimal learning rate comparison:")
+opt_results = lr_analyzer.find_optimal_lr(initial)
+print(f"Natural gradient optimal LR: {opt_results['natural']['optimal_lr']:.4f}")
+print(f"Standard gradient optimal LR: {opt_results['standard']['optimal_lr']:.4f}")
+```
+
+<Warning>
+Learning rates that work well for natural gradient may cause divergence with standard gradient and vice versa. Always tune learning rates separately for each method.
+</Warning>
+
+---
+
+## 5. Convergence Analysis
+
+Natural gradient often exhibits superior convergence properties near optima.
+
+<Definition term="Convergence Rate">
+For a quadratic loss landscape, natural gradient achieves:
+$$\mathcal{L}(\theta_t) - \mathcal{L}^* \leq (1 - \eta)^t (\mathcal{L}(\theta_0) - \mathcal{L}^*)$$
+
+with learning rate $\eta = 1$, achieving the optimal linear convergence rate.
+</Definition>
+
+### Implementation
+
+```python
+class ConvergenceAnalysis:
+    """
+    Analyze convergence properties of natural gradient.
+    """
+
+    def __init__(self, circuit_fn, loss_fn, n_params, optimal_loss=None):
+        self.circuit_fn = circuit_fn
+        self.loss_fn = loss_fn
+        self.n_params = n_params
+        self.optimal_loss = optimal_loss
+
+    def run_optimization(self, initial_params, optimizer_type='natural',
+                        lr=0.1, n_steps=100, damping=1e-4):
+        """Run optimization and track convergence."""
+        params = initial_params.copy()
+        losses = []
+        grad_norms = []
+        param_distances = []
+
+        for step in range(n_steps):
+            current_loss = self.loss_fn(params)
+            losses.append(current_loss)
+
+            # Compute gradient
+            eps = 1e-5
+            grad = np.zeros(self.n_params)
+            for i in range(self.n_params):
+                p_plus = params.copy()
+                p_plus[i] += eps
+                p_minus = params.copy()
+                p_minus[i] -= eps
+                grad[i] = (self.loss_fn(p_plus) - self.loss_fn(p_minus)) / (2 * eps)
+
+            grad_norms.append(np.linalg.norm(grad))
+
+            if optimizer_type == 'natural':
+                # Compute QFI
+                psi = self.circuit_fn(params)
+                dpsi = []
+                for i in range(self.n_params):
+                    p_plus = params.copy()
+                    p_plus[i] += eps
+                    p_minus = params.copy()
+                    p_minus[i] -= eps
+                    dpsi.append((self.circuit_fn(p_plus) - self.circuit_fn(p_minus)) / (2 * eps))
+
+                qfi = np.zeros((self.n_params, self.n_params))
+                for i in range(self.n_params):
+                    for j in range(self.n_params):
+                        t1 = np.vdot(dpsi[i], dpsi[j])
+                        t2 = np.vdot(dpsi[i], psi) * np.vdot(psi, dpsi[j])
+                        qfi[i, j] = 4 * np.real(t1 - t2)
+
+                qfi_reg = qfi + damping * np.eye(self.n_params)
+                update = np.linalg.solve(qfi_reg, grad)
+            else:
+                update = grad
+
+            param_distances.append(np.linalg.norm(lr * update))
+            params = params - lr * update
+
+        return {
+            'losses': np.array(losses),
+            'grad_norms': np.array(grad_norms),
+            'param_distances': np.array(param_distances)
+        }
+
+    def compare_convergence(self, initial_params, n_steps=50):
+        """Compare natural and standard gradient convergence."""
+        nat_results = self.run_optimization(
+            initial_params, 'natural', lr=0.3, n_steps=n_steps)
+        std_results = self.run_optimization(
+            initial_params, 'standard', lr=0.05, n_steps=n_steps)
+
+        return nat_results, std_results
+
+    def convergence_rate(self, losses):
+        """Estimate convergence rate from loss history."""
+        if self.optimal_loss is not None:
+            errors = losses - self.optimal_loss
+        else:
+            errors = losses - losses[-1]
+
+        # Fit exponential: error_t = error_0 * (1 - rate)^t
+        # log(error_t / error_0) = t * log(1 - rate)
+        positive_errors = errors[errors > 1e-10]
+        if len(positive_errors) < 2:
+            return 0.0
+
+        log_ratios = np.log(positive_errors[1:] / positive_errors[:-1])
+        avg_log_ratio = np.mean(log_ratios)
+
+        # (1 - rate) = exp(avg_log_ratio)
+        rate = 1 - np.exp(avg_log_ratio)
+
+        return max(0, min(1, rate))
+
+
+# Convergence analysis
+circuit, loss, H, exact_gs = create_vqe_problem()
+n_params = 4
+initial = np.random.randn(n_params) * 0.5
+
+analyzer = ConvergenceAnalysis(circuit, loss, n_params, optimal_loss=exact_gs)
+nat_results, std_results = analyzer.compare_convergence(initial, n_steps=50)
+
+print("Convergence Analysis")
+print("="*60)
+
+nat_rate = analyzer.convergence_rate(nat_results['losses'])
+std_rate = analyzer.convergence_rate(std_results['losses'])
+
+print(f"Estimated convergence rates:")
+print(f"  Natural gradient: {nat_rate:.4f}")
+print(f"  Standard gradient: {std_rate:.4f}")
+
+print(f"\nFinal losses:")
+print(f"  Natural gradient: {nat_results['losses'][-1]:.6f}")
+print(f"  Standard gradient: {std_results['losses'][-1]:.6f}")
+
+print(f"\nError from optimal:")
+print(f"  Natural gradient: {nat_results['losses'][-1] - exact_gs:.6f}")
+print(f"  Standard gradient: {std_results['losses'][-1] - exact_gs:.6f}")
+```
+
+---
+
+## 6. Practical Implementation Tips
+
+Effective natural gradient implementation requires attention to numerical details.
+
+<Formula>
+Implementation Checklist:
+1. Use damped QFI: $\tilde{F}_Q = F_Q + \lambda I$
+2. Solve $\tilde{F}_Q \cdot g_{nat} = g$ instead of inverting
+3. Monitor QFI condition number
+4. Adapt damping based on step success
+</Formula>
+
+### Implementation
+
+```python
+class PracticalNaturalGradient:
+    """
+    Production-ready natural gradient optimizer.
+    """
+
+    def __init__(self, circuit_fn, loss_fn, n_params):
+        self.circuit_fn = circuit_fn
+        self.loss_fn = loss_fn
+        self.n_params = n_params
+
+        # Hyperparameters
+        self.lr = 0.1
+        self.damping = 1e-3
+        self.min_damping = 1e-6
+        self.max_damping = 1.0
+        self.damping_factor = 2.0
+
+        # Monitoring
+        self.history = {
+            'losses': [],
+            'damping': [],
+            'condition': [],
+            'step_size': []
+        }
+
+    def compute_qfi_and_gradient(self, params, eps=1e-5):
+        """Compute QFI and gradient together for efficiency."""
+        psi = self.circuit_fn(params)
+
+        # State derivatives
+        dpsi = []
+        for i in range(self.n_params):
+            p_plus = params.copy()
+            p_plus[i] += eps
+            p_minus = params.copy()
+            p_minus[i] -= eps
+            dpsi.append((self.circuit_fn(p_plus) - self.circuit_fn(p_minus)) / (2 * eps))
+
+        # QFI
+        qfi = np.zeros((self.n_params, self.n_params))
+        for i in range(self.n_params):
+            for j in range(self.n_params):
+                t1 = np.vdot(dpsi[i], dpsi[j])
+                t2 = np.vdot(dpsi[i], psi) * np.vdot(psi, dpsi[j])
+                qfi[i, j] = 4 * np.real(t1 - t2)
+
+        # Gradient
+        grad = np.zeros(self.n_params)
+        for i in range(self.n_params):
+            p_plus = params.copy()
+            p_plus[i] += eps
+            p_minus = params.copy()
+            p_minus[i] -= eps
+            grad[i] = (self.loss_fn(p_plus) - self.loss_fn(p_minus)) / (2 * eps)
+
+        return qfi, grad
+
+    def adaptive_step(self, params):
+        """
+        Perform step with adaptive damping.
+        """
+        current_loss = self.loss_fn(params)
+        qfi, grad = self.compute_qfi_and_gradient(params)
+
+        # Try step with current damping
+        success = False
+        attempts = 0
+        max_attempts = 10
+
+        while not success and attempts < max_attempts:
+            qfi_damped = qfi + self.damping * np.eye(self.n_params)
+
+            # Check condition number
+            eigenvalues = np.linalg.eigvalsh(qfi_damped)
+            condition = np.max(eigenvalues) / np.max(np.min(eigenvalues), 1e-10)
+            self.history['condition'].append(condition)
+
+            # Compute natural gradient
+            try:
+                nat_grad = np.linalg.solve(qfi_damped, grad)
+            except np.linalg.LinAlgError:
+                self.damping *= self.damping_factor
+                attempts += 1
+                continue
+
+            # Try step
+            new_params = params - self.lr * nat_grad
+            new_loss = self.loss_fn(new_params)
+
+            if new_loss < current_loss:
+                success = True
+                # Decrease damping for next step
+                self.damping = max(self.min_damping, self.damping / self.damping_factor)
+            else:
+                # Increase damping and retry
+                self.damping = min(self.max_damping, self.damping * self.damping_factor)
+                attempts += 1
+
+        if not success:
+            # Fall back to gradient descent
+            new_params = params - 0.01 * grad
+            new_loss = self.loss_fn(new_params)
+
+        # Record history
+        self.history['losses'].append(new_loss)
+        self.history['damping'].append(self.damping)
+        self.history['step_size'].append(np.linalg.norm(params - new_params))
+
+        return new_params
+
+    def optimize(self, initial_params, n_steps=100, verbose=True):
+        """Run optimization."""
+        params = initial_params.copy()
+
+        for step in range(n_steps):
+            params = self.adaptive_step(params)
+
+            if verbose and step % 10 == 0:
+                print(f"Step {step}: Loss = {self.history['losses'][-1]:.6f}, "
+                      f"Damping = {self.history['damping'][-1]:.2e}")
+
+        return params
+
+    def get_diagnostics(self):
+        """Return optimization diagnostics."""
+        return {
+            'final_loss': self.history['losses'][-1],
+            'min_loss': np.min(self.history['losses']),
+            'avg_damping': np.mean(self.history['damping']),
+            'max_condition': np.max(self.history['condition']),
+            'avg_step_size': np.mean(self.history['step_size'])
+        }
+
+
+# Practical optimization
+circuit, loss, H, exact_gs = create_vqe_problem()
+n_params = 4
+initial = np.random.randn(n_params) * 0.5
+
+practical_opt = PracticalNaturalGradient(circuit, loss, n_params)
+practical_opt.lr = 0.3
+
+print("Practical Natural Gradient Optimization")
+print("="*60)
+
+final_params = practical_opt.optimize(initial.copy(), n_steps=40, verbose=True)
+
+diagnostics = practical_opt.get_diagnostics()
+print(f"\nDiagnostics:")
+for key, value in diagnostics.items():
+    print(f"  {key}: {value:.6f}")
+
+print(f"\nOptimal energy: {exact_gs:.6f}")
+print(f"Achieved energy: {loss(final_params):.6f}")
+print(f"Error: {loss(final_params) - exact_gs:.6f}")
+```
+
+<Tip>
+Adaptive damping helps navigate both ill-conditioned and well-conditioned regions. Start with moderate damping and let the algorithm adjust based on step success.
+</Tip>
+
+---
+
+## Summary
+
+Natural gradient descent provides powerful optimization for variational quantum circuits:
+
+1. **Update rule**: Uses QFI inverse to rescale gradients appropriately
+2. **Regularization**: Tikhonov damping and adaptive methods ensure stability
+3. **Parameterization invariance**: Optimization path independent of parameter choice
+4. **Learning rate**: Typically larger than standard GD (often 0.1-1.0)
+5. **Convergence**: Often faster, especially near optima
+6. **Practical tips**: Adaptive damping, condition monitoring, linear solvers
+
+Natural gradient is particularly effective for VQE and other variational algorithms.

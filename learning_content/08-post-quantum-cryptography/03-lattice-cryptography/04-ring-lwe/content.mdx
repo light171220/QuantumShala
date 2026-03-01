@@ -1,0 +1,808 @@
+---
+title: "Ring-LWE and Module-LWE: Efficient Structured Lattice Cryptography"
+description: "Learn how algebraic structure enables efficient lattice-based cryptography. Understand polynomial rings, Ring-LWE, Module-LWE, and why Kyber uses Module-LWE for the optimal balance of efficiency and security."
+duration: 75
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Define polynomial rings and their role in cryptography
+- Explain the Ring-LWE problem and its security foundations
+- Understand Module-LWE as a generalization
+- Implement efficient polynomial operations using NTT
+- Compare security-efficiency tradeoffs of LWE variants
+- Connect these foundations to Kyber's design
+
+## 1. The Efficiency Problem with Standard LWE
+
+Standard LWE is theoretically beautiful but has practical limitations:
+
+```python
+def lwe_efficiency_analysis():
+    """
+    Analyze the efficiency of standard LWE.
+    """
+    print("STANDARD LWE EFFICIENCY ANALYSIS")
+    print("=" * 60)
+    
+    # For security level comparable to AES-128
+    n = 512  # Dimension needed for ~128-bit security
+    m = 1024  # Number of samples
+    q = 3329  # Typical modulus
+    
+    # Public key size: A (m×n) + b (m)
+    # Each element needs log2(q) ≈ 12 bits
+    bits_per_element = 12
+    
+    pk_matrix = m * n * bits_per_element  # A matrix
+    pk_vector = m * bits_per_element       # b vector
+    pk_total = (pk_matrix + pk_vector) / 8 / 1024  # KB
+    
+    # Ciphertext size (per bit encrypted!)
+    ct_per_bit = (n + 1) * bits_per_element / 8  # bytes per bit
+    
+    # Operation cost: matrix-vector multiplication
+    ops_encrypt = m * n  # For computing u = S^T A
+    
+    print(f"Parameters: n={n}, m={m}, q={q}")
+    print(f"\nSizes:")
+    print(f"  Public key (A matrix): {pk_matrix/8/1024:.1f} KB")
+    print(f"  Public key (total): {pk_total:.1f} KB")
+    print(f"  Ciphertext per bit: {ct_per_bit:.0f} bytes")
+    print(f"  To encrypt 256 bits: {ct_per_bit * 256 / 1024:.1f} KB")
+    
+    print(f"\nOperations:")
+    print(f"  Matrix-vector multiply: O({m}×{n}) = O({m*n:,})")
+    
+    print(f"\n❌ PROBLEM: Keys and ciphertexts are huge!")
+    print(f"   RSA-2048 public key: 256 bytes")
+    print(f"   Standard LWE public key: {pk_total*1024:.0f} bytes")
+
+lwe_efficiency_analysis()
+```
+
+<Warning>
+**Standard LWE requires megabyte-sized keys.** This is impractical for most applications. We need structured variants that maintain security while dramatically reducing sizes.
+</Warning>
+
+## 2. Polynomial Rings: The Key to Efficiency
+
+<Definition term="Polynomial Ring R_q">
+The ring $R_q = \mathbb{Z}_q[x] / (x^n + 1)$ consists of polynomials with coefficients in $\mathbb{Z}_q$ modulo the polynomial $x^n + 1$.
+
+$$R_q = \{a_0 + a_1 x + \cdots + a_{n-1} x^{n-1} : a_i \in \mathbb{Z}_q\}$$
+
+with addition and multiplication modulo both $q$ and $x^n + 1$.
+</Definition>
+
+```python
+import numpy as np
+from typing import List, Tuple
+
+class PolynomialRing:
+    """
+    Polynomial ring R_q = Z_q[x] / (x^n + 1).
+    
+    Elements are polynomials of degree < n with coefficients in Z_q.
+    Multiplication is modulo x^n + 1 (negacyclic convolution).
+    """
+    
+    def __init__(self, n: int, q: int):
+        """
+        Initialize polynomial ring parameters.
+        
+        Args:
+            n: Degree of modulus polynomial (must be power of 2)
+            q: Coefficient modulus
+        """
+        if n & (n - 1) != 0:
+            raise ValueError("n must be a power of 2")
+        
+        self.n = n
+        self.q = q
+    
+    def add(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Add two polynomials coefficient-wise mod q."""
+        return (a + b) % self.q
+    
+    def subtract(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Subtract polynomials coefficient-wise mod q."""
+        return (a - b) % self.q
+    
+    def multiply_naive(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """
+        Multiply polynomials using schoolbook algorithm.
+        
+        This is O(n²) - we'll optimize later with NTT.
+        """
+        n = self.n
+        q = self.q
+        
+        # Full convolution (degree up to 2n-2)
+        result = np.zeros(2 * n - 1, dtype=np.int64)
+        
+        for i in range(n):
+            for j in range(n):
+                result[i + j] = (result[i + j] + a[i] * b[j]) % q
+        
+        # Reduce modulo x^n + 1
+        # x^n ≡ -1 (mod x^n + 1), so x^(n+k) ≡ -x^k
+        reduced = np.zeros(n, dtype=np.int64)
+        for i in range(2 * n - 1):
+            if i < n:
+                reduced[i] = (reduced[i] + result[i]) % q
+            else:
+                # x^i = x^(i mod n) * (-1)^(i // n)
+                reduced[i - n] = (reduced[i - n] - result[i]) % q
+        
+        return reduced
+    
+    def sample_uniform(self) -> np.ndarray:
+        """Sample a uniformly random polynomial."""
+        return np.random.randint(0, self.q, size=self.n)
+    
+    def sample_small(self, bound: int = 1) -> np.ndarray:
+        """Sample a polynomial with small coefficients in [-bound, bound]."""
+        coeffs = np.random.randint(-bound, bound + 1, size=self.n)
+        return coeffs % self.q
+    
+    def sample_gaussian(self, sigma: float) -> np.ndarray:
+        """Sample polynomial with Gaussian coefficients."""
+        coeffs = np.round(np.random.normal(0, sigma, size=self.n)).astype(int)
+        return coeffs % self.q
+
+
+def demonstrate_polynomial_ring():
+    """
+    Demonstrate polynomial ring operations.
+    """
+    print("POLYNOMIAL RING OPERATIONS")
+    print("=" * 60)
+    
+    # Small example
+    n, q = 4, 17
+    ring = PolynomialRing(n, q)
+    
+    # Polynomials as coefficient arrays [a_0, a_1, ..., a_{n-1}]
+    # f(x) = 3 + 2x + x^2 + 4x^3
+    f = np.array([3, 2, 1, 4])
+    # g(x) = 1 + x + x^2
+    g = np.array([1, 1, 1, 0])
+    
+    print(f"Ring: R_q = Z_{q}[x] / (x^{n} + 1)")
+    print(f"\nf(x) = {f[0]} + {f[1]}x + {f[2]}x² + {f[3]}x³")
+    print(f"g(x) = {g[0]} + {g[1]}x + {g[2]}x²")
+    
+    # Addition
+    h_add = ring.add(f, g)
+    print(f"\nf + g = {h_add}")
+    print(f"      = {h_add[0]} + {h_add[1]}x + {h_add[2]}x² + {h_add[3]}x³")
+    
+    # Multiplication (with reduction mod x^n + 1)
+    h_mul = ring.multiply_naive(f, g)
+    print(f"\nf · g (mod x^{n} + 1) = {h_mul}")
+    
+    # Show the reduction process
+    print(f"\nMultiplication detail:")
+    print(f"  Before reduction: degree up to {2*n-2}")
+    print(f"  Using x^{n} ≡ -1: higher terms wrap around with negation")
+
+demonstrate_polynomial_ring()
+```
+
+### Why $x^n + 1$?
+
+<Formula>
+$$\text{The polynomial } x^n + 1 \text{ (for } n = 2^k \text{) is:}$$
+$$\text{1. Irreducible over } \mathbb{Q} \text{ (enables security reductions)}$$
+$$\text{2. Splits nicely mod } q \text{ for certain primes (enables fast NTT)}$$
+$$\text{3. Creates negacyclic structure (multiplication wraps with negation)}$$
+</Formula>
+
+## 3. The Ring-LWE Problem
+
+<Definition term="Ring-LWE">
+Given samples $(a_i, b_i = a_i \cdot s + e_i) \in R_q \times R_q$ where:
+- $a_i$ are uniformly random in $R_q$
+- $s \in R_q$ is the secret polynomial
+- $e_i$ are small error polynomials from distribution $\chi$
+
+The Ring-LWE problem asks to recover $s$.
+</Definition>
+
+```python
+class RingLWE:
+    """
+    Ring-LWE problem instance.
+    
+    Ring-LWE: Given (a, b = a·s + e) in R_q × R_q, find s.
+    """
+    
+    def __init__(self, n: int, q: int, sigma: float):
+        """
+        Initialize Ring-LWE parameters.
+        
+        Args:
+            n: Ring dimension (polynomial degree)
+            q: Modulus
+            sigma: Error standard deviation
+        """
+        self.n = n
+        self.q = q
+        self.sigma = sigma
+        self.ring = PolynomialRing(n, q)
+    
+    def keygen(self) -> Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray]:
+        """
+        Generate Ring-LWE public/secret key pair.
+        
+        Returns:
+            public_key: (a, b) where b = a·s + e
+            secret_key: s
+        """
+        # Secret polynomial with small coefficients
+        s = self.ring.sample_small(bound=1)
+        
+        # Uniform random a
+        a = self.ring.sample_uniform()
+        
+        # Small error
+        e = self.ring.sample_gaussian(self.sigma)
+        
+        # b = a·s + e
+        b = self.ring.add(
+            self.ring.multiply_naive(a, s),
+            e
+        )
+        
+        return (a, b), s
+    
+    def encrypt_polynomial(self, pk: Tuple[np.ndarray, np.ndarray],
+                          message: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Encrypt a message polynomial.
+        
+        Encoding: message coefficients in {0, 1} scaled to {0, q/2}.
+        
+        Returns:
+            ciphertext: (u, v)
+        """
+        a, b = pk
+        
+        # Ephemeral secrets
+        r = self.ring.sample_small(bound=1)
+        e1 = self.ring.sample_gaussian(self.sigma)
+        e2 = self.ring.sample_gaussian(self.sigma)
+        
+        # u = a·r + e1
+        u = self.ring.add(
+            self.ring.multiply_naive(a, r),
+            e1
+        )
+        
+        # v = b·r + e2 + encode(message)
+        br = self.ring.multiply_naive(b, r)
+        encoded_msg = (message * (self.q // 2)) % self.q
+        v = self.ring.add(self.ring.add(br, e2), encoded_msg)
+        
+        return (u, v)
+    
+    def decrypt_polynomial(self, sk: np.ndarray,
+                          ct: Tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+        """
+        Decrypt ciphertext to recover message polynomial.
+        """
+        s = sk
+        u, v = ct
+        
+        # Compute v - u·s
+        us = self.ring.multiply_naive(u, s)
+        diff = self.ring.subtract(v, us)
+        
+        # Decode: round to 0 or q/2
+        message = np.zeros(self.n, dtype=int)
+        for i in range(self.n):
+            coeff = diff[i]
+            # Center the coefficient
+            if coeff > self.q // 2:
+                coeff -= self.q
+            # Decode
+            if abs(coeff) < self.q // 4:
+                message[i] = 0
+            else:
+                message[i] = 1
+        
+        return message
+
+
+def demonstrate_ring_lwe():
+    """
+    Demonstrate Ring-LWE encryption.
+    """
+    print("\nRING-LWE ENCRYPTION")
+    print("=" * 60)
+    
+    # Parameters (small for demonstration)
+    n, q, sigma = 64, 257, 2.0
+    
+    rlwe = RingLWE(n, q, sigma)
+    
+    print(f"Parameters: n={n}, q={q}, σ={sigma}")
+    
+    # Key generation
+    pk, sk = rlwe.keygen()
+    a, b = pk
+    print(f"\nKey generation:")
+    print(f"  Public key (a, b): two polynomials of degree {n-1}")
+    print(f"  Secret key s: one polynomial")
+    
+    # Encrypt a random message
+    message = np.random.randint(0, 2, size=n)
+    print(f"\nOriginal message (first 8 bits): {message[:8]}")
+    
+    ct = rlwe.encrypt_polynomial(pk, message)
+    print(f"Ciphertext: two polynomials")
+    
+    decrypted = rlwe.decrypt_polynomial(sk, ct)
+    print(f"Decrypted (first 8 bits): {decrypted[:8]}")
+    
+    # Check correctness
+    correct = np.all(message == decrypted)
+    print(f"\nDecryption correct: {correct}")
+    
+    # Size comparison
+    print(f"\n--- SIZE COMPARISON ---")
+    bits_per_coeff = int(np.ceil(np.log2(q)))
+    ring_pk_bytes = 2 * n * bits_per_coeff // 8
+    print(f"Ring-LWE public key: {ring_pk_bytes} bytes")
+    
+    # Equivalent standard LWE would need n×n matrix
+    std_lwe_pk_bytes = n * n * bits_per_coeff // 8
+    print(f"Equivalent Std-LWE public key: {std_lwe_pk_bytes} bytes")
+    print(f"Compression ratio: {std_lwe_pk_bytes / ring_pk_bytes:.0f}×")
+
+demonstrate_ring_lwe()
+```
+
+## 4. The Number Theoretic Transform (NTT)
+
+The NTT enables O(n log n) polynomial multiplication instead of O(n²).
+
+<Definition term="Number Theoretic Transform (NTT)">
+For a prime $q \equiv 1 \pmod{2n}$ with primitive $2n$-th root of unity $\omega$, the NTT of polynomial $a(x)$ is:
+
+$$\hat{a}_i = \sum_{j=0}^{n-1} a_j \cdot \omega^{ij} \pmod{q}$$
+
+Multiplication in NTT domain is pointwise: $\widehat{a \cdot b} = \hat{a} \odot \hat{b}$.
+</Definition>
+
+```python
+class NTTPolynomialRing:
+    """
+    Polynomial ring with NTT-accelerated multiplication.
+    """
+    
+    def __init__(self, n: int, q: int):
+        """
+        Initialize with NTT-friendly parameters.
+        
+        Requirements: q ≡ 1 (mod 2n) for 2n-th roots of unity.
+        """
+        self.n = n
+        self.q = q
+        
+        # Find primitive 2n-th root of unity
+        self.omega = self._find_primitive_root(2 * n)
+        self.omega_inv = pow(self.omega, -1, q)
+        
+        # Precompute twiddle factors
+        self.psi = pow(self.omega, (q - 1) // (2 * n), q)  # 2n-th root for negacyclic
+        self.psi_inv = pow(self.psi, -1, q)
+        
+        self.n_inv = pow(n, -1, q)
+    
+    def _find_primitive_root(self, order: int) -> int:
+        """Find a primitive root of given order mod q."""
+        # For q prime, g^((q-1)/order) is a primitive order-th root
+        # where g is a primitive root mod q
+        
+        # Find primitive root mod q
+        for g in range(2, self.q):
+            if pow(g, (self.q - 1) // 2, self.q) != 1:
+                # g is likely a primitive root
+                root = pow(g, (self.q - 1) // order, self.q)
+                if pow(root, order, self.q) == 1 and pow(root, order // 2, self.q) != 1:
+                    return root
+        raise ValueError(f"Could not find primitive {order}-th root mod {self.q}")
+    
+    def ntt(self, a: np.ndarray) -> np.ndarray:
+        """
+        Compute NTT of polynomial a.
+        
+        Uses Cooley-Tukey butterfly algorithm.
+        """
+        a = np.array(a, dtype=np.int64)
+        n = self.n
+        q = self.q
+        
+        # Bit-reversal permutation
+        result = self._bit_reverse(a)
+        
+        # Iterative NTT
+        length = 2
+        while length <= n:
+            wlen = pow(self.omega, n // length, q)
+            
+            for i in range(0, n, length):
+                w = 1
+                for j in range(length // 2):
+                    u = result[i + j]
+                    v = (result[i + j + length // 2] * w) % q
+                    result[i + j] = (u + v) % q
+                    result[i + j + length // 2] = (u - v) % q
+                    w = (w * wlen) % q
+            
+            length *= 2
+        
+        return result
+    
+    def intt(self, a: np.ndarray) -> np.ndarray:
+        """
+        Compute inverse NTT.
+        """
+        a = np.array(a, dtype=np.int64)
+        n = self.n
+        q = self.q
+        
+        result = self._bit_reverse(a)
+        
+        length = 2
+        while length <= n:
+            wlen = pow(self.omega_inv, n // length, q)
+            
+            for i in range(0, n, length):
+                w = 1
+                for j in range(length // 2):
+                    u = result[i + j]
+                    v = (result[i + j + length // 2] * w) % q
+                    result[i + j] = (u + v) % q
+                    result[i + j + length // 2] = (u - v) % q
+                    w = (w * wlen) % q
+            
+            length *= 2
+        
+        # Scale by 1/n
+        result = (result * self.n_inv) % q
+        return result
+    
+    def _bit_reverse(self, a: np.ndarray) -> np.ndarray:
+        """Bit-reversal permutation."""
+        n = len(a)
+        bits = int(np.log2(n))
+        result = np.zeros_like(a)
+        for i in range(n):
+            rev = int('{:0{w}b}'.format(i, w=bits)[::-1], 2)
+            result[rev] = a[i]
+        return result
+    
+    def multiply_ntt(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """
+        Multiply polynomials using NTT.
+        
+        O(n log n) instead of O(n²)!
+        """
+        # Transform to NTT domain
+        a_ntt = self.ntt(a)
+        b_ntt = self.ntt(b)
+        
+        # Pointwise multiplication
+        c_ntt = (a_ntt * b_ntt) % self.q
+        
+        # Transform back
+        c = self.intt(c_ntt)
+        
+        return c
+
+
+def compare_multiplication_methods():
+    """
+    Compare naive and NTT polynomial multiplication.
+    """
+    print("\nNTT MULTIPLICATION COMPARISON")
+    print("=" * 60)
+    
+    # NTT-friendly prime: q ≡ 1 (mod 2n)
+    n = 256
+    q = 7681  # 7681 = 1 + 30 * 256, so 7681 ≡ 1 (mod 512)
+    
+    naive_ring = PolynomialRing(n, q)
+    
+    print(f"Parameters: n={n}, q={q}")
+    
+    # Sample random polynomials
+    np.random.seed(42)
+    a = np.random.randint(0, q, size=n)
+    b = np.random.randint(0, q, size=n)
+    
+    # Naive multiplication
+    import time
+    
+    start = time.time()
+    for _ in range(10):
+        c_naive = naive_ring.multiply_naive(a, b)
+    naive_time = (time.time() - start) / 10
+    
+    print(f"\nNaive O(n²) multiplication: {naive_time*1000:.2f} ms")
+    
+    # Note: Full NTT implementation would be faster
+    # This is a simplified demonstration
+    print(f"Expected NTT O(n log n): ~{naive_time * np.log2(n) / n * 1000:.2f} ms")
+    print(f"Speedup for n={n}: ~{n / np.log2(n):.0f}×")
+    
+    print(f"\n--- FOR KYBER (n=256) ---")
+    print(f"Naive: O({n}²) = O({n*n:,}) operations per multiply")
+    print(f"NTT:   O({n} log {n}) = O({int(n * np.log2(n)):,}) operations")
+
+compare_multiplication_methods()
+```
+
+## 5. Module-LWE: The Best of Both Worlds
+
+<Definition term="Module-LWE">
+Module-LWE generalizes both standard LWE and Ring-LWE by working over vectors of ring elements:
+
+$$\mathbf{b} = \mathbf{A} \cdot \mathbf{s} + \mathbf{e} \in R_q^k$$
+
+where $\mathbf{A} \in R_q^{k \times k}$, $\mathbf{s}, \mathbf{e} \in R_q^k$.
+</Definition>
+
+```python
+class ModuleLWE:
+    """
+    Module-LWE: vectors of ring elements.
+    
+    This is what Kyber uses! It provides:
+    - Better security than Ring-LWE (no algebraic structure attacks)
+    - Better efficiency than standard LWE (ring structure)
+    - Flexible security levels by varying k
+    """
+    
+    def __init__(self, n: int, k: int, q: int, sigma: float):
+        """
+        Initialize Module-LWE parameters.
+        
+        Args:
+            n: Ring dimension
+            k: Module rank (vector dimension)
+            q: Modulus
+            sigma: Error parameter
+        """
+        self.n = n
+        self.k = k
+        self.q = q
+        self.sigma = sigma
+        self.ring = PolynomialRing(n, q)
+    
+    def sample_matrix(self) -> List[List[np.ndarray]]:
+        """Sample uniform random k×k matrix of polynomials."""
+        return [[self.ring.sample_uniform() for _ in range(self.k)] 
+                for _ in range(self.k)]
+    
+    def sample_vector(self, small: bool = False) -> List[np.ndarray]:
+        """Sample vector of k polynomials."""
+        if small:
+            return [self.ring.sample_small(bound=1) for _ in range(self.k)]
+        return [self.ring.sample_uniform() for _ in range(self.k)]
+    
+    def sample_error_vector(self) -> List[np.ndarray]:
+        """Sample vector of k error polynomials."""
+        return [self.ring.sample_gaussian(self.sigma) for _ in range(self.k)]
+    
+    def matrix_vector_multiply(self, A: List[List[np.ndarray]], 
+                               s: List[np.ndarray]) -> List[np.ndarray]:
+        """
+        Compute A · s where A is k×k matrix and s is k-vector.
+        """
+        result = []
+        for i in range(self.k):
+            # Sum of A[i][j] * s[j] for all j
+            acc = np.zeros(self.n, dtype=np.int64)
+            for j in range(self.k):
+                prod = self.ring.multiply_naive(A[i][j], s[j])
+                acc = self.ring.add(acc, prod)
+            result.append(acc)
+        return result
+    
+    def vector_add(self, a: List[np.ndarray], 
+                   b: List[np.ndarray]) -> List[np.ndarray]:
+        """Add two vectors of polynomials."""
+        return [self.ring.add(a[i], b[i]) for i in range(self.k)]
+    
+    def keygen(self):
+        """
+        Generate Module-LWE key pair.
+        
+        Public key: (A, t = As + e)
+        Secret key: s
+        """
+        A = self.sample_matrix()
+        s = self.sample_vector(small=True)
+        e = self.sample_error_vector()
+        
+        As = self.matrix_vector_multiply(A, s)
+        t = self.vector_add(As, e)
+        
+        return (A, t), s
+
+
+def demonstrate_module_lwe():
+    """
+    Demonstrate Module-LWE and compare to other variants.
+    """
+    print("\nMODULE-LWE DEMONSTRATION")
+    print("=" * 60)
+    
+    # Kyber-512 like parameters
+    n = 256
+    k = 2
+    q = 3329
+    sigma = 2.0
+    
+    print(f"Parameters (Kyber-512 style):")
+    print(f"  n = {n} (ring dimension)")
+    print(f"  k = {k} (module rank)")
+    print(f"  q = {q} (modulus)")
+    
+    mlwe = ModuleLWE(n, k, q, sigma)
+    pk, sk = mlwe.keygen()
+    A, t = pk
+    
+    print(f"\nKey sizes:")
+    bits_per_coeff = int(np.ceil(np.log2(q)))
+    
+    # Public key: A (k×k matrix of n-polynomials) + t (k polynomials)
+    pk_size = (k * k + k) * n * bits_per_coeff // 8
+    print(f"  Public key: {pk_size} bytes")
+    
+    # Secret key: s (k polynomials, but small coefficients)
+    sk_size = k * n  # Could be compressed more
+    print(f"  Secret key: ~{sk_size} bytes")
+    
+    print(f"\n--- COMPARISON ---")
+    
+    # Standard LWE for same security would need:
+    effective_dim = n * k
+    std_lwe_pk = effective_dim * effective_dim * bits_per_coeff // 8
+    print(f"Equivalent Standard-LWE public key: {std_lwe_pk:,} bytes")
+    
+    # Ring-LWE:
+    ring_lwe_pk = 2 * n * bits_per_coeff // 8
+    print(f"Ring-LWE public key (n={n}): {ring_lwe_pk} bytes")
+    
+    print(f"\nModule-LWE provides:")
+    print(f"  - Security closer to Standard-LWE (dimension {n*k})")
+    print(f"  - Efficiency closer to Ring-LWE (structured ops)")
+
+demonstrate_module_lwe()
+```
+
+## 6. Security Comparison
+
+```python
+def security_comparison():
+    """
+    Compare security foundations of LWE variants.
+    """
+    print("\nSECURITY COMPARISON OF LWE VARIANTS")
+    print("=" * 60)
+    
+    variants = {
+        'Standard LWE': {
+            'hardness_basis': 'Worst-case lattice problems (GapSVP, SIVP)',
+            'effective_dimension': 'n (the dimension parameter)',
+            'algebraic_structure': 'None',
+            'known_attacks': 'Only generic lattice attacks',
+            'security_confidence': 'Highest',
+            'efficiency': 'Poor (O(n²) keys)'
+        },
+        'Ring-LWE': {
+            'hardness_basis': 'Worst-case ideal lattice problems',
+            'effective_dimension': 'n (ring dimension)',
+            'algebraic_structure': 'Strong (ideal structure)',
+            'known_attacks': 'Generic + potential ideal-specific attacks',
+            'security_confidence': 'Good, but algebraic concerns',
+            'efficiency': 'Excellent (O(n) keys, O(n log n) ops)'
+        },
+        'Module-LWE': {
+            'hardness_basis': 'Worst-case module lattice problems',
+            'effective_dimension': 'n × k (ring dim × module rank)',
+            'algebraic_structure': 'Moderate (less than Ring-LWE)',
+            'known_attacks': 'Generic lattice attacks (mostly)',
+            'security_confidence': 'Very high (Kyber choice)',
+            'efficiency': 'Very good (balanced)'
+        }
+    }
+    
+    for variant, details in variants.items():
+        print(f"\n{variant}")
+        print("-" * 40)
+        for key, value in details.items():
+            print(f"  {key}: {value}")
+    
+    print("\n" + "=" * 60)
+    print("WHY KYBER CHOSE MODULE-LWE:")
+    print("-" * 40)
+    print("1. Security: Dimension n×k gives strong worst-case guarantees")
+    print("2. Flexibility: Vary k for different security levels")
+    print("   - Kyber-512:  k=2, ~128-bit security")
+    print("   - Kyber-768:  k=3, ~192-bit security")
+    print("   - Kyber-1024: k=4, ~256-bit security")
+    print("3. Efficiency: Ring structure enables NTT")
+    print("4. Conservatism: Less algebraic structure than Ring-LWE")
+
+security_comparison()
+```
+
+## 7. From Module-LWE to Kyber
+
+```python
+def kyber_connection():
+    """
+    Show how Module-LWE connects to Kyber.
+    """
+    print("\nFROM MODULE-LWE TO KYBER")
+    print("=" * 60)
+    
+    kyber_params = {
+        'Kyber-512': {'n': 256, 'k': 2, 'q': 3329, 'eta1': 3, 'eta2': 2},
+        'Kyber-768': {'n': 256, 'k': 3, 'q': 3329, 'eta1': 2, 'eta2': 2},
+        'Kyber-1024': {'n': 256, 'k': 4, 'q': 3329, 'eta1': 2, 'eta2': 2},
+    }
+    
+    print("Kyber Parameter Sets:")
+    print("-" * 60)
+    print(f"{'Variant':<12} {'n':<6} {'k':<4} {'q':<6} {'η₁':<4} {'η₂':<4} {'Security'}")
+    print("-" * 60)
+    
+    for name, params in kyber_params.items():
+        sec = {'Kyber-512': '128-bit', 'Kyber-768': '192-bit', 'Kyber-1024': '256-bit'}[name]
+        print(f"{name:<12} {params['n']:<6} {params['k']:<4} {params['q']:<6} "
+              f"{params['eta1']:<4} {params['eta2']:<4} {sec}")
+    
+    print("\nKey Kyber Features Beyond Basic Module-LWE:")
+    features = [
+        "Centered Binomial Distribution for errors (instead of Gaussian)",
+        "Compression of public keys and ciphertexts",
+        "NTT for all polynomial operations",
+        "IND-CCA2 security via Fujisaki-Okamoto transform",
+        "Deterministic key generation from seed (smaller keys)"
+    ]
+    for f in features:
+        print(f"  • {f}")
+
+kyber_connection()
+```
+
+## Summary
+
+In this lesson, you learned about structured LWE variants:
+
+1. **Standard LWE** is secure but inefficient: O(n²) keys
+2. **Polynomial rings** $R_q = \mathbb{Z}_q[x]/(x^n+1)$ enable compact representation
+3. **Ring-LWE** works in $R_q$: O(n) keys, O(n log n) operations via NTT
+4. **NTT** transforms polynomial multiplication to pointwise operations
+5. **Module-LWE** balances security (vectors of ring elements) and efficiency
+6. **Security hierarchy**: Standard > Module > Ring (for same parameters)
+7. **Kyber** uses Module-LWE with specific optimizations
+8. **Parameter choice**: k=2,3,4 gives 128,192,256-bit security
+
+Understanding these structures is essential for Kyber and modern lattice cryptography.
+
+## Further Reading
+
+- Next lesson: Lattice-Based Encryption Schemes (Kyber Deep Dive)
+- Related: NTT implementation optimizations
+- Advanced: Algebraic number theory for Ring-LWE security

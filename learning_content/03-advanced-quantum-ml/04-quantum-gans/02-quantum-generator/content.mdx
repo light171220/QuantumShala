@@ -1,0 +1,898 @@
+---
+title: "Quantum Generators for QGANs"
+description: "Learn how to design and implement quantum circuits as generators in quantum generative adversarial networks."
+estimatedMinutes: 65
+---
+
+# Quantum Generators for QGANs
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Design quantum circuits for generative tasks
+- Implement parameterized quantum generators
+- Map latent noise to quantum circuit parameters
+- Analyze expressiveness of quantum generators
+- Compare quantum and classical generator architectures
+- Optimize quantum generators for specific data types
+
+---
+
+## 1. Quantum Generator Architecture
+
+A quantum generator uses a parameterized quantum circuit (PQC) to generate samples.
+
+<Definition term="Quantum Generator">
+A quantum generator G_θ maps random inputs to quantum states:
+
+|ψ(θ,z)⟩ = U(θ,z)|0⟩^n
+
+where U(θ,z) is a parameterized unitary, θ are trainable parameters, and z is random noise.
+Measurements yield samples from a quantum-defined distribution.
+</Definition>
+
+<Formula expression="|ψ(θ)⟩ = ∏_{l=1}^{L} U_l(θ_l) |0⟩^n" description="Layered quantum generator circuit" />
+
+```python
+import numpy as np
+from scipy.linalg import expm
+from typing import List, Tuple, Dict
+
+class QuantumGenerator:
+    """
+    Quantum circuit generator for QGANs.
+    """
+
+    def __init__(
+        self,
+        n_qubits: int,
+        n_layers: int = 3,
+        entanglement: str = 'full'
+    ):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.entanglement = entanglement
+        self.dim = 2 ** n_qubits
+
+        # Pauli matrices
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        # Initialize parameters
+        self.n_params = self._count_parameters()
+        self.params = np.random.randn(self.n_params) * 0.1
+
+    def _count_parameters(self) -> int:
+        """Count trainable parameters."""
+        # 3 rotations per qubit per layer
+        single_qubit_params = 3 * self.n_qubits * self.n_layers
+
+        # Entangling parameters
+        if self.entanglement == 'full':
+            entangle_params = (self.n_qubits * (self.n_qubits - 1) // 2) * self.n_layers
+        elif self.entanglement == 'linear':
+            entangle_params = (self.n_qubits - 1) * self.n_layers
+        else:
+            entangle_params = 0
+
+        return single_qubit_params + entangle_params
+
+    def _rotation_gate(
+        self,
+        pauli: np.ndarray,
+        theta: float,
+        qubit: int
+    ) -> np.ndarray:
+        """Create rotation gate on specified qubit."""
+        gate = expm(-1j * theta / 2 * pauli)
+        return self._single_qubit_gate(gate, qubit)
+
+    def _single_qubit_gate(
+        self,
+        gate: np.ndarray,
+        qubit: int
+    ) -> np.ndarray:
+        """Expand single-qubit gate to full Hilbert space."""
+        result = np.array([[1]], dtype=complex)
+        for i in range(self.n_qubits):
+            result = np.kron(result, gate if i == qubit else self.I)
+        return result
+
+    def _rzz_gate(self, theta: float, q1: int, q2: int) -> np.ndarray:
+        """Create RZZ entangling gate."""
+        Z1 = self._single_qubit_gate(self.Z, q1)
+        Z2 = self._single_qubit_gate(self.Z, q2)
+        ZZ = Z1 @ Z2
+        return expm(-1j * theta / 2 * ZZ)
+
+    def build_circuit(
+        self,
+        params: np.ndarray = None,
+        noise: np.ndarray = None
+    ) -> np.ndarray:
+        """
+        Build the generator unitary.
+
+        Args:
+            params: Circuit parameters (use self.params if None)
+            noise: Optional noise to inject into circuit
+
+        Returns:
+            Unitary matrix U(θ)
+        """
+        if params is None:
+            params = self.params
+
+        U = np.eye(self.dim, dtype=complex)
+        param_idx = 0
+
+        for layer in range(self.n_layers):
+            # Single-qubit rotations (Rx, Ry, Rz on each qubit)
+            for qubit in range(self.n_qubits):
+                # Include noise if provided
+                noise_offset = 0 if noise is None else noise[param_idx % len(noise)] * 0.1
+
+                U = self._rotation_gate(
+                    self.X, params[param_idx] + noise_offset, qubit
+                ) @ U
+                param_idx += 1
+
+                U = self._rotation_gate(
+                    self.Y, params[param_idx], qubit
+                ) @ U
+                param_idx += 1
+
+                U = self._rotation_gate(
+                    self.Z, params[param_idx], qubit
+                ) @ U
+                param_idx += 1
+
+            # Entangling gates
+            if self.entanglement == 'full':
+                for q1 in range(self.n_qubits):
+                    for q2 in range(q1 + 1, self.n_qubits):
+                        U = self._rzz_gate(params[param_idx], q1, q2) @ U
+                        param_idx += 1
+
+            elif self.entanglement == 'linear':
+                for q in range(self.n_qubits - 1):
+                    U = self._rzz_gate(params[param_idx], q, q + 1) @ U
+                    param_idx += 1
+
+        return U
+
+    def generate_state(
+        self,
+        params: np.ndarray = None,
+        noise: np.ndarray = None
+    ) -> np.ndarray:
+        """
+        Generate quantum state |ψ(θ)⟩.
+
+        Returns:
+            State vector
+        """
+        U = self.build_circuit(params, noise)
+
+        # Initial state |0...0⟩
+        psi0 = np.zeros(self.dim, dtype=complex)
+        psi0[0] = 1.0
+
+        return U @ psi0
+
+    def sample(
+        self,
+        n_samples: int,
+        params: np.ndarray = None
+    ) -> np.ndarray:
+        """
+        Generate classical samples by measuring the quantum state.
+
+        Returns:
+            Binary samples (n_samples, n_qubits)
+        """
+        psi = self.generate_state(params)
+        probs = np.abs(psi) ** 2
+
+        # Sample from distribution
+        indices = np.random.choice(self.dim, size=n_samples, p=probs)
+
+        # Convert to binary
+        samples = np.array([
+            [(idx >> i) & 1 for i in range(self.n_qubits)]
+            for idx in indices
+        ])
+
+        return samples
+
+    def output_distribution(
+        self,
+        params: np.ndarray = None
+    ) -> np.ndarray:
+        """
+        Get the probability distribution over measurement outcomes.
+        """
+        psi = self.generate_state(params)
+        return np.abs(psi) ** 2
+```
+
+---
+
+## 2. Noise Injection Strategies
+
+Quantum generators can incorporate randomness in different ways.
+
+<Definition term="Noise Injection Methods">
+Three main approaches to inject noise into quantum generators:
+
+1. **Parameter noise**: Add random offsets z to parameters θ → θ + αz
+2. **Input encoding**: Encode z into initial rotations before main circuit
+3. **Ancilla-based**: Use measured ancilla qubits to condition generation
+</Definition>
+
+```python
+class NoiseAwareQuantumGenerator(QuantumGenerator):
+    """
+    Quantum generator with various noise injection strategies.
+    """
+
+    def __init__(
+        self,
+        n_qubits: int,
+        n_layers: int = 3,
+        noise_strategy: str = 'parameter'
+    ):
+        super().__init__(n_qubits, n_layers)
+        self.noise_strategy = noise_strategy
+
+        if noise_strategy == 'input':
+            # Additional input encoding layer
+            self.n_noise_params = n_qubits * 3
+        else:
+            self.n_noise_params = self.n_params
+
+    def generate_with_noise(
+        self,
+        z: np.ndarray,
+        params: np.ndarray = None
+    ) -> np.ndarray:
+        """
+        Generate state with noise injection.
+
+        Args:
+            z: Random noise vector
+            params: Circuit parameters
+
+        Returns:
+            Quantum state
+        """
+        if params is None:
+            params = self.params
+
+        if self.noise_strategy == 'parameter':
+            # Add noise to parameters
+            noisy_params = params + 0.1 * z[:len(params)]
+            return self.generate_state(noisy_params)
+
+        elif self.noise_strategy == 'input':
+            # Encode noise in input layer
+            return self._generate_with_input_noise(z, params)
+
+        elif self.noise_strategy == 'ancilla':
+            # Use ancilla-based noise
+            return self._generate_with_ancilla(z, params)
+
+        else:
+            return self.generate_state(params)
+
+    def _generate_with_input_noise(
+        self,
+        z: np.ndarray,
+        params: np.ndarray
+    ) -> np.ndarray:
+        """Apply noise as input encoding layer."""
+        U = np.eye(self.dim, dtype=complex)
+
+        # Input encoding layer (noise-dependent)
+        z_idx = 0
+        for qubit in range(self.n_qubits):
+            U = self._rotation_gate(self.X, z[z_idx], qubit) @ U
+            z_idx += 1
+            U = self._rotation_gate(self.Y, z[z_idx], qubit) @ U
+            z_idx += 1
+            U = self._rotation_gate(self.Z, z[z_idx], qubit) @ U
+            z_idx += 1
+
+        # Main parameterized circuit
+        U_main = self.build_circuit(params)
+        U_total = U_main @ U
+
+        psi0 = np.zeros(self.dim, dtype=complex)
+        psi0[0] = 1.0
+
+        return U_total @ psi0
+
+    def _generate_with_ancilla(
+        self,
+        z: np.ndarray,
+        params: np.ndarray
+    ) -> np.ndarray:
+        """
+        Ancilla-based noise injection.
+        Conceptually: measure ancilla, condition on result.
+        """
+        # Simplified: use z to select which branch
+        branch = int(z[0] * 4) % 4  # 4 branches
+
+        # Modify parameters based on branch
+        modified_params = params.copy()
+        modified_params[::4] += branch * 0.5
+
+        return self.generate_state(modified_params)
+
+    def sample_batch(
+        self,
+        n_samples: int,
+        params: np.ndarray = None
+    ) -> np.ndarray:
+        """
+        Generate batch of samples with different noise instances.
+        """
+        samples = []
+
+        for _ in range(n_samples):
+            # Random noise for each sample
+            z = np.random.randn(self.n_noise_params)
+            psi = self.generate_with_noise(z, params)
+            probs = np.abs(psi) ** 2
+
+            # Sample one outcome
+            idx = np.random.choice(self.dim, p=probs)
+            sample = [(idx >> i) & 1 for i in range(self.n_qubits)]
+            samples.append(sample)
+
+        return np.array(samples)
+```
+
+---
+
+## 3. Expressiveness Analysis
+
+Understanding the expressiveness of quantum generators is crucial for architecture design.
+
+<Definition term="Quantum Generator Expressiveness">
+A quantum generator's expressiveness refers to the set of distributions it can represent:
+
+- Number of parameters determines flexibility
+- Entanglement structure affects correlations
+- Circuit depth impacts the complexity of generated states
+
+Quantum generators can potentially represent distributions exponentially hard to sample classically.
+</Definition>
+
+<Tip>
+More entanglement generally increases expressiveness but also makes training harder due to barren plateaus.
+</Tip>
+
+```python
+class ExpressivenessAnalyzer:
+    """
+    Analyze expressiveness of quantum generators.
+    """
+
+    def __init__(self, generator: QuantumGenerator):
+        self.generator = generator
+
+    def compute_haar_distance(
+        self,
+        n_samples: int = 1000
+    ) -> float:
+        """
+        Estimate distance from Haar-random ensemble.
+
+        Haar-random states are the most expressively diverse.
+        Closer to Haar = more expressive.
+        """
+        # Sample random parameter settings
+        param_samples = []
+        for _ in range(n_samples):
+            params = np.random.randn(self.generator.n_params) * np.pi
+            psi = self.generator.generate_state(params)
+            param_samples.append(psi)
+
+        # Compute purity of ensemble
+        # Haar-random has purity = 1/d
+        ensemble_density = np.zeros(
+            (self.generator.dim, self.generator.dim),
+            dtype=complex
+        )
+
+        for psi in param_samples:
+            ensemble_density += np.outer(psi, psi.conj()) / n_samples
+
+        purity = np.real(np.trace(ensemble_density @ ensemble_density))
+        haar_purity = 1 / self.generator.dim
+
+        return abs(purity - haar_purity)
+
+    def compute_entanglement_capability(
+        self,
+        n_samples: int = 100
+    ) -> Dict[str, float]:
+        """
+        Analyze entanglement generation capability.
+        """
+        entropies = []
+
+        for _ in range(n_samples):
+            params = np.random.randn(self.generator.n_params) * np.pi
+            psi = self.generator.generate_state(params)
+
+            # Compute entanglement entropy for bipartition
+            entropy = self._compute_entanglement_entropy(psi)
+            entropies.append(entropy)
+
+        return {
+            'mean_entropy': np.mean(entropies),
+            'max_entropy': np.max(entropies),
+            'min_entropy': np.min(entropies),
+            'std_entropy': np.std(entropies)
+        }
+
+    def _compute_entanglement_entropy(self, psi: np.ndarray) -> float:
+        """
+        Compute entanglement entropy for first n/2 vs rest bipartition.
+        """
+        n_a = self.generator.n_qubits // 2
+        n_b = self.generator.n_qubits - n_a
+
+        dim_a = 2 ** n_a
+        dim_b = 2 ** n_b
+
+        # Reshape state into bipartite form
+        psi_matrix = psi.reshape(dim_a, dim_b)
+
+        # Compute reduced density matrix
+        rho_a = psi_matrix @ psi_matrix.conj().T
+
+        # Compute von Neumann entropy
+        eigenvalues = np.linalg.eigvalsh(rho_a)
+        eigenvalues = eigenvalues[eigenvalues > 1e-10]
+        entropy = -np.sum(eigenvalues * np.log2(eigenvalues))
+
+        return entropy
+
+    def parameter_sensitivity(
+        self,
+        base_params: np.ndarray = None,
+        epsilon: float = 0.01
+    ) -> np.ndarray:
+        """
+        Compute sensitivity of output to each parameter.
+        """
+        if base_params is None:
+            base_params = self.generator.params
+
+        base_dist = self.generator.output_distribution(base_params)
+        sensitivities = []
+
+        for i in range(len(base_params)):
+            # Perturb parameter
+            perturbed = base_params.copy()
+            perturbed[i] += epsilon
+
+            new_dist = self.generator.output_distribution(perturbed)
+
+            # Total variation distance
+            tv = 0.5 * np.sum(np.abs(new_dist - base_dist))
+            sensitivities.append(tv / epsilon)
+
+        return np.array(sensitivities)
+
+    def circuit_depth_analysis(
+        self,
+        max_layers: int = 10
+    ) -> Dict[int, float]:
+        """
+        Analyze how expressiveness changes with circuit depth.
+        """
+        results = {}
+
+        for n_layers in range(1, max_layers + 1):
+            # Create generator with specified depth
+            gen = QuantumGenerator(
+                self.generator.n_qubits,
+                n_layers,
+                self.generator.entanglement
+            )
+
+            # Measure expressiveness (Haar distance)
+            analyzer = ExpressivenessAnalyzer(gen)
+            haar_dist = analyzer.compute_haar_distance(n_samples=200)
+            results[n_layers] = haar_dist
+
+        return results
+```
+
+---
+
+## 4. Gradient Computation
+
+Training quantum generators requires computing gradients.
+
+<Definition term="Parameter-Shift Rule for Generators">
+For a rotation gate Rθ = exp(-iθP/2), the gradient is:
+
+∂⟨M⟩/∂θ = (1/2)[⟨M⟩_{θ+π/2} - ⟨M⟩_{θ-π/2}]
+
+This enables gradient computation using only circuit evaluations.
+</Definition>
+
+```python
+class QuantumGeneratorTrainer:
+    """
+    Training utilities for quantum generators.
+    """
+
+    def __init__(
+        self,
+        generator: QuantumGenerator,
+        learning_rate: float = 0.01
+    ):
+        self.generator = generator
+        self.lr = learning_rate
+
+    def compute_gradient_parameter_shift(
+        self,
+        loss_fn,
+        params: np.ndarray = None
+    ) -> np.ndarray:
+        """
+        Compute gradient using parameter-shift rule.
+
+        Args:
+            loss_fn: Function that takes params and returns scalar loss
+            params: Parameters (uses generator.params if None)
+
+        Returns:
+            Gradient array
+        """
+        if params is None:
+            params = self.generator.params
+
+        shift = np.pi / 2
+        grad = np.zeros_like(params)
+
+        for i in range(len(params)):
+            # Forward shift
+            params_plus = params.copy()
+            params_plus[i] += shift
+            loss_plus = loss_fn(params_plus)
+
+            # Backward shift
+            params_minus = params.copy()
+            params_minus[i] -= shift
+            loss_minus = loss_fn(params_minus)
+
+            # Gradient
+            grad[i] = (loss_plus - loss_minus) / 2
+
+        return grad
+
+    def compute_gradient_spsa(
+        self,
+        loss_fn,
+        params: np.ndarray = None,
+        epsilon: float = 0.1
+    ) -> np.ndarray:
+        """
+        Compute gradient using SPSA (Simultaneous Perturbation).
+        More efficient for many parameters.
+        """
+        if params is None:
+            params = self.generator.params
+
+        # Random perturbation direction
+        delta = np.random.choice([-1, 1], size=len(params))
+
+        # Evaluate at perturbed points
+        loss_plus = loss_fn(params + epsilon * delta)
+        loss_minus = loss_fn(params - epsilon * delta)
+
+        # Approximate gradient
+        grad = (loss_plus - loss_minus) / (2 * epsilon) * delta
+
+        return grad
+
+    def train_step(
+        self,
+        loss_fn,
+        method: str = 'parameter_shift'
+    ) -> float:
+        """
+        Perform one training step.
+
+        Returns:
+            Current loss value
+        """
+        # Compute gradient
+        if method == 'parameter_shift':
+            grad = self.compute_gradient_parameter_shift(loss_fn)
+        elif method == 'spsa':
+            grad = self.compute_gradient_spsa(loss_fn)
+        else:
+            raise ValueError(f"Unknown method: {method}")
+
+        # Update parameters
+        self.generator.params -= self.lr * grad
+
+        # Return current loss
+        return loss_fn(self.generator.params)
+
+    def train(
+        self,
+        loss_fn,
+        n_iterations: int = 100,
+        method: str = 'parameter_shift',
+        verbose: bool = True
+    ) -> List[float]:
+        """
+        Full training loop.
+        """
+        losses = []
+
+        for i in range(n_iterations):
+            loss = self.train_step(loss_fn, method)
+            losses.append(loss)
+
+            if verbose and i % 20 == 0:
+                print(f"Iteration {i}: Loss = {loss:.6f}")
+
+        return losses
+```
+
+---
+
+## 5. Output Modes
+
+Quantum generators can output different types of data.
+
+<Definition term="Generator Output Modes">
+Quantum generators can produce:
+
+1. **Quantum states**: Output the full state |ψ(θ)⟩
+2. **Classical samples**: Measure and output bit strings
+3. **Continuous features**: Post-process measurements or use amplitude encoding
+4. **Mixed outputs**: Combine quantum and classical components
+</Definition>
+
+```python
+class MultiModalQuantumGenerator(QuantumGenerator):
+    """
+    Quantum generator with multiple output modes.
+    """
+
+    def __init__(
+        self,
+        n_qubits: int,
+        n_layers: int = 3,
+        output_mode: str = 'samples'
+    ):
+        super().__init__(n_qubits, n_layers)
+        self.output_mode = output_mode
+
+    def generate(
+        self,
+        n_samples: int = 1,
+        params: np.ndarray = None
+    ):
+        """
+        Generate output in specified mode.
+        """
+        if self.output_mode == 'state':
+            return self.generate_state(params)
+
+        elif self.output_mode == 'samples':
+            return self.sample(n_samples, params)
+
+        elif self.output_mode == 'continuous':
+            return self._generate_continuous(n_samples, params)
+
+        elif self.output_mode == 'probabilities':
+            return self.output_distribution(params)
+
+        else:
+            raise ValueError(f"Unknown output mode: {self.output_mode}")
+
+    def _generate_continuous(
+        self,
+        n_samples: int,
+        params: np.ndarray = None
+    ) -> np.ndarray:
+        """
+        Generate continuous-valued outputs.
+        Maps measurement statistics to continuous features.
+        """
+        if params is None:
+            params = self.params
+
+        outputs = []
+
+        for _ in range(n_samples):
+            # Generate with random noise
+            z = np.random.randn(self.n_params)
+            noisy_params = params + 0.1 * z
+
+            psi = self.generate_state(noisy_params)
+
+            # Extract continuous features from state
+            features = self._extract_features(psi)
+            outputs.append(features)
+
+        return np.array(outputs)
+
+    def _extract_features(self, psi: np.ndarray) -> np.ndarray:
+        """
+        Extract continuous features from quantum state.
+        """
+        features = []
+
+        # Pauli expectations as features
+        for qubit in range(self.n_qubits):
+            # ⟨Z_i⟩
+            Z_i = self._single_qubit_gate(self.Z, qubit)
+            exp_z = np.real(psi.conj() @ Z_i @ psi)
+            features.append(exp_z)
+
+            # ⟨X_i⟩
+            X_i = self._single_qubit_gate(self.X, qubit)
+            exp_x = np.real(psi.conj() @ X_i @ psi)
+            features.append(exp_x)
+
+        return np.array(features)
+
+    def generate_image(
+        self,
+        height: int,
+        width: int,
+        params: np.ndarray = None
+    ) -> np.ndarray:
+        """
+        Generate image-like output.
+        Maps probability amplitudes to pixel values.
+        """
+        if params is None:
+            params = self.params
+
+        psi = self.generate_state(params)
+
+        # Use probability amplitudes as pixel intensities
+        n_pixels = height * width
+        probs = np.abs(psi) ** 2
+
+        # Interpolate if needed
+        if len(probs) != n_pixels:
+            # Simple interpolation
+            x_old = np.linspace(0, 1, len(probs))
+            x_new = np.linspace(0, 1, n_pixels)
+            probs = np.interp(x_new, x_old, probs)
+
+        # Normalize to [0, 1] for image
+        image = probs / np.max(probs)
+
+        return image.reshape(height, width)
+```
+
+---
+
+## 6. Architecture Comparison
+
+Comparing quantum vs classical generator architectures.
+
+```python
+class GeneratorComparison:
+    """
+    Compare quantum and classical generators.
+    """
+
+    def __init__(self, n_features: int, latent_dim: int):
+        self.n_features = n_features
+        self.latent_dim = latent_dim
+
+        # Quantum generator
+        n_qubits = max(2, int(np.ceil(np.log2(n_features + 1))))
+        self.quantum_gen = QuantumGenerator(n_qubits, n_layers=3)
+
+        # Classical generator (simple MLP)
+        self.classical_params = self._init_classical()
+
+    def _init_classical(self) -> Dict:
+        """Initialize classical generator parameters."""
+        hidden = 32
+        return {
+            'W1': np.random.randn(self.latent_dim, hidden) * 0.1,
+            'b1': np.zeros(hidden),
+            'W2': np.random.randn(hidden, self.n_features) * 0.1,
+            'b2': np.zeros(self.n_features)
+        }
+
+    def classical_generate(
+        self,
+        z: np.ndarray
+    ) -> np.ndarray:
+        """Generate using classical network."""
+        h = np.maximum(0, z @ self.classical_params['W1'] + self.classical_params['b1'])
+        out = np.tanh(h @ self.classical_params['W2'] + self.classical_params['b2'])
+        return out
+
+    def compare_expressiveness(
+        self,
+        n_samples: int = 500
+    ) -> Dict[str, float]:
+        """
+        Compare expressiveness of quantum vs classical.
+        """
+        # Quantum samples
+        quantum_samples = self.quantum_gen.sample_batch(n_samples) if hasattr(
+            self.quantum_gen, 'sample_batch'
+        ) else self.quantum_gen.sample(n_samples)
+
+        # Classical samples
+        z = np.random.randn(n_samples, self.latent_dim)
+        classical_samples = self.classical_generate(z)
+
+        # Diversity metrics
+        quantum_diversity = self._compute_diversity(quantum_samples)
+        classical_diversity = self._compute_diversity(classical_samples)
+
+        return {
+            'quantum_diversity': quantum_diversity,
+            'classical_diversity': classical_diversity,
+            'quantum_n_params': self.quantum_gen.n_params,
+            'classical_n_params': sum(p.size for p in self.classical_params.values())
+        }
+
+    def _compute_diversity(self, samples: np.ndarray) -> float:
+        """Compute sample diversity as average pairwise distance."""
+        n = min(100, len(samples))
+        distances = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                dist = np.linalg.norm(samples[i] - samples[j])
+                distances.append(dist)
+        return np.mean(distances) if distances else 0.0
+
+    def parameter_efficiency(self) -> Dict[str, float]:
+        """
+        Compare parameter efficiency.
+        """
+        return {
+            'quantum_params': self.quantum_gen.n_params,
+            'classical_params': sum(p.size for p in self.classical_params.values()),
+            'quantum_expressible_dims': self.quantum_gen.dim,
+            'ratio': self.quantum_gen.dim / self.quantum_gen.n_params
+        }
+```
+
+---
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Quantum Generator Architecture**: PQCs map random inputs to quantum states for sampling
+
+2. **Noise Injection**: Multiple strategies (parameter, input, ancilla) add stochasticity
+
+3. **Expressiveness**: Quantum generators can represent distributions hard for classical networks
+
+4. **Gradient Computation**: Parameter-shift rule enables gradient-based training
+
+5. **Output Modes**: Generators can output states, samples, or continuous features
+
+6. **Architecture Comparison**: Quantum generators offer different trade-offs than classical ones
+
+The next lesson will cover quantum discriminators and their role in QGANs.

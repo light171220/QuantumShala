@@ -1,0 +1,1051 @@
+---
+title: "Training Quantum Boltzmann Machines"
+description: "Master the algorithms and techniques for training quantum Boltzmann machines, including gradient estimation on quantum hardware and hybrid training strategies."
+estimatedMinutes: 70
+---
+
+# Training Quantum Boltzmann Machines
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Derive QBM training gradients using quantum mechanics
+- Implement quantum gradient estimation algorithms
+- Apply contrastive divergence in quantum settings
+- Use parameter-shift rules for QBM training
+- Design hybrid quantum-classical training loops
+- Handle noise and errors during QBM training
+
+---
+
+## 1. QBM Training Objective
+
+Training a Quantum Boltzmann Machine requires optimizing parameters to match a target distribution or minimize an energy-based objective.
+
+<Definition term="QBM Log-Likelihood">
+For training data {v^(k)}, the log-likelihood objective is:
+
+L(θ) = (1/N) Σ_k log P(v^(k)) = (1/N) Σ_k log Tr_h[⟨v^(k)|ρ(θ)|v^(k)⟩]
+
+where ρ(θ) = exp(-βH(θ))/Z(θ) is the Gibbs state.
+</Definition>
+
+<Formula expression="∂L/∂θ = -β[⟨∂H/∂θ⟩_{data} - ⟨∂H/∂θ⟩_{model}]" description="Gradient of QBM log-likelihood" />
+
+The gradient involves two expectations: the data-dependent term (positive phase) and the model expectation (negative phase).
+
+```python
+import numpy as np
+from scipy.linalg import expm
+from typing import Tuple, Dict, Callable
+
+class QBMTrainingObjective:
+    """
+    QBM training objective and gradient computation.
+    """
+
+    def __init__(self, n_visible: int, n_hidden: int):
+        self.n_visible = n_visible
+        self.n_hidden = n_hidden
+        self.n_total = n_visible + n_hidden
+        self.dim = 2 ** self.n_total
+
+        # Pauli matrices
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    def build_hamiltonian(
+        self,
+        W: np.ndarray,
+        a: np.ndarray,
+        b: np.ndarray,
+        gamma: np.ndarray
+    ) -> np.ndarray:
+        """Build QBM Hamiltonian from parameters."""
+        H = np.zeros((self.dim, self.dim), dtype=complex)
+
+        # Single qubit Z terms (biases)
+        for i in range(self.n_visible):
+            H -= a[i] * self._single_z(i)
+        for j in range(self.n_hidden):
+            H -= b[j] * self._single_z(self.n_visible + j)
+
+        # ZZ coupling terms
+        for i in range(self.n_visible):
+            for j in range(self.n_hidden):
+                H -= W[i, j] * self._zz_term(i, self.n_visible + j)
+
+        # Transverse field terms
+        for k in range(self.n_total):
+            H -= gamma[k] * self._single_x(k)
+
+        return H
+
+    def _single_z(self, qubit: int) -> np.ndarray:
+        """Single qubit Z operator."""
+        result = np.array([[1]], dtype=complex)
+        for i in range(self.n_total):
+            result = np.kron(result, self.Z if i == qubit else self.I)
+        return result
+
+    def _single_x(self, qubit: int) -> np.ndarray:
+        """Single qubit X operator."""
+        result = np.array([[1]], dtype=complex)
+        for i in range(self.n_total):
+            result = np.kron(result, self.X if i == qubit else self.I)
+        return result
+
+    def _zz_term(self, q1: int, q2: int) -> np.ndarray:
+        """ZZ coupling term."""
+        return self._single_z(q1) @ self._single_z(q2)
+
+    def compute_gibbs_state(
+        self,
+        H: np.ndarray,
+        beta: float
+    ) -> np.ndarray:
+        """Compute Gibbs state density matrix."""
+        exp_H = expm(-beta * H)
+        Z = np.trace(exp_H)
+        return exp_H / Z
+
+    def log_likelihood(
+        self,
+        params: Dict[str, np.ndarray],
+        data: np.ndarray,
+        beta: float
+    ) -> float:
+        """
+        Compute log-likelihood for training data.
+
+        Args:
+            params: Dictionary with 'W', 'a', 'b', 'gamma'
+            data: Binary data matrix (n_samples, n_visible)
+            beta: Inverse temperature
+
+        Returns:
+            Average log-likelihood
+        """
+        H = self.build_hamiltonian(
+            params['W'], params['a'], params['b'], params['gamma']
+        )
+        rho = self.compute_gibbs_state(H, beta)
+
+        # Trace out hidden qubits for visible marginal
+        rho_v = self._partial_trace_hidden(rho)
+
+        # Compute log-likelihood for each data point
+        log_lik = 0.0
+        for v in data:
+            v_idx = self._binary_to_int(v)
+            prob = np.real(rho_v[v_idx, v_idx])
+            log_lik += np.log(max(prob, 1e-10))
+
+        return log_lik / len(data)
+
+    def _partial_trace_hidden(self, rho: np.ndarray) -> np.ndarray:
+        """Trace out hidden qubits."""
+        dim_v = 2 ** self.n_visible
+        dim_h = 2 ** self.n_hidden
+
+        rho_reshaped = rho.reshape(dim_v, dim_h, dim_v, dim_h)
+        rho_v = np.einsum('ijik->jk', rho_reshaped)
+
+        return rho_v
+
+    def _binary_to_int(self, binary: np.ndarray) -> int:
+        """Convert binary array to integer."""
+        return int(sum(b * 2**i for i, b in enumerate(binary)))
+```
+
+---
+
+## 2. Gradient Estimation for QBMs
+
+Computing gradients for QBM training requires estimating expectations with respect to quantum Gibbs states.
+
+<Definition term="Positive Phase Gradient">
+The data-dependent gradient term (positive phase):
+
+⟨∂H/∂θ⟩_{data} = (1/N) Σ_k Tr[∂H/∂θ · ρ(v^(k))]
+
+where ρ(v^(k)) is the conditional state given visible configuration v^(k).
+</Definition>
+
+<Definition term="Negative Phase Gradient">
+The model expectation (negative phase):
+
+⟨∂H/∂θ⟩_{model} = Tr[∂H/∂θ · ρ]
+
+where ρ is the full Gibbs state.
+</Definition>
+
+<Tip>
+The negative phase is the computationally hard part of QBM training, as it requires sampling from or computing expectations over the full Gibbs distribution.
+</Tip>
+
+```python
+class QBMGradientEstimator:
+    """
+    Gradient estimation for QBM training.
+    """
+
+    def __init__(self, qbm_objective: QBMTrainingObjective):
+        self.objective = qbm_objective
+        self.n_visible = qbm_objective.n_visible
+        self.n_hidden = qbm_objective.n_hidden
+
+    def compute_exact_gradients(
+        self,
+        params: Dict[str, np.ndarray],
+        data: np.ndarray,
+        beta: float
+    ) -> Dict[str, np.ndarray]:
+        """
+        Compute exact gradients using full density matrix.
+        Only feasible for small systems.
+        """
+        H = self.objective.build_hamiltonian(
+            params['W'], params['a'], params['b'], params['gamma']
+        )
+        rho = self.objective.compute_gibbs_state(H, beta)
+
+        grad_W = np.zeros_like(params['W'])
+        grad_a = np.zeros_like(params['a'])
+        grad_b = np.zeros_like(params['b'])
+        grad_gamma = np.zeros_like(params['gamma'])
+
+        # Positive phase: data-dependent expectations
+        for v in data:
+            rho_cond = self._conditional_state(rho, v)
+
+            for i in range(self.n_visible):
+                dH_da = -self.objective._single_z(i)
+                grad_a[i] -= beta * np.real(np.trace(dH_da @ rho_cond)) / len(data)
+
+            for j in range(self.n_hidden):
+                dH_db = -self.objective._single_z(self.n_visible + j)
+                grad_b[j] -= beta * np.real(np.trace(dH_db @ rho_cond)) / len(data)
+
+            for i in range(self.n_visible):
+                for j in range(self.n_hidden):
+                    dH_dW = -self.objective._zz_term(i, self.n_visible + j)
+                    grad_W[i, j] -= beta * np.real(np.trace(dH_dW @ rho_cond)) / len(data)
+
+        # Negative phase: model expectations
+        for i in range(self.n_visible):
+            dH_da = -self.objective._single_z(i)
+            grad_a[i] += beta * np.real(np.trace(dH_da @ rho))
+
+        for j in range(self.n_hidden):
+            dH_db = -self.objective._single_z(self.n_visible + j)
+            grad_b[j] += beta * np.real(np.trace(dH_db @ rho))
+
+        for i in range(self.n_visible):
+            for j in range(self.n_hidden):
+                dH_dW = -self.objective._zz_term(i, self.n_visible + j)
+                grad_W[i, j] += beta * np.real(np.trace(dH_dW @ rho))
+
+        # Transverse field gradients
+        for k in range(self.n_visible + self.n_hidden):
+            dH_dgamma = -self.objective._single_x(k)
+            # Both phases contribute for gamma
+            model_exp = np.real(np.trace(dH_dgamma @ rho))
+            grad_gamma[k] = beta * model_exp  # Simplified for transverse field
+
+        return {
+            'W': grad_W,
+            'a': grad_a,
+            'b': grad_b,
+            'gamma': grad_gamma
+        }
+
+    def _conditional_state(
+        self,
+        rho: np.ndarray,
+        v: np.ndarray
+    ) -> np.ndarray:
+        """
+        Compute conditional state given visible configuration.
+
+        ρ(h|v) = ⟨v|ρ|v⟩ / P(v)
+        """
+        dim_v = 2 ** self.n_visible
+        dim_h = 2 ** self.n_hidden
+        v_idx = self.objective._binary_to_int(v)
+
+        # Extract block corresponding to visible configuration
+        rho_reshaped = rho.reshape(dim_v, dim_h, dim_v, dim_h)
+        rho_h_given_v = rho_reshaped[v_idx, :, v_idx, :]
+
+        # Normalize
+        prob_v = np.trace(rho_h_given_v)
+        if prob_v > 1e-10:
+            rho_h_given_v = rho_h_given_v / prob_v
+
+        # Expand back to full space
+        rho_cond = np.zeros_like(rho)
+        for h_idx in range(dim_h):
+            for h_idx2 in range(dim_h):
+                full_idx1 = v_idx * dim_h + h_idx
+                full_idx2 = v_idx * dim_h + h_idx2
+                rho_cond[full_idx1, full_idx2] = rho_h_given_v[h_idx, h_idx2]
+
+        return rho_cond
+```
+
+---
+
+## 3. Quantum Contrastive Divergence
+
+Classical contrastive divergence (CD) can be extended to the quantum setting for efficient training.
+
+<Definition term="Quantum Contrastive Divergence">
+Quantum CD approximates the negative phase by running k steps of quantum dynamics:
+
+CD-k gradient ≈ ⟨∂H/∂θ⟩_{data} - ⟨∂H/∂θ⟩_{k-step}
+
+where the k-step expectation comes from samples after k steps of quantum evolution.
+</Definition>
+
+<Formula expression="ρ^{(k)} = U(τ)^k ρ^{(0)} (U(τ)^k)^†" description="Quantum evolution for CD sampling" />
+
+```python
+class QuantumContrastiveDivergence:
+    """
+    Quantum Contrastive Divergence for QBM training.
+    """
+
+    def __init__(
+        self,
+        n_visible: int,
+        n_hidden: int,
+        k_steps: int = 1
+    ):
+        self.n_visible = n_visible
+        self.n_hidden = n_hidden
+        self.n_total = n_visible + n_hidden
+        self.dim = 2 ** self.n_total
+        self.k_steps = k_steps
+
+        # Pauli matrices
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    def build_hamiltonian(
+        self,
+        params: Dict[str, np.ndarray]
+    ) -> np.ndarray:
+        """Build Hamiltonian from parameters."""
+        H = np.zeros((self.dim, self.dim), dtype=complex)
+
+        for i in range(self.n_visible):
+            H -= params['a'][i] * self._single_op(self.Z, i)
+
+        for j in range(self.n_hidden):
+            H -= params['b'][j] * self._single_op(self.Z, self.n_visible + j)
+
+        for i in range(self.n_visible):
+            for j in range(self.n_hidden):
+                Zi = self._single_op(self.Z, i)
+                Zj = self._single_op(self.Z, self.n_visible + j)
+                H -= params['W'][i, j] * Zi @ Zj
+
+        for k in range(self.n_total):
+            H -= params['gamma'][k] * self._single_op(self.X, k)
+
+        return H
+
+    def _single_op(self, op: np.ndarray, qubit: int) -> np.ndarray:
+        """Create single-qubit operator."""
+        result = np.array([[1]], dtype=complex)
+        for i in range(self.n_total):
+            result = np.kron(result, op if i == qubit else self.I)
+        return result
+
+    def initialize_data_state(self, v: np.ndarray) -> np.ndarray:
+        """
+        Initialize state clamped to visible configuration.
+        Hidden qubits in superposition.
+        """
+        # Visible part: computational basis state |v⟩
+        psi_v = np.zeros(2 ** self.n_visible, dtype=complex)
+        v_idx = int(sum(v[i] * 2**i for i in range(self.n_visible)))
+        psi_v[v_idx] = 1.0
+
+        # Hidden part: uniform superposition
+        psi_h = np.ones(2 ** self.n_hidden, dtype=complex)
+        psi_h /= np.linalg.norm(psi_h)
+
+        # Full state
+        psi = np.kron(psi_v, psi_h)
+        return psi
+
+    def quantum_gibbs_step(
+        self,
+        psi: np.ndarray,
+        H: np.ndarray,
+        tau: float,
+        beta: float
+    ) -> np.ndarray:
+        """
+        Perform one step of quantum Gibbs sampling.
+        Uses imaginary time evolution approximation.
+        """
+        # Approximate imaginary time evolution
+        # exp(-tau*beta*H) |psi⟩ (unnormalized)
+        evolved = expm(-tau * beta * H) @ psi
+        evolved /= np.linalg.norm(evolved)
+
+        return evolved
+
+    def compute_cd_gradient(
+        self,
+        params: Dict[str, np.ndarray],
+        data: np.ndarray,
+        beta: float,
+        tau: float = 0.1
+    ) -> Dict[str, np.ndarray]:
+        """
+        Compute CD-k gradient for QBM.
+
+        Args:
+            params: Model parameters
+            data: Training data (n_samples, n_visible)
+            beta: Inverse temperature
+            tau: Time step for quantum evolution
+
+        Returns:
+            Gradient dictionary
+        """
+        H = self.build_hamiltonian(params)
+
+        grad_W = np.zeros_like(params['W'])
+        grad_a = np.zeros_like(params['a'])
+        grad_b = np.zeros_like(params['b'])
+        grad_gamma = np.zeros_like(params['gamma'])
+
+        for v in data:
+            # Positive phase: data-clamped expectation
+            psi_data = self.initialize_data_state(v)
+            rho_data = np.outer(psi_data, psi_data.conj())
+
+            # k-step quantum evolution for negative phase
+            psi_model = psi_data.copy()
+            for _ in range(self.k_steps):
+                psi_model = self.quantum_gibbs_step(psi_model, H, tau, beta)
+            rho_model = np.outer(psi_model, psi_model.conj())
+
+            # Compute gradient contributions
+            for i in range(self.n_visible):
+                Z_i = self._single_op(self.Z, i)
+                pos = np.real(np.trace(Z_i @ rho_data))
+                neg = np.real(np.trace(Z_i @ rho_model))
+                grad_a[i] += beta * (neg - pos) / len(data)
+
+            for j in range(self.n_hidden):
+                Z_j = self._single_op(self.Z, self.n_visible + j)
+                pos = np.real(np.trace(Z_j @ rho_data))
+                neg = np.real(np.trace(Z_j @ rho_model))
+                grad_b[j] += beta * (neg - pos) / len(data)
+
+            for i in range(self.n_visible):
+                for j in range(self.n_hidden):
+                    ZZ = self._single_op(self.Z, i) @ self._single_op(
+                        self.Z, self.n_visible + j
+                    )
+                    pos = np.real(np.trace(ZZ @ rho_data))
+                    neg = np.real(np.trace(ZZ @ rho_model))
+                    grad_W[i, j] += beta * (neg - pos) / len(data)
+
+            for k in range(self.n_total):
+                X_k = self._single_op(self.X, k)
+                pos = np.real(np.trace(X_k @ rho_data))
+                neg = np.real(np.trace(X_k @ rho_model))
+                grad_gamma[k] += beta * (neg - pos) / len(data)
+
+        return {
+            'W': grad_W,
+            'a': grad_a,
+            'b': grad_b,
+            'gamma': grad_gamma
+        }
+```
+
+---
+
+## 4. Parameter-Shift Rules for QBM
+
+For gate-based QBM implementations, the parameter-shift rule provides exact gradients.
+
+<Definition term="Parameter-Shift Rule">
+For a parameter θ in a quantum gate exp(-iθG/2), the gradient is:
+
+∂⟨O⟩/∂θ = (1/2)[⟨O⟩_{θ+π/2} - ⟨O⟩_{θ-π/2}]
+
+This requires only two circuit evaluations per parameter.
+</Definition>
+
+<Formula expression="∂⟨H⟩/∂θ = [⟨H⟩(θ + s) - ⟨H⟩(θ - s)]/(2 sin(s))" description="Generalized parameter-shift with shift s" />
+
+<Tip>
+The parameter-shift rule is exact (not an approximation) and is well-suited for noisy quantum hardware.
+</Tip>
+
+```python
+class ParameterShiftQBM:
+    """
+    Parameter-shift rule implementation for variational QBM.
+    """
+
+    def __init__(
+        self,
+        n_visible: int,
+        n_hidden: int,
+        n_layers: int = 2
+    ):
+        self.n_visible = n_visible
+        self.n_hidden = n_hidden
+        self.n_total = n_visible + n_hidden
+        self.n_layers = n_layers
+        self.dim = 2 ** self.n_total
+
+        # Calculate number of parameters
+        # Each layer: 3 rotations per qubit + ZZ gates
+        params_per_layer = 3 * self.n_total + self.n_visible * self.n_hidden
+        self.n_params = self.n_layers * params_per_layer
+
+        # Pauli matrices
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    def build_circuit(self, params: np.ndarray) -> np.ndarray:
+        """Build unitary circuit from parameters."""
+        U = np.eye(self.dim, dtype=complex)
+        idx = 0
+
+        for layer in range(self.n_layers):
+            # Single-qubit rotations
+            for q in range(self.n_total):
+                U = self._rx(params[idx], q) @ U
+                idx += 1
+                U = self._ry(params[idx], q) @ U
+                idx += 1
+                U = self._rz(params[idx], q) @ U
+                idx += 1
+
+            # ZZ entangling gates between visible and hidden
+            for v in range(self.n_visible):
+                for h in range(self.n_hidden):
+                    U = self._rzz(params[idx], v, self.n_visible + h) @ U
+                    idx += 1
+
+        return U
+
+    def _rotation(self, theta: float, pauli: np.ndarray, qubit: int) -> np.ndarray:
+        """Create rotation gate."""
+        gate = expm(-1j * theta/2 * pauli)
+        return self._single_gate(gate, qubit)
+
+    def _rx(self, theta: float, qubit: int) -> np.ndarray:
+        return self._rotation(theta, self.X, qubit)
+
+    def _ry(self, theta: float, qubit: int) -> np.ndarray:
+        return self._rotation(theta, self.Y, qubit)
+
+    def _rz(self, theta: float, qubit: int) -> np.ndarray:
+        return self._rotation(theta, self.Z, qubit)
+
+    def _single_gate(self, gate: np.ndarray, qubit: int) -> np.ndarray:
+        """Expand single-qubit gate to full space."""
+        result = np.array([[1]], dtype=complex)
+        for i in range(self.n_total):
+            result = np.kron(result, gate if i == qubit else self.I)
+        return result
+
+    def _rzz(self, theta: float, q1: int, q2: int) -> np.ndarray:
+        """RZZ gate."""
+        Z1 = self._single_gate(self.Z, q1)
+        Z2 = self._single_gate(self.Z, q2)
+        ZZ = Z1 @ Z2
+        return expm(-1j * theta/2 * ZZ)
+
+    def expectation(
+        self,
+        params: np.ndarray,
+        observable: np.ndarray
+    ) -> float:
+        """Compute ⟨ψ|O|ψ⟩ where |ψ⟩ = U|0⟩."""
+        U = self.build_circuit(params)
+
+        psi0 = np.zeros(self.dim, dtype=complex)
+        psi0[0] = 1.0
+
+        psi = U @ psi0
+        return np.real(psi.conj() @ observable @ psi)
+
+    def parameter_shift_gradient(
+        self,
+        params: np.ndarray,
+        observable: np.ndarray,
+        shift: float = np.pi/2
+    ) -> np.ndarray:
+        """
+        Compute gradient using parameter-shift rule.
+
+        Args:
+            params: Circuit parameters
+            observable: Observable to measure
+            shift: Parameter shift (π/2 for standard rule)
+
+        Returns:
+            Gradient array
+        """
+        grad = np.zeros_like(params)
+
+        for i in range(len(params)):
+            # Forward shift
+            params_plus = params.copy()
+            params_plus[i] += shift
+            exp_plus = self.expectation(params_plus, observable)
+
+            # Backward shift
+            params_minus = params.copy()
+            params_minus[i] -= shift
+            exp_minus = self.expectation(params_minus, observable)
+
+            # Parameter-shift formula
+            grad[i] = (exp_plus - exp_minus) / (2 * np.sin(shift))
+
+        return grad
+
+    def natural_gradient(
+        self,
+        params: np.ndarray,
+        observable: np.ndarray,
+        regularization: float = 1e-4
+    ) -> np.ndarray:
+        """
+        Compute natural gradient using quantum Fisher information.
+        """
+        # Standard gradient
+        grad = self.parameter_shift_gradient(params, observable)
+
+        # Estimate quantum Fisher information matrix (simplified)
+        qfi = self._estimate_qfi(params, regularization)
+
+        # Natural gradient: F^{-1} * grad
+        return np.linalg.solve(qfi, grad)
+
+    def _estimate_qfi(
+        self,
+        params: np.ndarray,
+        regularization: float
+    ) -> np.ndarray:
+        """
+        Estimate quantum Fisher information matrix.
+        Uses finite differences for simplicity.
+        """
+        n = len(params)
+        qfi = np.zeros((n, n))
+        eps = 1e-4
+
+        U = self.build_circuit(params)
+        psi0 = np.zeros(self.dim, dtype=complex)
+        psi0[0] = 1.0
+        psi = U @ psi0
+
+        # Compute |∂ψ/∂θ_i⟩ for each parameter
+        dpsi = []
+        for i in range(n):
+            params_plus = params.copy()
+            params_plus[i] += eps
+            psi_plus = self.build_circuit(params_plus) @ psi0
+
+            params_minus = params.copy()
+            params_minus[i] -= eps
+            psi_minus = self.build_circuit(params_minus) @ psi0
+
+            dpsi_i = (psi_plus - psi_minus) / (2 * eps)
+            dpsi.append(dpsi_i)
+
+        # QFI: F_ij = 4 * Re[⟨∂ψ/∂θ_i|∂ψ/∂θ_j⟩ - ⟨∂ψ/∂θ_i|ψ⟩⟨ψ|∂ψ/∂θ_j⟩]
+        for i in range(n):
+            for j in range(n):
+                inner = np.vdot(dpsi[i], dpsi[j])
+                overlap_i = np.vdot(dpsi[i], psi)
+                overlap_j = np.vdot(psi, dpsi[j])
+                qfi[i, j] = 4 * np.real(inner - overlap_i * overlap_j)
+
+        # Regularization
+        qfi += regularization * np.eye(n)
+
+        return qfi
+```
+
+---
+
+## 5. Hybrid Training Loop
+
+A complete hybrid quantum-classical training loop for QBMs combines quantum gradient estimation with classical optimization.
+
+<Warning>
+Real quantum hardware introduces noise in gradient estimates. Techniques like gradient averaging and adaptive learning rates are essential for stable training.
+</Warning>
+
+```python
+class HybridQBMTrainer:
+    """
+    Hybrid quantum-classical training for QBMs.
+    """
+
+    def __init__(
+        self,
+        n_visible: int,
+        n_hidden: int,
+        n_layers: int = 2,
+        learning_rate: float = 0.1,
+        beta: float = 1.0
+    ):
+        self.n_visible = n_visible
+        self.n_hidden = n_hidden
+        self.n_layers = n_layers
+        self.learning_rate = learning_rate
+        self.beta = beta
+
+        # Initialize variational circuit
+        self.circuit = ParameterShiftQBM(n_visible, n_hidden, n_layers)
+
+        # Initialize parameters
+        self.params = np.random.randn(self.circuit.n_params) * 0.1
+
+        # Training history
+        self.loss_history = []
+        self.grad_history = []
+
+    def build_target_hamiltonian(
+        self,
+        data: np.ndarray
+    ) -> np.ndarray:
+        """
+        Build effective Hamiltonian from training data.
+        For generative training, minimize energy of data configurations.
+        """
+        dim = self.circuit.dim
+        H = np.zeros((dim, dim), dtype=complex)
+
+        for v in data:
+            # Create projector onto visible configuration
+            proj = self._visible_projector(v)
+            H -= proj / len(data)
+
+        return H
+
+    def _visible_projector(self, v: np.ndarray) -> np.ndarray:
+        """Create projector onto visible configuration."""
+        dim_v = 2 ** self.n_visible
+        dim_h = 2 ** self.n_hidden
+
+        v_idx = int(sum(v[i] * 2**i for i in range(self.n_visible)))
+
+        proj = np.zeros((self.circuit.dim, self.circuit.dim), dtype=complex)
+        for h in range(dim_h):
+            idx = v_idx * dim_h + h
+            proj[idx, idx] = 1.0
+
+        return proj
+
+    def compute_loss(
+        self,
+        params: np.ndarray,
+        data: np.ndarray
+    ) -> float:
+        """
+        Compute training loss.
+        Uses negative log-likelihood approximation.
+        """
+        H_target = self.build_target_hamiltonian(data)
+
+        # Energy expectation is proxy for negative log-likelihood
+        energy = self.circuit.expectation(params, H_target)
+
+        return energy
+
+    def train_step(
+        self,
+        data: np.ndarray,
+        use_natural_gradient: bool = False
+    ) -> float:
+        """
+        Perform one training step.
+
+        Returns:
+            Current loss value
+        """
+        H_target = self.build_target_hamiltonian(data)
+
+        # Compute gradient
+        if use_natural_gradient:
+            grad = self.circuit.natural_gradient(self.params, H_target)
+        else:
+            grad = self.circuit.parameter_shift_gradient(self.params, H_target)
+
+        # Update parameters
+        self.params -= self.learning_rate * grad
+
+        # Compute and store loss
+        loss = self.compute_loss(self.params, data)
+        self.loss_history.append(loss)
+        self.grad_history.append(np.linalg.norm(grad))
+
+        return loss
+
+    def train(
+        self,
+        data: np.ndarray,
+        n_epochs: int = 100,
+        batch_size: int = None,
+        use_natural_gradient: bool = False,
+        verbose: bool = True
+    ):
+        """
+        Full training loop.
+
+        Args:
+            data: Training data (n_samples, n_visible)
+            n_epochs: Number of training epochs
+            batch_size: Mini-batch size (None for full batch)
+            use_natural_gradient: Whether to use natural gradient
+            verbose: Print progress
+        """
+        n_samples = len(data)
+        if batch_size is None:
+            batch_size = n_samples
+
+        for epoch in range(n_epochs):
+            # Shuffle data
+            indices = np.random.permutation(n_samples)
+
+            epoch_loss = 0.0
+            n_batches = 0
+
+            for start in range(0, n_samples, batch_size):
+                end = min(start + batch_size, n_samples)
+                batch = data[indices[start:end]]
+
+                loss = self.train_step(batch, use_natural_gradient)
+                epoch_loss += loss
+                n_batches += 1
+
+            avg_loss = epoch_loss / n_batches
+
+            if verbose and epoch % 10 == 0:
+                grad_norm = self.grad_history[-1] if self.grad_history else 0
+                print(f"Epoch {epoch}: Loss = {avg_loss:.6f}, "
+                      f"Grad norm = {grad_norm:.6f}")
+
+    def sample(self, n_samples: int = 100) -> np.ndarray:
+        """
+        Generate samples from trained model.
+        """
+        U = self.circuit.build_circuit(self.params)
+        psi0 = np.zeros(self.circuit.dim, dtype=complex)
+        psi0[0] = 1.0
+        psi = U @ psi0
+
+        # Probability distribution
+        probs = np.abs(psi) ** 2
+
+        # Sample configurations
+        samples = np.random.choice(
+            len(probs), size=n_samples, p=probs
+        )
+
+        # Convert to visible configurations
+        visible_samples = []
+        dim_h = 2 ** self.n_hidden
+
+        for s in samples:
+            v_idx = s // dim_h
+            v = np.array([(v_idx >> i) & 1 for i in range(self.n_visible)])
+            visible_samples.append(v)
+
+        return np.array(visible_samples)
+```
+
+---
+
+## 6. Noise-Aware Training
+
+Training on noisy quantum hardware requires special consideration for error mitigation.
+
+<Definition term="Noise-Aware Gradient">
+Under depolarizing noise with rate p, the effective gradient becomes:
+
+∇θ_noisy ≈ (1-p)^d ∇θ_ideal
+
+where d is the circuit depth. This exponential suppression must be compensated.
+</Definition>
+
+```python
+class NoiseAwareQBMTrainer(HybridQBMTrainer):
+    """
+    QBM trainer with noise mitigation techniques.
+    """
+
+    def __init__(
+        self,
+        n_visible: int,
+        n_hidden: int,
+        n_layers: int = 2,
+        learning_rate: float = 0.1,
+        beta: float = 1.0,
+        noise_rate: float = 0.01
+    ):
+        super().__init__(n_visible, n_hidden, n_layers, learning_rate, beta)
+        self.noise_rate = noise_rate
+
+    def apply_noise(self, rho: np.ndarray) -> np.ndarray:
+        """
+        Apply depolarizing noise to density matrix.
+        """
+        dim = rho.shape[0]
+        noisy_rho = (1 - self.noise_rate) * rho
+        noisy_rho += self.noise_rate * np.eye(dim) / dim
+        return noisy_rho
+
+    def noisy_expectation(
+        self,
+        params: np.ndarray,
+        observable: np.ndarray,
+        n_shots: int = 1000
+    ) -> Tuple[float, float]:
+        """
+        Compute noisy expectation value with uncertainty.
+
+        Returns:
+            (mean, std_error)
+        """
+        U = self.circuit.build_circuit(params)
+        psi0 = np.zeros(self.circuit.dim, dtype=complex)
+        psi0[0] = 1.0
+        psi = U @ psi0
+
+        # Ideal density matrix
+        rho = np.outer(psi, psi.conj())
+
+        # Apply noise
+        rho_noisy = self.apply_noise(rho)
+
+        # Expectation value
+        exp_val = np.real(np.trace(observable @ rho_noisy))
+
+        # Estimate variance from finite shots
+        probs = np.real(np.diag(rho_noisy))
+        eigenvalues = np.real(np.diag(observable))
+        variance = np.sum(probs * eigenvalues**2) - exp_val**2
+        std_error = np.sqrt(variance / n_shots)
+
+        return exp_val, std_error
+
+    def richardson_extrapolation(
+        self,
+        params: np.ndarray,
+        observable: np.ndarray,
+        noise_factors: list = [1, 2, 3]
+    ) -> float:
+        """
+        Error mitigation via Richardson extrapolation.
+        """
+        expectations = []
+        original_noise = self.noise_rate
+
+        for factor in noise_factors:
+            self.noise_rate = original_noise * factor
+            exp, _ = self.noisy_expectation(params, observable)
+            expectations.append(exp)
+
+        self.noise_rate = original_noise
+
+        # Linear extrapolation to zero noise
+        # Fit: E(λ) = E_0 + c*λ
+        lambdas = np.array(noise_factors) * original_noise
+        A = np.vstack([lambdas, np.ones_like(lambdas)]).T
+        c, E0 = np.linalg.lstsq(A, expectations, rcond=None)[0]
+
+        return E0
+
+    def mitigated_gradient(
+        self,
+        params: np.ndarray,
+        observable: np.ndarray,
+        shift: float = np.pi/2
+    ) -> np.ndarray:
+        """
+        Compute gradient with error mitigation.
+        """
+        grad = np.zeros_like(params)
+
+        for i in range(len(params)):
+            params_plus = params.copy()
+            params_plus[i] += shift
+            exp_plus = self.richardson_extrapolation(params_plus, observable)
+
+            params_minus = params.copy()
+            params_minus[i] -= shift
+            exp_minus = self.richardson_extrapolation(params_minus, observable)
+
+            grad[i] = (exp_plus - exp_minus) / (2 * np.sin(shift))
+
+        return grad
+
+    def adaptive_learning_rate(
+        self,
+        grad_history: list,
+        initial_lr: float,
+        patience: int = 10
+    ) -> float:
+        """
+        Adapt learning rate based on gradient noise.
+        """
+        if len(grad_history) < patience:
+            return initial_lr
+
+        recent_grads = grad_history[-patience:]
+        grad_std = np.std([np.linalg.norm(g) for g in recent_grads])
+        grad_mean = np.mean([np.linalg.norm(g) for g in recent_grads])
+
+        # Reduce learning rate if gradients are noisy
+        noise_ratio = grad_std / (grad_mean + 1e-10)
+        if noise_ratio > 0.5:
+            return initial_lr * 0.5
+        elif noise_ratio < 0.1:
+            return initial_lr * 1.5
+
+        return initial_lr
+```
+
+---
+
+## Summary
+
+In this lesson, you learned:
+
+1. **QBM Training Objective**: Maximizing log-likelihood requires computing gradients with positive (data) and negative (model) phase contributions
+
+2. **Gradient Estimation**: Exact gradients require computing expectations over quantum Gibbs states, which is computationally demanding
+
+3. **Quantum Contrastive Divergence**: Extends classical CD to quantum settings by using quantum evolution for the negative phase
+
+4. **Parameter-Shift Rules**: Provide exact gradients for gate-based QBM implementations with simple circuit evaluations
+
+5. **Hybrid Training Loops**: Combine quantum gradient estimation with classical optimization algorithms
+
+6. **Noise-Aware Training**: Error mitigation techniques like Richardson extrapolation help compensate for hardware noise
+
+The next lesson will cover sampling and inference methods for trained QBMs.

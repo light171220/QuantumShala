@@ -1,0 +1,326 @@
+# Belief Propagation Decoding
+
+## Introduction
+
+Belief Propagation (BP) is a probabilistic decoding algorithm that passes messages on a factor graph to compute marginal probabilities of errors. While it can struggle with loopy graphs like those in surface codes, it excels for LDPC codes and serves as a building block for more sophisticated decoders.
+
+## Factor Graphs for Quantum Codes
+
+```
+Factor Graph Representation
+═══════════════════════════
+
+A factor graph represents the relationship between:
+    - Variables (possible errors on each qubit)
+    - Factors (syndrome constraints from stabilizers)
+
+STRUCTURE:
+    - Variable nodes: One per qubit (error = I, X, Y, or Z)
+    - Factor nodes: One per stabilizer check
+    - Edges: Connect variable to factors it participates in
+
+
+EXAMPLE: [[7,1,3]] Steane Code
+
+Stabilizers:
+    g₁ = X₀X₁X₂X₃
+    g₂ = X₁X₂X₄X₅
+    g₃ = X₂X₃X₅X₆
+    (plus Z stabilizers)
+
+Factor Graph:
+    Variable nodes: v₀, v₁, v₂, v₃, v₄, v₅, v₆
+
+    Factor nodes: f₁ (g₁), f₂ (g₂), f₃ (g₃), ...
+
+    Edges:
+    f₁ ─── v₀, v₁, v₂, v₃
+    f₂ ─── v₁, v₂, v₄, v₅
+    f₃ ─── v₂, v₃, v₅, v₆
+
+
+VISUALIZATION:
+
+    v₀    v₁    v₂    v₃    v₄    v₅    v₆
+    ○     ○     ○     ○     ○     ○     ○
+    │     │╲    │╲    │     │     │     │
+    │     │ ╲   │ ╲   │     │     │     │
+    └─────┼──╲──┼──╲──┘     │     │     │
+          │   ╲ │   ╲       │     │     │
+    ┌─────┘    ╲│    ╲──────┼─────┘     │
+    │           ├─────╲─────┤           │
+    ■ f₁        ■ f₂   ╲────┼───────────┤
+                        ╲   │           │
+                         ╲──┼───────────┤
+                            ■ f₃        │
+
+    ○ = variable node
+    ■ = factor node
+```
+
+## Message Passing Algorithm
+
+```python
+class BeliefPropagation:
+    """
+    Implement Belief Propagation for quantum codes.
+    """
+
+    def __init__(self, parity_check: list, error_rate: float):
+        self.H = parity_check
+        self.p = error_rate
+
+    def explain_message_passing(self):
+        """Explain the message passing algorithm."""
+        print("""
+Belief Propagation Message Passing
+══════════════════════════════════
+
+Two types of messages passed iteratively:
+
+1. VARIABLE → FACTOR messages (μ)
+    "What I believe about my error, considering other factors"
+
+    μ_{v→f}(e) ∝ prior(e) × ∏_{f' ≠ f} ν_{f'→v}(e)
+
+    v = variable, f = factor, e = error type (I, X, Y, Z)
+
+
+2. FACTOR → VARIABLE messages (ν)
+    "What I (factor) tell you about your error"
+
+    ν_{f→v}(e) ∝ ∑_{e': compatible} ∏_{v' ≠ v} μ_{v'→f}(e')
+
+    Compatible: errors consistent with syndrome
+
+
+ALGORITHM:
+
+    1. Initialize:
+       μ_{v→f}(e) = prior(e)  (e.g., P(error) = p)
+
+    2. Iterate:
+       for each factor f:
+           compute ν_{f→v} from μ_{v'→f}
+       for each variable v:
+           compute μ_{v→f} from ν_{f'→v}
+
+    3. Converge:
+       Repeat step 2 until messages stop changing
+       (or max iterations)
+
+    4. Decide:
+       belief(v, e) = prior(e) × ∏_f ν_{f→v}(e)
+       decoded_error[v] = argmax_e belief(v, e)
+        """)
+
+    def log_domain(self):
+        """Explain log-domain implementation."""
+        print("""
+Log-Domain Belief Propagation
+═════════════════════════════
+
+For numerical stability, work in log domain:
+
+    log μ_{v→f}(e) = log prior(e) + ∑_{f' ≠ f} log ν_{f'→v}(e)
+
+    Log-likelihood ratios (LLR):
+    L_v = log(P(e=I) / P(e=X))
+
+    Update equations become additions instead of multiplications.
+
+
+BINARY SYMMETRIC CHANNEL (simpler case):
+
+    For X-errors only with probability p:
+
+    L_v = log((1-p)/p)  (prior LLR)
+
+    Variable-to-check:
+    L_{v→c} = L_v + ∑_{c' ≠ c} L_{c'→v}
+
+    Check-to-variable (using tanh):
+    tanh(L_{c→v}/2) = ∏_{v' ≠ v} tanh(L_{v'→c}/2)
+
+    This is the "sum-product" algorithm in log domain.
+        """)
+
+
+bp = BeliefPropagation([[1,1,1,0], [0,1,1,1]], 0.01)
+bp.explain_message_passing()
+bp.log_domain()
+```
+
+## Handling Loops
+
+```
+The Loop Problem
+════════════════
+
+IDEAL: BP is exact on trees (no loops)
+REALITY: Quantum code factor graphs have loops!
+
+SURFACE CODE EXAMPLE:
+
+    ○───○───○
+    │   │   │
+    ■───■───■    Loops everywhere!
+    │   │   │
+    ○───○───○
+
+    Messages cycle around loops
+    Can fail to converge or give wrong answer
+
+CONSEQUENCES:
+    1. BP may not converge
+    2. Even if converges, may not be optimal
+    3. Threshold lower than optimal
+
+
+MITIGATION STRATEGIES:
+
+1. LIMITED ITERATIONS
+    Stop after fixed number of iterations
+    Prevents runaway oscillation
+
+2. DAMPING
+    New message = α × computed + (1-α) × old
+    Smooths updates, improves convergence
+
+3. SCHEDULING
+    Order of message updates affects convergence
+    "Residual" scheduling: update largest changes first
+
+4. NEURAL BP
+    Learn damping factors from data
+    Can adapt to specific code structure
+```
+
+## BP Performance
+
+```python
+class BPPerformance:
+    """
+    Analyze BP decoder performance.
+    """
+
+    def __init__(self):
+        pass
+
+    def threshold_analysis(self):
+        """Analyze BP threshold for different codes."""
+        print("""
+BP Threshold Analysis
+═════════════════════
+
+CODE TYPE              BP THRESHOLD    OPTIMAL
+────────────────────────────────────────────────
+Classical LDPC         Near optimal    ~capacity
+Quantum LDPC (good)    0.5-0.8%        ~1%
+Surface code           0.5-0.8%        ~1.1%
+Toric code             ~0.8%           ~1.1%
+
+BP GAP:
+    BP achieves 50-80% of optimal threshold
+    Gap due to loops in factor graph
+
+LDPC CODES:
+    Sparse parity checks → fewer loops
+    BP works much better!
+    Quantum LDPC: promising for future QEC
+
+
+COMPLEXITY:
+
+    Per iteration: O(edges) = O(n × avg_degree)
+    Iterations: O(log n) to O(n) depending on convergence
+
+    For surface code (d×d):
+    O(d² × degree × iterations) = O(d² × 4 × 20) = O(d²)
+
+    Similar to Union-Find, but with higher constant
+        """)
+
+    def when_to_use_bp(self):
+        """Discuss when BP is a good choice."""
+        print("""
+When to Use Belief Propagation
+══════════════════════════════
+
+BP IS GOOD FOR:
+    ✓ LDPC codes (sparse, few short loops)
+    ✓ Codes with good "girth" (long shortest loop)
+    ✓ When probabilistic info is valuable
+    ✓ As preprocessing for other decoders
+
+BP IS LESS SUITABLE FOR:
+    ✗ Surface codes (many short loops)
+    ✗ Highly structured codes with regularity
+    ✗ When near-optimal threshold is required
+
+HYBRID APPROACHES:
+    BP + OSD: Use BP to find most likely errors, then refine
+    BP + MWPM: BP provides edge weights for matching
+    Neural BP: Learn to overcome loop limitations
+        """)
+
+
+perf = BPPerformance()
+perf.threshold_analysis()
+perf.when_to_use_bp()
+```
+
+## BP Variants
+
+```
+Belief Propagation Variants
+═══════════════════════════
+
+1. SUM-PRODUCT (Standard)
+    Computes marginal probabilities
+    Soft outputs for each error type
+
+2. MIN-SUM
+    Approximation of sum-product
+    Uses min instead of sum in log domain
+    Faster but slightly less accurate
+
+3. NORMALIZED/OFFSET MIN-SUM
+    Corrects bias in min-sum
+    Better accuracy, still fast
+
+4. ORDERED STATISTICS DECODING (OSD)
+    Post-processing after BP
+    Fixes remaining errors
+    Approaches ML performance
+
+
+OSD OVERVIEW:
+
+    1. Run BP to get soft information
+    2. Sort bits by reliability
+    3. Fix most reliable bits
+    4. Exhaustively search remaining bits
+    5. Return best codeword found
+
+    BP + OSD achieves near-optimal for many codes!
+
+
+5. QUATERNARY BP
+    For quantum codes: handle X, Y, Z errors
+    Messages are 4-dimensional (I, X, Y, Z)
+    More complex but handles degeneracy better
+```
+
+## Summary
+
+Belief Propagation offers probabilistic decoding through message passing:
+
+1. **Factor Graphs**: Represent code structure as bipartite graph
+2. **Message Passing**: Exchange beliefs between variables and factors
+3. **Loop Challenge**: BP struggles with loopy graphs like surface codes
+4. **Threshold**: ~50-80% of optimal due to loops
+5. **Best For**: LDPC codes with sparse structure
+6. **Hybrids**: BP + OSD, BP + MWPM for improved performance
+
+BP is essential for quantum LDPC codes and provides probabilistic insights for other decoders.

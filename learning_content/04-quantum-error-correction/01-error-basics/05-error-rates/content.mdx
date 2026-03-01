@@ -1,0 +1,671 @@
+# Error Rates: Quantifying Quantum Gate Performance
+
+## Introduction
+
+To build fault-tolerant quantum computers, we need precise measurements of error rates. This lesson covers the metrics used to quantify quantum gate performance and the experimental techniques for measuring them.
+
+## Error Rate Metrics
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    ERROR RATE METRICS                               │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  FIDELITY METRICS:                                                  │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │ Average Gate Fidelity (F_avg)                                │  │
+│  │   F_avg = ∫ ⟨ψ|U†E(|ψ⟩⟨ψ|)U|ψ⟩ dψ                           │  │
+│  │   Range: [0, 1], higher is better                           │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │ Process Fidelity (F_proc)                                    │  │
+│  │   F_proc = ⟨Φ|E(|Φ⟩⟨Φ|)|Φ⟩   (maximally entangled state)   │  │
+│  │   Related: F_avg = (d·F_proc + 1)/(d + 1)                   │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  ERROR METRICS:                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │ Error Per Gate (EPG)                                         │  │
+│  │   EPG = 1 - F_avg                                           │  │
+│  │   Typical values: 10⁻⁴ to 10⁻² for physical gates          │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │ Diamond Distance (◇)                                         │  │
+│  │   ◇(E, U) = max_ρ ||( E ⊗ I)(ρ) - (U ⊗ I)(ρ)||₁           │  │
+│  │   Worst-case error including entanglement                   │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Gate Fidelity Calculations
+
+```python
+import numpy as np
+from typing import List, Tuple
+
+# Pauli matrices
+I = np.eye(2, dtype=complex)
+X = np.array([[0, 1], [1, 0]], dtype=complex)
+Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+class GateFidelityCalculator:
+    """
+    Calculate various gate fidelity metrics.
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                   FIDELITY RELATIONSHIPS                        │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                                                                 │
+    │  For single qubit (d=2):                                       │
+    │    F_avg = (2·F_proc + 1)/3                                    │
+    │    F_proc = (3·F_avg - 1)/2                                    │
+    │                                                                 │
+    │  For depolarizing noise with error rate p:                     │
+    │    F_avg = 1 - p(d-1)/d = 1 - p/2  (for qubit)                │
+    │    EPG = p/2                                                   │
+    │                                                                 │
+    │  Infidelity to error rate (approximate):                       │
+    │    r ≈ (d+1)(1-F_avg)/d = (3/2)·EPG  (for qubit)              │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+    """
+
+    def __init__(self, d: int = 2):
+        """Initialize for d-dimensional system."""
+        self.d = d
+
+    def average_gate_fidelity(self, kraus_ops: List[np.ndarray],
+                               target_unitary: np.ndarray) -> float:
+        """
+        Calculate average gate fidelity.
+
+        F_avg = (d·F_ent + 1)/(d + 1)
+        """
+        F_ent = self.entanglement_fidelity(kraus_ops, target_unitary)
+        F_avg = (self.d * F_ent + 1) / (self.d + 1)
+        return F_avg
+
+    def entanglement_fidelity(self, kraus_ops: List[np.ndarray],
+                               target_unitary: np.ndarray) -> float:
+        """
+        Calculate entanglement (process) fidelity.
+
+        F_ent = (1/d²)|Σₖ Tr[U†Kₖ]|²
+        """
+        total = 0
+        for K in kraus_ops:
+            total += np.trace(target_unitary.conj().T @ K)
+
+        F_ent = np.abs(total)**2 / self.d**2
+        return np.real(F_ent)
+
+    def error_per_gate(self, kraus_ops: List[np.ndarray],
+                       target_unitary: np.ndarray) -> float:
+        """Calculate error per gate (infidelity)."""
+        return 1 - self.average_gate_fidelity(kraus_ops, target_unitary)
+
+    def depolarizing_fidelity(self, p: float) -> float:
+        """
+        Calculate fidelity for depolarizing channel.
+
+        E(ρ) = (1-p)ρ + p·I/d
+        F_avg = 1 - p(d-1)/d
+        """
+        return 1 - p * (self.d - 1) / self.d
+
+    def diamond_distance_bound(self, kraus_ops: List[np.ndarray],
+                                target_unitary: np.ndarray) -> float:
+        """
+        Upper bound on diamond distance.
+
+        ◇(E, U) ≤ √(d(d-1)(1-F_ent))
+        """
+        F_ent = self.entanglement_fidelity(kraus_ops, target_unitary)
+        return np.sqrt(self.d * (self.d - 1) * (1 - F_ent))
+
+# Example calculations
+calc = GateFidelityCalculator(d=2)
+
+# Create noisy X gate (depolarizing noise)
+def noisy_gate_kraus(gate: np.ndarray, p: float) -> List[np.ndarray]:
+    """Create Kraus operators for gate with depolarizing noise."""
+    K0 = np.sqrt(1 - 3*p/4) * gate
+    K1 = np.sqrt(p/4) * X @ gate
+    K2 = np.sqrt(p/4) * Y @ gate
+    K3 = np.sqrt(p/4) * Z @ gate
+    return [K0, K1, K2, K3]
+
+print("Gate Fidelity Analysis")
+print("=" * 60)
+
+for p in [0.001, 0.01, 0.1]:
+    kraus = noisy_gate_kraus(X, p)
+    F_avg = calc.average_gate_fidelity(kraus, X)
+    F_ent = calc.entanglement_fidelity(kraus, X)
+    epg = calc.error_per_gate(kraus, X)
+    diamond = calc.diamond_distance_bound(kraus, X)
+
+    print(f"\nDepolarizing p = {p}:")
+    print(f"  F_avg = {F_avg:.6f}")
+    print(f"  F_ent = {F_ent:.6f}")
+    print(f"  EPG   = {epg:.6f}")
+    print(f"  ◇ bound = {diamond:.6f}")
+```
+
+## Randomized Benchmarking
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                  RANDOMIZED BENCHMARKING                            │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  PROTOCOL:                                                          │
+│  1. Prepare |0⟩                                                    │
+│  2. Apply m random Clifford gates: C₁ · C₂ · ... · Cₘ             │
+│  3. Apply inverse Clifford: (C₁ · C₂ · ... · Cₘ)⁻¹                │
+│  4. Measure survival probability P(0)                              │
+│  5. Repeat for many random sequences                               │
+│  6. Average P(0) for each m                                        │
+│                                                                     │
+│  SIGNAL:                                                            │
+│  ┌─────────────────────────────────────────────────────────┐       │
+│  │  P(0)                                                    │       │
+│  │    ↑                                                     │       │
+│  │  1 ┼───○                                                 │       │
+│  │    │    ○                                                │       │
+│  │    │      ○                                              │       │
+│  │    │        ○  ← Exponential decay                      │       │
+│  │    │          ○                                          │       │
+│  │ 0.5┼─ ─ ─ ─ ─ ─○─ ─ ─ ─ ─ ─                             │       │
+│  │    │              ○    ○                                 │       │
+│  │    │                  ○   ○                              │       │
+│  │    │                       ○   ○                         │       │
+│  │    └──────────────────────────────→ m (sequence length)  │       │
+│  └─────────────────────────────────────────────────────────┘       │
+│                                                                     │
+│  FIT: P(0) = A · p^m + B                                           │
+│  Error per Clifford: r = (d-1)(1-p)/d                              │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+```python
+import numpy as np
+from typing import List, Tuple
+
+class RandomizedBenchmarking:
+    """
+    Implement randomized benchmarking for single-qubit gates.
+
+    RB extracts the average error rate independent of SPAM errors.
+    """
+
+    def __init__(self):
+        # Single-qubit Clifford group (24 elements)
+        self.cliffords = self._generate_cliffords()
+
+    def _generate_cliffords(self) -> List[np.ndarray]:
+        """
+        Generate the 24 single-qubit Clifford gates.
+        """
+        # Basis gates
+        I = np.eye(2, dtype=complex)
+        H = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+        S = np.array([[1, 0], [0, 1j]], dtype=complex)
+        X = np.array([[0, 1], [1, 0]], dtype=complex)
+
+        # Generate all Cliffords from {I, H, S, X, HS, SH, HSH, ...}
+        cliffords = []
+        generators = [I, H, S, X]
+
+        # Use recursive generation up to depth 3
+        seen = set()
+        queue = [I]
+
+        while len(cliffords) < 24 and queue:
+            current = queue.pop(0)
+
+            # Check if this is a new Clifford (up to phase)
+            key = tuple(np.round(np.abs(current).flatten(), 6))
+            if key not in seen:
+                seen.add(key)
+                cliffords.append(current)
+
+                # Generate new candidates
+                for g in generators:
+                    queue.append(g @ current)
+
+        return cliffords[:24]
+
+    def random_clifford_sequence(self, length: int) -> Tuple[List[np.ndarray], np.ndarray]:
+        """
+        Generate random Clifford sequence and its inverse.
+
+        Returns:
+            (sequence, inverse): List of Cliffords and the combined inverse
+        """
+        sequence = []
+        total = np.eye(2, dtype=complex)
+
+        for _ in range(length):
+            idx = np.random.randint(len(self.cliffords))
+            cliff = self.cliffords[idx]
+            sequence.append(cliff)
+            total = cliff @ total
+
+        inverse = total.conj().T
+        return sequence, inverse
+
+    def run_sequence(self, sequence: List[np.ndarray],
+                     inverse: np.ndarray,
+                     noise_model: callable) -> float:
+        """
+        Run RB sequence with noise and return survival probability.
+        """
+        # Start in |0⟩
+        state = np.array([[1, 0], [0, 0]], dtype=complex)
+
+        # Apply noisy sequence
+        for cliff in sequence:
+            # Apply gate with noise
+            state = noise_model(cliff, state)
+
+        # Apply inverse
+        state = noise_model(inverse, state)
+
+        # Return |0⟩ population
+        return np.real(state[0, 0])
+
+    def run_rb(self, sequence_lengths: List[int],
+               n_sequences: int,
+               noise_model: callable) -> dict:
+        """
+        Run full RB experiment.
+        """
+        results = {'lengths': [], 'survival_probs': [], 'std_devs': []}
+
+        for m in sequence_lengths:
+            survivals = []
+
+            for _ in range(n_sequences):
+                seq, inv = self.random_clifford_sequence(m)
+                p0 = self.run_sequence(seq, inv, noise_model)
+                survivals.append(p0)
+
+            results['lengths'].append(m)
+            results['survival_probs'].append(np.mean(survivals))
+            results['std_devs'].append(np.std(survivals))
+
+        return results
+
+    def fit_rb_decay(self, lengths: List[int],
+                     survival_probs: List[float]) -> dict:
+        """
+        Fit RB decay to extract error rate.
+
+        Model: P(m) = A * p^m + B
+        """
+        # Simple log-linear fit for p
+        log_probs = np.log(np.array(survival_probs) - 0.5)
+        slope, intercept = np.polyfit(lengths, log_probs, 1)
+
+        p = np.exp(slope)
+        A = np.exp(intercept)
+        B = 0.5
+
+        # Error per Clifford
+        r = (1 - p) / 2  # For d=2: r = (d-1)(1-p)/d
+
+        return {
+            'decay_rate': p,
+            'A': A,
+            'B': B,
+            'error_per_clifford': r,
+            'average_gate_fidelity': 1 - r
+        }
+
+def depolarizing_noise_model(gate: np.ndarray, rho: np.ndarray,
+                              p: float = 0.01) -> np.ndarray:
+    """Apply gate followed by depolarizing noise."""
+    # Apply gate
+    rho = gate @ rho @ gate.conj().T
+
+    # Apply depolarizing noise
+    rho = (1 - p) * rho + (p / 2) * np.eye(2)
+
+    return rho
+
+# Run simulated RB
+rb = RandomizedBenchmarking()
+
+# Create noise model with 1% depolarizing
+noise = lambda gate, rho: depolarizing_noise_model(gate, rho, p=0.01)
+
+print("Randomized Benchmarking Simulation")
+print("=" * 60)
+
+# Run RB
+lengths = [1, 5, 10, 20, 50, 100]
+results = rb.run_rb(lengths, n_sequences=50, noise_model=noise)
+
+print("\nSequence length | Survival probability")
+print("-" * 40)
+for m, p in zip(results['lengths'], results['survival_probs']):
+    print(f"  {m:3d}           | {p:.4f}")
+
+# Fit decay
+fit = rb.fit_rb_decay(results['lengths'], results['survival_probs'])
+print(f"\nFitted decay rate (p): {fit['decay_rate']:.4f}")
+print(f"Error per Clifford: {fit['error_per_clifford']:.4f}")
+print(f"Average gate fidelity: {fit['average_gate_fidelity']:.4f}")
+```
+
+## Error Budget Analysis
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     ERROR BUDGET                                    │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  TOTAL ERROR = Coherent + Incoherent + Leakage + SPAM              │
+│                                                                     │
+│  TYPICAL BREAKDOWN (superconducting qubit):                        │
+│  ┌────────────────────────────────────────────────────────────┐    │
+│  │                                                            │    │
+│  │  ████████████████████  T1 decay          40%              │    │
+│  │  ████████████         T2 dephasing      25%              │    │
+│  │  ██████               Pulse error       15%              │    │
+│  │  ████                 Leakage           10%              │    │
+│  │  ███                  Crosstalk          7%              │    │
+│  │  █                    Other              3%              │    │
+│  │                                                            │    │
+│  └────────────────────────────────────────────────────────────┘    │
+│                                                                     │
+│  ERROR RATE REQUIREMENTS FOR FAULT TOLERANCE:                       │
+│  • Surface code threshold: ~1%                                      │
+│  • Current best gates: ~10⁻⁴ (0.01%)                               │
+│  • Factor of ~100 below threshold needed for practical scaling      │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+```python
+import numpy as np
+from dataclasses import dataclass
+from typing import Dict
+
+@dataclass
+class ErrorSource:
+    """A source of quantum errors."""
+    name: str
+    rate: float
+    type: str  # 'coherent', 'incoherent', 'leakage', 'spam'
+    description: str
+
+class ErrorBudgetAnalyzer:
+    """
+    Analyze error budget for quantum gates.
+    """
+
+    def __init__(self):
+        self.error_sources = []
+
+    def add_error_source(self, source: ErrorSource):
+        """Add an error source to the budget."""
+        self.error_sources.append(source)
+
+    def from_device_parameters(self, T1: float, T2: float,
+                                gate_time: float,
+                                pulse_error: float = 0.001,
+                                leakage: float = 0.001,
+                                crosstalk: float = 0.0005) -> None:
+        """
+        Build error budget from device parameters.
+
+        Args:
+            T1: Relaxation time (seconds)
+            T2: Dephasing time (seconds)
+            gate_time: Gate duration (seconds)
+            pulse_error: Coherent pulse error rate
+            leakage: Leakage to non-computational states
+            crosstalk: Crosstalk error rate
+        """
+        # T1 contribution
+        t1_error = gate_time / T1 / 2
+        self.add_error_source(ErrorSource(
+            "T1 decay", t1_error, "incoherent",
+            "Amplitude damping from excited state relaxation"
+        ))
+
+        # T2 contribution (pure dephasing)
+        # T2 = 1/(1/T1 + 1/T_phi), so T_phi = 1/(1/T2 - 1/T1)
+        if T2 < T1:
+            t_phi = 1 / (1/T2 - 1/(2*T1))
+            t_phi_error = gate_time / t_phi / 2
+        else:
+            t_phi_error = 0
+
+        self.add_error_source(ErrorSource(
+            "Pure dephasing", t_phi_error, "incoherent",
+            "Phase randomization from low-frequency noise"
+        ))
+
+        # Pulse errors
+        self.add_error_source(ErrorSource(
+            "Pulse calibration", pulse_error, "coherent",
+            "Systematic rotation errors from miscalibration"
+        ))
+
+        # Leakage
+        self.add_error_source(ErrorSource(
+            "Leakage", leakage, "leakage",
+            "Population transfer to non-computational states"
+        ))
+
+        # Crosstalk
+        self.add_error_source(ErrorSource(
+            "Crosstalk", crosstalk, "coherent",
+            "Unwanted coupling to neighboring qubits"
+        ))
+
+    def total_error(self) -> float:
+        """Calculate total error rate."""
+        # Incoherent errors add linearly (approximately)
+        incoherent = sum(s.rate for s in self.error_sources
+                         if s.type == 'incoherent')
+
+        # Coherent errors can add or cancel - assume worst case
+        coherent = sum(s.rate for s in self.error_sources
+                       if s.type == 'coherent')
+
+        # Leakage adds linearly
+        leakage = sum(s.rate for s in self.error_sources
+                      if s.type == 'leakage')
+
+        return incoherent + coherent + leakage
+
+    def print_budget(self):
+        """Print error budget breakdown."""
+        print("\nError Budget Breakdown")
+        print("=" * 60)
+
+        total = self.total_error()
+
+        for source in sorted(self.error_sources, key=lambda x: -x.rate):
+            percentage = 100 * source.rate / total if total > 0 else 0
+            bar = "█" * int(percentage / 5)
+            print(f"{source.name:20s} {source.rate:.2e}  ({percentage:5.1f}%) {bar}")
+            print(f"    [{source.type}] {source.description}")
+
+        print("-" * 60)
+        print(f"{'Total error rate':20s} {total:.2e}")
+
+        # Compare to threshold
+        threshold = 0.01
+        print(f"\nSurface code threshold: {threshold:.2e}")
+        print(f"Margin: {threshold/total:.1f}x {'below' if total < threshold else 'ABOVE'} threshold")
+
+# Example analysis
+analyzer = ErrorBudgetAnalyzer()
+
+# Typical superconducting qubit parameters
+analyzer.from_device_parameters(
+    T1=50e-6,          # 50 μs
+    T2=70e-6,          # 70 μs
+    gate_time=20e-9,   # 20 ns gate
+    pulse_error=0.001, # 0.1% pulse error
+    leakage=0.0005,    # 0.05% leakage
+    crosstalk=0.0002   # 0.02% crosstalk
+)
+
+analyzer.print_budget()
+```
+
+## Cross-Platform Comparison
+
+```python
+import numpy as np
+
+class QubitTechnologyComparison:
+    """
+    Compare error rates across different qubit technologies.
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                  QUBIT TECHNOLOGY COMPARISON                    │
+    ├──────────────────┬──────────────┬─────────────┬────────────────┤
+    │ Technology       │ 1Q Gate EPG  │ 2Q Gate EPG │ Readout Error │
+    ├──────────────────┼──────────────┼─────────────┼────────────────┤
+    │ Superconducting  │ 10⁻⁴ - 10⁻³ │ 10⁻³ - 10⁻²│ 10⁻³ - 10⁻²  │
+    │ Trapped Ion      │ 10⁻⁵ - 10⁻⁴ │ 10⁻³ - 10⁻²│ 10⁻⁴ - 10⁻³  │
+    │ Neutral Atom     │ 10⁻³ - 10⁻² │ 10⁻² - 10⁻¹│ 10⁻² - 10⁻¹  │
+    │ Photonic         │ 10⁻⁵ - 10⁻⁴ │ 10⁻¹ (prob)│ 10⁻³ - 10⁻²  │
+    │ Silicon Spin     │ 10⁻³ - 10⁻² │ 10⁻² - 10⁻¹│ 10⁻² - 10⁻¹  │
+    │ NV Center        │ 10⁻³ - 10⁻² │ 10⁻² - 10⁻¹│ 10⁻² - 10⁻¹  │
+    └──────────────────┴──────────────┴─────────────┴────────────────┘
+    """
+
+    def __init__(self):
+        self.technologies = {
+            'superconducting': {
+                '1q_gate_fidelity': (0.999, 0.9999),
+                '2q_gate_fidelity': (0.99, 0.999),
+                'readout_fidelity': (0.99, 0.999),
+                'T1': (50e-6, 500e-6),
+                'T2': (50e-6, 200e-6),
+                'gate_time_1q': (20e-9, 50e-9),
+                'gate_time_2q': (30e-9, 300e-9)
+            },
+            'trapped_ion': {
+                '1q_gate_fidelity': (0.9999, 0.99999),
+                '2q_gate_fidelity': (0.99, 0.999),
+                'readout_fidelity': (0.999, 0.9999),
+                'T1': (1.0, 100.0),  # seconds!
+                'T2': (0.1, 10.0),
+                'gate_time_1q': (1e-6, 10e-6),
+                'gate_time_2q': (50e-6, 500e-6)
+            },
+            'neutral_atom': {
+                '1q_gate_fidelity': (0.99, 0.999),
+                '2q_gate_fidelity': (0.9, 0.99),
+                'readout_fidelity': (0.9, 0.99),
+                'T1': (1.0, 10.0),
+                'T2': (0.1, 1.0),
+                'gate_time_1q': (100e-9, 1e-6),
+                'gate_time_2q': (100e-9, 1e-6)
+            }
+        }
+
+    def compare_technologies(self) -> None:
+        """Print comparison table."""
+        print("\nQubit Technology Error Rate Comparison")
+        print("=" * 70)
+        print(f"{'Technology':<18} {'1Q Error':<12} {'2Q Error':<12} {'Readout':<12}")
+        print("-" * 70)
+
+        for tech, params in self.technologies.items():
+            f1q_min, f1q_max = params['1q_gate_fidelity']
+            f2q_min, f2q_max = params['2q_gate_fidelity']
+            fr_min, fr_max = params['readout_fidelity']
+
+            e1q = f"{(1-f1q_max):.0e}-{(1-f1q_min):.0e}"
+            e2q = f"{(1-f2q_max):.0e}-{(1-f2q_min):.0e}"
+            er = f"{(1-fr_max):.0e}-{(1-fr_min):.0e}"
+
+            print(f"{tech:<18} {e1q:<12} {e2q:<12} {er:<12}")
+
+    def error_budget_for_circuit(self, technology: str,
+                                  n_1q_gates: int,
+                                  n_2q_gates: int,
+                                  n_measurements: int) -> dict:
+        """
+        Estimate total error for a circuit on given technology.
+        """
+        params = self.technologies[technology]
+
+        # Use typical (middle) values
+        e1q = (1 - params['1q_gate_fidelity'][0] + 1 - params['1q_gate_fidelity'][1]) / 2
+        e2q = (1 - params['2q_gate_fidelity'][0] + 1 - params['2q_gate_fidelity'][1]) / 2
+        er = (1 - params['readout_fidelity'][0] + 1 - params['readout_fidelity'][1]) / 2
+
+        # Total error (first-order approximation)
+        total_error = n_1q_gates * e1q + n_2q_gates * e2q + n_measurements * er
+
+        return {
+            '1q_contribution': n_1q_gates * e1q,
+            '2q_contribution': n_2q_gates * e2q,
+            'readout_contribution': n_measurements * er,
+            'total_error': total_error,
+            'success_probability': max(0, 1 - total_error)
+        }
+
+# Demonstrate
+comparison = QubitTechnologyComparison()
+comparison.compare_technologies()
+
+# Example circuit error estimation
+print("\n\nCircuit Error Estimation (100 1Q + 50 2Q + 10 measurements)")
+print("-" * 60)
+
+for tech in ['superconducting', 'trapped_ion', 'neutral_atom']:
+    result = comparison.error_budget_for_circuit(tech, 100, 50, 10)
+    print(f"\n{tech.upper()}:")
+    print(f"  1Q gates:    {result['1q_contribution']:.3f}")
+    print(f"  2Q gates:    {result['2q_contribution']:.3f}")
+    print(f"  Readout:     {result['readout_contribution']:.3f}")
+    print(f"  Total error: {result['total_error']:.3f}")
+    print(f"  Success:     {result['success_probability']*100:.1f}%")
+```
+
+## Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                   ERROR RATES SUMMARY                               │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  KEY METRICS:                                                       │
+│  • Average gate fidelity (F_avg): Haar-averaged overlap             │
+│  • Error per gate (EPG): 1 - F_avg                                  │
+│  • Diamond distance: Worst-case error including entanglement        │
+│                                                                     │
+│  MEASUREMENT TECHNIQUES:                                            │
+│  • Randomized benchmarking: SPAM-free EPG extraction               │
+│  • Process tomography: Full channel reconstruction                 │
+│  • Interleaved RB: Single gate characterization                    │
+│                                                                     │
+│  ERROR BUDGET COMPONENTS:                                           │
+│  • Decoherence (T1, T2): Usually dominant                          │
+│  • Control errors: Pulse calibration, crosstalk                    │
+│  • Leakage: Population outside computational space                 │
+│                                                                     │
+│  CURRENT STATE OF THE ART:                                          │
+│  • Best 1Q gates: ~10⁻⁵ EPG (trapped ions)                         │
+│  • Best 2Q gates: ~10⁻³ EPG (multiple platforms)                   │
+│  • Surface code threshold: ~10⁻² (comfortably achievable)          │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Precise error rate measurements are essential for developing fault-tolerant quantum systems and comparing different hardware approaches.

@@ -1,0 +1,762 @@
+---
+title: "Application Migration"
+description: "Migrating applications to post-quantum cryptography including code changes, library updates, and testing strategies"
+---
+
+# Application Migration to PQC
+
+Migrating applications to PQC requires careful analysis of cryptographic dependencies, library updates, and comprehensive testing.
+
+## Cryptographic Dependency Analysis
+
+```
+Application Crypto Dependency Map:
+═══════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────┐
+│                     APPLICATION LAYER                           │
+├─────────────────────────────────────────────────────────────────┤
+│  User Authentication    │  Data Encryption    │  API Security  │
+│  - Password hashing     │  - File encryption  │  - OAuth/JWT   │
+│  - Session tokens       │  - DB encryption    │  - API keys    │
+│  - Certificate auth     │  - Message encrypt  │  - Signatures  │
+└─────────────┬───────────┴─────────┬───────────┴────────┬────────┘
+              │                     │                    │
+              ▼                     ▼                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   CRYPTOGRAPHIC LIBRARIES                        │
+├─────────────────────────────────────────────────────────────────┤
+│  OpenSSL/BoringSSL  │  libsodium  │  Language-specific  │  HSM  │
+│  - TLS/SSL          │  - NaCl     │  - Python crypto    │  SDK  │
+│  - X.509            │  - Box/Sign │  - Java JCE         │       │
+│  - PKCS#11          │  - KX       │  - Go crypto        │       │
+└─────────────────────┴─────────────┴─────────────────────┴───────┘
+              │                     │                    │
+              ▼                     ▼                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   CRYPTOGRAPHIC PRIMITIVES                       │
+├─────────────────────────────────────────────────────────────────┤
+│  Key Exchange         │  Signatures           │  Encryption     │
+│  ┌─────────────────┐  │  ┌─────────────────┐  │  ┌───────────┐  │
+│  │ ECDH → ML-KEM   │  │  │ ECDSA → ML-DSA  │  │  │ AES (OK)  │  │
+│  │ X25519 → Hybrid │  │  │ RSA → Hybrid    │  │  │ XChaCha   │  │
+│  │ DH → Deprecated │  │  │ Ed25519 → Hybr  │  │  │ (OK)      │  │
+│  └─────────────────┘  │  └─────────────────┘  │  └───────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+from dataclasses import dataclass
+from typing import List, Dict, Optional
+from enum import Enum
+import ast
+import re
+
+class CryptoUsageType(Enum):
+    KEY_EXCHANGE = "key_exchange"
+    SIGNATURE = "signature"
+    ENCRYPTION = "encryption"
+    HASH = "hash"
+    MAC = "mac"
+    KDF = "kdf"
+
+@dataclass
+class CryptoDependency:
+    """Identified cryptographic dependency."""
+    file_path: str
+    line_number: int
+    usage_type: CryptoUsageType
+    algorithm: str
+    library: str
+    pqc_migration_needed: bool
+    recommended_replacement: Optional[str]
+
+class CryptoScanner:
+    """
+    Scans application code for cryptographic dependencies.
+    """
+
+    def __init__(self):
+        self.vulnerable_patterns = {
+            # Key exchange patterns needing migration
+            CryptoUsageType.KEY_EXCHANGE: [
+                (r"ECDH|ecdh|X25519|x25519|DH\(|diffie.?hellman",
+                 "ML-KEM or X25519-ML-KEM hybrid"),
+                (r"key_exchange|kex|shared_secret",
+                 "Review for PQC migration"),
+            ],
+            # Signature patterns needing migration
+            CryptoUsageType.SIGNATURE: [
+                (r"ECDSA|ecdsa|Ed25519|ed25519",
+                 "ML-DSA or hybrid ECDSA+ML-DSA"),
+                (r"RSA.*sign|sign.*RSA|rsa_sign",
+                 "ML-DSA or hybrid RSA+ML-DSA"),
+                (r"\.sign\(|\.verify\(|signature",
+                 "Review signature algorithm"),
+            ],
+        }
+
+        # Libraries with PQC support
+        self.pqc_libraries = {
+            "python": ["oqs", "liboqs-python", "pqcrypto"],
+            "javascript": ["liboqs-node", "crystals-kyber"],
+            "go": ["circl", "liboqs-go"],
+            "java": ["bouncy-castle-pqc", "liboqs-java"],
+            "rust": ["pqcrypto", "oqs-rs"],
+        }
+
+    def scan_python_file(self, content: str, file_path: str) -> List[CryptoDependency]:
+        """Scan Python file for crypto usage."""
+        dependencies = []
+        lines = content.split('\n')
+
+        for line_num, line in enumerate(lines, 1):
+            # Check imports
+            if 'from cryptography' in line or 'import cryptography' in line:
+                dependencies.append(CryptoDependency(
+                    file_path=file_path,
+                    line_number=line_num,
+                    usage_type=CryptoUsageType.KEY_EXCHANGE,
+                    algorithm="cryptography library",
+                    library="cryptography",
+                    pqc_migration_needed=True,
+                    recommended_replacement="Add oqs-python for PQC"
+                ))
+
+            # Check for ECDH
+            if 'ECDH' in line or 'X25519' in line:
+                dependencies.append(CryptoDependency(
+                    file_path=file_path,
+                    line_number=line_num,
+                    usage_type=CryptoUsageType.KEY_EXCHANGE,
+                    algorithm="ECDH/X25519",
+                    library="cryptography",
+                    pqc_migration_needed=True,
+                    recommended_replacement="ML-KEM-768 or X25519-ML-KEM-768 hybrid"
+                ))
+
+            # Check for signatures
+            if 'ECDSA' in line or 'Ed25519' in line:
+                dependencies.append(CryptoDependency(
+                    file_path=file_path,
+                    line_number=line_num,
+                    usage_type=CryptoUsageType.SIGNATURE,
+                    algorithm="ECDSA/Ed25519",
+                    library="cryptography",
+                    pqc_migration_needed=True,
+                    recommended_replacement="ML-DSA-65 or hybrid signature"
+                ))
+
+        return dependencies
+
+    def generate_migration_report(
+        self,
+        dependencies: List[CryptoDependency]
+    ) -> str:
+        """Generate migration report from dependencies."""
+        lines = [
+            "CRYPTOGRAPHIC DEPENDENCY MIGRATION REPORT",
+            "=" * 50,
+            "",
+        ]
+
+        # Group by migration need
+        needs_migration = [d for d in dependencies if d.pqc_migration_needed]
+
+        lines.append(f"Total dependencies found: {len(dependencies)}")
+        lines.append(f"Requiring PQC migration: {len(needs_migration)}")
+        lines.append("")
+
+        # Group by type
+        by_type: Dict[CryptoUsageType, List[CryptoDependency]] = {}
+        for dep in needs_migration:
+            by_type.setdefault(dep.usage_type, []).append(dep)
+
+        for usage_type, deps in by_type.items():
+            lines.append(f"\n{usage_type.value.upper()} ({len(deps)} items):")
+            for dep in deps:
+                lines.append(f"  {dep.file_path}:{dep.line_number}")
+                lines.append(f"    Current: {dep.algorithm}")
+                lines.append(f"    Recommended: {dep.recommended_replacement}")
+
+        return "\n".join(lines)
+
+# Example usage
+scanner = CryptoScanner()
+sample_code = '''
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+private_key = X25519PrivateKey.generate()
+public_key = private_key.public_key()
+'''
+
+deps = scanner.scan_python_file(sample_code, "example.py")
+print(scanner.generate_migration_report(deps))
+```
+
+## Library Updates
+
+```
+PQC Library Integration Matrix:
+═══════════════════════════════════════════════════════════════════
+
+Python:
+┌─────────────────────────────────────────────────────────────────┐
+│ Library           │ PQC Support      │ Hybrid Support          │
+├───────────────────┼──────────────────┼─────────────────────────┤
+│ cryptography      │ Pending          │ Pending                 │
+│ oqs-python        │ Full (liboqs)    │ Manual combination      │
+│ pqcrypto          │ Full             │ Limited                 │
+│ pyca/cryptography │ Future releases  │ Planned                 │
+└───────────────────┴──────────────────┴─────────────────────────┘
+
+JavaScript/Node.js:
+┌─────────────────────────────────────────────────────────────────┐
+│ Library           │ PQC Support      │ Hybrid Support          │
+├───────────────────┼──────────────────┼─────────────────────────┤
+│ node:crypto       │ OpenSSL 3.x dep  │ Via OpenSSL             │
+│ liboqs-node       │ Full             │ Manual                  │
+│ crystals-kyber    │ ML-KEM only      │ No                      │
+└───────────────────┴──────────────────┴─────────────────────────┘
+
+Go:
+┌─────────────────────────────────────────────────────────────────┐
+│ Library           │ PQC Support      │ Hybrid Support          │
+├───────────────────┼──────────────────┼─────────────────────────┤
+│ crypto/tls        │ Go 1.23+ hybrids │ X25519-ML-KEM-768       │
+│ cloudflare/circl  │ Full             │ Full                    │
+│ liboqs-go         │ Full             │ Manual                  │
+└───────────────────┴──────────────────┴─────────────────────────┘
+
+Java:
+┌─────────────────────────────────────────────────────────────────┐
+│ Library           │ PQC Support      │ Hybrid Support          │
+├───────────────────┼──────────────────┼─────────────────────────┤
+│ BouncyCastle      │ Full (1.78+)     │ Full                    │
+│ liboqs-java       │ Full             │ Manual                  │
+│ JCE providers     │ Vendor-dependent │ Varies                  │
+└───────────────────┴──────────────────┴─────────────────────────┘
+```
+
+```python
+from abc import ABC, abstractmethod
+from typing import Tuple, Optional
+from dataclasses import dataclass
+
+@dataclass
+class KeyPair:
+    """Generic key pair container."""
+    public_key: bytes
+    private_key: bytes
+    algorithm: str
+
+@dataclass
+class HybridKeyPair:
+    """Hybrid key pair with both classical and PQC components."""
+    classical: KeyPair
+    pqc: KeyPair
+
+class CryptoProvider(ABC):
+    """Abstract crypto provider interface."""
+
+    @abstractmethod
+    def generate_keypair(self) -> KeyPair:
+        pass
+
+    @abstractmethod
+    def encapsulate(self, public_key: bytes) -> Tuple[bytes, bytes]:
+        """Return (ciphertext, shared_secret)."""
+        pass
+
+    @abstractmethod
+    def decapsulate(self, private_key: bytes, ciphertext: bytes) -> bytes:
+        """Return shared_secret."""
+        pass
+
+class HybridCryptoProvider:
+    """
+    Hybrid crypto provider combining classical and PQC.
+    """
+
+    def __init__(
+        self,
+        classical_provider: CryptoProvider,
+        pqc_provider: CryptoProvider
+    ):
+        self.classical = classical_provider
+        self.pqc = pqc_provider
+
+    def generate_keypair(self) -> HybridKeyPair:
+        """Generate hybrid key pair."""
+        return HybridKeyPair(
+            classical=self.classical.generate_keypair(),
+            pqc=self.pqc.generate_keypair()
+        )
+
+    def encapsulate(
+        self,
+        classical_pubkey: bytes,
+        pqc_pubkey: bytes
+    ) -> Tuple[bytes, bytes, bytes]:
+        """
+        Hybrid encapsulation.
+        Returns: (classical_ct, pqc_ct, combined_secret)
+        """
+        classical_ct, classical_ss = self.classical.encapsulate(classical_pubkey)
+        pqc_ct, pqc_ss = self.pqc.encapsulate(pqc_pubkey)
+
+        # Combine secrets (simple XOR or KDF)
+        combined = self._combine_secrets(classical_ss, pqc_ss)
+
+        return classical_ct, pqc_ct, combined
+
+    def decapsulate(
+        self,
+        classical_privkey: bytes,
+        pqc_privkey: bytes,
+        classical_ct: bytes,
+        pqc_ct: bytes
+    ) -> bytes:
+        """Hybrid decapsulation."""
+        classical_ss = self.classical.decapsulate(classical_privkey, classical_ct)
+        pqc_ss = self.pqc.decapsulate(pqc_privkey, pqc_ct)
+
+        return self._combine_secrets(classical_ss, pqc_ss)
+
+    def _combine_secrets(self, secret1: bytes, secret2: bytes) -> bytes:
+        """
+        Combine two shared secrets.
+        In production, use proper KDF (HKDF).
+        """
+        import hashlib
+        combined = secret1 + secret2
+        return hashlib.sha256(combined).digest()
+
+# Example migration wrapper
+class MigrationWrapper:
+    """
+    Wrapper to migrate from classical to hybrid crypto.
+    Provides backward compatibility during transition.
+    """
+
+    def __init__(self, enable_pqc: bool = False):
+        self.enable_pqc = enable_pqc
+        # Initialize providers based on configuration
+
+    def key_exchange(
+        self,
+        peer_public_keys: dict
+    ) -> Tuple[bytes, dict]:
+        """
+        Perform key exchange with migration support.
+
+        Args:
+            peer_public_keys: Dict with 'classical' and optionally 'pqc' keys
+
+        Returns:
+            (shared_secret, our_public_keys)
+        """
+        if self.enable_pqc and 'pqc' in peer_public_keys:
+            # Full hybrid key exchange
+            return self._hybrid_exchange(peer_public_keys)
+        else:
+            # Classical-only fallback
+            return self._classical_exchange(peer_public_keys)
+
+    def _hybrid_exchange(self, peer_keys: dict) -> Tuple[bytes, dict]:
+        """Hybrid key exchange implementation."""
+        # Implementation details
+        pass
+
+    def _classical_exchange(self, peer_keys: dict) -> Tuple[bytes, dict]:
+        """Classical key exchange for backward compatibility."""
+        # Implementation details
+        pass
+
+print("Hybrid crypto provider ready for migration")
+```
+
+## Code Migration Patterns
+
+```
+Migration Pattern: Gradual Transition
+═══════════════════════════════════════════════════════════════════
+
+Step 1: Add PQC Library Alongside Classical
+┌─────────────────────────────────────────────────────────────────┐
+│ # Before                                                         │
+│ from cryptography.hazmat.primitives.asymmetric import x25519    │
+│                                                                  │
+│ # After                                                          │
+│ from cryptography.hazmat.primitives.asymmetric import x25519    │
+│ import oqs  # Add PQC library                                   │
+└─────────────────────────────────────────────────────────────────┘
+
+Step 2: Create Abstraction Layer
+┌─────────────────────────────────────────────────────────────────┐
+│ class KeyExchange:                                               │
+│     def __init__(self, mode="classical"):                       │
+│         self.mode = mode                                         │
+│                                                                  │
+│     def generate_keys(self):                                     │
+│         if self.mode == "hybrid":                               │
+│             return self._generate_hybrid()                       │
+│         return self._generate_classical()                        │
+└─────────────────────────────────────────────────────────────────┘
+
+Step 3: Feature Flag Control
+┌─────────────────────────────────────────────────────────────────┐
+│ # config.py                                                      │
+│ PQC_ENABLED = os.getenv("PQC_ENABLED", "false") == "true"       │
+│ PQC_MODE = os.getenv("PQC_MODE", "hybrid")  # hybrid | pure     │
+│                                                                  │
+│ # usage.py                                                       │
+│ kex = KeyExchange(mode="hybrid" if PQC_ENABLED else "classical")│
+└─────────────────────────────────────────────────────────────────┘
+
+Step 4: Gradual Rollout
+┌─────────────────────────────────────────────────────────────────┐
+│ Week 1: PQC_ENABLED=true for 1% of traffic                      │
+│ Week 2: Increase to 10% if metrics healthy                      │
+│ Week 4: Increase to 50%                                          │
+│ Week 6: Full rollout (100%)                                      │
+│ Future: Switch PQC_MODE to "pure" when ready                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+from typing import Protocol, Dict, Any
+from functools import wraps
+import os
+
+class FeatureFlagService:
+    """Feature flag service for PQC migration."""
+
+    def __init__(self):
+        self.flags = {
+            "pqc_enabled": os.getenv("PQC_ENABLED", "false") == "true",
+            "pqc_mode": os.getenv("PQC_MODE", "hybrid"),
+            "pqc_percentage": int(os.getenv("PQC_PERCENTAGE", "0")),
+        }
+
+    def is_pqc_enabled(self, user_id: str = None) -> bool:
+        """Check if PQC is enabled for this request."""
+        if not self.flags["pqc_enabled"]:
+            return False
+
+        # Percentage-based rollout
+        if user_id and self.flags["pqc_percentage"] < 100:
+            return hash(user_id) % 100 < self.flags["pqc_percentage"]
+
+        return True
+
+    def get_pqc_mode(self) -> str:
+        """Get PQC mode (hybrid or pure)."""
+        return self.flags["pqc_mode"]
+
+def with_pqc_migration(func):
+    """Decorator for PQC migration support."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        flags = FeatureFlagService()
+        user_id = kwargs.get('user_id')
+
+        kwargs['pqc_enabled'] = flags.is_pqc_enabled(user_id)
+        kwargs['pqc_mode'] = flags.get_pqc_mode()
+
+        return func(*args, **kwargs)
+    return wrapper
+
+# Example: Migrated encryption function
+@with_pqc_migration
+def encrypt_message(
+    plaintext: bytes,
+    recipient_public_key: bytes,
+    pqc_enabled: bool = False,
+    pqc_mode: str = "hybrid",
+    **kwargs
+) -> Dict[str, bytes]:
+    """
+    Encrypt message with PQC migration support.
+    """
+    if pqc_enabled:
+        if pqc_mode == "hybrid":
+            # Hybrid encryption
+            return hybrid_encrypt(plaintext, recipient_public_key)
+        else:
+            # Pure PQC encryption
+            return pqc_encrypt(plaintext, recipient_public_key)
+    else:
+        # Classical encryption (backward compatible)
+        return classical_encrypt(plaintext, recipient_public_key)
+
+def hybrid_encrypt(plaintext: bytes, pubkey: bytes) -> Dict[str, bytes]:
+    """Hybrid encryption placeholder."""
+    return {"ciphertext": b"hybrid_encrypted", "mode": b"hybrid"}
+
+def pqc_encrypt(plaintext: bytes, pubkey: bytes) -> Dict[str, bytes]:
+    """Pure PQC encryption placeholder."""
+    return {"ciphertext": b"pqc_encrypted", "mode": b"pqc"}
+
+def classical_encrypt(plaintext: bytes, pubkey: bytes) -> Dict[str, bytes]:
+    """Classical encryption placeholder."""
+    return {"ciphertext": b"classical_encrypted", "mode": b"classical"}
+
+# Demo
+result = encrypt_message(b"Hello", b"pubkey", user_id="user123")
+print(f"Encryption result: {result}")
+```
+
+## Testing Strategy
+
+```
+PQC Migration Testing Pyramid:
+═══════════════════════════════════════════════════════════════════
+
+                    ┌─────────────────────┐
+                    │   E2E Tests         │
+                    │   - Full workflows  │
+                    │   - Browser tests   │
+                    └──────────┬──────────┘
+                               │
+              ┌────────────────┴────────────────┐
+              │       Integration Tests          │
+              │   - API endpoint tests           │
+              │   - TLS handshake tests          │
+              │   - Certificate chain tests      │
+              └────────────────┬────────────────┘
+                               │
+    ┌──────────────────────────┴──────────────────────────┐
+    │                    Unit Tests                        │
+    │   - Crypto primitive tests                           │
+    │   - Hybrid combination tests                         │
+    │   - Serialization/deserialization tests              │
+    │   - Error handling tests                             │
+    └──────────────────────────────────────────────────────┘
+
+Test Categories:
+┌─────────────────────────────────────────────────────────────────┐
+│ Functional Tests          │ Compatibility Tests                 │
+│ □ Correct encryption      │ □ Classical client → Hybrid server │
+│ □ Correct decryption      │ □ Hybrid client → Classical server │
+│ □ Signature verify        │ □ Mixed client versions            │
+│ □ Key exchange works      │ □ Fallback behavior                │
+├───────────────────────────┼─────────────────────────────────────┤
+│ Performance Tests         │ Security Tests                      │
+│ □ Latency regression      │ □ Side-channel resistance          │
+│ □ Throughput impact       │ □ Input validation                 │
+│ □ Memory usage            │ □ Error path security              │
+│ □ CPU utilization         │ □ Constant-time operations         │
+└───────────────────────────┴─────────────────────────────────────┘
+```
+
+```python
+from dataclasses import dataclass
+from typing import List, Callable, Optional
+from enum import Enum
+import time
+
+class TestResult(Enum):
+    PASS = "pass"
+    FAIL = "fail"
+    SKIP = "skip"
+
+@dataclass
+class TestCase:
+    """Test case definition."""
+    name: str
+    category: str
+    test_fn: Callable
+    expected_result: any
+    timeout_ms: int = 5000
+
+@dataclass
+class TestReport:
+    """Test execution report."""
+    total: int
+    passed: int
+    failed: int
+    skipped: int
+    duration_ms: float
+    failures: List[str]
+
+class PQCMigrationTestSuite:
+    """
+    Test suite for PQC migration validation.
+    """
+
+    def __init__(self):
+        self.tests: List[TestCase] = []
+        self._register_tests()
+
+    def _register_tests(self):
+        """Register all test cases."""
+        # Functional tests
+        self.tests.extend([
+            TestCase(
+                "hybrid_key_generation",
+                "functional",
+                self._test_hybrid_keygen,
+                True
+            ),
+            TestCase(
+                "hybrid_encapsulation",
+                "functional",
+                self._test_hybrid_encap,
+                True
+            ),
+            TestCase(
+                "hybrid_decapsulation",
+                "functional",
+                self._test_hybrid_decap,
+                True
+            ),
+        ])
+
+        # Compatibility tests
+        self.tests.extend([
+            TestCase(
+                "classical_fallback",
+                "compatibility",
+                self._test_classical_fallback,
+                True
+            ),
+            TestCase(
+                "version_negotiation",
+                "compatibility",
+                self._test_version_negotiation,
+                True
+            ),
+        ])
+
+        # Performance tests
+        self.tests.extend([
+            TestCase(
+                "keygen_performance",
+                "performance",
+                self._test_keygen_perf,
+                True,
+                timeout_ms=10000
+            ),
+            TestCase(
+                "handshake_latency",
+                "performance",
+                self._test_handshake_latency,
+                True,
+                timeout_ms=10000
+            ),
+        ])
+
+    def _test_hybrid_keygen(self) -> bool:
+        """Test hybrid key generation."""
+        # Simulated test
+        return True
+
+    def _test_hybrid_encap(self) -> bool:
+        """Test hybrid encapsulation."""
+        return True
+
+    def _test_hybrid_decap(self) -> bool:
+        """Test hybrid decapsulation."""
+        return True
+
+    def _test_classical_fallback(self) -> bool:
+        """Test fallback to classical crypto."""
+        return True
+
+    def _test_version_negotiation(self) -> bool:
+        """Test version negotiation between clients."""
+        return True
+
+    def _test_keygen_perf(self) -> bool:
+        """Test key generation performance."""
+        iterations = 100
+        start = time.time()
+        for _ in range(iterations):
+            # Simulated keygen
+            pass
+        elapsed_ms = (time.time() - start) * 1000
+        avg_ms = elapsed_ms / iterations
+        # Pass if average under 10ms
+        return avg_ms < 10
+
+    def _test_handshake_latency(self) -> bool:
+        """Test TLS handshake latency impact."""
+        return True
+
+    def run_all(self, category: Optional[str] = None) -> TestReport:
+        """Run all tests, optionally filtered by category."""
+        tests_to_run = self.tests
+        if category:
+            tests_to_run = [t for t in self.tests if t.category == category]
+
+        passed = 0
+        failed = 0
+        skipped = 0
+        failures = []
+
+        start = time.time()
+
+        for test in tests_to_run:
+            try:
+                result = test.test_fn()
+                if result == test.expected_result:
+                    passed += 1
+                else:
+                    failed += 1
+                    failures.append(f"{test.name}: expected {test.expected_result}, got {result}")
+            except Exception as e:
+                failed += 1
+                failures.append(f"{test.name}: {str(e)}")
+
+        elapsed_ms = (time.time() - start) * 1000
+
+        return TestReport(
+            total=len(tests_to_run),
+            passed=passed,
+            failed=failed,
+            skipped=skipped,
+            duration_ms=elapsed_ms,
+            failures=failures
+        )
+
+    def generate_report(self, report: TestReport) -> str:
+        """Generate human-readable test report."""
+        lines = [
+            "PQC MIGRATION TEST REPORT",
+            "=" * 40,
+            f"Total tests: {report.total}",
+            f"Passed: {report.passed}",
+            f"Failed: {report.failed}",
+            f"Skipped: {report.skipped}",
+            f"Duration: {report.duration_ms:.2f}ms",
+            "",
+        ]
+
+        if report.failures:
+            lines.append("FAILURES:")
+            for failure in report.failures:
+                lines.append(f"  - {failure}")
+        else:
+            lines.append("All tests passed!")
+
+        return "\n".join(lines)
+
+# Run tests
+suite = PQCMigrationTestSuite()
+report = suite.run_all()
+print(suite.generate_report(report))
+```
+
+## Summary
+
+Application migration to PQC involves:
+
+1. **Dependency analysis**: Identify all crypto usage in code
+2. **Library updates**: Add PQC-capable libraries
+3. **Code migration**: Implement hybrid patterns
+4. **Feature flags**: Control gradual rollout
+5. **Comprehensive testing**: Functional, compatibility, and performance tests
+
+Plan for iterative migration with rollback capability at each stage.

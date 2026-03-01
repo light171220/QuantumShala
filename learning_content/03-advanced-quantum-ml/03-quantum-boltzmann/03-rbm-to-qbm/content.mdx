@@ -1,0 +1,712 @@
+---
+title: "From RBMs to Quantum Boltzmann Machines"
+description: "Learn how to extend Restricted Boltzmann Machines to their quantum counterparts, understanding the mapping between classical and quantum architectures."
+duration: 65
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Map RBM architecture to quantum systems
+- Understand quantum-classical hybrid RBM approaches
+- Implement quantum restricted Boltzmann machines
+- Design quantum circuits for QRBM
+- Compare expressiveness of classical and quantum RBMs
+- Identify advantages of quantum RBM formulations
+
+## 1. Classical RBM to Quantum Mapping
+
+The transition from classical to quantum RBMs involves mapping the bipartite structure to a quantum Hamiltonian.
+
+<Definition term="Quantum Restricted Boltzmann Machine">
+A Quantum RBM (QRBM) extends the classical RBM by replacing classical binary units with quantum spins and adding quantum fluctuation terms. The bipartite structure is preserved, with visible and hidden qubits connected through a trainable interaction Hamiltonian.
+</Definition>
+
+### Architecture Mapping
+
+<Formula>
+$$H_{QRBM} = -\sum_i a_i \sigma_i^z - \sum_j b_j \tau_j^z - \sum_{i,j} W_{ij} \sigma_i^z \tau_j^z - \Gamma_v \sum_i \sigma_i^x - \Gamma_h \sum_j \tau_j^x$$
+</Formula>
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+class QuantumRBM:
+    """
+    Quantum Restricted Boltzmann Machine implementation.
+
+    Extends classical RBM with transverse field terms.
+    """
+
+    def __init__(self, n_visible, n_hidden, gamma_visible=0.5, gamma_hidden=0.5):
+        """
+        Initialize QRBM.
+
+        Args:
+            n_visible: Number of visible qubits
+            n_hidden: Number of hidden qubits
+            gamma_visible: Transverse field on visible layer
+            gamma_hidden: Transverse field on hidden layer
+        """
+        self.n_visible = n_visible
+        self.n_hidden = n_hidden
+        self.n_total = n_visible + n_hidden
+        self.dim = 2**self.n_total
+
+        self.gamma_v = gamma_visible
+        self.gamma_h = gamma_hidden
+
+        # Initialize parameters
+        np.random.seed(42)
+        self.a = np.random.randn(n_visible) * 0.1  # Visible biases
+        self.b = np.random.randn(n_hidden) * 0.1   # Hidden biases
+        self.W = np.random.randn(n_visible, n_hidden) * 0.1  # Weights
+
+        # Build operators
+        self._build_operators()
+
+        # Build Hamiltonian
+        self.H = self._build_hamiltonian()
+
+    def _build_operators(self):
+        """Build Pauli operators for all qubits."""
+        I = np.eye(2, dtype=complex)
+        X = np.array([[0, 1], [1, 0]], dtype=complex)
+        Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        def tensor_at(op, pos):
+            result = np.eye(1)
+            for i in range(self.n_total):
+                result = np.kron(result, op if i == pos else I)
+            return result
+
+        # Visible qubits: indices 0 to n_visible-1
+        self.sigma_x = [tensor_at(X, i) for i in range(self.n_visible)]
+        self.sigma_z = [tensor_at(Z, i) for i in range(self.n_visible)]
+
+        # Hidden qubits: indices n_visible to n_total-1
+        self.tau_x = [tensor_at(X, self.n_visible + j) for j in range(self.n_hidden)]
+        self.tau_z = [tensor_at(Z, self.n_visible + j) for j in range(self.n_hidden)]
+
+    def _build_hamiltonian(self):
+        """Construct QRBM Hamiltonian."""
+        H = np.zeros((self.dim, self.dim), dtype=complex)
+
+        # Visible biases
+        for i in range(self.n_visible):
+            H -= self.a[i] * self.sigma_z[i]
+
+        # Hidden biases
+        for j in range(self.n_hidden):
+            H -= self.b[j] * self.tau_z[j]
+
+        # Visible-hidden couplings
+        for i in range(self.n_visible):
+            for j in range(self.n_hidden):
+                H -= self.W[i, j] * (self.sigma_z[i] @ self.tau_z[j])
+
+        # Transverse fields
+        for i in range(self.n_visible):
+            H -= self.gamma_v * self.sigma_x[i]
+
+        for j in range(self.n_hidden):
+            H -= self.gamma_h * self.tau_x[j]
+
+        return H
+
+    def update_hamiltonian(self):
+        """Rebuild Hamiltonian after parameter changes."""
+        self.H = self._build_hamiltonian()
+
+    def get_gibbs_state(self, temperature=1.0):
+        """Compute thermal Gibbs state."""
+        beta = 1.0 / temperature
+        exp_H = expm(-beta * self.H)
+        Z = np.trace(exp_H)
+        return exp_H / Z
+
+    def marginal_visible(self, rho):
+        """
+        Compute marginal distribution over visible qubits.
+
+        Traces out hidden qubits.
+        """
+        dim_v = 2**self.n_visible
+        dim_h = 2**self.n_hidden
+
+        # Reshape and trace
+        rho_reshaped = rho.reshape(dim_v, dim_h, dim_v, dim_h)
+        rho_visible = np.trace(rho_reshaped, axis1=1, axis2=3)
+
+        return rho_visible
+
+    def sample_visible(self, temperature=1.0, n_samples=1):
+        """Sample visible configurations from the model."""
+        rho = self.get_gibbs_state(temperature)
+        rho_v = self.marginal_visible(rho)
+
+        # Probability of each visible configuration
+        probs = np.real(np.diag(rho_v))
+        probs = probs / np.sum(probs)  # Normalize
+
+        # Sample
+        samples = np.random.choice(len(probs), size=n_samples, p=probs)
+
+        # Convert to binary
+        binary_samples = []
+        for s in samples:
+            bits = format(s, f'0{self.n_visible}b')
+            binary_samples.append([int(b) for b in bits])
+
+        return np.array(binary_samples)
+```
+
+## 2. Quantum-Classical Hybrid Approaches
+
+Hybrid approaches combine quantum sampling with classical training.
+
+<Definition term="Hybrid QRBM">
+A hybrid QRBM uses a quantum device to perform sampling from the model distribution while classical computers handle gradient computation and parameter updates. This leverages potential quantum speedup in sampling.
+</Definition>
+
+```python
+class HybridQRBM:
+    """
+    Hybrid quantum-classical RBM.
+
+    Uses quantum sampling with classical gradient updates.
+    """
+
+    def __init__(self, n_visible, n_hidden, quantum_sampler=None):
+        """
+        Initialize hybrid QRBM.
+
+        Args:
+            n_visible: Number of visible units
+            n_hidden: Number of hidden units
+            quantum_sampler: Quantum sampling backend (None uses simulation)
+        """
+        self.n_visible = n_visible
+        self.n_hidden = n_hidden
+
+        # Classical parameters
+        np.random.seed(42)
+        self.a = np.zeros(n_visible)
+        self.b = np.zeros(n_hidden)
+        self.W = np.random.randn(n_visible, n_hidden) * 0.01
+
+        # Quantum parameters
+        self.gamma = 0.5  # Transverse field strength
+
+        # For simulated quantum sampling
+        self.qrbm = QuantumRBM(n_visible, n_hidden, self.gamma, self.gamma)
+        self._sync_parameters()
+
+    def _sync_parameters(self):
+        """Synchronize classical params with quantum model."""
+        self.qrbm.a = self.a.copy()
+        self.qrbm.b = self.b.copy()
+        self.qrbm.W = self.W.copy()
+        self.qrbm.update_hamiltonian()
+
+    def quantum_sample(self, v_data=None, n_samples=100, temperature=1.0):
+        """
+        Perform quantum sampling.
+
+        In real implementation, this would use a quantum device.
+        Here we simulate using the QRBM.
+        """
+        self._sync_parameters()
+
+        # Get Gibbs state
+        rho = self.qrbm.get_gibbs_state(temperature)
+
+        # For positive phase (data-dependent), we condition on visible
+        if v_data is not None:
+            # This is simplified - real implementation would prepare
+            # a conditional state
+            pass
+
+        # Sample visible configurations
+        samples = self.qrbm.sample_visible(temperature, n_samples)
+
+        return samples
+
+    def compute_gradients(self, v_data, n_fantasy=100, temperature=1.0):
+        """
+        Compute gradients using quantum sampling for negative phase.
+
+        Args:
+            v_data: Batch of visible data
+            n_fantasy: Number of fantasy particles for negative phase
+            temperature: Sampling temperature
+        """
+        batch_size = len(v_data)
+
+        # Positive phase (classical computation)
+        # P(h|v) for classical RBM approximation
+        h_probs_pos = 1.0 / (1.0 + np.exp(-self.b - np.dot(v_data, self.W)))
+
+        # Negative phase (quantum sampling)
+        v_neg = self.quantum_sample(n_samples=n_fantasy, temperature=temperature)
+        h_probs_neg = 1.0 / (1.0 + np.exp(-self.b - np.dot(v_neg, self.W)))
+
+        # Gradients
+        grad_W = (np.dot(v_data.T, h_probs_pos) / batch_size -
+                  np.dot(v_neg.T, h_probs_neg) / n_fantasy)
+        grad_a = np.mean(v_data, axis=0) - np.mean(v_neg, axis=0)
+        grad_b = np.mean(h_probs_pos, axis=0) - np.mean(h_probs_neg, axis=0)
+
+        return grad_W, grad_a, grad_b
+
+    def train_step(self, v_data, learning_rate=0.01, temperature=1.0):
+        """Single training step."""
+        grad_W, grad_a, grad_b = self.compute_gradients(v_data, temperature=temperature)
+
+        self.W += learning_rate * grad_W
+        self.a += learning_rate * grad_a
+        self.b += learning_rate * grad_b
+
+        return np.mean(grad_W**2)  # Return gradient magnitude
+```
+
+## 3. QRBM Circuit Design
+
+Implementing QRBM on gate-based quantum computers requires specific circuit designs.
+
+```python
+class QRBMCircuit:
+    """
+    Parameterized quantum circuit for QRBM.
+
+    Implements QRBM using variational circuit ansatz.
+    """
+
+    def __init__(self, n_visible, n_hidden, n_layers=2):
+        """
+        Initialize QRBM circuit.
+
+        Args:
+            n_visible: Number of visible qubits
+            n_hidden: Number of hidden qubits
+            n_layers: Number of variational layers
+        """
+        self.n_visible = n_visible
+        self.n_hidden = n_hidden
+        self.n_total = n_visible + n_hidden
+        self.n_layers = n_layers
+
+        # Parameter count
+        # Each layer: Rz on each qubit + Ry on each qubit + ZZ couplings
+        self.n_single_params = 2 * self.n_total * n_layers
+        self.n_coupling_params = n_visible * n_hidden * n_layers
+        self.n_params = self.n_single_params + self.n_coupling_params
+
+        # Initialize parameters
+        np.random.seed(42)
+        self.params = np.random.randn(self.n_params) * 0.1
+
+    def _build_circuit_unitary(self, params):
+        """
+        Build unitary from circuit parameters.
+
+        Simulates the quantum circuit.
+        """
+        dim = 2**self.n_total
+        U = np.eye(dim, dtype=complex)
+
+        # Pauli matrices
+        I = np.eye(2, dtype=complex)
+        X = np.array([[0, 1], [1, 0]], dtype=complex)
+        Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+        Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        def tensor_at(op, pos):
+            result = np.eye(1)
+            for i in range(self.n_total):
+                result = np.kron(result, op if i == pos else I)
+            return result
+
+        def Rz(theta):
+            return np.array([[np.exp(-1j*theta/2), 0],
+                           [0, np.exp(1j*theta/2)]], dtype=complex)
+
+        def Ry(theta):
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            return np.array([[c, -s], [s, c]], dtype=complex)
+
+        param_idx = 0
+
+        for layer in range(self.n_layers):
+            # Single-qubit rotations
+            for i in range(self.n_total):
+                # Rz rotation
+                theta_z = params[param_idx]
+                U_rz = tensor_at(Rz(theta_z), i)
+                U = U_rz @ U
+                param_idx += 1
+
+            for i in range(self.n_total):
+                # Ry rotation
+                theta_y = params[param_idx]
+                U_ry = tensor_at(Ry(theta_y), i)
+                U = U_ry @ U
+                param_idx += 1
+
+            # ZZ couplings between visible and hidden
+            for i in range(self.n_visible):
+                for j in range(self.n_hidden):
+                    theta_zz = params[param_idx]
+                    # exp(-i θ/2 ZZ) = cos(θ/2)I - i sin(θ/2)ZZ
+                    ZZ = tensor_at(Z, i) @ tensor_at(Z, self.n_visible + j)
+                    U_zz = np.cos(theta_zz/2) * np.eye(dim) - 1j * np.sin(theta_zz/2) * ZZ
+                    U = U_zz @ U
+                    param_idx += 1
+
+        return U
+
+    def prepare_state(self, params=None):
+        """
+        Prepare QRBM state using variational circuit.
+
+        Starts from |0...0⟩ and applies circuit.
+        """
+        if params is None:
+            params = self.params
+
+        U = self._build_circuit_unitary(params)
+
+        # Initial state |0...0⟩
+        psi0 = np.zeros(2**self.n_total, dtype=complex)
+        psi0[0] = 1
+
+        # Apply circuit
+        psi = U @ psi0
+
+        return psi
+
+    def get_density_matrix(self, params=None):
+        """Get density matrix from circuit."""
+        psi = self.prepare_state(params)
+        return np.outer(psi, psi.conj())
+
+    def sample(self, params=None, n_samples=100):
+        """Sample from the circuit output."""
+        psi = self.prepare_state(params)
+        probs = np.abs(psi)**2
+
+        samples = np.random.choice(len(probs), size=n_samples, p=probs)
+
+        # Extract visible part
+        visible_samples = []
+        for s in samples:
+            bits = format(s, f'0{self.n_total}b')
+            visible_bits = [int(b) for b in bits[:self.n_visible]]
+            visible_samples.append(visible_bits)
+
+        return np.array(visible_samples)
+```
+
+<Tip>
+The choice of circuit ansatz significantly affects QRBM expressiveness. Hardware-efficient ansatzes that respect the device topology often perform well in practice.
+</Tip>
+
+## 4. Expressiveness Comparison
+
+Understanding when quantum RBMs offer advantages over classical versions.
+
+```python
+def compare_rbm_expressiveness(n_visible, n_hidden, test_distributions):
+    """
+    Compare classical and quantum RBM expressiveness.
+
+    Args:
+        n_visible: Number of visible units
+        n_hidden: Number of hidden units
+        test_distributions: List of target distributions to fit
+
+    Returns:
+        Comparison metrics
+    """
+    results = {}
+
+    for dist_name, target_probs in test_distributions.items():
+        # Classical RBM fitting
+        classical_kl = fit_classical_rbm(n_visible, n_hidden, target_probs)
+
+        # Quantum RBM fitting (with transverse field)
+        quantum_kl = fit_quantum_rbm(n_visible, n_hidden, target_probs)
+
+        results[dist_name] = {
+            'classical_kl': classical_kl,
+            'quantum_kl': quantum_kl,
+            'quantum_advantage': classical_kl - quantum_kl
+        }
+
+    return results
+
+
+def fit_classical_rbm(n_visible, n_hidden, target_probs, n_epochs=100):
+    """Fit classical RBM to target distribution."""
+    from scipy.optimize import minimize
+
+    def kl_divergence(params, target):
+        # Unpack parameters
+        a = params[:n_visible]
+        b = params[n_visible:n_visible + n_hidden]
+        W = params[n_visible + n_hidden:].reshape(n_visible, n_hidden)
+
+        # Compute model probabilities
+        model_probs = classical_rbm_probs(a, b, W, n_visible)
+
+        # KL divergence
+        kl = np.sum(target * np.log(target / (model_probs + 1e-10) + 1e-10))
+        return kl
+
+    # Initialize
+    n_params = n_visible + n_hidden + n_visible * n_hidden
+    params_init = np.random.randn(n_params) * 0.1
+
+    result = minimize(kl_divergence, params_init, args=(target_probs,),
+                     method='L-BFGS-B', options={'maxiter': n_epochs})
+
+    return result.fun
+
+
+def classical_rbm_probs(a, b, W, n_visible):
+    """Compute classical RBM visible probabilities."""
+    n_configs = 2**n_visible
+    probs = np.zeros(n_configs)
+
+    for v_idx in range(n_configs):
+        bits = format(v_idx, f'0{n_visible}b')
+        v = np.array([int(bit) for bit in bits])
+
+        # Free energy
+        F = -np.dot(a, v) - np.sum(np.log(1 + np.exp(b + np.dot(v, W))))
+        probs[v_idx] = np.exp(-F)
+
+    probs /= np.sum(probs)
+    return probs
+
+
+def fit_quantum_rbm(n_visible, n_hidden, target_probs, n_epochs=100):
+    """Fit quantum RBM to target distribution."""
+    qrbm = QuantumRBM(n_visible, n_hidden)
+
+    def kl_divergence(params):
+        # Update QRBM parameters
+        qrbm.a = params[:n_visible]
+        qrbm.b = params[n_visible:n_visible + n_hidden]
+        qrbm.W = params[n_visible + n_hidden:].reshape(n_visible, n_hidden)
+        qrbm.update_hamiltonian()
+
+        # Get model distribution
+        rho = qrbm.get_gibbs_state(temperature=1.0)
+        rho_v = qrbm.marginal_visible(rho)
+        model_probs = np.real(np.diag(rho_v))
+        model_probs /= np.sum(model_probs)
+
+        # KL divergence
+        kl = np.sum(target_probs * np.log(target_probs / (model_probs + 1e-10) + 1e-10))
+        return kl
+
+    from scipy.optimize import minimize
+
+    n_params = n_visible + n_hidden + n_visible * n_hidden
+    params_init = np.concatenate([qrbm.a, qrbm.b, qrbm.W.flatten()])
+
+    result = minimize(kl_divergence, params_init,
+                     method='L-BFGS-B', options={'maxiter': n_epochs})
+
+    return result.fun
+```
+
+## 5. Quantum Advantages in RBMs
+
+Identifying scenarios where quantum RBMs outperform classical versions.
+
+<Warning>
+Quantum advantage in RBMs is task-dependent. While quantum correlations can enhance expressiveness for certain distributions, the overhead of quantum operations may not always justify the improvement for simple tasks.
+</Warning>
+
+```python
+def analyze_quantum_advantage(n_visible, n_hidden):
+    """
+    Analyze when quantum RBMs offer advantages.
+
+    Tests various distribution types.
+    """
+    # Generate test distributions
+    test_cases = {}
+
+    # 1. Product distribution (should be easy for both)
+    probs_product = np.random.rand(2**n_visible)
+    probs_product /= probs_product.sum()
+    test_cases['product'] = probs_product
+
+    # 2. Correlated distribution
+    probs_corr = np.zeros(2**n_visible)
+    for i in range(2**n_visible):
+        bits = format(i, f'0{n_visible}b')
+        # Favor configurations with matching adjacent bits
+        matches = sum(1 for j in range(len(bits)-1) if bits[j] == bits[j+1])
+        probs_corr[i] = np.exp(matches)
+    probs_corr /= probs_corr.sum()
+    test_cases['correlated'] = probs_corr
+
+    # 3. Quantum-like distribution (interference pattern)
+    probs_quantum = np.zeros(2**n_visible)
+    for i in range(2**n_visible):
+        # Simulate interference-like pattern
+        phase = 2 * np.pi * i / (2**n_visible)
+        amplitude = 0.5 + 0.5 * np.cos(phase)
+        probs_quantum[i] = amplitude**2
+    probs_quantum /= probs_quantum.sum()
+    test_cases['quantum_like'] = probs_quantum
+
+    # Compare fitting quality
+    results = compare_rbm_expressiveness(n_visible, n_hidden, test_cases)
+
+    # Analyze results
+    analysis = {
+        'best_quantum_advantage': max(r['quantum_advantage'] for r in results.values()),
+        'advantage_cases': [k for k, v in results.items() if v['quantum_advantage'] > 0.01],
+        'details': results
+    }
+
+    return analysis
+```
+
+## 6. Training Quantum RBMs
+
+Practical training methods for quantum RBMs.
+
+```python
+class QRBMTrainer:
+    """
+    Trainer for Quantum RBMs using gradient-based optimization.
+    """
+
+    def __init__(self, qrbm, learning_rate=0.01, use_natural_gradient=False):
+        """
+        Initialize trainer.
+
+        Args:
+            qrbm: QuantumRBM instance
+            learning_rate: Learning rate
+            use_natural_gradient: Whether to use quantum natural gradient
+        """
+        self.qrbm = qrbm
+        self.lr = learning_rate
+        self.use_natural_gradient = use_natural_gradient
+
+        # Training history
+        self.history = {'loss': [], 'kl': []}
+
+    def compute_loss(self, target_probs, temperature=1.0):
+        """Compute KL divergence loss."""
+        rho = self.qrbm.get_gibbs_state(temperature)
+        rho_v = self.qrbm.marginal_visible(rho)
+        model_probs = np.real(np.diag(rho_v))
+        model_probs /= model_probs.sum()
+
+        kl = np.sum(target_probs * np.log(target_probs / (model_probs + 1e-10) + 1e-10))
+        return kl
+
+    def compute_gradients(self, target_probs, temperature=1.0, epsilon=1e-5):
+        """Compute parameter gradients numerically."""
+        grad_a = np.zeros_like(self.qrbm.a)
+        grad_b = np.zeros_like(self.qrbm.b)
+        grad_W = np.zeros_like(self.qrbm.W)
+
+        # Gradient for visible biases
+        for i in range(len(self.qrbm.a)):
+            self.qrbm.a[i] += epsilon
+            self.qrbm.update_hamiltonian()
+            loss_plus = self.compute_loss(target_probs, temperature)
+
+            self.qrbm.a[i] -= 2 * epsilon
+            self.qrbm.update_hamiltonian()
+            loss_minus = self.compute_loss(target_probs, temperature)
+
+            grad_a[i] = (loss_plus - loss_minus) / (2 * epsilon)
+            self.qrbm.a[i] += epsilon
+
+        # Gradient for hidden biases
+        for j in range(len(self.qrbm.b)):
+            self.qrbm.b[j] += epsilon
+            self.qrbm.update_hamiltonian()
+            loss_plus = self.compute_loss(target_probs, temperature)
+
+            self.qrbm.b[j] -= 2 * epsilon
+            self.qrbm.update_hamiltonian()
+            loss_minus = self.compute_loss(target_probs, temperature)
+
+            grad_b[j] = (loss_plus - loss_minus) / (2 * epsilon)
+            self.qrbm.b[j] += epsilon
+
+        # Gradient for weights
+        for i in range(self.qrbm.W.shape[0]):
+            for j in range(self.qrbm.W.shape[1]):
+                self.qrbm.W[i, j] += epsilon
+                self.qrbm.update_hamiltonian()
+                loss_plus = self.compute_loss(target_probs, temperature)
+
+                self.qrbm.W[i, j] -= 2 * epsilon
+                self.qrbm.update_hamiltonian()
+                loss_minus = self.compute_loss(target_probs, temperature)
+
+                grad_W[i, j] = (loss_plus - loss_minus) / (2 * epsilon)
+                self.qrbm.W[i, j] += epsilon
+
+        self.qrbm.update_hamiltonian()
+
+        return grad_a, grad_b, grad_W
+
+    def train_step(self, target_probs, temperature=1.0):
+        """Single training step."""
+        grad_a, grad_b, grad_W = self.compute_gradients(target_probs, temperature)
+
+        self.qrbm.a -= self.lr * grad_a
+        self.qrbm.b -= self.lr * grad_b
+        self.qrbm.W -= self.lr * grad_W
+        self.qrbm.update_hamiltonian()
+
+        loss = self.compute_loss(target_probs, temperature)
+        self.history['loss'].append(loss)
+
+        return loss
+
+    def train(self, target_probs, n_epochs=50, temperature=1.0, verbose=True):
+        """Full training loop."""
+        for epoch in range(n_epochs):
+            loss = self.train_step(target_probs, temperature)
+
+            if verbose and epoch % 10 == 0:
+                print(f"Epoch {epoch}: Loss = {loss:.6f}")
+
+        return self.history
+```
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Architecture mapping** from classical RBMs to quantum Hamiltonians
+2. **Hybrid approaches** combining quantum sampling with classical training
+3. **Circuit design** for implementing QRBMs on gate-based devices
+4. **Expressiveness comparison** between classical and quantum RBMs
+5. **Quantum advantages** that arise for specific distribution types
+6. **Training methods** for optimizing QRBM parameters
+
+QRBMs extend classical generative models with quantum correlations for enhanced expressiveness.
+
+## Further Reading
+
+- Next lesson: Training Quantum Boltzmann Machines
+- Related: Variational Quantum Eigensolver
+- Application: Quantum Generative Modeling

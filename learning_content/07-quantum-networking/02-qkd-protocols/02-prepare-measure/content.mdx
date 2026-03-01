@@ -1,0 +1,896 @@
+# Prepare-and-Measure Protocols
+
+Prepare-and-measure (P&M) protocols form the foundation of practical quantum key distribution. In these protocols, one party (Alice) prepares quantum states encoding key bits, while the other party (Bob) measures them to extract the key. This lesson explores the major P&M protocols in depth.
+
+## P&M Protocol Architecture
+
+The prepare-and-measure paradigm follows a consistent architectural pattern across all its variants.
+
+### General Structure
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  Prepare-and-Measure Architecture               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ┌─────────┐    Quantum Channel    ┌─────────┐                │
+│   │  ALICE  │ ══════════════════════│   BOB   │                │
+│   │ Prepare │      (photons)        │ Measure │                │
+│   └────┬────┘                       └────┬────┘                │
+│        │                                 │                      │
+│   ┌────▼────────────────────────────────▼────┐                 │
+│   │          Classical Channel               │                 │
+│   │    (basis reconciliation, EC, PA)        │                 │
+│   └──────────────────────────────────────────┘                 │
+│                                                                 │
+│   Protocol Steps:                                               │
+│   1. Alice: Generate random bits + bases                        │
+│   2. Alice: Prepare qubits in chosen states                     │
+│   3. Alice: Send qubits through quantum channel                 │
+│   4. Bob: Choose random measurement bases                       │
+│   5. Bob: Measure incoming qubits                               │
+│   6. Both: Sift keys (keep matching bases)                      │
+│   7. Both: Error correction + privacy amplification             │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Core Implementation Framework
+
+```python
+import numpy as np
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import List, Tuple, Dict, Optional
+from enum import Enum
+import math
+
+class Basis(Enum):
+    """Measurement basis enumeration."""
+    RECTILINEAR = 0  # Z basis: |0⟩, |1⟩
+    DIAGONAL = 1     # X basis: |+⟩, |-⟩
+    CIRCULAR = 2     # Y basis: |R⟩, |L⟩ (for six-state)
+
+@dataclass
+class QuantumState:
+    """Represents a prepared quantum state."""
+    bit_value: int
+    basis: Basis
+    theta: float  # Angle on Bloch sphere
+    phi: float    # Phase angle
+
+    def to_bloch(self) -> Tuple[float, float, float]:
+        """Convert to Bloch sphere coordinates."""
+        x = np.sin(self.theta) * np.cos(self.phi)
+        y = np.sin(self.theta) * np.sin(self.phi)
+        z = np.cos(self.theta)
+        return (x, y, z)
+
+class PrepareAndMeasureProtocol(ABC):
+    """Abstract base class for P&M protocols."""
+
+    def __init__(self, n_bits: int):
+        self.n_bits = n_bits
+        self.alice_bits = None
+        self.alice_bases = None
+        self.bob_bases = None
+        self.bob_results = None
+        self.sifted_key_alice = None
+        self.sifted_key_bob = None
+
+    @abstractmethod
+    def get_bases(self) -> List[Basis]:
+        """Return available bases for this protocol."""
+        pass
+
+    @abstractmethod
+    def prepare_state(self, bit: int, basis: Basis) -> QuantumState:
+        """Prepare quantum state for given bit and basis."""
+        pass
+
+    @abstractmethod
+    def measure(self, state: QuantumState, basis: Basis) -> int:
+        """Measure quantum state in given basis."""
+        pass
+
+    def alice_prepare(self) -> List[QuantumState]:
+        """Alice prepares random bits with random bases."""
+        bases = self.get_bases()
+        self.alice_bits = np.random.randint(0, 2, self.n_bits)
+        self.alice_bases = [np.random.choice(bases) for _ in range(self.n_bits)]
+
+        states = []
+        for bit, basis in zip(self.alice_bits, self.alice_bases):
+            states.append(self.prepare_state(bit, basis))
+
+        return states
+
+    def bob_measure(self, states: List[QuantumState]) -> List[int]:
+        """Bob measures with random bases."""
+        bases = self.get_bases()
+        self.bob_bases = [np.random.choice(bases) for _ in range(self.n_bits)]
+
+        self.bob_results = []
+        for state, basis in zip(states, self.bob_bases):
+            result = self.measure(state, basis)
+            self.bob_results.append(result)
+
+        return self.bob_results
+
+    def sift(self) -> Tuple[List[int], List[int]]:
+        """Sift keys to keep only matching bases."""
+        alice_sifted = []
+        bob_sifted = []
+
+        for i in range(self.n_bits):
+            if self.alice_bases[i] == self.bob_bases[i]:
+                alice_sifted.append(self.alice_bits[i])
+                bob_sifted.append(self.bob_results[i])
+
+        self.sifted_key_alice = alice_sifted
+        self.sifted_key_bob = bob_sifted
+
+        return alice_sifted, bob_sifted
+
+    def calculate_qber(self) -> float:
+        """Calculate quantum bit error rate."""
+        if not self.sifted_key_alice:
+            return 0.0
+
+        errors = sum(a != b for a, b in
+                    zip(self.sifted_key_alice, self.sifted_key_bob))
+        return errors / len(self.sifted_key_alice)
+
+    def sifting_efficiency(self) -> float:
+        """Calculate sifting efficiency."""
+        if not self.sifted_key_alice:
+            return 0.0
+        return len(self.sifted_key_alice) / self.n_bits
+```
+
+## BB84 Protocol
+
+BB84 is the foundational prepare-and-measure protocol, using two conjugate bases with four possible states.
+
+### BB84 State Space
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    BB84 State Space                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Rectilinear (Z) Basis      Diagonal (X) Basis                │
+│   ┌─────────────────┐        ┌─────────────────┐               │
+│   │                 │        │        ↗        │               │
+│   │       |0⟩       │        │    |+⟩          │               │
+│   │        ↑        │        │   /             │               │
+│   │        │        │        │  /              │               │
+│   │   ─────┼─────   │        │─────────────────│               │
+│   │        │        │        │              \  │               │
+│   │        ↓        │        │               \ │               │
+│   │       |1⟩       │        │            |-⟩ ↘│               │
+│   └─────────────────┘        └─────────────────┘               │
+│                                                                 │
+│   States:                                                       │
+│   |0⟩ = (1, 0)     → bit 0, Z basis                            │
+│   |1⟩ = (0, 1)     → bit 1, Z basis                            │
+│   |+⟩ = (|0⟩+|1⟩)/√2 → bit 0, X basis                          │
+│   |-⟩ = (|0⟩-|1⟩)/√2 → bit 1, X basis                          │
+│                                                                 │
+│   Measurement in wrong basis → 50% error probability           │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Complete BB84 Implementation
+
+```python
+class BB84Protocol(PrepareAndMeasureProtocol):
+    """Complete BB84 protocol implementation."""
+
+    def __init__(self, n_bits: int, noise_level: float = 0.0):
+        super().__init__(n_bits)
+        self.noise_level = noise_level
+        self.states_map = {
+            (0, Basis.RECTILINEAR): QuantumState(0, Basis.RECTILINEAR, 0, 0),
+            (1, Basis.RECTILINEAR): QuantumState(1, Basis.RECTILINEAR, np.pi, 0),
+            (0, Basis.DIAGONAL): QuantumState(0, Basis.DIAGONAL, np.pi/2, 0),
+            (1, Basis.DIAGONAL): QuantumState(1, Basis.DIAGONAL, np.pi/2, np.pi),
+        }
+
+    def get_bases(self) -> List[Basis]:
+        """BB84 uses two bases."""
+        return [Basis.RECTILINEAR, Basis.DIAGONAL]
+
+    def prepare_state(self, bit: int, basis: Basis) -> QuantumState:
+        """Prepare BB84 state."""
+        return self.states_map[(bit, basis)]
+
+    def measure(self, state: QuantumState, basis: Basis) -> int:
+        """Measure state in given basis with optional noise."""
+        # Matching basis → deterministic (plus noise)
+        if state.basis == basis:
+            if np.random.random() < self.noise_level:
+                return 1 - state.bit_value
+            return state.bit_value
+
+        # Mismatched basis → random outcome
+        return np.random.randint(0, 2)
+
+    def run_protocol(self) -> Dict:
+        """Execute complete BB84 protocol."""
+        # Step 1: Alice prepares states
+        states = self.alice_prepare()
+
+        # Step 2: Bob measures
+        self.bob_measure(states)
+
+        # Step 3: Sift keys
+        alice_key, bob_key = self.sift()
+
+        # Step 4: Calculate statistics
+        qber = self.calculate_qber()
+        efficiency = self.sifting_efficiency()
+
+        return {
+            'raw_bits': self.n_bits,
+            'sifted_bits': len(alice_key),
+            'sifting_efficiency': efficiency,
+            'qber': qber,
+            'alice_key': alice_key,
+            'bob_key': bob_key,
+            'secure': qber < 0.11  # BB84 threshold
+        }
+
+class BB84Simulator:
+    """Full BB84 simulation with visualization."""
+
+    def __init__(self, n_bits: int = 100):
+        self.n_bits = n_bits
+        self.protocol = BB84Protocol(n_bits)
+
+    def simulate_with_eavesdropper(self,
+                                   intercept_fraction: float = 0.0) -> Dict:
+        """Simulate BB84 with optional eavesdropper."""
+        # Alice prepares
+        states = self.protocol.alice_prepare()
+
+        # Eve intercepts (if present)
+        eve_results = []
+        if intercept_fraction > 0:
+            states, eve_results = self._eavesdrop(states, intercept_fraction)
+
+        # Bob measures
+        self.protocol.bob_measure(states)
+
+        # Sift
+        alice_key, bob_key = self.protocol.sift()
+
+        # Calculate QBER
+        qber = self.protocol.calculate_qber()
+
+        # Eve's information
+        eve_info = self._calculate_eve_information(eve_results, intercept_fraction)
+
+        return {
+            'qber': qber,
+            'sifted_length': len(alice_key),
+            'eve_intercept_fraction': intercept_fraction,
+            'eve_information_fraction': eve_info,
+            'detected': qber > 0.11,
+            'expected_qber': intercept_fraction * 0.25
+        }
+
+    def _eavesdrop(self, states: List[QuantumState],
+                   fraction: float) -> Tuple[List[QuantumState], List[Dict]]:
+        """Eve performs intercept-resend attack."""
+        intercepted_states = []
+        eve_results = []
+
+        for i, state in enumerate(states):
+            if np.random.random() < fraction:
+                # Eve intercepts
+                eve_basis = np.random.choice([Basis.RECTILINEAR, Basis.DIAGONAL])
+
+                # Measure in random basis
+                if eve_basis == state.basis:
+                    eve_bit = state.bit_value
+                else:
+                    eve_bit = np.random.randint(0, 2)
+
+                eve_results.append({
+                    'index': i,
+                    'eve_basis': eve_basis,
+                    'eve_bit': eve_bit,
+                    'correct_basis': eve_basis == state.basis
+                })
+
+                # Resend in Eve's basis
+                new_state = QuantumState(
+                    eve_bit,
+                    eve_basis,
+                    0 if eve_bit == 0 else np.pi,
+                    0
+                )
+                intercepted_states.append(new_state)
+            else:
+                intercepted_states.append(state)
+
+        return intercepted_states, eve_results
+
+    def _calculate_eve_information(self, eve_results: List[Dict],
+                                    fraction: float) -> float:
+        """Calculate fraction of key Eve knows."""
+        if not eve_results:
+            return 0.0
+
+        correct_guesses = sum(1 for r in eve_results if r['correct_basis'])
+        return (correct_guesses / len(eve_results)) * fraction
+
+# Run BB84 simulation
+simulator = BB84Simulator(n_bits=1000)
+result = simulator.simulate_with_eavesdropper(intercept_fraction=0.5)
+print(f"QBER: {result['qber']:.3f}")
+print(f"Expected QBER: {result['expected_qber']:.3f}")
+print(f"Eve detected: {result['detected']}")
+```
+
+## B92 Protocol
+
+B92 is a simplified protocol using only two non-orthogonal states, providing security with fewer resources.
+
+### B92 State Space
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    B92 Protocol States                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Only TWO states (non-orthogonal):                            │
+│                                                                 │
+│              |+⟩                                                │
+│             ↗                                                   │
+│            /  45°                                               │
+│           /                                                     │
+│     ─────●───────→ |0⟩                                         │
+│           \                                                     │
+│                                                                 │
+│   Alice sends:                                                  │
+│   • bit 0 → |0⟩ (rectilinear)                                  │
+│   • bit 1 → |+⟩ (diagonal)                                     │
+│                                                                 │
+│   Bob measures in OPPOSITE basis:                               │
+│   • Rectilinear: conclusive 1 if |1⟩                           │
+│   • Diagonal: conclusive 0 if |-⟩                              │
+│                                                                 │
+│   Inner product: ⟨0|+⟩ = 1/√2 ≈ 0.707                          │
+│   → Non-orthogonal states cannot be perfectly distinguished    │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### B92 Implementation
+
+```python
+class B92Protocol(PrepareAndMeasureProtocol):
+    """B92 protocol with two non-orthogonal states."""
+
+    def __init__(self, n_bits: int, noise_level: float = 0.0):
+        super().__init__(n_bits)
+        self.noise_level = noise_level
+        # Only two states used
+        self.states_map = {
+            0: QuantumState(0, Basis.RECTILINEAR, 0, 0),      # |0⟩
+            1: QuantumState(1, Basis.DIAGONAL, np.pi/2, 0),   # |+⟩
+        }
+
+    def get_bases(self) -> List[Basis]:
+        """B92 uses complementary measurement bases."""
+        return [Basis.RECTILINEAR, Basis.DIAGONAL]
+
+    def prepare_state(self, bit: int, basis: Basis = None) -> QuantumState:
+        """Prepare B92 state - basis determined by bit."""
+        return self.states_map[bit]
+
+    def alice_prepare(self) -> List[QuantumState]:
+        """Alice prepares states based on bit values."""
+        self.alice_bits = np.random.randint(0, 2, self.n_bits)
+        # In B92, basis is determined by bit value
+        self.alice_bases = [
+            Basis.RECTILINEAR if b == 0 else Basis.DIAGONAL
+            for b in self.alice_bits
+        ]
+
+        return [self.prepare_state(bit) for bit in self.alice_bits]
+
+    def bob_measure(self, states: List[QuantumState]) -> List[Optional[int]]:
+        """Bob measures with complementary basis strategy."""
+        self.bob_bases = [np.random.choice(self.get_bases())
+                         for _ in range(self.n_bits)]
+
+        self.bob_results = []
+        self.bob_conclusive = []
+
+        for state, bob_basis in zip(states, self.bob_bases):
+            result, conclusive = self._b92_measure(state, bob_basis)
+            self.bob_results.append(result)
+            self.bob_conclusive.append(conclusive)
+
+        return self.bob_results
+
+    def _b92_measure(self, state: QuantumState,
+                     bob_basis: Basis) -> Tuple[Optional[int], bool]:
+        """
+        B92 measurement logic:
+        - If Bob measures in same basis as Alice → inconclusive
+        - If Bob measures in opposite basis → may be conclusive
+        """
+        alice_basis = state.basis
+
+        if bob_basis == alice_basis:
+            # Same basis → always inconclusive for B92
+            return None, False
+
+        # Opposite basis measurement
+        if bob_basis == Basis.RECTILINEAR:
+            # Measuring |+⟩ in Z basis
+            if state.bit_value == 1:  # |+⟩ state
+                # 50% chance each of |0⟩ or |1⟩
+                if np.random.random() < 0.5:
+                    return 1, True  # Conclusive: got |1⟩, Alice sent |+⟩ (bit=1)
+                else:
+                    return None, False  # Inconclusive: got |0⟩
+            else:  # |0⟩ state
+                return 0, False  # Always get |0⟩, inconclusive
+        else:
+            # Measuring |0⟩ in X basis
+            if state.bit_value == 0:  # |0⟩ state
+                # 50% chance each of |+⟩ or |-⟩
+                if np.random.random() < 0.5:
+                    return 0, True  # Conclusive: got |-⟩, Alice sent |0⟩ (bit=0)
+                else:
+                    return None, False  # Inconclusive: got |+⟩
+            else:  # |+⟩ state
+                return 1, False  # Always get |+⟩, inconclusive
+
+        return None, False
+
+    def sift(self) -> Tuple[List[int], List[int]]:
+        """Keep only conclusive measurements."""
+        alice_sifted = []
+        bob_sifted = []
+
+        for i in range(self.n_bits):
+            if self.bob_conclusive[i] and self.bob_results[i] is not None:
+                alice_sifted.append(self.alice_bits[i])
+                bob_sifted.append(self.bob_results[i])
+
+        self.sifted_key_alice = alice_sifted
+        self.sifted_key_bob = bob_sifted
+
+        return alice_sifted, bob_sifted
+
+    def run_protocol(self) -> Dict:
+        """Execute B92 protocol."""
+        states = self.alice_prepare()
+        self.bob_measure(states)
+        alice_key, bob_key = self.sift()
+
+        return {
+            'raw_bits': self.n_bits,
+            'sifted_bits': len(alice_key),
+            'sifting_efficiency': self.sifting_efficiency(),
+            'qber': self.calculate_qber(),
+            'alice_key': alice_key,
+            'bob_key': bob_key
+        }
+
+# Compare B92 efficiency
+b92 = B92Protocol(n_bits=1000)
+result = b92.run_protocol()
+print(f"B92 Sifting efficiency: {result['sifting_efficiency']:.3f}")
+print(f"Expected: ~0.25 (half of BB84's ~0.50)")
+```
+
+## Six-State Protocol
+
+The six-state protocol adds a third mutually unbiased basis, improving security at the cost of efficiency.
+
+### Six-State Geometry
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  Six-State Protocol                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Three Mutually Unbiased Bases (MUBs):                        │
+│                                                                 │
+│        Z axis (|0⟩, |1⟩)         Bloch Sphere View             │
+│             |0⟩                        |0⟩                      │
+│              ↑                          ●                       │
+│              │                         /│\                      │
+│              │                        / │ \                     │
+│    X axis ───●─── |+⟩              |L⟩──●──|+⟩                  │
+│              │                        \ │ /                     │
+│              │                         \│/                      │
+│              ↓                          ●                       │
+│             |1⟩                        |1⟩                      │
+│                                                                 │
+│   Y axis: |R⟩ = (|0⟩+i|1⟩)/√2,  |L⟩ = (|0⟩-i|1⟩)/√2           │
+│                                                                 │
+│   States:                                                       │
+│   Z basis: |0⟩, |1⟩                                            │
+│   X basis: |+⟩ = (|0⟩+|1⟩)/√2,  |-⟩ = (|0⟩-|1⟩)/√2            │
+│   Y basis: |R⟩ = (|0⟩+i|1⟩)/√2, |L⟩ = (|0⟩-i|1⟩)/√2           │
+│                                                                 │
+│   Each pair of states is orthogonal within its basis           │
+│   States from different bases have overlap |⟨ψ|φ⟩|² = 1/2      │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Six-State Implementation
+
+```python
+class SixStateProtocol(PrepareAndMeasureProtocol):
+    """Six-state protocol with three MUBs."""
+
+    def __init__(self, n_bits: int, noise_level: float = 0.0):
+        super().__init__(n_bits)
+        self.noise_level = noise_level
+
+        # Six states on Bloch sphere
+        self.states_map = {
+            # Z basis (θ=0 or π, φ=0)
+            (0, Basis.RECTILINEAR): QuantumState(0, Basis.RECTILINEAR, 0, 0),
+            (1, Basis.RECTILINEAR): QuantumState(1, Basis.RECTILINEAR, np.pi, 0),
+            # X basis (θ=π/2, φ=0 or π)
+            (0, Basis.DIAGONAL): QuantumState(0, Basis.DIAGONAL, np.pi/2, 0),
+            (1, Basis.DIAGONAL): QuantumState(1, Basis.DIAGONAL, np.pi/2, np.pi),
+            # Y basis (θ=π/2, φ=π/2 or 3π/2)
+            (0, Basis.CIRCULAR): QuantumState(0, Basis.CIRCULAR, np.pi/2, np.pi/2),
+            (1, Basis.CIRCULAR): QuantumState(1, Basis.CIRCULAR, np.pi/2, 3*np.pi/2),
+        }
+
+    def get_bases(self) -> List[Basis]:
+        """Six-state uses three MUBs."""
+        return [Basis.RECTILINEAR, Basis.DIAGONAL, Basis.CIRCULAR]
+
+    def prepare_state(self, bit: int, basis: Basis) -> QuantumState:
+        """Prepare one of six states."""
+        return self.states_map[(bit, basis)]
+
+    def measure(self, state: QuantumState, basis: Basis) -> int:
+        """Measure in one of three bases."""
+        if state.basis == basis:
+            # Matching basis
+            if np.random.random() < self.noise_level:
+                return 1 - state.bit_value
+            return state.bit_value
+
+        # Mismatched basis → random
+        return np.random.randint(0, 2)
+
+    def run_protocol(self) -> Dict:
+        """Execute six-state protocol."""
+        states = self.alice_prepare()
+        self.bob_measure(states)
+        alice_key, bob_key = self.sift()
+
+        return {
+            'raw_bits': self.n_bits,
+            'sifted_bits': len(alice_key),
+            'sifting_efficiency': self.sifting_efficiency(),
+            'expected_efficiency': 1/3,  # Three bases → 1/3 match
+            'qber': self.calculate_qber(),
+            'qber_threshold': 0.126,  # Higher than BB84's 0.11
+            'secure': self.calculate_qber() < 0.126
+        }
+
+class SixStateSecurityAnalysis:
+    """Security analysis for six-state protocol."""
+
+    @staticmethod
+    def error_rate_vs_interception(intercept_fraction: float) -> float:
+        """
+        Calculate QBER for six-state under intercept-resend.
+
+        Eve guesses basis correctly 1/3 of the time.
+        When wrong (2/3), she introduces 50% error.
+        """
+        return intercept_fraction * (2/3) * 0.5
+
+    @staticmethod
+    def mutual_information(qber: float) -> Dict[str, float]:
+        """Calculate mutual information bounds."""
+        def h(p):
+            if p <= 0 or p >= 1:
+                return 0
+            return -p * np.log2(p) - (1-p) * np.log2(1-p)
+
+        # Alice-Bob mutual information
+        I_AB = 1 - h(qber)
+
+        # Eve's information (six-state bound)
+        # For six-state, Eve's information is more constrained
+        I_AE = h(0.5 + np.sqrt(qber * (1 - qber))) if qber < 0.5 else 1
+
+        # Secret key rate
+        r = max(0, I_AB - I_AE)
+
+        return {
+            'I_AB': I_AB,
+            'I_AE': I_AE,
+            'secret_rate': r,
+            'threshold_qber': 0.126
+        }
+```
+
+## Protocol Comparison
+
+Understanding the tradeoffs between protocols helps select the right one for each application.
+
+### Comprehensive Comparison
+
+```python
+class ProtocolComparison:
+    """Compare P&M protocol properties."""
+
+    def __init__(self):
+        self.protocols = {
+            'BB84': {
+                'states': 4,
+                'bases': 2,
+                'sifting_efficiency': 0.5,
+                'qber_threshold': 0.11,
+                'security_proof': 'Unconditional',
+                'implementation': 'Standard',
+                'year': 1984
+            },
+            'B92': {
+                'states': 2,
+                'bases': 2,
+                'sifting_efficiency': 0.25,
+                'qber_threshold': 0.10,  # Lower due to fewer constraints
+                'security_proof': 'Unconditional',
+                'implementation': 'Simpler source',
+                'year': 1992
+            },
+            'Six-State': {
+                'states': 6,
+                'bases': 3,
+                'sifting_efficiency': 1/3,
+                'qber_threshold': 0.126,
+                'security_proof': 'Unconditional',
+                'implementation': 'Requires Y-basis',
+                'year': 1998
+            },
+            'SARG04': {
+                'states': 4,
+                'bases': 2,
+                'sifting_efficiency': 0.25,
+                'qber_threshold': 0.10,
+                'security_proof': 'Unconditional',
+                'implementation': 'Modified sifting',
+                'year': 2004
+            }
+        }
+
+    def compare_efficiency(self, n_photons: int,
+                          loss_db: float) -> Dict[str, Dict]:
+        """Compare key generation efficiency."""
+        transmission = 10 ** (-loss_db / 10)
+
+        results = {}
+        for name, props in self.protocols.items():
+            raw_detected = n_photons * transmission
+            sifted = raw_detected * props['sifting_efficiency']
+            # Assume 5% QBER for fair comparison
+            qber = 0.05
+            # Simple secret fraction estimate
+            secret_fraction = max(0, 1 - 2 * self._h(qber)) if qber < props['qber_threshold'] else 0
+            final_key = sifted * secret_fraction
+
+            results[name] = {
+                'raw_detected': raw_detected,
+                'sifted_bits': sifted,
+                'final_key_bits': final_key,
+                'overall_efficiency': final_key / n_photons if n_photons > 0 else 0
+            }
+
+        return results
+
+    def _h(self, p: float) -> float:
+        """Binary entropy."""
+        if p <= 0 or p >= 1:
+            return 0
+        return -p * np.log2(p) - (1-p) * np.log2(1-p)
+
+    def security_comparison(self) -> str:
+        """Generate security comparison table."""
+        header = f"{'Protocol':<12} {'States':<8} {'Bases':<7} {'QBER Th':<10} {'Efficiency':<12}"
+        lines = [header, "=" * 55]
+
+        for name, props in self.protocols.items():
+            line = f"{name:<12} {props['states']:<8} {props['bases']:<7} "
+            line += f"{props['qber_threshold']:<10.3f} {props['sifting_efficiency']:<12.3f}"
+            lines.append(line)
+
+        return "\n".join(lines)
+
+    def recommend_protocol(self, requirements: Dict) -> str:
+        """Recommend protocol based on requirements."""
+        priority = requirements.get('priority', 'balanced')
+
+        if priority == 'simplicity':
+            return 'B92'
+        elif priority == 'security':
+            return 'Six-State'
+        elif priority == 'efficiency':
+            return 'BB84'
+        elif priority == 'noise_tolerance':
+            return 'Six-State'
+        else:
+            return 'BB84'
+
+# Run comparison
+comparison = ProtocolComparison()
+print(comparison.security_comparison())
+print("\n" + "="*55)
+
+# Efficiency comparison at 10 dB loss
+efficiency = comparison.compare_efficiency(1000000, 10)
+for name, result in efficiency.items():
+    print(f"{name}: {result['final_key_bits']:.0f} secret bits")
+```
+
+### Protocol Selection Guide
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Protocol Selection Decision Tree                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│                    Start                                        │
+│                      │                                          │
+│                      ▼                                          │
+│              ┌──────────────┐                                   │
+│              │ Need highest │                                   │
+│              │  security?   │                                   │
+│              └──────┬───────┘                                   │
+│                     │                                           │
+│          Yes ───────┴─────── No                                 │
+│           │                   │                                 │
+│           ▼                   ▼                                 │
+│     ┌──────────┐      ┌──────────────┐                         │
+│     │Six-State │      │Implementation│                         │
+│     │ Protocol │      │  simplicity? │                         │
+│     └──────────┘      └──────┬───────┘                         │
+│                              │                                  │
+│                   Yes ───────┴─────── No                        │
+│                    │                   │                        │
+│                    ▼                   ▼                        │
+│              ┌──────────┐      ┌──────────────┐                │
+│              │   B92    │      │  Need high   │                │
+│              │ Protocol │      │  efficiency? │                │
+│              └──────────┘      └──────┬───────┘                │
+│                                       │                         │
+│                            Yes ───────┴─────── No               │
+│                             │                   │               │
+│                             ▼                   ▼               │
+│                       ┌──────────┐       ┌──────────┐          │
+│                       │   BB84   │       │   BB84   │          │
+│                       │ Protocol │       │(Default) │          │
+│                       └──────────┘       └──────────┘          │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Key Rate Optimization
+
+Optimizing key generation rates requires balancing multiple factors.
+
+```python
+class KeyRateOptimizer:
+    """Optimize secret key rate for P&M protocols."""
+
+    def __init__(self, protocol_type: str = 'BB84'):
+        self.protocol_type = protocol_type
+        self.params = self._get_protocol_params(protocol_type)
+
+    def _get_protocol_params(self, protocol: str) -> Dict:
+        """Get protocol-specific parameters."""
+        params = {
+            'BB84': {'sift_eff': 0.5, 'qber_max': 0.11, 'n_bases': 2},
+            'B92': {'sift_eff': 0.25, 'qber_max': 0.10, 'n_bases': 2},
+            'Six-State': {'sift_eff': 1/3, 'qber_max': 0.126, 'n_bases': 3}
+        }
+        return params.get(protocol, params['BB84'])
+
+    def calculate_key_rate(self,
+                          repetition_rate: float,
+                          transmission: float,
+                          detector_efficiency: float,
+                          qber: float,
+                          dark_count_prob: float = 1e-6) -> Dict:
+        """
+        Calculate achievable secret key rate.
+
+        Args:
+            repetition_rate: Pulse rate (Hz)
+            transmission: Channel transmission
+            detector_efficiency: Detector efficiency
+            qber: Quantum bit error rate
+            dark_count_prob: Dark count probability per gate
+        """
+        # Detection probability
+        p_detect = transmission * detector_efficiency
+
+        # Raw key rate
+        raw_rate = repetition_rate * p_detect
+
+        # Sifted key rate
+        sifted_rate = raw_rate * self.params['sift_eff']
+
+        # Error correction efficiency (typically f ≈ 1.16)
+        f_ec = 1.16
+
+        # Binary entropy
+        h = lambda p: -p*np.log2(p) - (1-p)*np.log2(1-p) if 0 < p < 1 else 0
+
+        # Secret fraction (asymptotic)
+        if qber < self.params['qber_max']:
+            secret_fraction = 1 - h(qber) - f_ec * h(qber)
+        else:
+            secret_fraction = 0
+
+        # Secret key rate
+        secret_rate = sifted_rate * max(0, secret_fraction)
+
+        return {
+            'raw_rate': raw_rate,
+            'sifted_rate': sifted_rate,
+            'secret_rate': secret_rate,
+            'secret_fraction': secret_fraction,
+            'qber_margin': self.params['qber_max'] - qber
+        }
+
+    def optimize_parameters(self,
+                           channel_loss_db: float,
+                           target_rate: float) -> Dict:
+        """Find optimal parameters for target key rate."""
+        transmission = 10 ** (-channel_loss_db / 10)
+
+        # Minimum requirements
+        min_rep_rate = target_rate / (transmission * 0.5 * self.params['sift_eff'])
+
+        # Recommended settings
+        return {
+            'min_repetition_rate_hz': min_rep_rate,
+            'recommended_rep_rate_hz': min_rep_rate * 2,  # 2x margin
+            'required_detector_efficiency': 0.9,
+            'max_tolerable_qber': self.params['qber_max'] * 0.8,  # 80% of max
+            'channel_transmission': transmission
+        }
+
+# Example optimization
+optimizer = KeyRateOptimizer('BB84')
+rate = optimizer.calculate_key_rate(
+    repetition_rate=1e9,  # 1 GHz
+    transmission=0.1,      # 10 dB loss
+    detector_efficiency=0.9,
+    qber=0.03
+)
+print(f"Secret key rate: {rate['secret_rate']/1e6:.2f} Mbps")
+```
+
+## Summary
+
+Prepare-and-measure protocols provide the practical foundation for quantum key distribution:
+
+- **BB84**: The gold standard with balanced efficiency and security
+- **B92**: Simplified implementation with reduced resources
+- **Six-State**: Enhanced security with three mutually unbiased bases
+- **Key tradeoffs**: Security margin vs. sifting efficiency vs. implementation complexity
+
+Understanding these protocols enables proper selection and optimization for specific deployment scenarios.

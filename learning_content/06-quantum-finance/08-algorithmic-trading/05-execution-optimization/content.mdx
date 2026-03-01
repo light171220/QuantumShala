@@ -1,0 +1,671 @@
+---
+title: "Execution Optimization"
+duration: "45 minutes"
+---
+
+# Execution Optimization
+
+Execution optimization minimizes the cost of translating trading decisions into actual positions. Poor execution can erode strategy profits through market impact, timing slippage, and suboptimal order routing. Quantum computing offers new approaches to these complex optimization problems.
+
+## The Execution Problem
+
+When executing large orders, traders face a fundamental tradeoff: execute quickly and move the market against you, or execute slowly and risk adverse price movements.
+
+<QuizQuestion
+  question="What is the main tradeoff in optimal execution?"
+  options={[
+    "Speed vs. accuracy",
+    "Market impact vs. timing risk",
+    "Cost vs. profit",
+    "Volume vs. price"
+  ]}
+  correctAnswer={1}
+  explanation="Optimal execution balances market impact (price movement caused by your trading) against timing risk (unfavorable price moves while waiting to execute)."
+/>
+
+```python
+import numpy as np
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
+from scipy.optimize import minimize
+import cvxpy as cp
+
+@dataclass
+class ExecutionContext:
+    """Market context for execution decisions."""
+    total_shares: int
+    time_horizon: float  # hours
+    volatility: float  # daily
+    avg_daily_volume: int
+    bid_ask_spread: float
+    risk_aversion: float
+
+    @property
+    def participation_rate(self) -> float:
+        """Expected participation as fraction of ADV."""
+        trading_minutes = self.time_horizon * 60
+        daily_minutes = 390  # 6.5 hours
+        available_volume = self.avg_daily_volume * (trading_minutes / daily_minutes)
+        return self.total_shares / available_volume
+
+class AlmgrenChrissModel:
+    """
+    Almgren-Chriss optimal execution model.
+
+    Minimizes: E[cost] + λ * Var[cost]
+    where cost includes permanent and temporary market impact.
+    """
+
+    def __init__(self, context: ExecutionContext):
+        self.context = context
+
+        # Model parameters
+        self.permanent_impact = self._estimate_permanent_impact()
+        self.temporary_impact = self._estimate_temporary_impact()
+
+    def _estimate_permanent_impact(self) -> float:
+        """Estimate permanent price impact coefficient."""
+        # Simplified: proportional to volatility / sqrt(ADV)
+        return self.context.volatility / np.sqrt(self.context.avg_daily_volume)
+
+    def _estimate_temporary_impact(self) -> float:
+        """Estimate temporary price impact coefficient."""
+        # Simplified: based on spread and volatility
+        return self.context.bid_ask_spread + 0.1 * self.context.volatility
+
+    def optimal_trajectory(self, num_intervals: int) -> np.ndarray:
+        """
+        Compute optimal execution trajectory.
+
+        Returns array of shares to execute at each interval.
+        """
+        X = self.context.total_shares
+        T = self.context.time_horizon
+        tau = T / num_intervals  # interval length
+
+        gamma = self.permanent_impact
+        eta = self.temporary_impact
+        sigma = self.context.volatility / np.sqrt(252)  # per-hour vol
+        lam = self.context.risk_aversion
+
+        # Almgren-Chriss closed-form solution
+        kappa = np.sqrt(lam * sigma**2 / eta)
+
+        # Remaining inventory at each time
+        remaining = np.zeros(num_intervals + 1)
+        remaining[0] = X
+
+        times = np.linspace(0, T, num_intervals + 1)
+
+        for i in range(num_intervals + 1):
+            t = times[i]
+            remaining[i] = X * np.sinh(kappa * (T - t)) / np.sinh(kappa * T)
+
+        # Shares to trade at each interval
+        trades = -np.diff(remaining)
+
+        return trades
+
+    def expected_cost(self, trajectory: np.ndarray) -> dict:
+        """Calculate expected execution cost breakdown."""
+        X = self.context.total_shares
+        T = self.context.time_horizon
+        n = len(trajectory)
+        tau = T / n
+
+        gamma = self.permanent_impact
+        eta = self.temporary_impact
+
+        # Permanent impact cost
+        permanent_cost = gamma * X * sum(trajectory)
+
+        # Temporary impact cost
+        temporary_cost = eta * sum(t**2 for t in trajectory) / tau
+
+        # Spread cost
+        spread_cost = self.context.bid_ask_spread * X / 2
+
+        return {
+            'permanent_impact': permanent_cost,
+            'temporary_impact': temporary_cost,
+            'spread_cost': spread_cost,
+            'total_cost': permanent_cost + temporary_cost + spread_cost
+        }
+```
+
+## Volume-Weighted Execution
+
+VWAP (Volume-Weighted Average Price) strategies distribute trades according to expected volume patterns.
+
+```python
+class VWAPExecutor:
+    """VWAP execution with volume prediction."""
+
+    def __init__(self, historical_volume_profile: np.ndarray):
+        """
+        Initialize with historical intraday volume profile.
+
+        Args:
+            historical_volume_profile: Average volume by minute of day
+        """
+        self.volume_profile = historical_volume_profile / historical_volume_profile.sum()
+
+    def generate_schedule(
+        self,
+        total_shares: int,
+        start_minute: int,
+        end_minute: int
+    ) -> np.ndarray:
+        """Generate VWAP participation schedule."""
+        # Extract relevant portion of volume profile
+        profile_slice = self.volume_profile[start_minute:end_minute]
+
+        # Normalize to sum to 1
+        normalized = profile_slice / profile_slice.sum()
+
+        # Scale to total shares
+        schedule = normalized * total_shares
+
+        return schedule
+
+    def adaptive_vwap(
+        self,
+        target_shares: int,
+        executed_shares: int,
+        elapsed_minutes: int,
+        total_minutes: int,
+        actual_volume: int,
+        expected_volume: int
+    ) -> int:
+        """
+        Adaptive VWAP adjusts based on actual vs expected volume.
+
+        Returns shares to trade in current interval.
+        """
+        remaining_shares = target_shares - executed_shares
+        remaining_time = total_minutes - elapsed_minutes
+
+        if remaining_time <= 0:
+            return remaining_shares
+
+        # Volume participation ratio
+        if expected_volume > 0:
+            volume_ratio = actual_volume / expected_volume
+        else:
+            volume_ratio = 1.0
+
+        # Base rate
+        base_rate = remaining_shares / remaining_time
+
+        # Adjust based on volume
+        if volume_ratio > 1.1:
+            # Volume is higher than expected - can be more aggressive
+            adjusted_rate = base_rate * 1.2
+        elif volume_ratio < 0.9:
+            # Volume is lower - be more passive
+            adjusted_rate = base_rate * 0.8
+        else:
+            adjusted_rate = base_rate
+
+        # Cap at remaining shares
+        return min(int(adjusted_rate), remaining_shares)
+
+
+class TWAPExecutor:
+    """Time-Weighted Average Price execution."""
+
+    def __init__(self, randomize: bool = True):
+        self.randomize = randomize
+
+    def generate_schedule(
+        self,
+        total_shares: int,
+        num_intervals: int,
+        randomization_pct: float = 0.2
+    ) -> np.ndarray:
+        """
+        Generate TWAP schedule with optional randomization.
+
+        Randomization helps avoid detection by other algorithms.
+        """
+        base_size = total_shares / num_intervals
+        schedule = np.full(num_intervals, base_size)
+
+        if self.randomize:
+            # Add random variation while preserving total
+            noise = np.random.normal(0, base_size * randomization_pct, num_intervals)
+            noise = noise - noise.mean()  # Zero-sum adjustment
+            schedule = schedule + noise
+            schedule = np.maximum(schedule, 0)  # No negative trades
+            schedule = schedule * (total_shares / schedule.sum())  # Normalize
+
+        return schedule.astype(int)
+```
+
+<QuizQuestion
+  question="Why might adaptive VWAP outperform static VWAP?"
+  options={[
+    "It always trades faster",
+    "It adjusts to actual market conditions in real-time",
+    "It uses less computing power",
+    "It ignores historical patterns"
+  ]}
+  correctAnswer={1}
+  explanation="Adaptive VWAP adjusts participation based on actual vs. expected volume, capturing opportunities when liquidity is better than expected and pulling back when it's worse."
+/>
+
+## Smart Order Routing
+
+Smart order routing (SOR) selects the best venue for each order based on price, liquidity, and fees.
+
+```python
+@dataclass
+class Venue:
+    """Trading venue characteristics."""
+    name: str
+    displayed_liquidity: int
+    hidden_liquidity_estimate: int
+    maker_fee: float  # negative = rebate
+    taker_fee: float
+    latency_ms: float
+    fill_rate: float  # historical fill rate
+
+    @property
+    def total_estimated_liquidity(self) -> int:
+        return self.displayed_liquidity + self.hidden_liquidity_estimate
+
+class SmartOrderRouter:
+    """
+    Intelligent order routing across multiple venues.
+    """
+
+    def __init__(self, venues: List[Venue]):
+        self.venues = venues
+
+    def route_order(
+        self,
+        side: str,  # 'buy' or 'sell'
+        shares: int,
+        limit_price: float,
+        urgency: str = 'medium'  # 'low', 'medium', 'high'
+    ) -> List[Tuple[Venue, int, str]]:
+        """
+        Route order to optimal venues.
+
+        Returns list of (venue, shares, order_type) tuples.
+        """
+        routing_plan = []
+        remaining = shares
+
+        # Score venues
+        scored_venues = self._score_venues(side, urgency)
+
+        for venue, score in scored_venues:
+            if remaining <= 0:
+                break
+
+            # Determine allocation
+            if urgency == 'high':
+                # Take all available liquidity
+                allocation = min(remaining, venue.total_estimated_liquidity)
+                order_type = 'IOC'  # Immediate or cancel
+            elif urgency == 'low':
+                # Post passive orders for rebates
+                allocation = remaining // len(self.venues)
+                order_type = 'POST_ONLY'
+            else:
+                # Balance between displayed and hidden
+                allocation = min(remaining, venue.displayed_liquidity)
+                order_type = 'LIMIT'
+
+            if allocation > 0:
+                routing_plan.append((venue, allocation, order_type))
+                remaining -= allocation
+
+        # Handle any remaining shares
+        if remaining > 0:
+            best_venue = scored_venues[0][0]
+            routing_plan.append((best_venue, remaining, 'LIMIT'))
+
+        return routing_plan
+
+    def _score_venues(
+        self,
+        side: str,
+        urgency: str
+    ) -> List[Tuple[Venue, float]]:
+        """Score venues based on execution quality factors."""
+        scores = []
+
+        for venue in self.venues:
+            score = 0.0
+
+            # Liquidity score
+            liquidity_score = np.log1p(venue.total_estimated_liquidity)
+
+            # Cost score (lower is better)
+            if urgency == 'low':
+                # Prefer maker rebates
+                cost_score = -venue.maker_fee
+            else:
+                # Consider taker fees
+                cost_score = -venue.taker_fee
+
+            # Fill rate score
+            fill_score = venue.fill_rate
+
+            # Latency score (lower is better for high urgency)
+            latency_score = -venue.latency_ms / 100
+
+            # Weight based on urgency
+            if urgency == 'high':
+                score = 0.4 * liquidity_score + 0.1 * cost_score + 0.3 * fill_score + 0.2 * latency_score
+            elif urgency == 'low':
+                score = 0.2 * liquidity_score + 0.5 * cost_score + 0.2 * fill_score + 0.1 * latency_score
+            else:
+                score = 0.3 * liquidity_score + 0.3 * cost_score + 0.3 * fill_score + 0.1 * latency_score
+
+            scores.append((venue, score))
+
+        return sorted(scores, key=lambda x: x[1], reverse=True)
+```
+
+## Quantum Execution Optimization
+
+Quantum computing can address execution optimization as a combinatorial problem, particularly for multi-asset portfolios.
+
+```python
+class QuantumExecutionOptimizer:
+    """
+    Quantum-enhanced execution optimization.
+
+    Uses QAOA to solve the multi-asset execution scheduling problem.
+    """
+
+    def __init__(self, num_qubits: int = 8):
+        self.num_qubits = num_qubits
+
+    def optimize_multi_asset_execution(
+        self,
+        orders: List[dict],
+        time_slots: int,
+        covariance_matrix: np.ndarray,
+        impact_coefficients: np.ndarray
+    ) -> np.ndarray:
+        """
+        Optimize execution schedule for multiple correlated assets.
+
+        Args:
+            orders: List of {'asset': str, 'shares': int, 'direction': int}
+            time_slots: Number of execution intervals
+            covariance_matrix: Asset return correlations
+            impact_coefficients: Market impact per asset
+
+        Returns:
+            Optimal execution schedule (assets x time_slots)
+        """
+        n_assets = len(orders)
+
+        # Build cost matrix considering cross-asset correlations
+        # When assets are correlated, executing them together
+        # can amplify or reduce market impact
+
+        cost_matrix = self._build_cost_matrix(
+            n_assets, time_slots, covariance_matrix, impact_coefficients
+        )
+
+        # For now, use classical optimization
+        # In production, this would use QAOA
+        schedule = self._classical_solve(orders, time_slots, cost_matrix)
+
+        return schedule
+
+    def _build_cost_matrix(
+        self,
+        n_assets: int,
+        time_slots: int,
+        covariance: np.ndarray,
+        impact: np.ndarray
+    ) -> np.ndarray:
+        """Build cost matrix for optimization."""
+        # Simplified cost model
+        # C[i,t,j,s] = cost of trading asset i at time t given asset j trades at time s
+
+        n = n_assets * time_slots
+        cost = np.zeros((n, n))
+
+        for i in range(n_assets):
+            for t in range(time_slots):
+                idx_i = i * time_slots + t
+                for j in range(n_assets):
+                    for s in range(time_slots):
+                        idx_j = j * time_slots + s
+
+                        if i == j and t == s:
+                            # Self-impact
+                            cost[idx_i, idx_j] = impact[i] ** 2
+                        elif t == s:
+                            # Cross-asset impact at same time
+                            cost[idx_i, idx_j] = covariance[i, j] * impact[i] * impact[j]
+                        elif i == j:
+                            # Same asset different times - timing risk
+                            time_diff = abs(t - s)
+                            cost[idx_i, idx_j] = covariance[i, i] * time_diff / time_slots
+
+        return cost
+
+    def _classical_solve(
+        self,
+        orders: List[dict],
+        time_slots: int,
+        cost_matrix: np.ndarray
+    ) -> np.ndarray:
+        """Classical solver for comparison."""
+        n_assets = len(orders)
+
+        # Decision variables: fraction of each order at each time
+        x = cp.Variable((n_assets, time_slots), nonneg=True)
+
+        # Constraints: must execute full order
+        constraints = [cp.sum(x, axis=1) == 1]
+
+        # Objective: minimize quadratic cost
+        # Flatten x for matrix multiplication
+        x_flat = cp.reshape(x, (n_assets * time_slots,))
+        objective = cp.Minimize(cp.quad_form(x_flat, cost_matrix))
+
+        problem = cp.Problem(objective, constraints)
+        problem.solve()
+
+        # Convert to shares
+        schedule = np.zeros((n_assets, time_slots))
+        for i, order in enumerate(orders):
+            schedule[i, :] = x.value[i, :] * order['shares']
+
+        return schedule
+
+
+class ExecutionSimulator:
+    """Simulate execution with realistic market dynamics."""
+
+    def __init__(self, seed: int = 42):
+        np.random.seed(seed)
+
+    def simulate_execution(
+        self,
+        schedule: np.ndarray,
+        initial_price: float,
+        volatility: float,
+        impact_coefficient: float,
+        spread: float
+    ) -> dict:
+        """
+        Simulate execution of a trading schedule.
+
+        Returns execution statistics.
+        """
+        n_intervals = len(schedule)
+        prices = [initial_price]
+        fills = []
+        costs = []
+
+        cumulative_shares = 0
+
+        for i, shares in enumerate(schedule):
+            if shares == 0:
+                fills.append(0)
+                costs.append(0)
+                continue
+
+            # Random price movement
+            price_move = np.random.normal(0, volatility / np.sqrt(n_intervals))
+
+            # Permanent impact from previous trades
+            permanent_impact = impact_coefficient * cumulative_shares
+
+            # Temporary impact from current trade
+            temporary_impact = impact_coefficient * shares * 0.5
+
+            # Current price
+            current_price = prices[-1] * (1 + price_move + permanent_impact)
+
+            # Execution price (includes temporary impact and half spread)
+            exec_price = current_price * (1 + temporary_impact) + spread / 2
+
+            fills.append(shares)
+            costs.append(shares * exec_price)
+            cumulative_shares += shares
+            prices.append(current_price)
+
+        arrival_price = initial_price
+        avg_exec_price = sum(costs) / sum(fills) if sum(fills) > 0 else 0
+
+        return {
+            'total_shares': sum(fills),
+            'total_cost': sum(costs),
+            'avg_execution_price': avg_exec_price,
+            'arrival_price': arrival_price,
+            'implementation_shortfall': (avg_exec_price - arrival_price) / arrival_price,
+            'price_path': prices,
+            'fill_schedule': fills
+        }
+```
+
+<QuizQuestion
+  question="What makes multi-asset execution optimization suitable for quantum computing?"
+  options={[
+    "It requires random numbers",
+    "It's a combinatorial problem with correlated constraints",
+    "It needs fast network connections",
+    "It only works with two assets"
+  ]}
+  correctAnswer={1}
+  explanation="Multi-asset execution involves choosing from many possible schedules while respecting correlations between assets. This combinatorial structure with complex constraints is well-suited for quantum optimization algorithms like QAOA."
+/>
+
+## Transaction Cost Analysis
+
+Measuring execution quality helps improve future trading decisions.
+
+```python
+class TransactionCostAnalyzer:
+    """Analyze transaction costs and execution quality."""
+
+    def __init__(self):
+        self.executions = []
+
+    def record_execution(
+        self,
+        symbol: str,
+        side: str,
+        shares: int,
+        avg_price: float,
+        arrival_price: float,
+        vwap: float,
+        close_price: float,
+        commission: float
+    ):
+        """Record an execution for analysis."""
+        self.executions.append({
+            'symbol': symbol,
+            'side': side,
+            'shares': shares,
+            'avg_price': avg_price,
+            'arrival_price': arrival_price,
+            'vwap': vwap,
+            'close_price': close_price,
+            'commission': commission,
+            'notional': shares * avg_price
+        })
+
+    def calculate_metrics(self, execution: dict) -> dict:
+        """Calculate execution quality metrics."""
+        side_mult = 1 if execution['side'] == 'buy' else -1
+
+        # Implementation Shortfall
+        # Difference between decision price and execution price
+        impl_shortfall = side_mult * (
+            execution['avg_price'] - execution['arrival_price']
+        ) / execution['arrival_price']
+
+        # VWAP Slippage
+        # Difference between execution price and market VWAP
+        vwap_slippage = side_mult * (
+            execution['avg_price'] - execution['vwap']
+        ) / execution['vwap']
+
+        # Participation-adjusted cost
+        # How execution compared to where market went
+        market_move = (execution['close_price'] - execution['arrival_price']) / execution['arrival_price']
+        timing_cost = side_mult * (execution['avg_price'] - execution['arrival_price']) / execution['arrival_price']
+
+        # Total cost in basis points
+        total_cost_bps = impl_shortfall * 10000 + execution['commission'] / execution['notional'] * 10000
+
+        return {
+            'implementation_shortfall_bps': impl_shortfall * 10000,
+            'vwap_slippage_bps': vwap_slippage * 10000,
+            'market_move_bps': market_move * 10000,
+            'timing_cost_bps': timing_cost * 10000,
+            'commission_bps': execution['commission'] / execution['notional'] * 10000,
+            'total_cost_bps': total_cost_bps
+        }
+
+    def generate_report(self) -> dict:
+        """Generate summary report across all executions."""
+        all_metrics = [self.calculate_metrics(e) for e in self.executions]
+
+        if not all_metrics:
+            return {}
+
+        # Aggregate statistics
+        total_notional = sum(e['notional'] for e in self.executions)
+
+        # Notional-weighted averages
+        def weighted_avg(metric_name):
+            return sum(
+                m[metric_name] * e['notional']
+                for m, e in zip(all_metrics, self.executions)
+            ) / total_notional
+
+        return {
+            'num_executions': len(self.executions),
+            'total_notional': total_notional,
+            'avg_implementation_shortfall_bps': weighted_avg('implementation_shortfall_bps'),
+            'avg_vwap_slippage_bps': weighted_avg('vwap_slippage_bps'),
+            'avg_total_cost_bps': weighted_avg('total_cost_bps'),
+            'total_commission': sum(e['commission'] for e in self.executions)
+        }
+```
+
+## Summary
+
+Execution optimization balances market impact against timing risk. Key techniques include:
+
+- **Almgren-Chriss model** for optimal trade scheduling
+- **VWAP/TWAP** algorithms for benchmark-relative execution
+- **Smart order routing** across multiple venues
+- **Quantum optimization** for multi-asset execution
+- **Transaction cost analysis** for continuous improvement
+
+Effective execution can add significant alpha by reducing the gap between theoretical strategy returns and realized performance.

@@ -1,0 +1,544 @@
+---
+title: "Constraints in Portfolio Optimization"
+description: "Learn how to incorporate real-world constraints into portfolio optimization including position limits, sector exposure, turnover constraints, and cardinality restrictions."
+duration: 55
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Implement position and weight constraints in portfolio optimization
+- Add sector and industry exposure limits
+- Handle turnover and transaction cost constraints
+- Understand cardinality constraints and their computational complexity
+- Recognize when constraints make problems suitable for quantum computing
+
+## 1. Why Constraints Matter
+
+Real-world portfolios cannot simply implement the theoretical optimal solution. Regulatory requirements, risk management policies, and practical limitations all impose constraints.
+
+<Definition term="Constrained Optimization">
+An optimization problem where the solution must satisfy additional requirements beyond the objective function, such as bounds, equality constraints, or integer restrictions.
+</Definition>
+
+### Common Constraint Categories
+
+| Category | Examples | Complexity Impact |
+|----------|----------|-------------------|
+| Box constraints | Min/max weight per asset | Convex (easy) |
+| Linear equality | Full investment, sector targets | Convex (easy) |
+| Linear inequality | Sector limits, exposure bounds | Convex (easy) |
+| Cardinality | Select exactly k assets | NP-hard |
+| Integer | Buy whole shares only | NP-hard |
+
+## 2. Box and Bound Constraints
+
+The simplest constraints limit individual position sizes.
+
+### Position Limits
+
+<Formula>
+$$l_i \leq w_i \leq u_i \quad \forall i = 1, \ldots, n$$
+</Formula>
+
+```python
+import numpy as np
+import cvxpy as cp
+
+def portfolio_with_bounds(expected_returns, cov_matrix,
+                          min_weight=0.0, max_weight=0.2):
+    """
+    Portfolio optimization with position limits.
+
+    Args:
+        expected_returns: Expected returns vector
+        cov_matrix: Covariance matrix
+        min_weight: Minimum weight per asset (default 0 = long-only)
+        max_weight: Maximum weight per asset (default 20%)
+
+    Returns:
+        Optimal weights
+    """
+    n = len(expected_returns)
+    w = cp.Variable(n)
+
+    # Objective: maximize return - risk
+    portfolio_return = expected_returns @ w
+    portfolio_variance = cp.quad_form(w, cov_matrix)
+    objective = cp.Maximize(portfolio_return - 0.5 * portfolio_variance)
+
+    # Constraints
+    constraints = [
+        cp.sum(w) == 1,           # Fully invested
+        w >= min_weight,           # Minimum position
+        w <= max_weight            # Maximum position
+    ]
+
+    problem = cp.Problem(objective, constraints)
+    problem.solve()
+
+    return w.value
+
+# Example: 10 assets
+np.random.seed(42)
+n_assets = 10
+expected_returns = np.random.uniform(0.05, 0.15, n_assets)
+cov_matrix = np.random.randn(n_assets, n_assets)
+cov_matrix = cov_matrix @ cov_matrix.T / 100  # Make positive definite
+
+weights = portfolio_with_bounds(expected_returns, cov_matrix,
+                                min_weight=0.02, max_weight=0.20)
+print("Weights with 2%-20% bounds:")
+print(weights.round(3))
+```
+
+### Long-Short Portfolios
+
+For market-neutral strategies, allow negative weights:
+
+```python
+def long_short_portfolio(expected_returns, cov_matrix,
+                         gross_exposure=2.0, net_exposure=0.0):
+    """
+    Long-short portfolio with exposure constraints.
+
+    Args:
+        gross_exposure: Sum of |weights| (leverage)
+        net_exposure: Sum of weights (market exposure)
+    """
+    n = len(expected_returns)
+    w = cp.Variable(n)
+
+    # Absolute values for gross exposure
+    w_abs = cp.Variable(n)
+
+    objective = cp.Maximize(expected_returns @ w - 0.5 * cp.quad_form(w, cov_matrix))
+
+    constraints = [
+        cp.sum(w) == net_exposure,      # Market neutral
+        w_abs >= w,                      # |w| >= w
+        w_abs >= -w,                     # |w| >= -w
+        cp.sum(w_abs) <= gross_exposure, # Leverage limit
+        w >= -0.5,                       # Max short
+        w <= 0.5                         # Max long
+    ]
+
+    problem = cp.Problem(objective, constraints)
+    problem.solve()
+
+    return w.value
+
+weights_ls = long_short_portfolio(expected_returns, cov_matrix)
+print("\nLong-short weights (market neutral):")
+print(weights_ls.round(3))
+print(f"Net exposure: {weights_ls.sum():.4f}")
+print(f"Gross exposure: {np.abs(weights_ls).sum():.2f}")
+```
+
+## 3. Sector and Group Constraints
+
+Portfolios often need limits on exposure to sectors, countries, or asset classes.
+
+### Sector Exposure Limits
+
+<Formula>
+$$L_s \leq \sum_{i \in S_s} w_i \leq U_s$$
+</Formula>
+
+```python
+def portfolio_with_sectors(expected_returns, cov_matrix,
+                           sector_assignments, sector_limits):
+    """
+    Portfolio optimization with sector constraints.
+
+    Args:
+        sector_assignments: Dict mapping sector name to list of asset indices
+        sector_limits: Dict mapping sector name to (min, max) exposure
+    """
+    n = len(expected_returns)
+    w = cp.Variable(n)
+
+    objective = cp.Maximize(expected_returns @ w - 0.5 * cp.quad_form(w, cov_matrix))
+
+    constraints = [
+        cp.sum(w) == 1,
+        w >= 0,
+        w <= 0.15
+    ]
+
+    # Add sector constraints
+    for sector, indices in sector_assignments.items():
+        if sector in sector_limits:
+            min_exp, max_exp = sector_limits[sector]
+            sector_weight = cp.sum([w[i] for i in indices])
+            constraints.append(sector_weight >= min_exp)
+            constraints.append(sector_weight <= max_exp)
+
+    problem = cp.Problem(objective, constraints)
+    problem.solve()
+
+    return w.value
+
+# Define sectors
+sectors = {
+    'Technology': [0, 1, 2],
+    'Healthcare': [3, 4],
+    'Finance': [5, 6],
+    'Energy': [7, 8, 9]
+}
+
+# Sector limits
+limits = {
+    'Technology': (0.10, 0.35),
+    'Healthcare': (0.05, 0.25),
+    'Finance': (0.10, 0.30),
+    'Energy': (0.05, 0.20)
+}
+
+weights_sector = portfolio_with_sectors(expected_returns, cov_matrix,
+                                        sectors, limits)
+print("Weights with sector constraints:")
+for sector, indices in sectors.items():
+    sector_weight = sum(weights_sector[i] for i in indices)
+    print(f"  {sector}: {sector_weight:.1%}")
+```
+
+<Tip>
+Sector constraints ensure diversification even when expected returns suggest concentrating in a single industry. This protects against model misspecification.
+</Tip>
+
+## 4. Turnover and Transaction Cost Constraints
+
+When rebalancing an existing portfolio, trading costs matter.
+
+### Turnover Constraint
+
+<Formula>
+$$\sum_{i=1}^n |w_i - w_i^{current}| \leq \tau$$
+</Formula>
+
+```python
+def portfolio_with_turnover(expected_returns, cov_matrix,
+                            current_weights, max_turnover=0.3):
+    """
+    Portfolio optimization with turnover constraint.
+
+    Args:
+        current_weights: Existing portfolio weights
+        max_turnover: Maximum two-way turnover allowed
+    """
+    n = len(expected_returns)
+    w = cp.Variable(n)
+
+    # Trade variables (for |w - w_current|)
+    buy = cp.Variable(n, nonneg=True)
+    sell = cp.Variable(n, nonneg=True)
+
+    objective = cp.Maximize(expected_returns @ w - 0.5 * cp.quad_form(w, cov_matrix))
+
+    constraints = [
+        cp.sum(w) == 1,
+        w >= 0,
+        w <= 0.20,
+        w == current_weights + buy - sell,  # Weight decomposition
+        cp.sum(buy + sell) <= max_turnover   # Turnover limit
+    ]
+
+    problem = cp.Problem(objective, constraints)
+    problem.solve()
+
+    return w.value, buy.value, sell.value
+
+# Current portfolio
+current = np.array([0.15, 0.10, 0.10, 0.10, 0.10,
+                    0.10, 0.10, 0.10, 0.08, 0.07])
+
+new_weights, buys, sells = portfolio_with_turnover(
+    expected_returns, cov_matrix, current, max_turnover=0.20
+)
+
+print("Current vs New weights:")
+for i in range(len(current)):
+    print(f"  Asset {i}: {current[i]:.1%} -> {new_weights[i]:.1%}")
+print(f"\nTotal turnover: {(np.abs(new_weights - current)).sum():.1%}")
+```
+
+### Transaction Cost Penalty
+
+Instead of a hard constraint, penalize trading:
+
+```python
+def portfolio_with_costs(expected_returns, cov_matrix,
+                         current_weights, cost_rate=0.001):
+    """
+    Portfolio optimization with transaction cost penalty.
+
+    Args:
+        cost_rate: Cost per unit traded (e.g., 10 bps)
+    """
+    n = len(expected_returns)
+    w = cp.Variable(n)
+
+    # Trade size
+    trade = cp.Variable(n)
+    trade_abs = cp.Variable(n, nonneg=True)
+
+    # Objective: return - risk - costs
+    net_return = expected_returns @ w - cost_rate * cp.sum(trade_abs)
+    portfolio_variance = cp.quad_form(w, cov_matrix)
+    objective = cp.Maximize(net_return - 0.5 * portfolio_variance)
+
+    constraints = [
+        cp.sum(w) == 1,
+        w >= 0,
+        w <= 0.25,
+        trade == w - current_weights,
+        trade_abs >= trade,
+        trade_abs >= -trade
+    ]
+
+    problem = cp.Problem(objective, constraints)
+    problem.solve()
+
+    return w.value
+
+weights_cost = portfolio_with_costs(expected_returns, cov_matrix, current)
+print("\nWeights with transaction cost penalty:")
+print(f"Turnover: {np.abs(weights_cost - current).sum():.1%}")
+```
+
+## 5. Cardinality Constraints
+
+Cardinality constraints limit the number of assets held.
+
+<Definition term="Cardinality Constraint">
+A constraint that limits the portfolio to hold at most (or exactly) k non-zero positions out of n available assets.
+</Definition>
+
+<Warning>
+Cardinality constraints make portfolio optimization NP-hard. The number of possible portfolios grows combinatorially: $\binom{n}{k}$ possible selections.
+</Warning>
+
+### The Complexity Challenge
+
+| Assets (n) | Select (k) | Combinations | Time to Enumerate |
+|------------|------------|--------------|-------------------|
+| 20 | 5 | 15,504 | < 1 second |
+| 50 | 10 | 10 billion | Hours |
+| 100 | 20 | 10^17 | Centuries |
+| 500 | 50 | 10^69 | Heat death of universe |
+
+### Mixed-Integer Formulation
+
+```python
+def portfolio_cardinality_mip(expected_returns, cov_matrix,
+                              max_assets=5, min_weight=0.05):
+    """
+    Portfolio with cardinality constraint using mixed-integer programming.
+
+    Warning: This can be slow for large universes!
+    """
+    n = len(expected_returns)
+
+    # Continuous weights
+    w = cp.Variable(n)
+
+    # Binary selection variables
+    z = cp.Variable(n, boolean=True)
+
+    objective = cp.Maximize(expected_returns @ w - 0.5 * cp.quad_form(w, cov_matrix))
+
+    constraints = [
+        cp.sum(w) == 1,
+        w >= 0,
+        cp.sum(z) <= max_assets,          # At most k assets
+        w >= min_weight * z,               # If selected, at least min_weight
+        w <= z                             # If not selected, weight = 0
+    ]
+
+    problem = cp.Problem(objective, constraints)
+    problem.solve(solver=cp.ECOS_BB)  # Branch-and-bound solver
+
+    return w.value, z.value
+
+# Small example (tractable)
+weights_card, selected = portfolio_cardinality_mip(
+    expected_returns, cov_matrix, max_assets=4
+)
+
+print("Cardinality-constrained portfolio (max 4 assets):")
+for i, (w, z) in enumerate(zip(weights_card, selected)):
+    if z > 0.5:
+        print(f"  Asset {i}: {w:.1%}")
+```
+
+<Tip>
+Cardinality constraints are where quantum computing may provide advantages. Quantum algorithms like QAOA can explore the combinatorial space more efficiently than classical enumeration.
+</Tip>
+
+## 6. Combining Multiple Constraints
+
+Real portfolios typically have many constraints simultaneously.
+
+```python
+class ConstrainedPortfolioOptimizer:
+    """
+    Flexible portfolio optimizer with multiple constraint types.
+    """
+
+    def __init__(self, expected_returns, cov_matrix):
+        self.mu = expected_returns
+        self.Sigma = cov_matrix
+        self.n = len(expected_returns)
+
+    def optimize(self,
+                 risk_aversion=1.0,
+                 min_weight=0.0,
+                 max_weight=1.0,
+                 sector_map=None,
+                 sector_limits=None,
+                 current_weights=None,
+                 max_turnover=None,
+                 transaction_cost=0.0):
+        """
+        Optimize with flexible constraints.
+        """
+        w = cp.Variable(self.n)
+
+        # Base objective
+        ret = self.mu @ w
+        var = cp.quad_form(w, self.Sigma)
+
+        # Transaction costs if rebalancing
+        cost_term = 0
+        constraints = [cp.sum(w) == 1]
+
+        # Box constraints
+        constraints.append(w >= min_weight)
+        constraints.append(w <= max_weight)
+
+        # Sector constraints
+        if sector_map and sector_limits:
+            for sector, indices in sector_map.items():
+                if sector in sector_limits:
+                    lo, hi = sector_limits[sector]
+                    sector_w = cp.sum([w[i] for i in indices])
+                    constraints.extend([sector_w >= lo, sector_w <= hi])
+
+        # Turnover constraint
+        if current_weights is not None and max_turnover is not None:
+            trade = cp.Variable(self.n)
+            trade_abs = cp.Variable(self.n, nonneg=True)
+            constraints.extend([
+                trade == w - current_weights,
+                trade_abs >= trade,
+                trade_abs >= -trade,
+                cp.sum(trade_abs) <= max_turnover
+            ])
+            cost_term = transaction_cost * cp.sum(trade_abs)
+
+        objective = cp.Maximize(ret - cost_term - (risk_aversion/2) * var)
+
+        problem = cp.Problem(objective, constraints)
+        problem.solve()
+
+        return {
+            'weights': w.value,
+            'return': float(self.mu @ w.value),
+            'volatility': float(np.sqrt(w.value @ self.Sigma @ w.value)),
+            'status': problem.status
+        }
+
+# Example with multiple constraints
+optimizer = ConstrainedPortfolioOptimizer(expected_returns, cov_matrix)
+
+result = optimizer.optimize(
+    risk_aversion=2.0,
+    min_weight=0.02,
+    max_weight=0.20,
+    sector_map=sectors,
+    sector_limits=limits,
+    current_weights=current,
+    max_turnover=0.25,
+    transaction_cost=0.001
+)
+
+print("Multi-constrained portfolio:")
+print(f"  Expected return: {result['return']:.2%}")
+print(f"  Volatility: {result['volatility']:.2%}")
+print(f"  Sharpe ratio: {(result['return'] - 0.02) / result['volatility']:.3f}")
+```
+
+## 7. Constraint Hierarchy
+
+When constraints conflict, prioritize them:
+
+```python
+def hierarchical_optimization(expected_returns, cov_matrix,
+                              hard_constraints, soft_constraints, penalties):
+    """
+    Handle conflicting constraints with hierarchy.
+
+    Hard constraints must be satisfied.
+    Soft constraints are penalized if violated.
+    """
+    n = len(expected_returns)
+    w = cp.Variable(n)
+
+    # Slack variables for soft constraints
+    slack = cp.Variable(len(soft_constraints), nonneg=True)
+
+    # Base objective with slack penalties
+    ret = expected_returns @ w
+    var = cp.quad_form(w, cov_matrix)
+    penalty = sum(p * s for p, s in zip(penalties, slack))
+
+    objective = cp.Maximize(ret - 0.5 * var - penalty)
+
+    # Hard constraints (must satisfy)
+    constraints = hard_constraints(w)
+
+    # Soft constraints (with slack)
+    for i, soft_fn in enumerate(soft_constraints):
+        left, right = soft_fn(w)
+        constraints.append(left <= right + slack[i])
+
+    problem = cp.Problem(objective, constraints)
+    problem.solve()
+
+    return w.value, slack.value
+```
+
+## 8. Quantum Computing Connection
+
+Constraints affect quantum algorithm applicability:
+
+| Constraint Type | Classical Approach | Quantum Approach |
+|-----------------|-------------------|------------------|
+| Convex (bounds, linear) | Efficient solvers | No advantage |
+| Cardinality | Branch-and-bound (slow) | QAOA potential |
+| Integer weights | MIP solvers | QAOA/VQE |
+| Non-convex costs | Heuristics | Variational |
+
+<Warning>
+Quantum advantage for portfolio optimization is only expected when constraints make the problem NP-hard. Standard mean-variance with convex constraints is solved efficiently classically.
+</Warning>
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Box constraints** limit individual position sizes (convex, efficient)
+2. **Sector constraints** ensure diversification across groups
+3. **Turnover constraints** manage rebalancing costs
+4. **Cardinality constraints** make the problem NP-hard
+5. **Multiple constraints** can be combined in a single optimization
+6. **Quantum potential** exists primarily for NP-hard constraints
+
+## Further Reading
+
+- Next lesson: QUBO Formulation for Portfolio Optimization
+- Related: QAOA for Combinatorial Optimization
+- Application: Real-world Portfolio Construction

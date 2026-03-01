@@ -1,0 +1,876 @@
+---
+title: "Classical Fisher Information"
+description: "Understand the Fisher information matrix as the foundation for natural gradient methods, including its role in measuring parameter sensitivity."
+keywords: ["fisher-information", "information-geometry", "cramer-rao", "statistical-estimation", "natural-gradient", "parameter-sensitivity"]
+---
+
+# Classical Fisher Information
+
+The Fisher information matrix quantifies how much information data carries about unknown parameters. It forms the foundation for natural gradient methods that respect the geometry of probability distributions and quantum states.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Define Fisher information and its geometric interpretation
+- Compute Fisher information for common distributions
+- Understand the Cramér-Rao bound
+- Connect Fisher information to natural gradients
+- Implement Fisher information matrix computation
+- Apply Fisher information to parameter estimation
+
+---
+
+## 1. Definition of Fisher Information
+
+Fisher information measures the sensitivity of a probability distribution to its parameters.
+
+<Definition term="Fisher Information">
+For a parametric probability distribution p(x; θ), the Fisher information is:
+$$I(\theta) = \mathbb{E}\left[\left(\frac{\partial}{\partial \theta} \log p(x; \theta)\right)^2\right]$$
+
+It measures how much the log-likelihood changes with the parameter, quantifying the "information" data carries about θ.
+</Definition>
+
+### Single Parameter Case
+
+```python
+import numpy as np
+
+class FisherInformation:
+    """
+    Compute Fisher information for parametric distributions.
+    """
+
+    def __init__(self, distribution_type='gaussian'):
+        self.distribution_type = distribution_type
+
+    def log_likelihood(self, x, params):
+        """
+        Compute log p(x; params).
+        """
+        if self.distribution_type == 'gaussian':
+            mu, sigma = params
+            return -0.5 * np.log(2 * np.pi * sigma**2) - (x - mu)**2 / (2 * sigma**2)
+
+        elif self.distribution_type == 'bernoulli':
+            p = params[0]
+            p = np.clip(p, 1e-10, 1 - 1e-10)
+            return x * np.log(p) + (1 - x) * np.log(1 - p)
+
+        elif self.distribution_type == 'poisson':
+            lam = params[0]
+            from math import factorial
+            return x * np.log(lam) - lam - np.log(factorial(int(x)))
+
+        else:
+            raise ValueError(f"Unknown distribution: {self.distribution_type}")
+
+    def score_function(self, x, params, param_idx=0, eps=1e-5):
+        """
+        Compute score function: ∂/∂θ log p(x; θ).
+
+        Uses numerical differentiation.
+        """
+        params_plus = params.copy()
+        params_plus[param_idx] += eps
+
+        params_minus = params.copy()
+        params_minus[param_idx] -= eps
+
+        ll_plus = self.log_likelihood(x, params_plus)
+        ll_minus = self.log_likelihood(x, params_minus)
+
+        return (ll_plus - ll_minus) / (2 * eps)
+
+    def fisher_information_numerical(self, params, n_samples=10000):
+        """
+        Estimate Fisher information via Monte Carlo.
+
+        I(θ) = E[(∂ log p / ∂θ)²]
+        """
+        # Sample from distribution
+        samples = self._sample(params, n_samples)
+
+        fisher = 0.0
+        for x in samples:
+            score = self.score_function(x, params)
+            fisher += score ** 2
+
+        return fisher / n_samples
+
+    def _sample(self, params, n_samples):
+        """Sample from the distribution."""
+        if self.distribution_type == 'gaussian':
+            mu, sigma = params
+            return np.random.normal(mu, sigma, n_samples)
+        elif self.distribution_type == 'bernoulli':
+            p = params[0]
+            return np.random.binomial(1, p, n_samples)
+        elif self.distribution_type == 'poisson':
+            lam = params[0]
+            return np.random.poisson(lam, n_samples)
+
+    def fisher_information_analytical(self, params):
+        """
+        Compute Fisher information analytically.
+        """
+        if self.distribution_type == 'gaussian':
+            mu, sigma = params
+            # For mean parameter: I(μ) = 1/σ²
+            I_mu = 1 / sigma**2
+            # For variance parameter: I(σ) = 2/σ²
+            I_sigma = 2 / sigma**2
+            return np.array([[I_mu, 0], [0, I_sigma]])
+
+        elif self.distribution_type == 'bernoulli':
+            p = params[0]
+            # I(p) = 1 / (p(1-p))
+            return np.array([[1 / (p * (1 - p))]])
+
+        elif self.distribution_type == 'poisson':
+            lam = params[0]
+            # I(λ) = 1/λ
+            return np.array([[1 / lam]])
+
+# Example: Gaussian distribution
+fisher = FisherInformation('gaussian')
+params = np.array([0.0, 1.0])  # μ=0, σ=1
+
+# Numerical estimation
+I_numerical = fisher.fisher_information_numerical(params[:1], n_samples=10000)  # For μ only
+print(f"Numerical Fisher Information I(μ): {I_numerical:.4f}")
+
+# Analytical
+I_analytical = fisher.fisher_information_analytical(params)
+print(f"Analytical Fisher Information Matrix:\n{I_analytical}")
+
+# Bernoulli example
+fisher_bernoulli = FisherInformation('bernoulli')
+p = np.array([0.3])
+I_bernoulli = fisher_bernoulli.fisher_information_analytical(p)
+print(f"\nBernoulli I(p=0.3): {I_bernoulli[0,0]:.4f}")
+print(f"Expected: {1/(0.3*0.7):.4f}")
+```
+
+<Tip>
+The Fisher information is always non-negative. Higher Fisher information means the distribution is more "sensitive" to parameter changes, making the parameter easier to estimate.
+</Tip>
+
+---
+
+## 2. Fisher Information Matrix
+
+For multiple parameters, Fisher information becomes a matrix capturing correlations.
+
+<Formula>
+Fisher Information Matrix:
+$$[I(\theta)]_{ij} = \mathbb{E}\left[\frac{\partial \log p}{\partial \theta_i} \frac{\partial \log p}{\partial \theta_j}\right]$$
+
+Alternative (equivalent) form:
+$$[I(\theta)]_{ij} = -\mathbb{E}\left[\frac{\partial^2 \log p}{\partial \theta_i \partial \theta_j}\right]$$
+</Formula>
+
+### Implementation
+
+```python
+class FisherInformationMatrix:
+    """
+    Compute the full Fisher information matrix for multivariate parameters.
+    """
+
+    def __init__(self, log_prob_fn, n_params):
+        """
+        Args:
+            log_prob_fn: Function computing log p(x; θ)
+            n_params: Number of parameters
+        """
+        self.log_prob_fn = log_prob_fn
+        self.n_params = n_params
+
+    def score_vector(self, x, params, eps=1e-5):
+        """
+        Compute gradient of log probability: ∇_θ log p(x; θ).
+        """
+        scores = np.zeros(self.n_params)
+
+        for i in range(self.n_params):
+            params_plus = params.copy()
+            params_plus[i] += eps
+
+            params_minus = params.copy()
+            params_minus[i] -= eps
+
+            scores[i] = (self.log_prob_fn(x, params_plus) -
+                        self.log_prob_fn(x, params_minus)) / (2 * eps)
+
+        return scores
+
+    def compute_fim(self, params, sample_fn, n_samples=5000):
+        """
+        Compute Fisher Information Matrix via Monte Carlo.
+
+        FIM_ij = E[score_i * score_j]
+        """
+        fim = np.zeros((self.n_params, self.n_params))
+
+        # Sample from distribution
+        samples = sample_fn(params, n_samples)
+
+        for x in samples:
+            score = self.score_vector(x, params)
+            fim += np.outer(score, score)
+
+        return fim / n_samples
+
+    def compute_fim_hessian(self, params, sample_fn, n_samples=5000, eps=1e-4):
+        """
+        Compute FIM using Hessian form: FIM_ij = -E[∂²log p / ∂θᵢ∂θⱼ].
+        """
+        fim = np.zeros((self.n_params, self.n_params))
+        samples = sample_fn(params, n_samples)
+
+        for x in samples:
+            hessian = self._compute_hessian(x, params, eps)
+            fim -= hessian
+
+        return fim / n_samples
+
+    def _compute_hessian(self, x, params, eps):
+        """Compute Hessian of log probability."""
+        hessian = np.zeros((self.n_params, self.n_params))
+
+        for i in range(self.n_params):
+            for j in range(self.n_params):
+                # Four-point finite difference
+                pp = params.copy()
+                pp[i] += eps
+                pp[j] += eps
+
+                pm = params.copy()
+                pm[i] += eps
+                pm[j] -= eps
+
+                mp = params.copy()
+                mp[i] -= eps
+                mp[j] += eps
+
+                mm = params.copy()
+                mm[i] -= eps
+                mm[j] -= eps
+
+                hessian[i, j] = (self.log_prob_fn(x, pp) -
+                                self.log_prob_fn(x, pm) -
+                                self.log_prob_fn(x, mp) +
+                                self.log_prob_fn(x, mm)) / (4 * eps**2)
+
+        return hessian
+
+
+# Example: Multivariate Gaussian
+def mvn_log_prob(x, params):
+    """Log probability for 2D Gaussian with diagonal covariance."""
+    mu = params[:2]
+    sigma = params[2:4]
+
+    log_p = -np.log(2 * np.pi) - np.sum(np.log(sigma))
+    log_p -= 0.5 * np.sum(((x - mu) / sigma)**2)
+
+    return log_p
+
+def mvn_sample(params, n_samples):
+    """Sample from 2D Gaussian."""
+    mu = params[:2]
+    sigma = params[2:4]
+
+    samples = []
+    for _ in range(n_samples):
+        x = np.random.normal(mu, sigma)
+        samples.append(x)
+
+    return samples
+
+# Compute FIM
+fim_computer = FisherInformationMatrix(mvn_log_prob, n_params=4)
+params = np.array([0.0, 0.0, 1.0, 1.0])  # μ₁, μ₂, σ₁, σ₂
+
+fim = fim_computer.compute_fim(params, mvn_sample, n_samples=5000)
+print("Fisher Information Matrix (2D Gaussian):")
+print(np.round(fim, 3))
+
+print("\nExpected diagonal values:")
+print(f"I(μ₁) = I(μ₂) = 1/σ² = 1.0")
+print(f"I(σ₁) = I(σ₂) = 2/σ² = 2.0")
+```
+
+<Warning>
+The Fisher information matrix must be positive semi-definite. Numerical instabilities can cause violations, so always check eigenvalues and add regularization if needed.
+</Warning>
+
+---
+
+## 3. Cramér-Rao Bound
+
+The Fisher information sets a fundamental limit on estimation precision.
+
+<Definition term="Cramér-Rao Bound">
+For any unbiased estimator θ̂ of parameter θ:
+$$\text{Var}(\hat{\theta}) \geq \frac{1}{I(\theta)}$$
+
+This means no unbiased estimator can have variance smaller than the inverse Fisher information. Estimators achieving this bound are called "efficient."
+</Definition>
+
+### Implementation
+
+```python
+class CramerRaoBound:
+    """
+    Demonstrate the Cramér-Rao bound through estimation experiments.
+    """
+
+    def __init__(self, distribution_type='gaussian'):
+        self.distribution_type = distribution_type
+
+    def theoretical_bound(self, true_params, n_samples):
+        """
+        Compute the Cramér-Rao lower bound.
+
+        For n i.i.d. samples, the bound is 1/(n * I(θ))
+        """
+        if self.distribution_type == 'gaussian':
+            mu, sigma = true_params
+            # For mean estimation: bound = σ²/n
+            return sigma**2 / n_samples
+
+        elif self.distribution_type == 'bernoulli':
+            p = true_params[0]
+            # For p estimation: bound = p(1-p)/n
+            return p * (1 - p) / n_samples
+
+    def mle_estimator(self, samples):
+        """
+        Maximum likelihood estimator.
+        """
+        if self.distribution_type == 'gaussian':
+            mu_hat = np.mean(samples)
+            sigma_hat = np.std(samples, ddof=0)
+            return np.array([mu_hat, sigma_hat])
+
+        elif self.distribution_type == 'bernoulli':
+            p_hat = np.mean(samples)
+            return np.array([p_hat])
+
+    def run_experiment(self, true_params, n_samples, n_trials=1000):
+        """
+        Run estimation experiments to verify Cramér-Rao bound.
+        """
+        estimates = []
+
+        for _ in range(n_trials):
+            # Generate samples
+            if self.distribution_type == 'gaussian':
+                samples = np.random.normal(true_params[0], true_params[1], n_samples)
+            elif self.distribution_type == 'bernoulli':
+                samples = np.random.binomial(1, true_params[0], n_samples)
+
+            # Estimate parameters
+            estimate = self.mle_estimator(samples)
+            estimates.append(estimate)
+
+        estimates = np.array(estimates)
+
+        # Compute empirical variance
+        empirical_var = np.var(estimates, axis=0)
+
+        # Theoretical bound
+        theoretical_var = self.theoretical_bound(true_params, n_samples)
+
+        return {
+            'empirical_variance': empirical_var,
+            'cramer_rao_bound': theoretical_var,
+            'efficiency': theoretical_var / empirical_var[0] if empirical_var[0] > 0 else 0
+        }
+
+
+# Verify Cramér-Rao bound for Gaussian mean estimation
+crb = CramerRaoBound('gaussian')
+true_params = np.array([5.0, 2.0])  # μ=5, σ=2
+
+print("Verifying Cramér-Rao Bound for Gaussian Mean Estimation")
+print("="*60)
+
+for n_samples in [10, 50, 100, 500, 1000]:
+    results = crb.run_experiment(true_params, n_samples, n_trials=2000)
+
+    print(f"\nn = {n_samples}:")
+    print(f"  Cramér-Rao Bound: {results['cramer_rao_bound']:.6f}")
+    print(f"  Empirical Variance: {results['empirical_variance'][0]:.6f}")
+    print(f"  Efficiency: {results['efficiency']:.4f}")
+
+# Bernoulli example
+print("\n" + "="*60)
+print("Verifying Cramér-Rao Bound for Bernoulli")
+print("="*60)
+
+crb_bern = CramerRaoBound('bernoulli')
+for p in [0.2, 0.5, 0.8]:
+    results = crb_bern.run_experiment(np.array([p]), n_samples=100, n_trials=2000)
+    print(f"\np = {p}:")
+    print(f"  Cramér-Rao Bound: {results['cramer_rao_bound']:.6f}")
+    print(f"  Empirical Variance: {results['empirical_variance'][0]:.6f}")
+```
+
+---
+
+## 4. Geometric Interpretation
+
+Fisher information defines a Riemannian metric on the parameter space.
+
+<Formula>
+Riemannian Distance:
+$$ds^2 = \sum_{ij} I_{ij}(\theta) d\theta_i d\theta_j$$
+
+The Fisher information matrix defines the "natural" geometry of the probability distribution family.
+</Formula>
+
+### Implementation
+
+```python
+class InformationGeometry:
+    """
+    Explore the geometric aspects of Fisher information.
+    """
+
+    def __init__(self, fim_fn):
+        """
+        Args:
+            fim_fn: Function that computes FIM given parameters
+        """
+        self.fim_fn = fim_fn
+
+    def geodesic_distance(self, theta1, theta2, n_steps=100):
+        """
+        Approximate geodesic distance between two parameter points.
+
+        Uses numerical integration along straight line (approximation).
+        """
+        distance = 0.0
+        path = np.linspace(0, 1, n_steps + 1)
+
+        for i in range(n_steps):
+            t = (path[i] + path[i+1]) / 2
+            theta_t = theta1 + t * (theta2 - theta1)
+
+            # Compute FIM at this point
+            fim = self.fim_fn(theta_t)
+
+            # Infinitesimal displacement
+            d_theta = (theta2 - theta1) / n_steps
+
+            # Riemannian length element
+            ds_squared = d_theta @ fim @ d_theta
+            distance += np.sqrt(max(ds_squared, 0))
+
+        return distance
+
+    def natural_gradient(self, theta, euclidean_gradient):
+        """
+        Convert Euclidean gradient to natural gradient.
+
+        natural_grad = FIM^(-1) @ euclidean_grad
+        """
+        fim = self.fim_fn(theta)
+
+        # Add regularization for numerical stability
+        fim_reg = fim + 1e-6 * np.eye(len(theta))
+
+        natural_grad = np.linalg.solve(fim_reg, euclidean_gradient)
+        return natural_grad
+
+    def kl_divergence_quadratic(self, theta, delta_theta):
+        """
+        Quadratic approximation of KL divergence.
+
+        D_KL(p_θ || p_{θ+δ}) ≈ (1/2) δθᵀ I(θ) δθ
+        """
+        fim = self.fim_fn(theta)
+        return 0.5 * delta_theta @ fim @ delta_theta
+
+
+# Example: Geometry of Gaussian family (varying μ with fixed σ=1)
+def gaussian_fim_mean_only(theta):
+    """FIM for Gaussian with σ=1, varying μ."""
+    # I(μ) = 1/σ² = 1 for σ=1
+    return np.array([[1.0]])
+
+geometry = InformationGeometry(gaussian_fim_mean_only)
+
+# Geodesic distance (equals Euclidean for Gaussian mean)
+theta1 = np.array([0.0])
+theta2 = np.array([3.0])
+dist = geometry.geodesic_distance(theta1, theta2)
+print(f"Geodesic distance from μ=0 to μ=3: {dist:.4f}")
+print(f"Expected (Euclidean for this case): 3.0")
+
+# Example: Geometry of Bernoulli family
+def bernoulli_fim(theta):
+    """FIM for Bernoulli distribution."""
+    p = theta[0]
+    p = np.clip(p, 0.01, 0.99)
+    return np.array([[1.0 / (p * (1 - p))]])
+
+geometry_bern = InformationGeometry(bernoulli_fim)
+
+# Compare distances
+p1, p2 = np.array([0.1]), np.array([0.2])
+p3, p4 = np.array([0.4]), np.array([0.5])
+
+dist_low = geometry_bern.geodesic_distance(p1, p2)
+dist_mid = geometry_bern.geodesic_distance(p3, p4)
+
+print(f"\nBernoulli geodesic distances:")
+print(f"From p=0.1 to p=0.2: {dist_low:.4f}")
+print(f"From p=0.4 to p=0.5: {dist_mid:.4f}")
+print("(Same Euclidean distance, but different information-geometric distance)")
+```
+
+<Tip>
+The Fisher information metric makes the parameter space "curved." Moving near extreme probabilities (p≈0 or p≈1 for Bernoulli) requires larger geodesic distances because the information content is higher there.
+</Tip>
+
+---
+
+## 5. Natural Gradient Descent
+
+Natural gradient descent uses Fisher information to adapt step sizes to parameter geometry.
+
+<Definition term="Natural Gradient">
+The natural gradient is the steepest descent direction in the Riemannian manifold defined by Fisher information:
+$$\tilde{\nabla} L = I(\theta)^{-1} \nabla L$$
+
+It provides parameterization-invariant updates.
+</Definition>
+
+### Implementation
+
+```python
+class NaturalGradientOptimizer:
+    """
+    Natural gradient descent optimizer.
+    """
+
+    def __init__(self, fim_fn, learning_rate=0.1, damping=1e-4):
+        self.fim_fn = fim_fn
+        self.lr = learning_rate
+        self.damping = damping
+
+        # History for analysis
+        self.param_history = []
+        self.loss_history = []
+
+    def step(self, params, gradient):
+        """
+        Perform one natural gradient step.
+
+        params = params - lr * FIM^(-1) @ gradient
+        """
+        fim = self.fim_fn(params)
+
+        # Add damping for numerical stability
+        fim_damped = fim + self.damping * np.eye(len(params))
+
+        # Compute natural gradient
+        natural_grad = np.linalg.solve(fim_damped, gradient)
+
+        # Update parameters
+        new_params = params - self.lr * natural_grad
+
+        # Store history
+        self.param_history.append(params.copy())
+
+        return new_params
+
+    def optimize(self, initial_params, gradient_fn, loss_fn, n_steps=100):
+        """
+        Run natural gradient optimization.
+        """
+        params = initial_params.copy()
+
+        for step in range(n_steps):
+            loss = loss_fn(params)
+            gradient = gradient_fn(params)
+
+            self.loss_history.append(loss)
+            params = self.step(params, gradient)
+
+        return params
+
+
+class StandardGradientOptimizer:
+    """
+    Standard (Euclidean) gradient descent for comparison.
+    """
+
+    def __init__(self, learning_rate=0.1):
+        self.lr = learning_rate
+        self.param_history = []
+        self.loss_history = []
+
+    def optimize(self, initial_params, gradient_fn, loss_fn, n_steps=100):
+        """Run standard gradient descent."""
+        params = initial_params.copy()
+
+        for step in range(n_steps):
+            loss = loss_fn(params)
+            gradient = gradient_fn(params)
+
+            self.loss_history.append(loss)
+            self.param_history.append(params.copy())
+
+            params = params - self.lr * gradient
+
+        return params
+
+
+# Comparison on Bernoulli MLE problem
+def bernoulli_nll(p, data):
+    """Negative log-likelihood for Bernoulli."""
+    p = np.clip(p[0], 1e-6, 1 - 1e-6)
+    return -np.mean(data * np.log(p) + (1 - data) * np.log(1 - p))
+
+def bernoulli_gradient(p, data):
+    """Gradient of NLL."""
+    p_val = np.clip(p[0], 1e-6, 1 - 1e-6)
+    grad = -np.mean(data / p_val - (1 - data) / (1 - p_val))
+    return np.array([grad])
+
+def bernoulli_fim_fn(p):
+    """Fisher information for Bernoulli."""
+    p_val = np.clip(p[0], 0.01, 0.99)
+    return np.array([[1.0 / (p_val * (1 - p_val))]])
+
+# Generate data
+true_p = 0.7
+data = np.random.binomial(1, true_p, 100)
+
+# Create loss and gradient functions
+loss_fn = lambda p: bernoulli_nll(p, data)
+grad_fn = lambda p: bernoulli_gradient(p, data)
+
+# Starting from poor initial guess
+initial = np.array([0.1])
+
+# Natural gradient descent
+nat_opt = NaturalGradientOptimizer(bernoulli_fim_fn, learning_rate=0.5)
+nat_result = nat_opt.optimize(initial.copy(), grad_fn, loss_fn, n_steps=50)
+
+# Standard gradient descent
+std_opt = StandardGradientOptimizer(learning_rate=0.01)
+std_result = std_opt.optimize(initial.copy(), grad_fn, loss_fn, n_steps=50)
+
+print("Bernoulli MLE Optimization Comparison")
+print("="*50)
+print(f"True parameter: {true_p}")
+print(f"MLE estimate: {np.mean(data):.4f}")
+print(f"\nNatural gradient result: {nat_result[0]:.4f}")
+print(f"Standard gradient result: {std_result[0]:.4f}")
+print(f"\nNatural gradient final loss: {nat_opt.loss_history[-1]:.6f}")
+print(f"Standard gradient final loss: {std_opt.loss_history[-1]:.6f}")
+```
+
+<Warning>
+Computing and inverting the Fisher information matrix is expensive for high-dimensional parameters. Approximations like diagonal FIM or Kronecker-factored FIM are often necessary for large-scale problems.
+</Warning>
+
+---
+
+## 6. Applications to Machine Learning
+
+Fisher information enables better optimization in neural networks and probabilistic models.
+
+<Formula>
+Fisher Information in Neural Networks:
+$$I(\theta) = \mathbb{E}_{x \sim p_\text{data}}\left[\nabla_\theta \log p(y|x;\theta) \nabla_\theta \log p(y|x;\theta)^\top\right]$$
+
+The empirical Fisher is computed over training data as an approximation.
+</Formula>
+
+### Implementation
+
+```python
+class NeuralNetworkFisher:
+    """
+    Compute and use Fisher information for neural network optimization.
+    """
+
+    def __init__(self, layer_sizes):
+        self.layer_sizes = layer_sizes
+        self.n_layers = len(layer_sizes) - 1
+
+        # Initialize weights
+        self.weights = []
+        self.biases = []
+
+        for i in range(self.n_layers):
+            W = np.random.randn(layer_sizes[i+1], layer_sizes[i]) * 0.1
+            b = np.zeros(layer_sizes[i+1])
+            self.weights.append(W)
+            self.biases.append(b)
+
+    def forward(self, x):
+        """Forward pass with stored activations."""
+        activations = [x]
+        current = x
+
+        for i in range(self.n_layers - 1):
+            z = self.weights[i] @ current + self.biases[i]
+            current = np.maximum(0, z)  # ReLU
+            activations.append(current)
+
+        # Output layer (softmax for classification)
+        z = self.weights[-1] @ current + self.biases[-1]
+        exp_z = np.exp(z - np.max(z))
+        probs = exp_z / exp_z.sum()
+        activations.append(probs)
+
+        return probs, activations
+
+    def compute_gradient(self, x, y):
+        """Compute gradient of log-likelihood."""
+        probs, activations = self.forward(x)
+
+        # Create one-hot target
+        target = np.zeros(probs.shape)
+        target[y] = 1
+
+        # Gradient of cross-entropy
+        grad_output = probs - target
+
+        # Backpropagation
+        grads_W = []
+        grads_b = []
+
+        delta = grad_output
+
+        for i in range(self.n_layers - 1, -1, -1):
+            grads_W.insert(0, np.outer(delta, activations[i]))
+            grads_b.insert(0, delta)
+
+            if i > 0:
+                delta = self.weights[i].T @ delta
+                delta *= (activations[i] > 0)  # ReLU derivative
+
+        return grads_W, grads_b
+
+    def flatten_gradients(self, grads_W, grads_b):
+        """Flatten gradients into single vector."""
+        flat = []
+        for W, b in zip(grads_W, grads_b):
+            flat.extend(W.flatten())
+            flat.extend(b)
+        return np.array(flat)
+
+    def compute_empirical_fisher(self, X, y, n_samples=None):
+        """
+        Compute empirical Fisher information matrix.
+
+        FIM = (1/n) Σ_i g_i g_i^T
+
+        where g_i is the gradient for sample i.
+        """
+        if n_samples is None:
+            n_samples = len(X)
+        else:
+            n_samples = min(n_samples, len(X))
+
+        indices = np.random.choice(len(X), n_samples, replace=False)
+
+        # Get parameter dimension
+        grads_W, grads_b = self.compute_gradient(X[0], y[0])
+        flat_grad = self.flatten_gradients(grads_W, grads_b)
+        n_params = len(flat_grad)
+
+        # Compute FIM
+        fim = np.zeros((n_params, n_params))
+
+        for idx in indices:
+            grads_W, grads_b = self.compute_gradient(X[idx], y[idx])
+            g = self.flatten_gradients(grads_W, grads_b)
+            fim += np.outer(g, g)
+
+        return fim / n_samples
+
+    def compute_diagonal_fisher(self, X, y, n_samples=None):
+        """
+        Compute diagonal approximation of Fisher.
+
+        Much cheaper: O(n_params) instead of O(n_params²)
+        """
+        if n_samples is None:
+            n_samples = len(X)
+        else:
+            n_samples = min(n_samples, len(X))
+
+        indices = np.random.choice(len(X), n_samples, replace=False)
+
+        grads_W, grads_b = self.compute_gradient(X[0], y[0])
+        flat_grad = self.flatten_gradients(grads_W, grads_b)
+        diagonal_fim = np.zeros(len(flat_grad))
+
+        for idx in indices:
+            grads_W, grads_b = self.compute_gradient(X[idx], y[idx])
+            g = self.flatten_gradients(grads_W, grads_b)
+            diagonal_fim += g ** 2
+
+        return diagonal_fim / n_samples
+
+
+# Example
+np.random.seed(42)
+
+# Create small network
+net = NeuralNetworkFisher([4, 8, 3])
+
+# Generate synthetic data
+n_samples = 50
+X = np.random.randn(n_samples, 4)
+y = np.random.randint(0, 3, n_samples)
+
+# Compute Fisher information
+print("Computing Fisher Information for Neural Network")
+print("="*50)
+
+# Diagonal approximation (fast)
+diag_fim = net.compute_diagonal_fisher(X, y, n_samples=30)
+print(f"Diagonal FIM shape: {diag_fim.shape}")
+print(f"Diagonal FIM range: [{diag_fim.min():.6f}, {diag_fim.max():.6f}]")
+
+# Full FIM (slow for large networks)
+full_fim = net.compute_empirical_fisher(X, y, n_samples=30)
+print(f"\nFull FIM shape: {full_fim.shape}")
+print(f"FIM eigenvalue range: [{np.min(np.linalg.eigvalsh(full_fim)):.6f}, "
+      f"{np.max(np.linalg.eigvalsh(full_fim)):.6f}]")
+
+# Verify diagonal approximation
+print(f"\nDiagonal extraction vs diagonal FIM agreement: "
+      f"{np.allclose(np.diag(full_fim), diag_fim, rtol=0.1)}")
+```
+
+<Tip>
+For deep learning, diagonal Fisher or Kronecker-factored approximations (K-FAC) make natural gradient tractable. These capture the most important curvature information while being computationally feasible.
+</Tip>
+
+---
+
+## Summary
+
+Classical Fisher information provides the foundation for natural gradient methods:
+
+1. **Definition**: Fisher information measures parameter sensitivity via score function variance
+2. **Matrix form**: FIM captures correlations between parameters
+3. **Cramér-Rao bound**: Sets fundamental limits on estimation precision
+4. **Geometry**: FIM defines Riemannian metric on probability space
+5. **Natural gradient**: Uses FIM inverse for parameterization-invariant optimization
+6. **Applications**: Enables better optimization in neural networks and probabilistic models
+
+Understanding classical Fisher information is essential for the quantum extensions we'll explore next.

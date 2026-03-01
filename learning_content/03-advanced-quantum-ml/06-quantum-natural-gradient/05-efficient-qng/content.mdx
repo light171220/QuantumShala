@@ -1,0 +1,649 @@
+---
+title: "Efficient Quantum Natural Gradient"
+description: "Learn efficient methods for computing quantum natural gradients that scale better than direct QFI matrix computation and inversion"
+---
+
+# Efficient Quantum Natural Gradient
+
+Direct computation of the quantum Fisher information matrix requires O(p²) quantum circuits, making it impractical for large variational circuits. This lesson covers efficient approximations and algorithms.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Implement block-diagonal QFI approximations
+- Use stochastic estimation for scalable QNG
+- Apply conjugate gradient methods for large systems
+- Implement simultaneous perturbation techniques
+- Understand QNG complexity and trade-offs
+- Design efficient measurement strategies
+
+## 1. Computational Complexity of QNG
+
+Understanding the bottleneck in quantum natural gradients guides efficient approximations.
+
+<Definition term="QNG Complexity">
+For p parameters:
+- QFI matrix computation: O(p²) quantum circuits
+- Matrix inversion: O(p³) classical operations
+- Total per iteration: O(p²) quantum + O(p³) classical
+</Definition>
+
+```python
+import numpy as np
+from scipy.linalg import solve, cho_factor, cho_solve
+import time
+
+def benchmark_qng_complexity(param_counts):
+    """
+    Benchmark QNG computational costs for different parameter counts.
+    """
+    results = []
+
+    for p in param_counts:
+        # Simulate QFI computation time (O(p²) circuits)
+        qfi_circuits = p * (p + 1) // 2  # Unique entries
+
+        # Simulate QFI matrix (random positive definite)
+        A = np.random.randn(p, p)
+        qfi = A @ A.T + 0.1 * np.eye(p)
+        gradient = np.random.randn(p)
+
+        # Time matrix inversion
+        start = time.time()
+        natural_grad = np.linalg.solve(qfi, gradient)
+        inversion_time = time.time() - start
+
+        results.append({
+            'params': p,
+            'qfi_circuits': qfi_circuits,
+            'inversion_time_ms': inversion_time * 1000
+        })
+
+    return results
+
+# Benchmark
+param_counts = [10, 20, 50, 100, 200]
+results = benchmark_qng_complexity(param_counts)
+
+print("QNG Complexity Scaling:")
+print("-" * 50)
+print(f"{'Params':<10} {'QFI Circuits':<15} {'Inversion (ms)':<15}")
+print("-" * 50)
+for r in results:
+    print(f"{r['params']:<10} {r['qfi_circuits']:<15} {r['inversion_time_ms']:<15.3f}")
+```
+
+## 2. Block-Diagonal Approximation
+
+Approximate the QFI matrix as block-diagonal, treating parameter groups independently.
+
+<Formula>
+Block-diagonal approximation:
+
+F ≈ F_block = diag(F₁, F₂, ..., F_k)
+
+where each block F_i corresponds to a layer or group of parameters.
+</Formula>
+
+```python
+def compute_block_diagonal_qfi(params, block_sizes, state_fn, eps=1e-5):
+    """
+    Compute block-diagonal QFI approximation.
+
+    Args:
+        params: All parameters
+        block_sizes: List of block sizes (must sum to len(params))
+        state_fn: Function to compute quantum state
+        eps: Finite difference step
+
+    Returns:
+        List of QFI blocks
+    """
+    assert sum(block_sizes) == len(params), "Block sizes must sum to total params"
+
+    blocks = []
+    param_idx = 0
+
+    for block_size in block_sizes:
+        # Extract block parameters
+        block_start = param_idx
+        block_end = param_idx + block_size
+
+        # Compute QFI for this block only
+        block_qfi = np.zeros((block_size, block_size))
+
+        state = state_fn(params)
+
+        # Compute derivatives for block parameters
+        derivs = []
+        for i in range(block_start, block_end):
+            params_plus = params.copy()
+            params_plus[i] += eps
+            params_minus = params.copy()
+            params_minus[i] -= eps
+
+            deriv = (state_fn(params_plus) - state_fn(params_minus)) / (2 * eps)
+            derivs.append(deriv)
+
+        # Compute block QFI
+        for i in range(block_size):
+            for j in range(block_size):
+                term1 = np.vdot(derivs[i], derivs[j])
+                term2 = np.vdot(derivs[i], state) * np.vdot(state, derivs[j])
+                block_qfi[i, j] = 4 * np.real(term1 - term2)
+
+        blocks.append(block_qfi)
+        param_idx = block_end
+
+    return blocks
+
+def block_diagonal_natural_gradient(gradient, qfi_blocks, reg_lambda=1e-4):
+    """
+    Compute natural gradient using block-diagonal QFI.
+
+    Args:
+        gradient: Full gradient vector
+        qfi_blocks: List of QFI blocks
+        reg_lambda: Regularization parameter
+
+    Returns:
+        Natural gradient vector
+    """
+    natural_grad = []
+    grad_idx = 0
+
+    for block in qfi_blocks:
+        block_size = block.shape[0]
+        block_grad = gradient[grad_idx:grad_idx + block_size]
+
+        # Regularize and invert block
+        block_reg = block + reg_lambda * np.eye(block_size)
+        block_nat_grad = np.linalg.solve(block_reg, block_grad)
+
+        natural_grad.extend(block_nat_grad)
+        grad_idx += block_size
+
+    return np.array(natural_grad)
+
+# Example: Compare full vs block-diagonal QNG
+def simple_state(params):
+    """Simple parameterized state for testing."""
+    dim = 4
+    state = np.zeros(dim, dtype=complex)
+    state[0] = 1.0
+
+    # Apply rotations
+    for i, angle in enumerate(params):
+        qubit = i % 2
+        c, s = np.cos(angle/2), np.sin(angle/2)
+        new_state = np.zeros(dim, dtype=complex)
+        for j in range(dim):
+            bit = (j >> qubit) & 1
+            j0 = j & ~(1 << qubit)
+            j1 = j | (1 << qubit)
+            if bit == 0:
+                new_state[j] += c * state[j0] - s * state[j1]
+            else:
+                new_state[j] += s * state[j0] + c * state[j1]
+        state = new_state
+
+    return state
+
+np.random.seed(42)
+params = np.random.randn(8)
+gradient = np.random.randn(8)
+
+# Block-diagonal QFI (2 blocks of 4 parameters each)
+qfi_blocks = compute_block_diagonal_qfi(params, [4, 4], simple_state)
+nat_grad_block = block_diagonal_natural_gradient(gradient, qfi_blocks)
+
+print("Block-Diagonal QNG:")
+print(f"Block 1 shape: {qfi_blocks[0].shape}")
+print(f"Block 2 shape: {qfi_blocks[1].shape}")
+print(f"Natural gradient: {nat_grad_block}")
+
+# Count circuits saved
+full_circuits = 8 * (8 + 1) // 2  # Full QFI
+block_circuits = 4 * 5 // 2 * 2   # Two 4x4 blocks
+print(f"\nCircuit reduction: {full_circuits} → {block_circuits} ({100*(1-block_circuits/full_circuits):.1f}% savings)")
+```
+
+<Tip>
+Block-diagonal approximation works best when parameters in different layers have weak correlations. For hardware-efficient ansätze with alternating layers, this is often a good approximation.
+</Tip>
+
+## 3. Stochastic Estimation
+
+Estimate QFI-gradient products stochastically without computing the full matrix.
+
+<Formula>
+Stochastic natural gradient:
+
+F⁻¹∇L ≈ E_v[v · (v^T F v)⁻¹ · (v^T ∇L)]
+
+where v are random probe vectors.
+</Formula>
+
+```python
+def stochastic_qfi_vector_product(params, vector, state_fn, n_samples=10, eps=1e-5):
+    """
+    Estimate F @ vector using stochastic sampling.
+
+    Uses the identity: F @ v = E[⟨∂ψ|v⟩|∂ψ⟩] - E[⟨∂ψ|ψ⟩⟨ψ|∂ψ⟩]v
+    approximated via sampled parameter directions.
+    """
+    n_params = len(params)
+    state = state_fn(params)
+
+    # Compute all derivatives (could be sampled for more efficiency)
+    derivs = []
+    for i in range(n_params):
+        params_plus = params.copy()
+        params_plus[i] += eps
+        params_minus = params.copy()
+        params_minus[i] -= eps
+        deriv = (state_fn(params_plus) - state_fn(params_minus)) / (2 * eps)
+        derivs.append(deriv)
+
+    # Compute F @ vector directly (for validation)
+    result = np.zeros(n_params)
+    for i in range(n_params):
+        for j in range(n_params):
+            term1 = np.vdot(derivs[i], derivs[j])
+            term2 = np.vdot(derivs[i], state) * np.vdot(state, derivs[j])
+            fij = 4 * np.real(term1 - term2)
+            result[i] += fij * vector[j]
+
+    return result
+
+def stochastic_natural_gradient(params, gradient, state_fn, n_iterations=20, reg_lambda=1e-4):
+    """
+    Compute natural gradient using conjugate gradient method.
+
+    Solves F @ x = gradient without explicitly forming F.
+    """
+    n_params = len(params)
+
+    # Initial guess
+    x = np.zeros(n_params)
+    r = gradient - stochastic_qfi_vector_product(params, x, state_fn) - reg_lambda * x
+    p = r.copy()
+    rsold = np.dot(r, r)
+
+    for i in range(n_iterations):
+        # Matrix-vector product F @ p
+        Fp = stochastic_qfi_vector_product(params, p, state_fn) + reg_lambda * p
+
+        alpha = rsold / (np.dot(p, Fp) + 1e-10)
+        x = x + alpha * p
+        r = r - alpha * Fp
+
+        rsnew = np.dot(r, r)
+
+        if np.sqrt(rsnew) < 1e-8:
+            break
+
+        p = r + (rsnew / rsold) * p
+        rsold = rsnew
+
+    return x
+
+# Compare stochastic vs exact natural gradient
+np.random.seed(42)
+params = np.random.randn(6)
+gradient = np.random.randn(6)
+
+# Stochastic natural gradient
+nat_grad_stoch = stochastic_natural_gradient(params, gradient, simple_state)
+
+print("Stochastic Natural Gradient (CG method):")
+print(f"Natural gradient: {nat_grad_stoch}")
+```
+
+## 4. Simultaneous Perturbation Stochastic Approximation (SPSA)
+
+SPSA estimates gradients using only two function evaluations regardless of parameter dimension.
+
+```python
+def spsa_gradient_estimate(params, loss_fn, perturbation_size=0.1):
+    """
+    Estimate gradient using SPSA.
+
+    Uses only 2 loss evaluations instead of 2p.
+    """
+    n_params = len(params)
+
+    # Random perturbation direction (Bernoulli ±1)
+    delta = np.random.choice([-1, 1], size=n_params)
+
+    # Evaluate loss at perturbed points
+    loss_plus = loss_fn(params + perturbation_size * delta)
+    loss_minus = loss_fn(params - perturbation_size * delta)
+
+    # Gradient estimate
+    gradient = (loss_plus - loss_minus) / (2 * perturbation_size * delta)
+
+    return gradient
+
+def spsa_qfi_estimate(params, state_fn, perturbation_size=0.1):
+    """
+    Estimate QFI using SPSA-style approach.
+
+    Returns a diagonal approximation.
+    """
+    n_params = len(params)
+
+    # Use multiple random directions
+    n_samples = 20
+    diagonal_estimates = np.zeros(n_params)
+
+    state = state_fn(params)
+
+    for _ in range(n_samples):
+        delta = np.random.choice([-1, 1], size=n_params)
+
+        state_plus = state_fn(params + perturbation_size * delta)
+        state_minus = state_fn(params - perturbation_size * delta)
+
+        # Fubini-Study distance gives curvature info
+        overlap_plus = np.abs(np.vdot(state, state_plus))
+        overlap_minus = np.abs(np.vdot(state, state_minus))
+
+        # Approximate local curvature
+        dist_plus = np.arccos(np.clip(overlap_plus, 0, 1))
+        dist_minus = np.arccos(np.clip(overlap_minus, 0, 1))
+
+        # Accumulate diagonal estimates
+        curvature = (dist_plus + dist_minus) / (2 * perturbation_size**2)
+        diagonal_estimates += curvature * np.abs(delta)
+
+    return 4 * diagonal_estimates / n_samples
+
+class SPSANaturalGradientOptimizer:
+    """
+    Natural gradient optimizer using SPSA for gradient and diagonal QFI.
+    """
+
+    def __init__(self, loss_fn, state_fn, learning_rate=0.1):
+        self.loss_fn = loss_fn
+        self.state_fn = state_fn
+        self.lr = learning_rate
+        self.history = []
+
+    def step(self, params, perturbation_size=0.1, reg_lambda=1e-2):
+        """One optimization step."""
+        # Estimate gradient via SPSA
+        gradient = spsa_gradient_estimate(params, self.loss_fn, perturbation_size)
+
+        # Estimate diagonal QFI
+        qfi_diag = spsa_qfi_estimate(params, self.state_fn, perturbation_size)
+
+        # Natural gradient with diagonal approximation
+        qfi_diag_reg = qfi_diag + reg_lambda
+        natural_grad = gradient / qfi_diag_reg
+
+        # Update
+        new_params = params - self.lr * natural_grad
+        loss = self.loss_fn(params)
+        self.history.append(loss)
+
+        return new_params
+
+    def optimize(self, initial_params, n_steps=100):
+        """Run optimization."""
+        params = initial_params.copy()
+        for step in range(n_steps):
+            # Decrease perturbation size over time
+            c = 0.1 / (step + 1)**0.1
+            params = self.step(params, perturbation_size=c)
+        return params
+
+# Demonstrate SPSA-based QNG
+np.random.seed(42)
+
+def test_loss(params):
+    state = simple_state(params)
+    H = np.diag([0, 1, 2, 3])  # Simple Hamiltonian
+    return np.real(np.vdot(state, H @ state))
+
+params = np.random.randn(6) * 0.5
+
+spsa_opt = SPSANaturalGradientOptimizer(test_loss, simple_state, learning_rate=0.5)
+final_params = spsa_opt.optimize(params, n_steps=50)
+
+print("SPSA-based Natural Gradient Optimization:")
+print(f"Initial loss: {spsa_opt.history[0]:.6f}")
+print(f"Final loss: {spsa_opt.history[-1]:.6f}")
+```
+
+<Warning>
+SPSA provides noisy estimates. Use averaging over multiple iterations and decaying perturbation sizes for convergence.
+</Warning>
+
+## 5. Layer-wise Natural Gradient
+
+Compute natural gradients layer by layer, treating each layer's parameters independently.
+
+```python
+class LayerwiseQNG:
+    """
+    Layer-wise quantum natural gradient optimizer.
+
+    Computes QFI and natural gradient for each layer separately.
+    """
+
+    def __init__(self, layer_sizes, state_fn, learning_rate=0.5, reg_lambda=1e-4):
+        self.layer_sizes = layer_sizes
+        self.state_fn = state_fn
+        self.lr = learning_rate
+        self.reg_lambda = reg_lambda
+        self.n_params = sum(layer_sizes)
+
+    def compute_layer_qfi(self, params, layer_idx, eps=1e-5):
+        """Compute QFI for a single layer."""
+        start = sum(self.layer_sizes[:layer_idx])
+        size = self.layer_sizes[layer_idx]
+
+        state = self.state_fn(params)
+
+        derivs = []
+        for i in range(start, start + size):
+            params_plus = params.copy()
+            params_plus[i] += eps
+            params_minus = params.copy()
+            params_minus[i] -= eps
+            deriv = (self.state_fn(params_plus) - self.state_fn(params_minus)) / (2 * eps)
+            derivs.append(deriv)
+
+        qfi = np.zeros((size, size))
+        for i in range(size):
+            for j in range(size):
+                term1 = np.vdot(derivs[i], derivs[j])
+                term2 = np.vdot(derivs[i], state) * np.vdot(state, derivs[j])
+                qfi[i, j] = 4 * np.real(term1 - term2)
+
+        return qfi
+
+    def compute_layer_gradient(self, params, layer_idx, loss_fn, eps=1e-5):
+        """Compute gradient for a single layer."""
+        start = sum(self.layer_sizes[:layer_idx])
+        size = self.layer_sizes[layer_idx]
+
+        gradient = np.zeros(size)
+        for i in range(size):
+            params_plus = params.copy()
+            params_plus[start + i] += eps
+            params_minus = params.copy()
+            params_minus[start + i] -= eps
+            gradient[i] = (loss_fn(params_plus) - loss_fn(params_minus)) / (2 * eps)
+
+        return gradient
+
+    def step(self, params, loss_fn):
+        """One optimization step with layer-wise updates."""
+        new_params = params.copy()
+
+        for layer_idx in range(len(self.layer_sizes)):
+            start = sum(self.layer_sizes[:layer_idx])
+            size = self.layer_sizes[layer_idx]
+
+            # Compute layer QFI and gradient
+            qfi = self.compute_layer_qfi(params, layer_idx)
+            gradient = self.compute_layer_gradient(params, layer_idx, loss_fn)
+
+            # Regularize and compute natural gradient
+            qfi_reg = qfi + self.reg_lambda * np.eye(size)
+            nat_grad = np.linalg.solve(qfi_reg, gradient)
+
+            # Update layer parameters
+            new_params[start:start + size] -= self.lr * nat_grad
+
+        return new_params, loss_fn(params)
+
+# Demonstrate layer-wise QNG
+np.random.seed(42)
+
+layer_sizes = [3, 3]  # Two layers of 3 parameters each
+params = np.random.randn(6) * 0.5
+
+lwqng = LayerwiseQNG(layer_sizes, simple_state, learning_rate=0.5)
+
+history = []
+for _ in range(30):
+    params, loss = lwqng.step(params, test_loss)
+    history.append(loss)
+
+print("Layer-wise QNG Optimization:")
+print(f"Initial loss: {history[0]:.6f}")
+print(f"Final loss: {history[-1]:.6f}")
+
+# Compare circuit counts
+full_qfi_circuits = 6 * 7 // 2
+layerwise_circuits = 2 * (3 * 4 // 2)
+print(f"\nCircuits: Full={full_qfi_circuits}, Layer-wise={layerwise_circuits}")
+```
+
+## 6. Measurement-Efficient QNG
+
+Design measurement strategies that extract maximum information with minimum shots.
+
+```python
+def optimal_measurement_allocation(qfi_eigenvalues, total_shots, min_shots=100):
+    """
+    Allocate measurement shots based on QFI eigenvalue structure.
+
+    Allocate more shots to eigenspaces with larger eigenvalues
+    (more sensitive directions).
+    """
+    n = len(qfi_eigenvalues)
+
+    # Proportional to eigenvalue magnitude
+    weights = np.abs(qfi_eigenvalues) / np.sum(np.abs(qfi_eigenvalues))
+
+    # Allocate shots
+    shots = np.maximum(min_shots, (weights * total_shots).astype(int))
+
+    # Adjust to exactly use total_shots
+    while np.sum(shots) > total_shots:
+        max_idx = np.argmax(shots)
+        shots[max_idx] -= 1
+    while np.sum(shots) < total_shots:
+        min_idx = np.argmin(shots)
+        shots[min_idx] += 1
+
+    return shots
+
+def grouped_parameter_measurement(params, state_fn, groups, n_shots=1000):
+    """
+    Measure QFI for parameter groups with adaptive shot allocation.
+
+    Args:
+        params: All parameters
+        state_fn: State preparation function
+        groups: List of parameter index lists
+        n_shots: Total measurement budget
+
+    Returns:
+        List of QFI estimates for each group
+    """
+    n_groups = len(groups)
+
+    # Initial uniform allocation
+    shots_per_group = n_shots // n_groups
+
+    group_qfis = []
+    group_variances = []
+
+    for group_idx, indices in enumerate(groups):
+        size = len(indices)
+
+        # Compute QFI for this group
+        state = state_fn(params)
+        derivs = []
+
+        eps = 1e-5
+        for i in indices:
+            params_plus = params.copy()
+            params_plus[i] += eps
+            params_minus = params.copy()
+            params_minus[i] -= eps
+            deriv = (state_fn(params_plus) - state_fn(params_minus)) / (2 * eps)
+            derivs.append(deriv)
+
+        qfi = np.zeros((size, size))
+        for i in range(size):
+            for j in range(size):
+                term1 = np.vdot(derivs[i], derivs[j])
+                term2 = np.vdot(derivs[i], state) * np.vdot(state, derivs[j])
+                qfi[i, j] = 4 * np.real(term1 - term2)
+
+        group_qfis.append(qfi)
+
+        # Estimate variance (for shot reallocation)
+        variance = np.var(np.linalg.eigvalsh(qfi))
+        group_variances.append(variance)
+
+    # Reallocate shots based on variance
+    total_var = sum(group_variances) + 1e-10
+    optimal_shots = [int(n_shots * v / total_var) for v in group_variances]
+
+    return group_qfis, optimal_shots
+
+# Demonstrate measurement-efficient QNG
+np.random.seed(42)
+params = np.random.randn(8)
+
+# Define parameter groups (e.g., by layer)
+groups = [[0, 1, 2, 3], [4, 5, 6, 7]]
+
+group_qfis, optimal_shots = grouped_parameter_measurement(
+    params, simple_state, groups, n_shots=10000
+)
+
+print("Measurement-Efficient QNG:")
+print(f"Group 1 QFI trace: {np.trace(group_qfis[0]):.4f}")
+print(f"Group 2 QFI trace: {np.trace(group_qfis[1]):.4f}")
+print(f"Optimal shot allocation: {optimal_shots}")
+```
+
+<Tip>
+For near-term devices with limited coherence, prioritize measuring the most sensitive parameter directions first, as identified by QFI eigenvalues.
+</Tip>
+
+## Summary
+
+In this lesson, you learned:
+
+- **Block-diagonal approximation** reduces O(p²) to O(k·(p/k)²) complexity
+- **Stochastic estimation** with conjugate gradient avoids explicit matrix construction
+- **SPSA** provides O(1) gradient estimates with diagonal QFI approximation
+- **Layer-wise QNG** treats layers independently for better scaling
+- **Measurement allocation** optimizes shot budget based on sensitivity
+- **Trade-offs** between accuracy and computational cost
+
+These techniques make quantum natural gradients practical for larger variational circuits.
+
+## Next Steps
+
+In the final lesson, we'll explore practical applications of quantum natural gradients, including VQE optimization, quantum machine learning, and noise-adaptive training.

@@ -1,0 +1,631 @@
+---
+title: "Isogeny Fundamentals: Maps Between Elliptic Curves"
+description: "Understand isogenies - the group homomorphisms between elliptic curves that form the foundation of isogeny-based cryptography. Learn kernels, degrees, dual isogenies, and computation methods."
+duration: 70
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Define isogenies and their key properties
+- Compute isogenies from their kernels using Vélu's formulas
+- Understand dual isogenies and degree
+- Navigate the supersingular isogeny graph
+- Explain how isogenies enable cryptographic constructions
+
+## 1. What is an Isogeny?
+
+<Definition term="Isogeny">
+An isogeny $\phi: E_1 \to E_2$ is a non-constant morphism (algebraic map) between elliptic curves that preserves the group structure:
+
+$$\phi(P + Q) = \phi(P) + \phi(Q)$$
+
+for all points $P, Q \in E_1$.
+</Definition>
+
+```python
+import numpy as np
+from typing import Tuple, Optional, List, Dict
+from dataclasses import dataclass
+
+def isogeny_overview():
+    """Overview of isogenies."""
+    print("ISOGENIES: MAPS BETWEEN ELLIPTIC CURVES")
+    print("=" * 70)
+    
+    overview = """
+    INTUITION:
+    ━━━━━━━━━━
+    
+    Think of an isogeny as a "structure-preserving tunnel" between curves:
+    
+    E₁ ----φ----> E₂
+    
+    • Maps points from E₁ to points on E₂
+    • Preserves addition: φ(P + Q) = φ(P) + φ(Q)
+    • Has a finite kernel: ker(φ) = {P : φ(P) = O}
+    
+    
+    KEY PROPERTIES:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Property        │ Description                                      │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ Degree          │ Size of kernel: deg(φ) = |ker(φ)|                │
+    │ Separable       │ If derivative is non-zero (all in char 0)        │
+    │ Dual isogeny    │ Every φ has a "reverse" φ̂: E₂ → E₁              │
+    │ j-invariant     │ φ exists iff there's path in isogeny graph       │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    
+    FUNDAMENTAL THEOREM:
+    ━━━━━━━━━━━━━━━━━━━━
+    
+    Every finite subgroup G ⊂ E defines a unique (up to isomorphism)
+    isogeny φ: E → E/G with kernel G.
+    
+    This means: SUBGROUP ↔ ISOGENY
+    
+    To specify an isogeny, just specify its kernel!
+    
+    
+    CRYPTOGRAPHIC RELEVANCE:
+    ━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    • Secret: A subgroup G (or generators of G)
+    • Public: The resulting curve E/G and possibly auxiliary data
+    • Hard problem: Given E and E', find the isogeny connecting them
+    
+    (Spoiler: SIDH's auxiliary data made this NOT hard after all!)
+    """
+    print(overview)
+
+isogeny_overview()
+```
+
+## 2. Kernels and Vélu's Formulas
+
+<Definition term="Vélu's Formulas">
+Given an elliptic curve $E: y^2 = x^3 + ax + b$ and a finite subgroup $G \subset E$, Vélu's formulas compute the isogeny $\phi: E \to E' = E/G$ and the coefficients of $E'$.
+</Definition>
+
+```python
+@dataclass
+class Point:
+    """Point on elliptic curve."""
+    x: Optional[int]
+    y: Optional[int]
+    
+    def is_infinity(self) -> bool:
+        return self.x is None
+    
+    @classmethod
+    def infinity(cls):
+        return cls(None, None)
+
+
+class IsogenyComputer:
+    """
+    Compute isogenies using Vélu's formulas.
+    
+    Given curve E and kernel G, computes:
+    1. The codomain curve E' = E/G
+    2. The isogeny map φ: E → E'
+    """
+    
+    def __init__(self, a: int, b: int, p: int):
+        """Initialize with curve y² = x³ + ax + b over F_p."""
+        self.a = a % p
+        self.b = b % p
+        self.p = p
+    
+    def add(self, P: Point, Q: Point) -> Point:
+        """Add two points."""
+        if P.is_infinity():
+            return Q
+        if Q.is_infinity():
+            return P
+        
+        if P.x == Q.x and (P.y + Q.y) % self.p == 0:
+            return Point.infinity()
+        
+        if P.x == Q.x:
+            num = (3 * P.x * P.x + self.a) % self.p
+            den = (2 * P.y) % self.p
+        else:
+            num = (Q.y - P.y) % self.p
+            den = (Q.x - P.x) % self.p
+        
+        lam = (num * pow(den, self.p - 2, self.p)) % self.p
+        x3 = (lam * lam - P.x - Q.x) % self.p
+        y3 = (lam * (P.x - x3) - P.y) % self.p
+        
+        return Point(x3, y3)
+    
+    def negate(self, P: Point) -> Point:
+        """Negate a point."""
+        if P.is_infinity():
+            return P
+        return Point(P.x, (-P.y) % self.p)
+    
+    def scalar_mult(self, k: int, P: Point) -> Point:
+        """Compute kP."""
+        if k == 0 or P.is_infinity():
+            return Point.infinity()
+        
+        if k < 0:
+            return self.scalar_mult(-k, self.negate(P))
+        
+        result = Point.infinity()
+        addend = P
+        
+        while k > 0:
+            if k & 1:
+                result = self.add(result, addend)
+            addend = self.add(addend, addend)
+            k >>= 1
+        
+        return result
+    
+    def velu_isogeny(self, kernel: List[Point]) -> Tuple[int, int, callable]:
+        """
+        Compute isogeny with given kernel using Vélu's formulas.
+        
+        Args:
+            kernel: List of points in the kernel (including O)
+        
+        Returns:
+            (a', b', φ) where E': y² = x³ + a'x + b' and φ is the map
+        """
+        # Remove point at infinity from kernel
+        kernel_finite = [P for P in kernel if not P.is_infinity()]
+        
+        if not kernel_finite:
+            # Trivial isogeny (identity)
+            return self.a, self.b, lambda P: P
+        
+        # Separate 2-torsion from non-2-torsion
+        # 2-torsion: points P with 2P = O (i.e., P.y = 0)
+        two_torsion = [P for P in kernel_finite if P.y == 0]
+        non_two_torsion = [P for P in kernel_finite if P.y != 0]
+        
+        # For non-2-torsion, pair P with -P (they appear together)
+        # Take representatives (one from each pair)
+        representatives = []
+        seen_x = set()
+        for P in non_two_torsion:
+            if P.x not in seen_x:
+                representatives.append(P)
+                seen_x.add(P.x)
+        
+        # Compute Vélu parameters
+        v = 0
+        w = 0
+        
+        for Q in two_torsion:
+            gQ = 3 * Q.x * Q.x + self.a
+            v = (v + gQ) % self.p
+            w = (w + Q.x * gQ) % self.p
+        
+        for Q in representatives:
+            gQ = 3 * Q.x * Q.x + self.a
+            vQ = 2 * gQ
+            uQ = (Q.y ** 2) % self.p
+            v = (v + vQ) % self.p
+            w = (w + uQ + Q.x * vQ) % self.p
+        
+        # New curve coefficients
+        a_new = (self.a - 5 * v) % self.p
+        b_new = (self.b - 7 * w) % self.p
+        
+        # The isogeny map (simplified - full Vélu is more complex)
+        def phi(P: Point) -> Point:
+            if P.is_infinity():
+                return Point.infinity()
+            
+            # Check if P is in kernel
+            for Q in kernel:
+                if not Q.is_infinity() and P.x == Q.x and P.y == Q.y:
+                    return Point.infinity()
+            
+            # Compute image (simplified)
+            x_num = P.x
+            x_den = 1
+            
+            for Q in two_torsion:
+                x_num = (x_num * (P.x - Q.x) - gQ_for(Q)) % self.p
+            
+            # This is simplified; real Vélu uses rational functions
+            return Point(x_num % self.p, P.y % self.p)
+        
+        return a_new, b_new, phi
+    
+    def compute_kernel_from_generator(self, G: Point, order: int) -> List[Point]:
+        """Compute full kernel <G> from generator and order."""
+        kernel = [Point.infinity()]
+        current = G
+        
+        for _ in range(order - 1):
+            kernel.append(current)
+            current = self.add(current, G)
+        
+        return kernel
+
+
+def demonstrate_isogeny():
+    """Demonstrate isogeny computation."""
+    print("\nISOGENY COMPUTATION DEMONSTRATION")
+    print("=" * 65)
+    
+    # Small curve for demonstration
+    p = 101
+    a, b = 0, 1  # y² = x³ + 1
+    
+    comp = IsogenyComputer(a, b, p)
+    
+    print(f"Source curve E: y² = x³ + {a}x + {b} over F_{p}")
+    
+    # Find a point of small order for kernel
+    # For demonstration, use a 2-torsion point (y = 0)
+    for x in range(p):
+        if (pow(x, 3, p) + a * x + b) % p == 0:
+            kernel_gen = Point(x, 0)
+            print(f"\nKernel generator: {kernel_gen}")
+            print(f"This is a 2-torsion point (2P = O)")
+            
+            # Compute kernel
+            kernel = [Point.infinity(), kernel_gen]
+            print(f"Full kernel: {kernel}")
+            
+            # Compute isogeny
+            a_new, b_new, phi = comp.velu_isogeny(kernel)
+            print(f"\nTarget curve E': y² = x³ + {a_new}x + {b_new}")
+            print(f"Isogeny degree: {len(kernel)}")
+            
+            break
+
+demonstrate_isogeny()
+```
+
+## 3. Dual Isogenies and Degree
+
+```python
+def dual_isogeny_explanation():
+    """Explain dual isogenies."""
+    print("\nDUAL ISOGENIES")
+    print("=" * 65)
+    
+    explanation = """
+    EVERY ISOGENY HAS A DUAL:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    For every isogeny φ: E₁ → E₂ of degree d,
+    there exists a unique dual isogeny φ̂: E₂ → E₁
+    
+    Properties:
+    • deg(φ̂) = deg(φ) = d
+    • φ̂ ∘ φ = [d] (multiplication by d on E₁)
+    • φ ∘ φ̂ = [d] (multiplication by d on E₂)
+    
+    
+    PICTORIALLY:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                                                                     │
+    │     E₁ ----φ----> E₂                                               │
+    │      ↑            │                                                │
+    │      │            │                                                │
+    │     [d]          [d]     (Multiplication-by-d maps)                │
+    │      │            │                                                │
+    │      │            ↓                                                │
+    │     E₁ <---φ̂---- E₂                                               │
+    │                                                                     │
+    │     Composition: φ̂ ∘ φ = [d] and φ ∘ φ̂ = [d]                      │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    
+    DEGREE:
+    ━━━━━━━━
+    
+    The degree of an isogeny φ equals:
+    • |ker(φ)| (number of kernel elements)
+    • The "size" of the map
+    
+    Common degrees in crypto:
+    • Prime ℓ: ℓ-isogenies (ℓ+1 choices from each curve)
+    • 2ᵃ or 3ᵇ: Powers used in SIDH
+    
+    
+    COMPOSITION:
+    ━━━━━━━━━━━━
+    
+    Isogenies can be composed:
+    
+    E₁ --φ₁--> E₂ --φ₂--> E₃
+    
+    deg(φ₂ ∘ φ₁) = deg(φ₂) × deg(φ₁)
+    
+    This allows building large-degree isogenies from small ones!
+    
+    SIDH Strategy:
+    • Compose many 2-isogenies to get 2ᵃ-isogeny
+    • Compose many 3-isogenies to get 3ᵇ-isogeny
+    """
+    print(explanation)
+
+dual_isogeny_explanation()
+```
+
+## 4. The Supersingular Isogeny Graph
+
+```python
+def isogeny_graph():
+    """Explain the supersingular isogeny graph."""
+    print("\nTHE SUPERSINGULAR ISOGENY GRAPH")
+    print("=" * 70)
+    
+    explanation = """
+    DEFINITION:
+    ━━━━━━━━━━━
+    
+    The ℓ-isogeny graph G_ℓ(p):
+    
+    • Vertices: Supersingular j-invariants over F_p²
+    • Edges: ℓ-isogenies between curves
+    
+    Each vertex has exactly (ℓ + 1) edges (counting with multiplicity).
+    
+    
+    EXAMPLE (ℓ = 2):
+    ━━━━━━━━━━━━━━━━
+    
+    For p = 431, there are about 36 supersingular j-invariants.
+    
+    Each j-value has 3 outgoing 2-isogenies (degree 2, so ℓ+1 = 3).
+    
+         j₁ ----2---- j₂
+          |\\          |
+          2  \\2       2
+          |    \\      |
+         j₃ ----2---- j₄
+    
+    
+    KEY PROPERTIES:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Property          │ Value                                          │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ Number of vertices│ ≈ p/12                                         │
+    │ Regularity        │ (ℓ + 1)-regular                                │
+    │ Connectivity      │ Connected (for ℓ ∤ p)                          │
+    │ Expansion         │ Ramanujan graph (optimal expansion)            │
+    │ Diameter          │ O(log p)                                       │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    
+    RAMANUJAN PROPERTY:
+    ━━━━━━━━━━━━━━━━━━━
+    
+    Supersingular isogeny graphs are Ramanujan graphs:
+    
+    • Eigenvalues of adjacency matrix are bounded
+    • Random walks mix rapidly (reach uniform distribution quickly)
+    • Hard to distinguish random walk from random node
+    
+    This was believed to make path-finding hard... (but SIDH was broken!)
+    
+    
+    CRYPTOGRAPHIC INTUITION:
+    ━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    SIDH idea:
+    
+    1. Start at public curve E₀
+    2. Alice walks 2ᵃ steps → reaches E_A (secret path)
+    3. Bob walks 3ᵇ steps → reaches E_B (secret path)
+    4. They should arrive at same E_AB (somehow...)
+    
+    The "somehow" required publishing auxiliary data.
+    This auxiliary data enabled the devastating 2022 attack!
+    """
+    print(explanation)
+
+
+class SimpleIsogenyGraph:
+    """
+    Simplified representation of supersingular isogeny graph.
+    
+    For demonstration only - real graphs are much larger.
+    """
+    
+    def __init__(self, j_invariants: List[int], edges: Dict[int, List[int]]):
+        """
+        Initialize graph.
+        
+        Args:
+            j_invariants: List of SS j-invariants
+            edges: Dict mapping j to list of j-values reachable by ℓ-isogenies
+        """
+        self.vertices = set(j_invariants)
+        self.edges = edges
+    
+    def neighbors(self, j: int) -> List[int]:
+        """Get j-invariants reachable from j by one isogeny."""
+        return self.edges.get(j, [])
+    
+    def random_walk(self, start: int, steps: int) -> List[int]:
+        """Perform random walk from start."""
+        import random
+        
+        path = [start]
+        current = start
+        
+        for _ in range(steps):
+            neighbors = self.neighbors(current)
+            if not neighbors:
+                break
+            current = random.choice(neighbors)
+            path.append(current)
+        
+        return path
+    
+    def shortest_path(self, start: int, end: int) -> Optional[List[int]]:
+        """Find shortest path using BFS."""
+        if start == end:
+            return [start]
+        
+        from collections import deque
+        
+        queue = deque([(start, [start])])
+        visited = {start}
+        
+        while queue:
+            current, path = queue.popleft()
+            
+            for neighbor in self.neighbors(current):
+                if neighbor == end:
+                    return path + [neighbor]
+                
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, path + [neighbor]))
+        
+        return None
+
+
+def demonstrate_isogeny_graph():
+    """Demonstrate isogeny graph concepts."""
+    print("\nISOGENY GRAPH DEMONSTRATION")
+    print("-" * 50)
+    
+    # Toy example: small "graph" for illustration
+    # In reality, supersingular graphs have ~p/12 vertices
+    
+    j_values = [0, 1, 2, 3, 4, 5]  # Fake j-invariants
+    
+    # 3-regular graph (like 2-isogeny graph)
+    edges = {
+        0: [1, 2, 3],
+        1: [0, 2, 4],
+        2: [0, 1, 5],
+        3: [0, 4, 5],
+        4: [1, 3, 5],
+        5: [2, 3, 4]
+    }
+    
+    graph = SimpleIsogenyGraph(j_values, edges)
+    
+    print("Toy 3-regular graph (like 2-isogeny graph)")
+    print(f"Vertices: {j_values}")
+    print(f"Each vertex has {len(edges[0])} neighbors")
+    
+    # Random walk
+    import random
+    random.seed(42)
+    walk = graph.random_walk(0, 5)
+    print(f"\nRandom walk from 0: {walk}")
+    
+    # Shortest path
+    path = graph.shortest_path(0, 5)
+    print(f"Shortest path 0 → 5: {path}")
+
+isogeny_graph()
+demonstrate_isogeny_graph()
+```
+
+## 5. Computing Isogenies in Practice
+
+```python
+def practical_computation():
+    """Explain practical isogeny computation."""
+    print("\nPRACTICAL ISOGENY COMPUTATION")
+    print("=" * 70)
+    
+    computation = """
+    VÉLU'S FORMULAS:
+    ━━━━━━━━━━━━━━━━
+    
+    Given kernel G ⊂ E, compute φ: E → E/G
+    
+    For each point Q in the kernel:
+    
+    1. Compute contribution to curve coefficients
+    2. Compute contribution to point mapping
+    
+    Complexity: O(ℓ) for degree-ℓ isogeny
+    
+    
+    SQRT-VÉLU (2020):
+    ━━━━━━━━━━━━━━━━━
+    
+    Improved algorithm by Bernstein et al.
+    
+    Complexity: O(√ℓ) for degree-ℓ isogeny
+    
+    Key for practical CSIDH implementation!
+    
+    
+    MONTGOMERY CURVES:
+    ━━━━━━━━━━━━━━━━━━
+    
+    For efficiency, use Montgomery form:
+    
+    E: By² = x³ + Ax² + x
+    
+    Advantages:
+    • Faster arithmetic
+    • x-only formulas (don't need y-coordinate)
+    • Efficient isogeny computation
+    
+    SIDH/SIKE used Montgomery curves extensively.
+    
+    
+    ALGORITHM: DEGREE-2 ISOGENY
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Input: Montgomery curve E_A, 2-torsion point P
+    Output: Isogenous curve E_A', map φ
+    
+    1. P = (x_P, y_P) with 2P = O means y_P = 0
+    2. New curve: A' = 2(1 - 2x_P²) - A
+    3. For any point Q = (x_Q, y_Q):
+       φ(Q) = (x_Q · (x_Q·x_P - 1)/(x_Q - x_P), ...)
+    
+    This is the building block for SIDH!
+    
+    
+    COMPOSING ISOGENIES:
+    ━━━━━━━━━━━━━━━━━━━━
+    
+    To compute 2ᵃ-isogeny:
+    
+    1. Find point P of order 2ᵃ
+    2. Compute 2-isogeny φ₁ with kernel <2^{a-1}P>
+    3. Map P to φ₁(P), now has order 2^{a-1}
+    4. Repeat until done
+    
+    Result: Chain of a 2-isogenies = one 2ᵃ-isogeny
+    """
+    print(computation)
+
+practical_computation()
+```
+
+## Summary
+
+In this lesson, you learned the fundamentals of isogenies:
+
+1. **Definition**: Group homomorphisms between elliptic curves
+2. **Kernel-Isogeny Correspondence**: Subgroup G ↔ Isogeny φ with ker(φ) = G
+3. **Vélu's Formulas**: Compute isogeny from kernel
+4. **Dual Isogenies**: Every φ has dual φ̂ with φ̂∘φ = [deg(φ)]
+5. **Degree**: Size of kernel, multiplicative under composition
+6. **Isogeny Graph**: Supersingular j-invariants connected by ℓ-isogenies
+7. **Ramanujan Property**: Excellent expansion, rapid mixing
+
+These concepts form the mathematical foundation of SIDH, CSIDH, and other isogeny schemes.
+
+## Further Reading
+
+- Next lesson: SIDH/SIKE History and Design
+- Related: Vélu's original paper (1971)
+- Advanced: Quaternion algebras and endomorphism rings

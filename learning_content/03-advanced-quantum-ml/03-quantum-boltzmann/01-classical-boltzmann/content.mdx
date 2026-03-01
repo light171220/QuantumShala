@@ -1,0 +1,720 @@
+---
+title: "Classical Boltzmann Machines"
+description: "Master the foundations of classical Boltzmann machines, including energy-based models, Gibbs sampling, and restricted Boltzmann machines as prerequisites for quantum extensions."
+duration: 65
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand energy-based probabilistic models
+- Derive the Boltzmann distribution for neural networks
+- Implement Gibbs sampling for inference
+- Build and train Restricted Boltzmann Machines
+- Apply contrastive divergence training
+- Identify limitations motivating quantum approaches
+
+## 1. Energy-Based Models
+
+Boltzmann machines are probabilistic neural networks based on the physics of thermal equilibrium.
+
+<Definition term="Boltzmann Machine">
+A Boltzmann machine is a stochastic recurrent neural network where units take binary states and the probability of each configuration is determined by an energy function through the Boltzmann distribution: P(v) ∝ exp(-E(v)/T).
+</Definition>
+
+### The Energy Function
+
+<Formula>
+$$E(\mathbf{v}, \mathbf{h}) = -\sum_i a_i v_i - \sum_j b_j h_j - \sum_{i,j} v_i W_{ij} h_j - \sum_{i<j} U_{ij} v_i v_j - \sum_{i<j} V_{ij} h_i h_j$$
+</Formula>
+
+```python
+import numpy as np
+
+class BoltzmannMachine:
+    """
+    Full Boltzmann machine with visible and hidden units.
+    """
+
+    def __init__(self, n_visible, n_hidden, temperature=1.0):
+        """
+        Initialize Boltzmann machine.
+
+        Args:
+            n_visible: Number of visible units
+            n_hidden: Number of hidden units
+            temperature: Temperature parameter (default 1.0)
+        """
+        self.n_visible = n_visible
+        self.n_hidden = n_hidden
+        self.T = temperature
+
+        # Initialize weights
+        np.random.seed(42)
+
+        # Visible-hidden weights
+        self.W = np.random.randn(n_visible, n_hidden) * 0.1
+
+        # Visible-visible weights (symmetric)
+        self.U = np.random.randn(n_visible, n_visible) * 0.05
+        self.U = (self.U + self.U.T) / 2
+        np.fill_diagonal(self.U, 0)
+
+        # Hidden-hidden weights (symmetric)
+        self.V = np.random.randn(n_hidden, n_hidden) * 0.05
+        self.V = (self.V + self.V.T) / 2
+        np.fill_diagonal(self.V, 0)
+
+        # Biases
+        self.a = np.zeros(n_visible)  # Visible biases
+        self.b = np.zeros(n_hidden)   # Hidden biases
+
+    def energy(self, v, h):
+        """
+        Compute energy for given visible and hidden configuration.
+
+        Args:
+            v: Visible unit states (binary)
+            h: Hidden unit states (binary)
+
+        Returns:
+            Energy value
+        """
+        # Bias terms
+        E = -np.dot(self.a, v) - np.dot(self.b, h)
+
+        # Visible-hidden interaction
+        E -= np.dot(v, np.dot(self.W, h))
+
+        # Visible-visible interaction
+        E -= 0.5 * np.dot(v, np.dot(self.U, v))
+
+        # Hidden-hidden interaction
+        E -= 0.5 * np.dot(h, np.dot(self.V, h))
+
+        return E
+
+    def probability(self, v, h):
+        """
+        Compute unnormalized probability of configuration.
+
+        Note: Normalization requires summing over all 2^(n_v + n_h) states.
+        """
+        return np.exp(-self.energy(v, h) / self.T)
+
+    def conditional_prob_hidden(self, v, j):
+        """
+        P(h_j = 1 | v, h_{-j}) for full Boltzmann machine.
+
+        Note: This depends on other hidden units due to V matrix.
+        """
+        # For full BM, this is more complex
+        # Simplified: ignoring hidden-hidden for now
+        activation = self.b[j] + np.dot(v, self.W[:, j])
+        return 1.0 / (1.0 + np.exp(-activation / self.T))
+
+    def conditional_prob_visible(self, h, i):
+        """
+        P(v_i = 1 | h, v_{-i}) for full Boltzmann machine.
+        """
+        activation = self.a[i] + np.dot(self.W[i, :], h)
+        return 1.0 / (1.0 + np.exp(-activation / self.T))
+
+
+def compute_partition_function(bm, verbose=False):
+    """
+    Compute partition function Z by enumeration.
+
+    Warning: Exponential in number of units - only for small systems!
+    """
+    Z = 0.0
+    n_total = bm.n_visible + bm.n_hidden
+
+    if n_total > 20:
+        raise ValueError("Too many units for exact computation")
+
+    n_configs = 2**n_total
+
+    for config_idx in range(n_configs):
+        # Convert index to binary configuration
+        bits = format(config_idx, f'0{n_total}b')
+        v = np.array([int(b) for b in bits[:bm.n_visible]])
+        h = np.array([int(b) for b in bits[bm.n_visible:]])
+
+        Z += bm.probability(v, h)
+
+        if verbose and config_idx % 10000 == 0:
+            print(f"Progress: {config_idx}/{n_configs}")
+
+    return Z
+```
+
+## 2. Gibbs Sampling
+
+Gibbs sampling is the primary inference method for Boltzmann machines.
+
+<Definition term="Gibbs Sampling">
+Gibbs sampling is a Markov Chain Monte Carlo method that generates samples from a joint distribution by iteratively sampling each variable from its conditional distribution given all other variables.
+</Definition>
+
+### Implementation
+
+```python
+class GibbsSampler:
+    """
+    Gibbs sampler for Boltzmann machines.
+    """
+
+    def __init__(self, boltzmann_machine):
+        """
+        Initialize sampler.
+
+        Args:
+            boltzmann_machine: BoltzmannMachine instance
+        """
+        self.bm = boltzmann_machine
+
+    def sample_hidden_given_visible(self, v):
+        """
+        Sample hidden units given visible units.
+
+        For RBM (no hidden-hidden connections), units are independent.
+        """
+        h = np.zeros(self.bm.n_hidden)
+
+        for j in range(self.bm.n_hidden):
+            prob = self.bm.conditional_prob_hidden(v, j)
+            h[j] = 1 if np.random.random() < prob else 0
+
+        return h
+
+    def sample_visible_given_hidden(self, h):
+        """
+        Sample visible units given hidden units.
+        """
+        v = np.zeros(self.bm.n_visible)
+
+        for i in range(self.bm.n_visible):
+            prob = self.bm.conditional_prob_visible(h, i)
+            v[i] = 1 if np.random.random() < prob else 0
+
+        return v
+
+    def gibbs_step(self, v, h):
+        """
+        One complete Gibbs sampling step.
+
+        Updates all units once.
+        """
+        # Sample hidden given visible
+        h_new = self.sample_hidden_given_visible(v)
+
+        # Sample visible given hidden
+        v_new = self.sample_visible_given_hidden(h_new)
+
+        return v_new, h_new
+
+    def run_chain(self, v_init, n_steps, burn_in=100):
+        """
+        Run Gibbs sampling chain.
+
+        Args:
+            v_init: Initial visible state
+            n_steps: Number of samples to collect
+            burn_in: Steps to discard for equilibration
+
+        Returns:
+            Array of visible samples
+        """
+        v = v_init.copy()
+        h = self.sample_hidden_given_visible(v)
+
+        samples = []
+
+        for step in range(burn_in + n_steps):
+            v, h = self.gibbs_step(v, h)
+
+            if step >= burn_in:
+                samples.append(v.copy())
+
+        return np.array(samples)
+
+    def parallel_tempering(self, n_temps=5, n_steps=1000):
+        """
+        Parallel tempering for better mixing.
+
+        Uses multiple chains at different temperatures.
+        """
+        temps = np.linspace(1.0, 5.0, n_temps)
+        chains = []
+
+        for T in temps:
+            # Create BM copy at this temperature
+            bm_t = BoltzmannMachine(self.bm.n_visible, self.bm.n_hidden, T)
+            bm_t.W = self.bm.W.copy()
+            bm_t.a = self.bm.a.copy()
+            bm_t.b = self.bm.b.copy()
+            chains.append((bm_t, GibbsSampler(bm_t)))
+
+        # Initialize states
+        states = [(np.random.randint(0, 2, self.bm.n_visible),
+                   np.random.randint(0, 2, self.bm.n_hidden))
+                  for _ in range(n_temps)]
+
+        samples = []
+
+        for step in range(n_steps):
+            # Gibbs step for each chain
+            for i, (bm_t, sampler) in enumerate(chains):
+                v, h = states[i]
+                states[i] = sampler.gibbs_step(v, h)
+
+            # Attempt swaps between adjacent temperatures
+            for i in range(n_temps - 1):
+                v1, h1 = states[i]
+                v2, h2 = states[i + 1]
+
+                bm1, _ = chains[i]
+                bm2, _ = chains[i + 1]
+
+                # Metropolis acceptance
+                delta = (bm1.energy(v2, h2) - bm1.energy(v1, h1)) / bm1.T
+                delta += (bm2.energy(v1, h1) - bm2.energy(v2, h2)) / bm2.T
+
+                if np.random.random() < np.exp(-delta):
+                    states[i], states[i + 1] = states[i + 1], states[i]
+
+            # Collect sample from lowest temperature chain
+            samples.append(states[0][0].copy())
+
+        return np.array(samples)
+```
+
+<Tip>
+Parallel tempering helps overcome the slow mixing problem in Boltzmann machines by allowing high-temperature chains to explore the state space more freely and swap configurations with lower-temperature chains.
+</Tip>
+
+## 3. Restricted Boltzmann Machines (RBMs)
+
+RBMs simplify the architecture by removing intra-layer connections.
+
+<Definition term="Restricted Boltzmann Machine">
+A Restricted Boltzmann Machine is a Boltzmann machine with no visible-visible or hidden-hidden connections. This restriction makes the hidden units conditionally independent given the visible units (and vice versa), enabling efficient parallel Gibbs sampling.
+</Definition>
+
+<Formula>
+$$E(\mathbf{v}, \mathbf{h}) = -\sum_i a_i v_i - \sum_j b_j h_j - \sum_{i,j} v_i W_{ij} h_j$$
+</Formula>
+
+```python
+class RestrictedBoltzmannMachine:
+    """
+    Restricted Boltzmann Machine implementation.
+    """
+
+    def __init__(self, n_visible, n_hidden):
+        """
+        Initialize RBM.
+
+        Args:
+            n_visible: Number of visible units
+            n_hidden: Number of hidden units
+        """
+        self.n_visible = n_visible
+        self.n_hidden = n_hidden
+
+        # Xavier initialization
+        np.random.seed(42)
+        self.W = np.random.randn(n_visible, n_hidden) * np.sqrt(2.0 / (n_visible + n_hidden))
+
+        # Biases
+        self.a = np.zeros(n_visible)
+        self.b = np.zeros(n_hidden)
+
+    def energy(self, v, h):
+        """Compute energy of configuration."""
+        return -np.dot(self.a, v) - np.dot(self.b, h) - np.dot(v, np.dot(self.W, h))
+
+    def free_energy(self, v):
+        """
+        Compute free energy F(v) = -log sum_h exp(-E(v,h)).
+
+        Analytically tractable for RBM.
+        """
+        # F(v) = -a·v - sum_j log(1 + exp(b_j + sum_i v_i W_ij))
+        visible_term = -np.dot(self.a, v)
+        hidden_term = -np.sum(np.log(1 + np.exp(self.b + np.dot(v, self.W))))
+        return visible_term + hidden_term
+
+    def prob_h_given_v(self, v):
+        """
+        P(h | v) - all hidden units are independent given v.
+
+        Returns probability vector for h_j = 1.
+        """
+        activation = self.b + np.dot(v, self.W)
+        return 1.0 / (1.0 + np.exp(-activation))
+
+    def prob_v_given_h(self, h):
+        """
+        P(v | h) - all visible units are independent given h.
+
+        Returns probability vector for v_i = 1.
+        """
+        activation = self.a + np.dot(self.W, h)
+        return 1.0 / (1.0 + np.exp(-activation))
+
+    def sample_h_given_v(self, v):
+        """Sample hidden units given visible."""
+        probs = self.prob_h_given_v(v)
+        return (np.random.random(self.n_hidden) < probs).astype(float)
+
+    def sample_v_given_h(self, h):
+        """Sample visible units given hidden."""
+        probs = self.prob_v_given_h(h)
+        return (np.random.random(self.n_visible) < probs).astype(float)
+
+    def gibbs_hvh(self, h):
+        """One Gibbs step: h → v → h."""
+        v = self.sample_v_given_h(h)
+        h_new = self.sample_h_given_v(v)
+        return v, h_new
+
+    def gibbs_vhv(self, v):
+        """One Gibbs step: v → h → v."""
+        h = self.sample_h_given_v(v)
+        v_new = self.sample_v_given_h(h)
+        return h, v_new
+
+    def reconstruct(self, v):
+        """Reconstruct visible from visible (v → h → v)."""
+        h_probs = self.prob_h_given_v(v)
+        v_probs = self.prob_v_given_h(h_probs)
+        return v_probs
+
+    def generate(self, n_samples, n_gibbs=1000, burn_in=100):
+        """Generate samples from the model."""
+        v = np.random.randint(0, 2, self.n_visible).astype(float)
+
+        samples = []
+
+        for step in range(burn_in + n_samples):
+            h, v = self.gibbs_vhv(v)
+
+            if step >= burn_in:
+                samples.append(v.copy())
+
+        return np.array(samples)
+```
+
+## 4. Contrastive Divergence Training
+
+Training RBMs uses the contrastive divergence algorithm.
+
+<Definition term="Contrastive Divergence">
+Contrastive Divergence (CD-k) approximates the gradient of the log-likelihood by running k steps of Gibbs sampling starting from the training data, rather than running until equilibrium.
+</Definition>
+
+<Formula>
+$$\Delta W_{ij} \propto \langle v_i h_j \rangle_{data} - \langle v_i h_j \rangle_{model}$$
+</Formula>
+
+```python
+class RBMTrainer:
+    """
+    Trainer for Restricted Boltzmann Machines using Contrastive Divergence.
+    """
+
+    def __init__(self, rbm, learning_rate=0.01, momentum=0.9, weight_decay=0.0001):
+        """
+        Initialize trainer.
+
+        Args:
+            rbm: RestrictedBoltzmannMachine instance
+            learning_rate: Learning rate
+            momentum: Momentum coefficient
+            weight_decay: L2 regularization strength
+        """
+        self.rbm = rbm
+        self.lr = learning_rate
+        self.momentum = momentum
+        self.weight_decay = weight_decay
+
+        # Momentum terms
+        self.W_velocity = np.zeros_like(rbm.W)
+        self.a_velocity = np.zeros_like(rbm.a)
+        self.b_velocity = np.zeros_like(rbm.b)
+
+    def compute_gradients(self, v_data, k=1):
+        """
+        Compute gradients using CD-k.
+
+        Args:
+            v_data: Batch of training examples
+            k: Number of Gibbs steps
+
+        Returns:
+            Gradients for W, a, b
+        """
+        batch_size = len(v_data)
+
+        # Positive phase (data-dependent)
+        h_probs_pos = np.array([self.rbm.prob_h_given_v(v) for v in v_data])
+        h_samples_pos = (np.random.random(h_probs_pos.shape) < h_probs_pos).astype(float)
+
+        # Negative phase (model-dependent)
+        v_neg = v_data.copy()
+        h_neg = h_samples_pos.copy()
+
+        for _ in range(k):
+            v_probs_neg = np.array([self.rbm.prob_v_given_h(h) for h in h_neg])
+            v_neg = (np.random.random(v_probs_neg.shape) < v_probs_neg).astype(float)
+
+            h_probs_neg = np.array([self.rbm.prob_h_given_v(v) for v in v_neg])
+            h_neg = (np.random.random(h_probs_neg.shape) < h_probs_neg).astype(float)
+
+        # Compute gradients
+        grad_W = (np.dot(v_data.T, h_probs_pos) - np.dot(v_neg.T, h_probs_neg)) / batch_size
+        grad_a = np.mean(v_data - v_neg, axis=0)
+        grad_b = np.mean(h_probs_pos - h_probs_neg, axis=0)
+
+        return grad_W, grad_a, grad_b
+
+    def train_step(self, v_data, k=1):
+        """
+        Single training step.
+
+        Args:
+            v_data: Batch of training examples
+            k: CD-k steps
+
+        Returns:
+            Reconstruction error
+        """
+        grad_W, grad_a, grad_b = self.compute_gradients(v_data, k)
+
+        # Apply weight decay
+        grad_W -= self.weight_decay * self.rbm.W
+
+        # Update with momentum
+        self.W_velocity = self.momentum * self.W_velocity + self.lr * grad_W
+        self.a_velocity = self.momentum * self.a_velocity + self.lr * grad_a
+        self.b_velocity = self.momentum * self.b_velocity + self.lr * grad_b
+
+        self.rbm.W += self.W_velocity
+        self.rbm.a += self.a_velocity
+        self.rbm.b += self.b_velocity
+
+        # Compute reconstruction error
+        v_recon = np.array([self.rbm.reconstruct(v) for v in v_data])
+        recon_error = np.mean((v_data - v_recon)**2)
+
+        return recon_error
+
+    def train(self, data, n_epochs=10, batch_size=32, k=1, verbose=True):
+        """
+        Train RBM on dataset.
+
+        Args:
+            data: Training data (n_samples, n_visible)
+            n_epochs: Number of training epochs
+            batch_size: Mini-batch size
+            k: CD-k steps
+            verbose: Print progress
+
+        Returns:
+            Training history
+        """
+        n_samples = len(data)
+        n_batches = n_samples // batch_size
+
+        history = {'recon_error': []}
+
+        for epoch in range(n_epochs):
+            # Shuffle data
+            indices = np.random.permutation(n_samples)
+
+            epoch_error = 0
+
+            for batch_idx in range(n_batches):
+                batch_start = batch_idx * batch_size
+                batch_end = batch_start + batch_size
+                batch = data[indices[batch_start:batch_end]]
+
+                error = self.train_step(batch, k)
+                epoch_error += error
+
+            avg_error = epoch_error / n_batches
+            history['recon_error'].append(avg_error)
+
+            if verbose:
+                print(f"Epoch {epoch + 1}/{n_epochs}, Recon Error: {avg_error:.6f}")
+
+        return history
+
+
+def persistent_contrastive_divergence(rbm, data, n_epochs=10, batch_size=32):
+    """
+    Persistent Contrastive Divergence (PCD) training.
+
+    Maintains persistent Markov chains instead of restarting from data.
+    """
+    n_samples = len(data)
+    n_batches = n_samples // batch_size
+
+    # Initialize persistent chains
+    persistent_chains = np.random.randint(0, 2, (batch_size, rbm.n_visible)).astype(float)
+
+    lr = 0.01
+    history = []
+
+    for epoch in range(n_epochs):
+        indices = np.random.permutation(n_samples)
+        epoch_error = 0
+
+        for batch_idx in range(n_batches):
+            batch_start = batch_idx * batch_size
+            batch_end = batch_start + batch_size
+            v_data = data[indices[batch_start:batch_end]]
+
+            # Positive phase
+            h_probs_pos = np.array([rbm.prob_h_given_v(v) for v in v_data])
+
+            # Negative phase: continue from persistent chains
+            v_neg = persistent_chains.copy()
+            for _ in range(1):  # One Gibbs step
+                h_probs = np.array([rbm.prob_h_given_v(v) for v in v_neg])
+                h_samples = (np.random.random(h_probs.shape) < h_probs).astype(float)
+                v_probs = np.array([rbm.prob_v_given_h(h) for h in h_samples])
+                v_neg = (np.random.random(v_probs.shape) < v_probs).astype(float)
+
+            # Update persistent chains
+            persistent_chains = v_neg.copy()
+
+            h_probs_neg = np.array([rbm.prob_h_given_v(v) for v in v_neg])
+
+            # Gradients
+            grad_W = (np.dot(v_data.T, h_probs_pos) - np.dot(v_neg.T, h_probs_neg)) / batch_size
+            grad_a = np.mean(v_data - v_neg, axis=0)
+            grad_b = np.mean(h_probs_pos - h_probs_neg, axis=0)
+
+            # Update
+            rbm.W += lr * grad_W
+            rbm.a += lr * grad_a
+            rbm.b += lr * grad_b
+
+            # Error
+            v_recon = np.array([rbm.reconstruct(v) for v in v_data])
+            epoch_error += np.mean((v_data - v_recon)**2)
+
+        history.append(epoch_error / n_batches)
+        print(f"PCD Epoch {epoch + 1}/{n_epochs}, Error: {history[-1]:.6f}")
+
+    return history
+```
+
+<Warning>
+CD-k with small k provides a biased gradient estimate. While CD-1 is commonly used for efficiency, it may not converge to the true maximum likelihood solution. Persistent CD or longer chains can improve quality but increase computational cost.
+</Warning>
+
+## 5. Limitations and Quantum Motivation
+
+Classical Boltzmann machines face fundamental limitations that quantum approaches may overcome.
+
+### Sampling Bottleneck
+
+```python
+def analyze_mixing_time(rbm, n_samples=1000):
+    """
+    Analyze mixing time of RBM Gibbs sampling.
+
+    Returns autocorrelation analysis.
+    """
+    # Generate samples
+    v = np.random.randint(0, 2, rbm.n_visible).astype(float)
+
+    samples = []
+    for _ in range(n_samples):
+        h = rbm.sample_h_given_v(v)
+        v = rbm.sample_v_given_h(h)
+        samples.append(v.copy())
+
+    samples = np.array(samples)
+
+    # Compute autocorrelation
+    mean_samples = np.mean(samples, axis=0)
+    centered = samples - mean_samples
+
+    autocorr = []
+    for lag in range(min(100, n_samples // 2)):
+        if lag == 0:
+            autocorr.append(1.0)
+        else:
+            corr = np.mean(centered[:-lag] * centered[lag:])
+            var = np.mean(centered**2)
+            autocorr.append(corr / (var + 1e-10))
+
+    # Estimate mixing time (time for autocorrelation to drop to 1/e)
+    threshold = 1.0 / np.e
+    mixing_time = len(autocorr)
+    for t, ac in enumerate(autocorr):
+        if ac < threshold:
+            mixing_time = t
+            break
+
+    return {
+        'autocorrelation': autocorr,
+        'mixing_time': mixing_time,
+        'effective_samples': n_samples / (2 * mixing_time + 1)
+    }
+
+
+def compare_sampling_efficiency():
+    """
+    Demonstrate sampling efficiency challenges.
+    """
+    results = {}
+
+    for n_hidden in [10, 50, 100, 200]:
+        rbm = RestrictedBoltzmannMachine(n_visible=50, n_hidden=n_hidden)
+
+        analysis = analyze_mixing_time(rbm)
+        results[n_hidden] = analysis
+
+        print(f"Hidden units: {n_hidden}")
+        print(f"  Mixing time: {analysis['mixing_time']}")
+        print(f"  Effective samples: {analysis['effective_samples']:.1f}")
+
+    return results
+```
+
+### Key Limitations
+
+1. **Slow mixing**: Gibbs sampling can get stuck in local modes
+2. **Partition function**: Intractable for large systems
+3. **Gradient approximation**: CD provides biased estimates
+4. **Expressiveness**: Limited by classical probability distributions
+
+<Tip>
+Quantum Boltzmann machines aim to address these limitations by leveraging quantum superposition for faster sampling, quantum tunneling for escaping local minima, and quantum correlations for enhanced expressiveness.
+</Tip>
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Energy-based models** define probabilities through the Boltzmann distribution
+2. **Gibbs sampling** enables inference but can be slow to mix
+3. **RBMs** simplify sampling through bipartite structure
+4. **Contrastive divergence** provides practical training
+5. **Key limitations** motivate quantum extensions
+
+Understanding classical Boltzmann machines is essential for appreciating the quantum approaches we'll explore next.
+
+## Further Reading
+
+- Next lesson: Quantum Boltzmann Machine Fundamentals
+- Related: Deep Belief Networks
+- Application: Generative Modeling with RBMs

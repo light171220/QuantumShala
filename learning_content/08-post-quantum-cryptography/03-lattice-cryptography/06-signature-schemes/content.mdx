@@ -1,0 +1,773 @@
+---
+title: "Dilithium/ML-DSA: The NIST Standard for Post-Quantum Digital Signatures"
+description: "Master Dilithium (ML-DSA), the NIST-standardized post-quantum digital signature scheme. Understand the Fiat-Shamir with Aborts paradigm, rejection sampling, and how Module-LWE enables secure signatures."
+duration: 85
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Explain how lattice problems enable digital signatures
+- Understand the Fiat-Shamir with Aborts paradigm
+- Implement core Dilithium algorithms (KeyGen, Sign, Verify)
+- Analyze rejection sampling and its security implications
+- Compare Dilithium parameter sets and security levels
+- Understand the relationship between Kyber and Dilithium
+
+## 1. Digital Signatures from Lattices: The Challenge
+
+Unlike encryption, signatures from lattices face a unique challenge: the signing process could leak information about the secret key.
+
+<Definition term="Signature Leakage Problem">
+In lattice signatures, computing $\mathbf{z} = \mathbf{y} + c\mathbf{s}$ (where $\mathbf{s}$ is secret) creates a distribution that depends on $\mathbf{s}$. An attacker collecting many signatures could statistically recover $\mathbf{s}$.
+</Definition>
+
+```python
+import numpy as np
+from typing import Tuple, List, Optional
+import hashlib
+import secrets
+
+def demonstrate_leakage_problem():
+    """
+    Demonstrate why naive lattice signatures leak the secret key.
+    """
+    print("SIGNATURE LEAKAGE PROBLEM")
+    print("=" * 60)
+    
+    # Simplified example: signature is z = y + c*s
+    # where y is random, c is challenge, s is secret
+    
+    s = 5  # Secret (in real scheme, a polynomial)
+    num_signatures = 10000
+    
+    # Collect signatures
+    z_values = []
+    c_values = []
+    
+    for _ in range(num_signatures):
+        y = np.random.randint(-100, 101)  # Random mask
+        c = np.random.choice([-1, 0, 1])  # Challenge
+        z = y + c * s
+        z_values.append(z)
+        c_values.append(c)
+    
+    z_values = np.array(z_values)
+    c_values = np.array(c_values)
+    
+    # Attack: E[z | c=1] - E[z | c=0] ≈ s
+    z_c1 = z_values[c_values == 1]
+    z_c0 = z_values[c_values == 0]
+    
+    estimated_s = np.mean(z_c1) - np.mean(z_c0)
+    
+    print(f"True secret s = {s}")
+    print(f"Estimated s from {num_signatures} signatures: {estimated_s:.4f}")
+    print(f"Error: {abs(estimated_s - s):.4f}")
+    print(f"\n❌ PROBLEM: The secret leaks through statistical analysis!")
+    print(f"   Solution: Rejection sampling to make z independent of s")
+
+demonstrate_leakage_problem()
+```
+
+## 2. The Solution: Fiat-Shamir with Aborts
+
+<Definition term="Fiat-Shamir with Aborts">
+A signature paradigm where:
+1. Generate random mask $\mathbf{y}$
+2. Compute commitment $\mathbf{w} = \mathbf{A}\mathbf{y}$
+3. Hash to get challenge $c = H(\mathbf{w}, \text{message})$
+4. Compute response $\mathbf{z} = \mathbf{y} + c\mathbf{s}$
+5. **Reject and restart** if $\mathbf{z}$ would leak information about $\mathbf{s}$
+</Definition>
+
+```python
+def demonstrate_rejection_sampling():
+    """
+    Demonstrate how rejection sampling prevents leakage.
+    """
+    print("\nREJECTION SAMPLING SOLUTION")
+    print("=" * 60)
+    
+    # Parameters
+    s = 5  # Secret
+    gamma = 50  # Bound for y
+    beta = 10   # Bound for rejection: |z| must be < gamma - beta
+    
+    num_attempts = 0
+    num_signatures = 1000
+    z_values = []
+    c_values = []
+    
+    signatures_generated = 0
+    while signatures_generated < num_signatures:
+        num_attempts += 1
+        
+        # Sample y uniformly in [-gamma, gamma]
+        y = np.random.randint(-gamma, gamma + 1)
+        c = np.random.choice([-1, 0, 1])
+        z = y + c * s
+        
+        # REJECTION: only accept if z is in valid range
+        # This makes z's distribution independent of s!
+        if abs(z) < gamma - beta:
+            z_values.append(z)
+            c_values.append(c)
+            signatures_generated += 1
+    
+    z_values = np.array(z_values)
+    c_values = np.array(c_values)
+    
+    # Try the same attack
+    z_c1 = z_values[c_values == 1]
+    z_c0 = z_values[c_values == 0]
+    
+    estimated_s = np.mean(z_c1) - np.mean(z_c0)
+    
+    print(f"Parameters: γ={gamma}, β={beta}")
+    print(f"True secret s = {s}")
+    print(f"Estimated s from {num_signatures} signatures: {estimated_s:.4f}")
+    print(f"Error: {abs(estimated_s - s):.4f}")
+    print(f"\n✓ SOLUTION: Rejection sampling makes z independent of s!")
+    print(f"   Average attempts per signature: {num_attempts/num_signatures:.2f}")
+    
+    # Show distribution is uniform regardless of c
+    print(f"\nDistribution analysis:")
+    print(f"  E[z | c=1]:  {np.mean(z_c1):.4f}")
+    print(f"  E[z | c=0]:  {np.mean(z_c0):.4f}")
+    print(f"  E[z | c=-1]: {np.mean(z_values[c_values == -1]):.4f}")
+    print(f"  All approximately 0 (uniform distribution)")
+
+demonstrate_rejection_sampling()
+```
+
+## 3. Dilithium Overview
+
+<Definition term="Dilithium (ML-DSA)">
+A digital signature scheme based on Module-LWE using the Fiat-Shamir with Aborts paradigm:
+- **Security**: Based on hardness of Module-LWE and Module-SIS
+- **Structure**: Similar to Kyber (same ring $R_q$, module structure)
+- **Standard**: FIPS 204 (ML-DSA), standardized August 2024
+</Definition>
+
+```python
+class DilithiumParameters:
+    """
+    Dilithium/ML-DSA parameter sets.
+    """
+    
+    # Common parameters
+    n = 256          # Polynomial degree
+    q = 8380417      # Modulus (prime, enables NTT)
+    d = 13           # Dropped bits from t
+    
+    # Parameter sets
+    PARAMS = {
+        'ML-DSA-44': {
+            'k': 4,       # Rows in A
+            'l': 4,       # Columns in A (also dimension of s1, y)
+            'eta': 2,     # Secret key coefficient bound
+            'tau': 39,    # Number of ±1s in challenge
+            'beta': 78,   # tau * eta
+            'gamma1': 2**17,  # y coefficient range
+            'gamma2': (q - 1) // 88,  # Low-order rounding range
+            'omega': 80,  # Max ones in hint
+            'security_level': 2,
+            'security_bits': 128
+        },
+        'ML-DSA-65': {
+            'k': 6,
+            'l': 5,
+            'eta': 4,
+            'tau': 49,
+            'beta': 196,
+            'gamma1': 2**19,
+            'gamma2': (q - 1) // 32,
+            'omega': 55,
+            'security_level': 3,
+            'security_bits': 192
+        },
+        'ML-DSA-87': {
+            'k': 8,
+            'l': 7,
+            'eta': 2,
+            'tau': 60,
+            'beta': 120,
+            'gamma1': 2**19,
+            'gamma2': (q - 1) // 32,
+            'omega': 75,
+            'security_level': 5,
+            'security_bits': 256
+        }
+    }
+    
+    @classmethod
+    def get_sizes(cls, variant: str) -> dict:
+        """Calculate key and signature sizes."""
+        p = cls.PARAMS[variant]
+        k, l = p['k'], p['l']
+        
+        # Public key: ρ (32 bytes) + t1 (k polynomials, 10 bits each)
+        pk_bytes = 32 + k * cls.n * 10 // 8
+        
+        # Secret key: ρ + K + tr + s1 + s2 + t0
+        sk_bytes = 32 + 32 + 64 + l * cls.n * 3 // 8 + k * cls.n * 3 // 8 + k * cls.n * 13 // 8
+        
+        # Signature: c̃ (32 bytes) + z (l polynomials) + hint
+        sig_bytes = 32 + l * cls.n * 20 // 8 + p['omega'] + k
+        
+        return {
+            'public_key_bytes': pk_bytes,
+            'secret_key_bytes': sk_bytes,
+            'signature_bytes': sig_bytes
+        }
+
+
+def display_dilithium_parameters():
+    """Display Dilithium parameter comparison."""
+    print("\nDILITHIUM/ML-DSA PARAMETER SETS")
+    print("=" * 75)
+    
+    print(f"\n{'Variant':<12} {'k':<4} {'l':<4} {'η':<4} {'τ':<4} {'γ₁':<10} {'Security'}")
+    print("-" * 75)
+    
+    for name, params in DilithiumParameters.PARAMS.items():
+        print(f"{name:<12} {params['k']:<4} {params['l']:<4} {params['eta']:<4} "
+              f"{params['tau']:<4} {params['gamma1']:<10} Level {params['security_level']} "
+              f"({params['security_bits']}-bit)")
+    
+    print(f"\n{'Variant':<12} {'PK':<10} {'SK':<10} {'Sig':<10}")
+    print("-" * 75)
+    
+    for name in DilithiumParameters.PARAMS:
+        sizes = DilithiumParameters.get_sizes(name)
+        print(f"{name:<12} {sizes['public_key_bytes']:<10} {sizes['secret_key_bytes']:<10} "
+              f"{sizes['signature_bytes']:<10}")
+
+display_dilithium_parameters()
+```
+
+## 4. Dilithium Key Generation
+
+<Formula>
+$$\textbf{KeyGen():}$$
+$$1. \ \rho, \rho', K \xleftarrow{\$} \{0,1\}^{256}$$
+$$2. \ \mathbf{A} = \text{ExpandA}(\rho) \in R_q^{k \times l}$$
+$$3. \ (\mathbf{s}_1, \mathbf{s}_2) = \text{ExpandS}(\rho') \text{ with } \|\mathbf{s}_i\|_\infty \leq \eta$$
+$$4. \ \mathbf{t} = \mathbf{A}\mathbf{s}_1 + \mathbf{s}_2$$
+$$5. \ (\mathbf{t}_1, \mathbf{t}_0) = \text{Power2Round}(\mathbf{t}, d)$$
+$$6. \ tr = H(\rho \| \mathbf{t}_1)$$
+$$7. \ \text{Return } pk = (\rho, \mathbf{t}_1), \ sk = (\rho, K, tr, \mathbf{s}_1, \mathbf{s}_2, \mathbf{t}_0)$$
+</Formula>
+
+```python
+class DilithiumPoly:
+    """
+    Polynomial operations for Dilithium.
+    
+    All polynomials are in R_q = Z_q[x]/(x^256 + 1) where q = 8380417.
+    """
+    
+    n = 256
+    q = 8380417
+    
+    @staticmethod
+    def add(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Add polynomials mod q."""
+        return (a.astype(np.int64) + b.astype(np.int64)) % DilithiumPoly.q
+    
+    @staticmethod
+    def subtract(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Subtract polynomials mod q."""
+        return (a.astype(np.int64) - b.astype(np.int64)) % DilithiumPoly.q
+    
+    @staticmethod
+    def multiply_naive(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Multiply polynomials mod (x^n + 1, q)."""
+        n = DilithiumPoly.n
+        q = DilithiumPoly.q
+        
+        result = np.zeros(2 * n - 1, dtype=np.int64)
+        for i in range(n):
+            for j in range(n):
+                result[i + j] += int(a[i]) * int(b[j])
+        
+        reduced = np.zeros(n, dtype=np.int64)
+        for i in range(2 * n - 1):
+            if i < n:
+                reduced[i] += result[i]
+            else:
+                reduced[i - n] -= result[i]
+        
+        return reduced % q
+    
+    @staticmethod
+    def infinity_norm(a: np.ndarray) -> int:
+        """Compute infinity norm (max absolute coefficient)."""
+        q = DilithiumPoly.q
+        # Center coefficients to [-q/2, q/2]
+        centered = np.where(a > q // 2, a - q, a)
+        return int(np.max(np.abs(centered)))
+    
+    @staticmethod
+    def power2round(a: np.ndarray, d: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Decompose a into (a1, a0) where a = a1 * 2^d + a0.
+        
+        Used for public key compression.
+        """
+        q = DilithiumPoly.q
+        a = a % q
+        
+        # a0 = a mod 2^d (centered)
+        a0 = a % (2**d)
+        a0 = np.where(a0 > 2**(d-1), a0 - 2**d, a0)
+        
+        # a1 = (a - a0) / 2^d
+        a1 = (a - a0) // (2**d)
+        
+        return a1.astype(np.int32), a0.astype(np.int32)
+    
+    @staticmethod
+    def decompose(a: np.ndarray, gamma2: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Decompose a into high and low parts for signature.
+        
+        a = a1 * 2γ₂ + a0 where |a0| ≤ γ₂
+        """
+        q = DilithiumPoly.q
+        a = a % q
+        
+        # Compute a0 = a mod± 2γ₂
+        a0 = a % (2 * gamma2)
+        a0 = np.where(a0 > gamma2, a0 - 2 * gamma2, a0)
+        
+        # Handle special case
+        a_minus_a0 = a - a0
+        a1 = np.where(
+            a_minus_a0 == q - 1,
+            0,
+            a_minus_a0 // (2 * gamma2)
+        )
+        a0 = np.where(a_minus_a0 == q - 1, a0 - 1, a0)
+        
+        return a1.astype(np.int32), a0.astype(np.int32)
+
+
+class DilithiumSignature:
+    """
+    Dilithium Digital Signature Scheme.
+    """
+    
+    def __init__(self, variant: str = 'ML-DSA-65'):
+        """Initialize with parameter set."""
+        self.params = DilithiumParameters.PARAMS[variant]
+        self.k = self.params['k']
+        self.l = self.params['l']
+        self.eta = self.params['eta']
+        self.tau = self.params['tau']
+        self.beta = self.params['beta']
+        self.gamma1 = self.params['gamma1']
+        self.gamma2 = self.params['gamma2']
+        self.omega = self.params['omega']
+        self.n = 256
+        self.q = 8380417
+        self.d = 13
+    
+    def _sample_uniform_poly(self, seed: bytes, nonce: int) -> np.ndarray:
+        """Sample uniform polynomial from seed."""
+        np.random.seed(int.from_bytes(seed[:4], 'big') + nonce)
+        return np.random.randint(0, self.q, size=self.n)
+    
+    def _sample_eta_poly(self, seed: bytes, nonce: int) -> np.ndarray:
+        """Sample polynomial with coefficients in [-η, η]."""
+        np.random.seed(int.from_bytes(seed[:4], 'big') + nonce)
+        return np.random.randint(-self.eta, self.eta + 1, size=self.n) % self.q
+    
+    def _sample_gamma1_poly(self, seed: bytes, nonce: int) -> np.ndarray:
+        """Sample polynomial with coefficients in [-γ₁+1, γ₁]."""
+        np.random.seed(int.from_bytes(seed[:4], 'big') + nonce)
+        return np.random.randint(-self.gamma1 + 1, self.gamma1 + 1, size=self.n) % self.q
+    
+    def _expand_A(self, rho: bytes) -> List[List[np.ndarray]]:
+        """Expand seed ρ to matrix A."""
+        A = []
+        for i in range(self.k):
+            row = []
+            for j in range(self.l):
+                row.append(self._sample_uniform_poly(rho, i * self.l + j))
+            A.append(row)
+        return A
+    
+    def _matrix_vector_mult(self, A: List[List[np.ndarray]], 
+                           v: List[np.ndarray]) -> List[np.ndarray]:
+        """Compute A · v."""
+        result = []
+        for i in range(self.k):
+            acc = np.zeros(self.n, dtype=np.int64)
+            for j in range(self.l):
+                prod = DilithiumPoly.multiply_naive(A[i][j], v[j])
+                acc = DilithiumPoly.add(acc, prod)
+            result.append(acc)
+        return result
+    
+    def _vector_add(self, a: List[np.ndarray], 
+                    b: List[np.ndarray]) -> List[np.ndarray]:
+        """Add vectors of polynomials."""
+        return [DilithiumPoly.add(a[i], b[i]) for i in range(len(a))]
+    
+    def _sample_challenge(self, seed: bytes) -> np.ndarray:
+        """
+        Sample challenge polynomial c with τ coefficients in {-1, 1}.
+        """
+        c = np.zeros(self.n, dtype=np.int32)
+        
+        # Deterministic sampling from seed
+        np.random.seed(int.from_bytes(seed[:4], 'big'))
+        
+        # Place τ non-zero coefficients
+        positions = np.random.choice(self.n, self.tau, replace=False)
+        signs = np.random.choice([-1, 1], self.tau)
+        
+        for pos, sign in zip(positions, signs):
+            c[pos] = sign
+        
+        return c % self.q
+    
+    def keygen(self) -> Tuple[dict, dict]:
+        """
+        Generate Dilithium key pair.
+        
+        Returns:
+            pk: Public key (rho, t1)
+            sk: Secret key (rho, K, tr, s1, s2, t0)
+        """
+        # Random seeds
+        rho = secrets.token_bytes(32)   # For matrix A
+        rho_prime = secrets.token_bytes(64)  # For secrets
+        K = secrets.token_bytes(32)     # For signing randomness
+        
+        # Expand matrix A
+        A = self._expand_A(rho)
+        
+        # Sample secrets s1 ∈ R_q^l and s2 ∈ R_q^k
+        s1 = [self._sample_eta_poly(rho_prime, i) for i in range(self.l)]
+        s2 = [self._sample_eta_poly(rho_prime, self.l + i) for i in range(self.k)]
+        
+        # Compute t = As1 + s2
+        As1 = self._matrix_vector_mult(A, s1)
+        t = self._vector_add(As1, s2)
+        
+        # Power2Round: t = t1 * 2^d + t0
+        t1 = []
+        t0 = []
+        for i in range(self.k):
+            t1_i, t0_i = DilithiumPoly.power2round(t[i], self.d)
+            t1.append(t1_i)
+            t0.append(t0_i)
+        
+        # Compute tr = H(rho || t1)
+        t1_bytes = b''.join(p.tobytes() for p in t1)
+        tr = hashlib.sha3_256(rho + t1_bytes).digest()
+        
+        pk = {'rho': rho, 't1': t1}
+        sk = {'rho': rho, 'K': K, 'tr': tr, 's1': s1, 's2': s2, 't0': t0}
+        
+        return pk, sk
+    
+    def sign(self, sk: dict, message: bytes) -> Optional[dict]:
+        """
+        Sign a message using Dilithium.
+        
+        Uses rejection sampling for security.
+        
+        Returns:
+            Signature (c_tilde, z, h) or None if too many rejections
+        """
+        rho = sk['rho']
+        K = sk['K']
+        tr = sk['tr']
+        s1 = sk['s1']
+        s2 = sk['s2']
+        t0 = sk['t0']
+        
+        # Expand A
+        A = self._expand_A(rho)
+        
+        # Compute μ = H(tr || M)
+        mu = hashlib.sha3_256(tr + message).digest()
+        
+        # Rejection sampling loop
+        max_attempts = 1000
+        nonce = 0
+        
+        for attempt in range(max_attempts):
+            # Sample y with coefficients in [-γ₁+1, γ₁]
+            rhoprime = hashlib.sha3_256(K + mu).digest()
+            y = [self._sample_gamma1_poly(rhoprime, nonce + i) for i in range(self.l)]
+            nonce += self.l
+            
+            # w = Ay
+            w = self._matrix_vector_mult(A, y)
+            
+            # Decompose w into (w1, w0)
+            w1 = []
+            for i in range(self.k):
+                w1_i, _ = DilithiumPoly.decompose(w[i], self.gamma2)
+                w1.append(w1_i)
+            
+            # Challenge c = H(μ || w1)
+            w1_bytes = b''.join(p.tobytes() for p in w1)
+            c_tilde = hashlib.sha3_256(mu + w1_bytes).digest()
+            c = self._sample_challenge(c_tilde)
+            
+            # z = y + c*s1
+            z = []
+            for i in range(self.l):
+                cs1 = DilithiumPoly.multiply_naive(c, s1[i])
+                z.append(DilithiumPoly.add(y[i], cs1))
+            
+            # Check ||z||_∞ < γ₁ - β
+            z_norm = max(DilithiumPoly.infinity_norm(z[i]) for i in range(self.l))
+            if z_norm >= self.gamma1 - self.beta:
+                continue  # Reject
+            
+            # Compute w - cs2 and check low bits
+            cs2 = []
+            for i in range(self.k):
+                cs2.append(DilithiumPoly.multiply_naive(c, s2[i]))
+            
+            r0 = []
+            valid = True
+            for i in range(self.k):
+                w_minus_cs2 = DilithiumPoly.subtract(w[i], cs2[i])
+                _, r0_i = DilithiumPoly.decompose(w_minus_cs2, self.gamma2)
+                r0.append(r0_i)
+                if DilithiumPoly.infinity_norm(r0_i) >= self.gamma2 - self.beta:
+                    valid = False
+                    break
+            
+            if not valid:
+                continue  # Reject
+            
+            # Compute hint (simplified - real implementation more complex)
+            h = [np.zeros(self.n, dtype=np.int32) for _ in range(self.k)]
+            
+            # Success!
+            return {
+                'c_tilde': c_tilde,
+                'z': z,
+                'h': h
+            }
+        
+        return None  # Failed after max attempts
+    
+    def verify(self, pk: dict, message: bytes, sig: dict) -> bool:
+        """
+        Verify a Dilithium signature.
+        
+        Returns:
+            True if signature is valid, False otherwise
+        """
+        rho = pk['rho']
+        t1 = pk['t1']
+        c_tilde = sig['c_tilde']
+        z = sig['z']
+        h = sig['h']
+        
+        # Check ||z||_∞ < γ₁ - β
+        z_norm = max(DilithiumPoly.infinity_norm(z[i]) for i in range(self.l))
+        if z_norm >= self.gamma1 - self.beta:
+            return False
+        
+        # Expand A
+        A = self._expand_A(rho)
+        
+        # Recompute challenge
+        c = self._sample_challenge(c_tilde)
+        
+        # Compute w'₁ = Az - c*t1*2^d (simplified)
+        Az = self._matrix_vector_mult(A, z)
+        
+        # t = t1 * 2^d (approximately)
+        t_approx = [t1[i] * (2**self.d) for i in range(self.k)]
+        
+        ct = []
+        for i in range(self.k):
+            ct.append(DilithiumPoly.multiply_naive(c, t_approx[i] % self.q))
+        
+        w_prime = []
+        for i in range(self.k):
+            w_prime.append(DilithiumPoly.subtract(Az[i], ct[i]))
+        
+        # Decompose and use hint
+        w1_prime = []
+        for i in range(self.k):
+            w1_i, _ = DilithiumPoly.decompose(w_prime[i], self.gamma2)
+            w1_prime.append(w1_i)
+        
+        # Compute tr and μ
+        t1_bytes = b''.join(p.tobytes() for p in t1)
+        tr = hashlib.sha3_256(rho + t1_bytes).digest()
+        mu = hashlib.sha3_256(tr + message).digest()
+        
+        # Recompute c_tilde
+        w1_prime_bytes = b''.join(p.tobytes() for p in w1_prime)
+        c_tilde_prime = hashlib.sha3_256(mu + w1_prime_bytes).digest()
+        
+        # Verify
+        return c_tilde == c_tilde_prime
+
+
+def demonstrate_dilithium():
+    """Demonstrate Dilithium signature scheme."""
+    print("\nDILITHIUM SIGNATURE DEMONSTRATION")
+    print("=" * 60)
+    
+    # Use smaller parameters for demonstration
+    dil = DilithiumSignature('ML-DSA-44')
+    
+    print(f"Parameters: ML-DSA-44")
+    print(f"  k={dil.k}, l={dil.l}, η={dil.eta}, τ={dil.tau}")
+    
+    # Key generation
+    print("\n1. KEY GENERATION")
+    pk, sk = dil.keygen()
+    print(f"   Generated key pair")
+    print(f"   Public key: ρ (32 bytes) + t₁ ({dil.k} polynomials)")
+    print(f"   Secret key: includes s₁ ({dil.l} polys), s₂ ({dil.k} polys)")
+    
+    # Signing
+    print("\n2. SIGNING")
+    message = b"This is a test message for Dilithium signature."
+    sig = dil.sign(sk, message)
+    
+    if sig:
+        print(f"   Signed message of {len(message)} bytes")
+        print(f"   Signature: c̃ (32 bytes) + z ({dil.l} polynomials) + hint")
+    else:
+        print("   Signing failed (too many rejections)")
+        return
+    
+    # Verification
+    print("\n3. VERIFICATION")
+    valid = dil.verify(pk, message, sig)
+    print(f"   Signature valid: {valid}")
+    
+    # Test with wrong message
+    wrong_message = b"This is a different message."
+    valid_wrong = dil.verify(pk, wrong_message, sig)
+    print(f"   Wrong message verification: {valid_wrong}")
+
+demonstrate_dilithium()
+```
+
+## 5. Security Properties
+
+```python
+def dilithium_security_analysis():
+    """Analyze Dilithium security properties."""
+    print("\nDILITHIUM SECURITY ANALYSIS")
+    print("=" * 60)
+    
+    security = {
+        'Hardness Assumptions': {
+            'Primary': 'Module-LWE (for key recovery)',
+            'Secondary': 'Module-SIS (for forgery)',
+            'Self-Targetability': 'Short Integer Solution variant'
+        },
+        'Security Model': {
+            'Type': 'EUF-CMA (Existential Unforgeability under Chosen Message Attack)',
+            'Proof': 'In Random Oracle Model',
+            'Quantum': 'Secure in QROM'
+        },
+        'Concrete Security': {
+            'ML-DSA-44': '~128 bits (NIST Level 2)',
+            'ML-DSA-65': '~192 bits (NIST Level 3)',
+            'ML-DSA-87': '~256 bits (NIST Level 5)'
+        },
+        'Attack Resistance': {
+            'Key Recovery': 'Requires solving Module-LWE',
+            'Forgery': 'Requires solving Module-SIS',
+            'Side Channels': 'Requires constant-time implementation'
+        }
+    }
+    
+    for category, details in security.items():
+        print(f"\n{category}")
+        print("-" * 50)
+        for key, value in details.items():
+            print(f"  {key}: {value}")
+
+dilithium_security_analysis()
+```
+
+## 6. Comparison: Dilithium vs Kyber
+
+```python
+def compare_kyber_dilithium():
+    """Compare Kyber and Dilithium."""
+    print("\nKYBER vs DILITHIUM COMPARISON")
+    print("=" * 70)
+    
+    comparison = """
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                    KYBER (ML-KEM)    │    DILITHIUM (ML-DSA)        │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ Purpose       Key Encapsulation      │    Digital Signatures        │
+    │ Problem       Module-LWE             │    Module-LWE + Module-SIS   │
+    │ Ring          R_q, q = 3329          │    R_q, q = 8380417          │
+    │ Degree        n = 256                │    n = 256                   │
+    │ Errors        CBD (Centered Binomial)│    Uniform small             │
+    │ Transform     Fujisaki-Okamoto       │    Fiat-Shamir with Aborts   │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ Level 3 Sizes:                                                      │
+    │   Public Key  1184 bytes             │    1952 bytes                │
+    │   Secret Key  2400 bytes             │    4032 bytes                │
+    │   CT/Sig      1088 bytes             │    3309 bytes                │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ Operations:                                                         │
+    │   KeyGen      Deterministic          │    Deterministic             │
+    │   Encaps/Sign Probabilistic          │    Rejection sampling        │
+    │   Decaps/Ver  Deterministic          │    Deterministic             │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    WHY DIFFERENT MODULI?
+    
+    Kyber (q = 3329):
+    - Small q for compact ciphertexts
+    - Compression reduces size further
+    - NTT-friendly (3329 = 1 + 13·256)
+    
+    Dilithium (q = 8380417):
+    - Larger q needed for rejection sampling
+    - Must accommodate γ₁ up to 2^19
+    - NTT-friendly (8380417 = 1 + 2^23 - 2^13 + 1)
+    """
+    print(comparison)
+
+compare_kyber_dilithium()
+```
+
+## Summary
+
+In this lesson, you learned about Dilithium/ML-DSA:
+
+1. **Signature Challenge**: Naive lattice signatures leak secret keys through statistics
+2. **Fiat-Shamir with Aborts**: Rejection sampling ensures signatures are independent of secrets
+3. **Module-LWE + Module-SIS**: Security based on two hard lattice problems
+4. **Power2Round and Decompose**: Enable compact public keys and efficient verification
+5. **Challenge Polynomial**: Sparse polynomial with τ coefficients in {-1, 1}
+6. **Rejection Criteria**: Multiple checks ensure no information leakage
+7. **Verification**: Recompute commitment and check hash equality
+8. **NIST Standard**: FIPS 204 (ML-DSA), primary signature recommendation
+
+Dilithium and Kyber together form the core of NIST's post-quantum cryptography standards, sharing the Module-LWE foundation while addressing different cryptographic needs.
+
+## Further Reading
+
+- Next Module: Hash-Based Signatures (SPHINCS+)
+- Related: SIS problem and lattice signatures
+- Advanced: Zero-knowledge proofs from lattices

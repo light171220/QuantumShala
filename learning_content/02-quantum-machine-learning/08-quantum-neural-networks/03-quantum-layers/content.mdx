@@ -1,0 +1,837 @@
+---
+title: "Quantum Layers"
+description: "Design and implement quantum layers including hardware-efficient ansatze, strongly entangling layers, problem-inspired architectures, and symmetry-preserving designs."
+---
+
+# Quantum Layers
+
+Quantum layers are the building blocks of quantum neural networks. The choice of layer architecture significantly impacts expressibility, trainability, and suitability for specific problems.
+
+## Hardware-Efficient Ansatze
+
+Hardware-efficient ansatze are designed to work well on near-term quantum devices by respecting their connectivity constraints.
+
+<Definition>
+**Hardware-Efficient Ansatz**:
+
+A circuit design that uses:
+1. Native gate sets of the hardware
+2. Connectivity patterns matching device topology
+3. Shallow depth to minimize decoherence effects
+
+$$U_{HE}(\theta) = \prod_{l=1}^{L} \left[ \prod_{q=1}^{n} R_Y(\theta_{l,q,1}) R_Z(\theta_{l,q,2}) \right] W_{ent}$$
+</Definition>
+
+```python
+import numpy as np
+
+class HardwareEfficientLayer:
+    """Hardware-efficient layer with linear entanglement."""
+
+    def __init__(self, n_qubits):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+        self.n_params = 2 * n_qubits  # RY + RZ per qubit
+
+    def _ry(self, theta, qubit):
+        """RY rotation gate."""
+        U = np.eye(self.dim, dtype=complex)
+        c, s = np.cos(theta/2), np.sin(theta/2)
+
+        for z in range(self.dim):
+            z_flip = z ^ (1 << (self.n_qubits - 1 - qubit))
+            if z < z_flip:
+                U[z, z] = c
+                U[z, z_flip] = -s
+                U[z_flip, z] = s
+                U[z_flip, z_flip] = c
+        return U
+
+    def _rz(self, theta, qubit):
+        """RZ rotation gate."""
+        U = np.eye(self.dim, dtype=complex)
+
+        for z in range(self.dim):
+            bit = (z >> (self.n_qubits - 1 - qubit)) & 1
+            phase = np.exp(-1j * theta/2) if bit == 0 else np.exp(1j * theta/2)
+            U[z, z] = phase
+        return U
+
+    def _cnot(self, control, target):
+        """CNOT gate."""
+        U = np.zeros((self.dim, self.dim), dtype=complex)
+
+        for z in range(self.dim):
+            ctrl_bit = (z >> (self.n_qubits - 1 - control)) & 1
+            if ctrl_bit:
+                z_new = z ^ (1 << (self.n_qubits - 1 - target))
+            else:
+                z_new = z
+            U[z_new, z] = 1
+        return U
+
+    def build(self, params):
+        """Build the layer unitary."""
+        U = np.eye(self.dim, dtype=complex)
+
+        # Rotation layer
+        for q in range(self.n_qubits):
+            U = self._ry(params[2*q], q) @ U
+            U = self._rz(params[2*q + 1], q) @ U
+
+        # Linear entanglement (nearest-neighbor CNOTs)
+        for q in range(self.n_qubits - 1):
+            U = self._cnot(q, q + 1) @ U
+
+        return U
+
+# Example
+print("Hardware-Efficient Layer")
+print("=" * 50)
+
+layer = HardwareEfficientLayer(n_qubits=4)
+params = np.random.uniform(0, 2*np.pi, layer.n_params)
+
+U = layer.build(params)
+print(f"Number of qubits: {layer.n_qubits}")
+print(f"Number of parameters: {layer.n_params}")
+print(f"Is unitary: {np.allclose(U @ U.conj().T, np.eye(layer.dim))}")
+
+# Apply to |0000⟩
+state = np.zeros(layer.dim, dtype=complex)
+state[0] = 1
+output = U @ state
+
+print("\nOutput state (top 4 amplitudes):")
+probs = np.abs(output)**2
+top_idx = np.argsort(probs)[::-1][:4]
+for idx in top_idx:
+    print(f"  |{format(idx, '04b')}⟩: {probs[idx]:.4f}")
+```
+
+## Strongly Entangling Layers
+
+Strongly entangling layers use all-to-all connectivity to maximize entanglement generation.
+
+<Formula>
+**Strongly Entangling Layer**:
+
+$$U_{SE}(\theta) = \prod_{l=1}^{L} \left[ \prod_{q=1}^{n} R_X(\theta_{l,q,1}) R_Y(\theta_{l,q,2}) R_Z(\theta_{l,q,3}) \right] \prod_{i<j} CZ_{ij}$$
+
+This creates maximal entanglement at the cost of increased gate count.
+</Formula>
+
+```python
+import numpy as np
+
+class StronglyEntanglingLayer:
+    """Strongly entangling layer with all-to-all connectivity."""
+
+    def __init__(self, n_qubits):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+        # 3 rotations per qubit (RX, RY, RZ)
+        self.n_params = 3 * n_qubits
+        # All-to-all CZ gates: n(n-1)/2
+        self.n_cz = n_qubits * (n_qubits - 1) // 2
+
+    def _rx(self, theta, qubit):
+        """RX rotation gate."""
+        U = np.eye(self.dim, dtype=complex)
+        c, s = np.cos(theta/2), np.sin(theta/2)
+
+        for z in range(self.dim):
+            z_flip = z ^ (1 << (self.n_qubits - 1 - qubit))
+            if z < z_flip:
+                U[z, z] = c
+                U[z, z_flip] = -1j * s
+                U[z_flip, z] = -1j * s
+                U[z_flip, z_flip] = c
+        return U
+
+    def _ry(self, theta, qubit):
+        """RY rotation gate."""
+        U = np.eye(self.dim, dtype=complex)
+        c, s = np.cos(theta/2), np.sin(theta/2)
+
+        for z in range(self.dim):
+            z_flip = z ^ (1 << (self.n_qubits - 1 - qubit))
+            if z < z_flip:
+                U[z, z] = c
+                U[z, z_flip] = -s
+                U[z_flip, z] = s
+                U[z_flip, z_flip] = c
+        return U
+
+    def _rz(self, theta, qubit):
+        """RZ rotation gate."""
+        U = np.eye(self.dim, dtype=complex)
+
+        for z in range(self.dim):
+            bit = (z >> (self.n_qubits - 1 - qubit)) & 1
+            phase = np.exp(-1j * theta/2) if bit == 0 else np.exp(1j * theta/2)
+            U[z, z] = phase
+        return U
+
+    def _cz(self, qubit1, qubit2):
+        """Controlled-Z gate."""
+        U = np.eye(self.dim, dtype=complex)
+
+        for z in range(self.dim):
+            bit1 = (z >> (self.n_qubits - 1 - qubit1)) & 1
+            bit2 = (z >> (self.n_qubits - 1 - qubit2)) & 1
+            if bit1 == 1 and bit2 == 1:
+                U[z, z] = -1
+        return U
+
+    def build(self, params):
+        """Build the layer unitary."""
+        U = np.eye(self.dim, dtype=complex)
+
+        # Full rotation layer (RX, RY, RZ)
+        for q in range(self.n_qubits):
+            U = self._rx(params[3*q], q) @ U
+            U = self._ry(params[3*q + 1], q) @ U
+            U = self._rz(params[3*q + 2], q) @ U
+
+        # All-to-all CZ entanglement
+        for q1 in range(self.n_qubits):
+            for q2 in range(q1 + 1, self.n_qubits):
+                U = self._cz(q1, q2) @ U
+
+        return U
+
+# Compare with hardware-efficient
+print("Strongly Entangling Layer")
+print("=" * 50)
+
+se_layer = StronglyEntanglingLayer(n_qubits=4)
+he_layer = HardwareEfficientLayer(n_qubits=4)
+
+print(f"\n{'Metric':<25} {'Hardware-Eff':<15} {'Strongly-Ent':<15}")
+print("-" * 55)
+print(f"{'Parameters':<25} {he_layer.n_params:<15} {se_layer.n_params:<15}")
+print(f"{'Entangling gates':<25} {he_layer.n_qubits - 1:<15} {se_layer.n_cz:<15}")
+
+# Test strongly entangling layer
+params = np.random.uniform(0, 2*np.pi, se_layer.n_params)
+U = se_layer.build(params)
+print(f"\nStrongly entangling layer is unitary: {np.allclose(U @ U.conj().T, np.eye(se_layer.dim))}")
+```
+
+<Tip>
+Strongly entangling layers achieve higher expressibility but require more two-qubit gates. Use them when all-to-all connectivity is available on your hardware.
+</Tip>
+
+## Problem-Inspired Architectures
+
+Problem-inspired ansatze leverage domain knowledge to improve performance.
+
+```python
+import numpy as np
+
+class ProblemInspiredLayers:
+    """Collection of problem-inspired quantum layers."""
+
+    def __init__(self, n_qubits):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+
+    def _ry(self, theta, qubit):
+        """RY gate."""
+        U = np.eye(self.dim, dtype=complex)
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        for z in range(self.dim):
+            z_flip = z ^ (1 << (self.n_qubits - 1 - qubit))
+            if z < z_flip:
+                U[z, z] = c
+                U[z, z_flip] = -s
+                U[z_flip, z] = s
+                U[z_flip, z_flip] = c
+        return U
+
+    def _rz(self, theta, qubit):
+        """RZ gate."""
+        U = np.eye(self.dim, dtype=complex)
+        for z in range(self.dim):
+            bit = (z >> (self.n_qubits - 1 - qubit)) & 1
+            phase = np.exp(-1j * theta/2) if bit == 0 else np.exp(1j * theta/2)
+            U[z, z] = phase
+        return U
+
+    def _rzz(self, theta, q1, q2):
+        """RZZ gate: exp(-i * theta/2 * Z_q1 Z_q2)."""
+        U = np.eye(self.dim, dtype=complex)
+        for z in range(self.dim):
+            bit1 = (z >> (self.n_qubits - 1 - q1)) & 1
+            bit2 = (z >> (self.n_qubits - 1 - q2)) & 1
+            parity = bit1 ^ bit2
+            phase = np.exp(-1j * theta/2) if parity == 0 else np.exp(1j * theta/2)
+            U[z, z] = phase
+        return U
+
+    def ising_layer(self, params_single, params_coupling):
+        """Layer inspired by Ising model Hamiltonian.
+
+        H = sum_i h_i Z_i + sum_<i,j> J_ij Z_i Z_j
+
+        Args:
+            params_single: Single-qubit Z rotations
+            params_coupling: Two-qubit ZZ couplings
+        """
+        U = np.eye(self.dim, dtype=complex)
+
+        # Single-qubit terms
+        for q in range(self.n_qubits):
+            U = self._rz(params_single[q], q) @ U
+
+        # Coupling terms (nearest-neighbor)
+        coupling_idx = 0
+        for q in range(self.n_qubits - 1):
+            U = self._rzz(params_coupling[coupling_idx], q, q + 1) @ U
+            coupling_idx += 1
+
+        return U
+
+    def qaoa_mixer(self, beta):
+        """QAOA-style mixer layer.
+
+        U_M(beta) = exp(-i * beta * sum_j X_j)
+        """
+        U = np.eye(self.dim, dtype=complex)
+
+        # Apply RX(2*beta) to each qubit
+        for q in range(self.n_qubits):
+            gate = np.eye(self.dim, dtype=complex)
+            c, s = np.cos(beta), np.sin(beta)
+            for z in range(self.dim):
+                z_flip = z ^ (1 << (self.n_qubits - 1 - q))
+                if z < z_flip:
+                    gate[z, z] = c
+                    gate[z, z_flip] = -1j * s
+                    gate[z_flip, z] = -1j * s
+                    gate[z_flip, z_flip] = c
+            U = gate @ U
+
+        return U
+
+    def chemistry_layer(self, params):
+        """Layer inspired by molecular orbital structure.
+
+        Includes paired excitations common in quantum chemistry.
+        """
+        U = np.eye(self.dim, dtype=complex)
+
+        # Single excitations (RY on each qubit)
+        for q in range(self.n_qubits):
+            U = self._ry(params[q], q) @ U
+
+        # Double excitations (ZZ couplings between orbital pairs)
+        param_idx = self.n_qubits
+        for q in range(0, self.n_qubits - 1, 2):
+            if param_idx < len(params):
+                U = self._rzz(params[param_idx], q, q + 1) @ U
+                param_idx += 1
+
+        return U
+
+# Example: Problem-inspired layers
+print("Problem-Inspired Layers")
+print("=" * 50)
+
+layers = ProblemInspiredLayers(n_qubits=4)
+
+# Ising layer
+print("\nIsing-inspired layer:")
+params_single = np.random.uniform(0, np.pi, 4)
+params_coupling = np.random.uniform(0, np.pi, 3)
+U_ising = layers.ising_layer(params_single, params_coupling)
+print(f"  Parameters: {len(params_single) + len(params_coupling)}")
+print(f"  Unitary: {np.allclose(U_ising @ U_ising.conj().T, np.eye(16))}")
+
+# QAOA mixer
+print("\nQAOA mixer layer:")
+U_mixer = layers.qaoa_mixer(beta=np.pi/4)
+print(f"  Parameters: 1")
+print(f"  Unitary: {np.allclose(U_mixer @ U_mixer.conj().T, np.eye(16))}")
+
+# Chemistry layer
+print("\nChemistry-inspired layer:")
+params_chem = np.random.uniform(0, np.pi, 6)
+U_chem = layers.chemistry_layer(params_chem)
+print(f"  Parameters: {len(params_chem)}")
+print(f"  Unitary: {np.allclose(U_chem @ U_chem.conj().T, np.eye(16))}")
+```
+
+## Symmetry-Preserving Ansatze
+
+Symmetry-preserving ansatze maintain certain quantum symmetries, crucial for physics applications.
+
+<Definition>
+**Symmetry-Preserving Ansatz**:
+
+A circuit that preserves a symmetry operator S if:
+$$[U(\theta), S] = 0 \quad \forall \theta$$
+
+This ensures the quantum state stays within a symmetry sector.
+</Definition>
+
+```python
+import numpy as np
+
+class SymmetryPreservingLayer:
+    """Layers that preserve specific symmetries."""
+
+    def __init__(self, n_qubits):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+
+    def _excitation_preserving_gate(self, theta, q1, q2):
+        """Gate that preserves total number of excitations.
+
+        Acts on |01⟩, |10⟩ subspace as a rotation.
+        Leaves |00⟩ and |11⟩ unchanged.
+        """
+        U = np.eye(self.dim, dtype=complex)
+        c, s = np.cos(theta/2), np.sin(theta/2)
+
+        for z in range(self.dim):
+            bit1 = (z >> (self.n_qubits - 1 - q1)) & 1
+            bit2 = (z >> (self.n_qubits - 1 - q2)) & 1
+
+            if bit1 == 0 and bit2 == 1:
+                # |01⟩ -> c|01⟩ + s|10⟩
+                z_swap = z ^ (1 << (self.n_qubits - 1 - q1)) ^ (1 << (self.n_qubits - 1 - q2))
+                U[z, z] = c
+                U[z_swap, z] = s
+            elif bit1 == 1 and bit2 == 0:
+                # |10⟩ -> -s|01⟩ + c|10⟩
+                z_swap = z ^ (1 << (self.n_qubits - 1 - q1)) ^ (1 << (self.n_qubits - 1 - q2))
+                U[z, z] = c
+                U[z_swap, z] = -s
+
+        return U
+
+    def _rz(self, theta, qubit):
+        """RZ gate (preserves Z-parity)."""
+        U = np.eye(self.dim, dtype=complex)
+        for z in range(self.dim):
+            bit = (z >> (self.n_qubits - 1 - qubit)) & 1
+            phase = np.exp(-1j * theta/2) if bit == 0 else np.exp(1j * theta/2)
+            U[z, z] = phase
+        return U
+
+    def particle_conserving_layer(self, params):
+        """Layer that conserves particle number (sum of Z operators).
+
+        Uses excitation-preserving two-qubit gates.
+        """
+        U = np.eye(self.dim, dtype=complex)
+        param_idx = 0
+
+        # RZ rotations (preserve particle number)
+        for q in range(self.n_qubits):
+            U = self._rz(params[param_idx], q) @ U
+            param_idx += 1
+
+        # Excitation-preserving gates between adjacent qubits
+        for q in range(self.n_qubits - 1):
+            U = self._excitation_preserving_gate(params[param_idx], q, q + 1) @ U
+            param_idx += 1
+
+        return U, param_idx
+
+    def total_spin_preserving_layer(self, params):
+        """Layer that approximately preserves total spin.
+
+        Uses symmetric two-qubit operations.
+        """
+        U = np.eye(self.dim, dtype=complex)
+        param_idx = 0
+
+        # Symmetric single-qubit rotations
+        for q in range(self.n_qubits):
+            U = self._rz(params[param_idx], q) @ U
+            param_idx += 1
+
+        # Symmetric two-qubit gates
+        for q in range(self.n_qubits - 1):
+            U = self._excitation_preserving_gate(params[param_idx], q, q + 1) @ U
+            param_idx += 1
+
+        return U, param_idx
+
+    def verify_particle_conservation(self, U, initial_state):
+        """Verify that particle number is conserved."""
+        # Compute particle number operator
+        def particle_number(state):
+            """Count expected number of |1⟩s."""
+            total = 0
+            probs = np.abs(state) ** 2
+            for z in range(self.dim):
+                n_ones = bin(z).count('1')
+                total += probs[z] * n_ones
+            return total
+
+        initial_n = particle_number(initial_state)
+        final_state = U @ initial_state
+        final_n = particle_number(final_state)
+
+        return {
+            'initial_particles': initial_n,
+            'final_particles': final_n,
+            'conserved': np.isclose(initial_n, final_n)
+        }
+
+# Example
+print("Symmetry-Preserving Layers")
+print("=" * 50)
+
+sym_layer = SymmetryPreservingLayer(n_qubits=4)
+
+# Test particle conservation
+print("\nParticle-conserving layer test:")
+
+# Start with 2 particles: |0011⟩
+initial = np.zeros(16, dtype=complex)
+initial[3] = 1  # |0011⟩ = 2 particles
+
+params = np.random.uniform(0, np.pi, 7)  # 4 RZ + 3 excitation gates
+U, n_used = sym_layer.particle_conserving_layer(params)
+
+result = sym_layer.verify_particle_conservation(U, initial)
+print(f"  Initial particles: {result['initial_particles']:.4f}")
+print(f"  Final particles: {result['final_particles']:.4f}")
+print(f"  Conservation verified: {result['conserved']}")
+
+# Test with different initial states
+print("\nTesting with various particle numbers:")
+for n_particles in [0, 1, 2, 3, 4]:
+    # Create state with n_particles (first matching basis state)
+    state = np.zeros(16, dtype=complex)
+    for z in range(16):
+        if bin(z).count('1') == n_particles:
+            state[z] = 1
+            break
+
+    result = sym_layer.verify_particle_conservation(U, state)
+    print(f"  n={n_particles}: Initial={result['initial_particles']:.1f}, "
+          f"Final={result['final_particles']:.4f}, Conserved={result['conserved']}")
+```
+
+<Warning>
+When implementing symmetry-preserving ansatze, ensure all gates commute with the symmetry operator. A single non-commuting gate breaks the symmetry.
+</Warning>
+
+## Layer Expressibility Analysis
+
+Expressibility quantifies how well a layer can explore the space of quantum states.
+
+```python
+import numpy as np
+
+def compute_layer_expressibility(layer_builder, n_samples=500):
+    """Analyze expressibility of a quantum layer.
+
+    Args:
+        layer_builder: Function that takes params and returns unitary
+        n_samples: Number of random samples
+
+    Returns:
+        Expressibility metrics
+    """
+    # Get layer properties
+    test_params = np.zeros(100)  # Large enough
+    try:
+        U_test = layer_builder(test_params[:10])
+        dim = U_test.shape[0]
+    except:
+        return None
+
+    fidelities = []
+
+    for _ in range(n_samples):
+        # Sample two random parameter sets
+        params1 = np.random.uniform(0, 2*np.pi, 20)
+        params2 = np.random.uniform(0, 2*np.pi, 20)
+
+        U1 = layer_builder(params1)
+        U2 = layer_builder(params2)
+
+        # Apply to |0...0⟩
+        state0 = np.zeros(dim, dtype=complex)
+        state0[0] = 1
+
+        state1 = U1 @ state0
+        state2 = U2 @ state0
+
+        # Fidelity
+        fidelity = np.abs(np.vdot(state1, state2)) ** 2
+        fidelities.append(fidelity)
+
+    fidelities = np.array(fidelities)
+
+    # Haar random reference
+    haar_mean = 1 / (dim + 1)
+    haar_var = dim / ((dim + 1)**2 * (dim + 2))
+
+    # Expressibility metrics
+    mean_f = np.mean(fidelities)
+    var_f = np.var(fidelities)
+
+    # KL divergence approximation
+    expr_score = 1 - abs(mean_f - haar_mean) / haar_mean
+
+    return {
+        'mean_fidelity': mean_f,
+        'var_fidelity': var_f,
+        'haar_mean': haar_mean,
+        'haar_var': haar_var,
+        'expressibility_score': expr_score,
+        'dimension': dim
+    }
+
+# Compare different layer types
+print("Layer Expressibility Analysis")
+print("=" * 60)
+
+n_qubits = 4
+dim = 2 ** n_qubits
+
+# Hardware-efficient layer
+he_layer = HardwareEfficientLayer(n_qubits)
+he_results = compute_layer_expressibility(
+    lambda p: he_layer.build(p[:he_layer.n_params]),
+    n_samples=400
+)
+
+# Strongly entangling layer
+se_layer = StronglyEntanglingLayer(n_qubits)
+se_results = compute_layer_expressibility(
+    lambda p: se_layer.build(p[:se_layer.n_params]),
+    n_samples=400
+)
+
+# Problem-inspired (Ising)
+pi_layer = ProblemInspiredLayers(n_qubits)
+pi_results = compute_layer_expressibility(
+    lambda p: pi_layer.ising_layer(p[:4], p[4:7]),
+    n_samples=400
+)
+
+print(f"\n{'Layer Type':<25} {'Mean F':<12} {'Haar Mean':<12} {'Score':<12}")
+print("-" * 60)
+
+for name, results in [
+    ('Hardware-Efficient', he_results),
+    ('Strongly-Entangling', se_results),
+    ('Ising-Inspired', pi_results)
+]:
+    if results:
+        print(f"{name:<25} {results['mean_fidelity']:<12.4f} "
+              f"{results['haar_mean']:<12.4f} {results['expressibility_score']:<12.3f}")
+
+print(f"\nReference: Haar random mean fidelity = 1/(d+1) = {1/(dim+1):.4f}")
+```
+
+## Multi-Layer Circuit Analysis
+
+Combining multiple layers increases expressibility but may affect trainability.
+
+```python
+import numpy as np
+
+class MultiLayerAnalyzer:
+    """Analyze multi-layer quantum circuits."""
+
+    def __init__(self, n_qubits):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+
+    def build_deep_circuit(self, layer_builder, n_layers, params):
+        """Build a deep circuit with multiple layers."""
+        U = np.eye(self.dim, dtype=complex)
+
+        params_per_layer = len(params) // n_layers
+
+        for l in range(n_layers):
+            start = l * params_per_layer
+            end = start + params_per_layer
+            U_layer = layer_builder(params[start:end])
+            U = U_layer @ U
+
+        return U
+
+    def analyze_depth_expressibility(self, layer_class, max_layers=6, n_samples=300):
+        """Analyze how expressibility changes with circuit depth."""
+        results = []
+
+        layer = layer_class(self.n_qubits)
+        params_per_layer = layer.n_params
+
+        for n_layers in range(1, max_layers + 1):
+            fidelities = []
+
+            for _ in range(n_samples):
+                params1 = np.random.uniform(0, 2*np.pi, params_per_layer * n_layers)
+                params2 = np.random.uniform(0, 2*np.pi, params_per_layer * n_layers)
+
+                U1 = self.build_deep_circuit(
+                    layer.build, n_layers, params1
+                )
+                U2 = self.build_deep_circuit(
+                    layer.build, n_layers, params2
+                )
+
+                state0 = np.zeros(self.dim, dtype=complex)
+                state0[0] = 1
+
+                state1 = U1 @ state0
+                state2 = U2 @ state0
+
+                fidelity = np.abs(np.vdot(state1, state2)) ** 2
+                fidelities.append(fidelity)
+
+            haar_mean = 1 / (self.dim + 1)
+            mean_f = np.mean(fidelities)
+
+            results.append({
+                'n_layers': n_layers,
+                'mean_fidelity': mean_f,
+                'haar_mean': haar_mean,
+                'expressibility': 1 - abs(mean_f - haar_mean) / haar_mean,
+                'total_params': params_per_layer * n_layers
+            })
+
+        return results
+
+# Analyze depth vs expressibility
+print("Depth vs Expressibility Analysis")
+print("=" * 60)
+
+analyzer = MultiLayerAnalyzer(n_qubits=4)
+
+print("\nHardware-Efficient Ansatz:")
+he_depth_results = analyzer.analyze_depth_expressibility(
+    HardwareEfficientLayer,
+    max_layers=5,
+    n_samples=200
+)
+
+print(f"{'Layers':<10} {'Params':<10} {'Mean F':<12} {'Express.':<12}")
+print("-" * 44)
+for r in he_depth_results:
+    print(f"{r['n_layers']:<10} {r['total_params']:<10} "
+          f"{r['mean_fidelity']:<12.4f} {r['expressibility']:<12.3f}")
+
+print("\nStrongly-Entangling Ansatz:")
+se_depth_results = analyzer.analyze_depth_expressibility(
+    StronglyEntanglingLayer,
+    max_layers=4,
+    n_samples=200
+)
+
+print(f"{'Layers':<10} {'Params':<10} {'Mean F':<12} {'Express.':<12}")
+print("-" * 44)
+for r in se_depth_results:
+    print(f"{r['n_layers']:<10} {r['total_params']:<10} "
+          f"{r['mean_fidelity']:<12.4f} {r['expressibility']:<12.3f}")
+```
+
+<Tip>
+Increasing depth improves expressibility but may lead to barren plateaus. Monitor gradient magnitudes during training to detect trainability issues.
+</Tip>
+
+## Practical Layer Selection Guide
+
+```python
+def layer_selection_guide(problem_type, n_qubits, hardware_connectivity, depth_budget):
+    """Recommend layer architecture based on problem requirements.
+
+    Args:
+        problem_type: 'classification', 'optimization', 'chemistry', 'general'
+        n_qubits: Number of qubits
+        hardware_connectivity: 'linear', 'all-to-all', 'grid'
+        depth_budget: 'shallow' (<10), 'medium' (10-50), 'deep' (>50)
+
+    Returns:
+        Recommended layer configurations
+    """
+    recommendations = []
+
+    # Hardware-efficient is always a baseline
+    recommendations.append({
+        'layer': 'Hardware-Efficient',
+        'reason': 'Good baseline, works on all hardware',
+        'params_per_layer': 2 * n_qubits,
+        'suggested_layers': 2 if depth_budget == 'shallow' else (4 if depth_budget == 'medium' else 8)
+    })
+
+    if hardware_connectivity == 'all-to-all':
+        recommendations.append({
+            'layer': 'Strongly-Entangling',
+            'reason': 'High expressibility with full connectivity',
+            'params_per_layer': 3 * n_qubits,
+            'suggested_layers': 1 if depth_budget == 'shallow' else (2 if depth_budget == 'medium' else 4)
+        })
+
+    if problem_type == 'chemistry':
+        recommendations.append({
+            'layer': 'Particle-Conserving',
+            'reason': 'Preserves electron number symmetry',
+            'params_per_layer': 2 * n_qubits - 1,
+            'suggested_layers': 3 if depth_budget == 'shallow' else (6 if depth_budget == 'medium' else 12)
+        })
+
+    if problem_type == 'optimization':
+        recommendations.append({
+            'layer': 'QAOA-style',
+            'reason': 'Problem-aware structure for optimization',
+            'params_per_layer': 2,  # gamma and beta
+            'suggested_layers': 2 if depth_budget == 'shallow' else (5 if depth_budget == 'medium' else 10)
+        })
+
+    if problem_type == 'classification':
+        recommendations.append({
+            'layer': 'Data-Reuploading',
+            'reason': 'Good for feature mapping with limited qubits',
+            'params_per_layer': 3 * n_qubits,
+            'suggested_layers': 3 if depth_budget == 'shallow' else (5 if depth_budget == 'medium' else 8)
+        })
+
+    return recommendations
+
+# Example usage
+print("Layer Selection Guide")
+print("=" * 60)
+
+scenarios = [
+    ('classification', 4, 'linear', 'shallow'),
+    ('chemistry', 8, 'all-to-all', 'medium'),
+    ('optimization', 6, 'linear', 'medium'),
+    ('general', 4, 'all-to-all', 'deep')
+]
+
+for problem, n_q, hw, depth in scenarios:
+    print(f"\nScenario: {problem}, {n_q} qubits, {hw}, {depth} depth")
+    print("-" * 50)
+
+    recs = layer_selection_guide(problem, n_q, hw, depth)
+    for rec in recs:
+        total_params = rec['params_per_layer'] * rec['suggested_layers']
+        print(f"  {rec['layer']}: {rec['suggested_layers']} layers, "
+              f"~{total_params} params")
+        print(f"    Reason: {rec['reason']}")
+```
+
+## Summary
+
+Key concepts in quantum layer design:
+
+1. **Hardware-Efficient Ansatze**: Linear entanglement, native gates, shallow circuits
+2. **Strongly Entangling Layers**: All-to-all connectivity, maximum expressibility
+3. **Problem-Inspired**: Domain knowledge guides architecture (Ising, chemistry)
+4. **Symmetry-Preserving**: Maintains physical constraints (particle number, spin)
+5. **Expressibility**: Measures coverage of state space, increases with depth
+
+The next lesson covers training strategies for quantum neural networks.

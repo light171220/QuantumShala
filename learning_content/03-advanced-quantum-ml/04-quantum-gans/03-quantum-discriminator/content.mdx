@@ -1,0 +1,729 @@
+---
+title: "Quantum Discriminators in QGANs"
+description: "Learn how to design quantum and hybrid quantum-classical discriminators for distinguishing real from generated data."
+estimatedMinutes: 60
+---
+
+# Quantum Discriminators in QGANs
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Design quantum discriminator circuits
+- Implement hybrid classical-quantum discriminators
+- Compute discriminator outputs from quantum measurements
+- Apply quantum kernels for discrimination
+- Train quantum discriminators efficiently
+- Balance quantum and classical components
+
+---
+
+## 1. Quantum Discriminator Architecture
+
+A quantum discriminator classifies inputs as real or fake using quantum circuits.
+
+<Definition term="Quantum Discriminator">
+A quantum discriminator D_φ maps input data to a probability of being real:
+
+D(x) = ⟨ψ(x,φ)|M|ψ(x,φ)⟩
+
+where |ψ(x,φ)⟩ = U(φ)V(x)|0⟩ encodes the input x and applies trainable parameters φ, and M is a measurement observable.
+</Definition>
+
+```python
+import numpy as np
+from scipy.linalg import expm
+from typing import Tuple, Dict
+
+class QuantumDiscriminator:
+    """
+    Quantum discriminator for QGAN.
+    """
+
+    def __init__(self, n_qubits: int, n_layers: int = 2):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dim = 2 ** n_qubits
+
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        # Encoding parameters (data-dependent)
+        self.n_encoding_params = n_qubits * 2
+
+        # Trainable parameters
+        self.n_trainable = 3 * n_qubits * n_layers
+        self.params = np.random.randn(self.n_trainable) * 0.1
+
+    def _single_gate(self, gate: np.ndarray, qubit: int) -> np.ndarray:
+        result = np.array([[1]], dtype=complex)
+        for i in range(self.n_qubits):
+            result = np.kron(result, gate if i == qubit else self.I)
+        return result
+
+    def _rotation(self, pauli: np.ndarray, theta: float, qubit: int) -> np.ndarray:
+        gate = expm(-1j * theta / 2 * pauli)
+        return self._single_gate(gate, qubit)
+
+    def encode_input(self, x: np.ndarray) -> np.ndarray:
+        """Encode classical input into quantum state."""
+        U = np.eye(self.dim, dtype=complex)
+
+        # Amplitude encoding via rotations
+        for i, val in enumerate(x[:self.n_qubits]):
+            # Ry rotation based on input value
+            U = self._rotation(self.Y, np.arcsin(val) * 2, i) @ U
+            # Rz rotation for phase encoding
+            U = self._rotation(self.Z, np.arccos(val**2) * 2, i) @ U
+
+        return U
+
+    def variational_circuit(self, params: np.ndarray) -> np.ndarray:
+        """Build trainable variational circuit."""
+        U = np.eye(self.dim, dtype=complex)
+        idx = 0
+
+        for layer in range(self.n_layers):
+            # Single-qubit rotations
+            for q in range(self.n_qubits):
+                U = self._rotation(self.X, params[idx], q) @ U
+                idx += 1
+                U = self._rotation(self.Y, params[idx], q) @ U
+                idx += 1
+                U = self._rotation(self.Z, params[idx], q) @ U
+                idx += 1
+
+            # Entangling layer (CZ gates)
+            for q in range(self.n_qubits - 1):
+                CZ = self._cz_gate(q, q + 1)
+                U = CZ @ U
+
+        return U
+
+    def _cz_gate(self, q1: int, q2: int) -> np.ndarray:
+        """Controlled-Z gate."""
+        CZ = np.eye(self.dim, dtype=complex)
+        for i in range(self.dim):
+            bits = [(i >> j) & 1 for j in range(self.n_qubits)]
+            if bits[q1] == 1 and bits[q2] == 1:
+                CZ[i, i] = -1
+        return CZ
+
+    def forward(self, x: np.ndarray, params: np.ndarray = None) -> float:
+        """
+        Compute discriminator output D(x).
+
+        Returns probability that x is real.
+        """
+        if params is None:
+            params = self.params
+
+        # Encode input
+        V = self.encode_input(x)
+
+        # Apply variational circuit
+        U = self.variational_circuit(params)
+
+        # Initial state
+        psi0 = np.zeros(self.dim, dtype=complex)
+        psi0[0] = 1.0
+
+        # Final state
+        psi = U @ V @ psi0
+
+        # Measure first qubit in Z basis
+        # P(0) = probability of measuring |0⟩
+        Z0 = self._single_gate(self.Z, 0)
+        expectation = np.real(psi.conj() @ Z0 @ psi)
+
+        # Map expectation [-1, 1] to probability [0, 1]
+        prob_real = (expectation + 1) / 2
+
+        return prob_real
+
+    def discriminate_batch(
+        self,
+        X: np.ndarray,
+        params: np.ndarray = None
+    ) -> np.ndarray:
+        """Discriminate a batch of inputs."""
+        return np.array([self.forward(x, params) for x in X])
+```
+
+---
+
+## 2. Hybrid Discriminators
+
+Combining quantum and classical components can improve performance.
+
+<Definition term="Hybrid Quantum-Classical Discriminator">
+A hybrid discriminator uses:
+- Quantum circuit for feature extraction
+- Classical neural network for final classification
+
+This leverages quantum advantages while maintaining classical expressiveness.
+</Definition>
+
+```python
+class HybridDiscriminator:
+    """
+    Hybrid quantum-classical discriminator.
+    """
+
+    def __init__(
+        self,
+        n_qubits: int,
+        classical_hidden: int = 16
+    ):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+        self.classical_hidden = classical_hidden
+
+        # Pauli matrices
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        # Quantum parameters
+        self.n_quantum_params = 3 * n_qubits
+        self.quantum_params = np.random.randn(self.n_quantum_params) * 0.1
+
+        # Classical parameters
+        self.n_quantum_features = 2 * n_qubits  # Z and X expectations
+        self.classical_params = {
+            'W1': np.random.randn(self.n_quantum_features, classical_hidden) * 0.1,
+            'b1': np.zeros(classical_hidden),
+            'W2': np.random.randn(classical_hidden, 1) * 0.1,
+            'b2': np.zeros(1)
+        }
+
+    def _single_gate(self, gate: np.ndarray, qubit: int) -> np.ndarray:
+        result = np.array([[1]], dtype=complex)
+        for i in range(self.n_qubits):
+            result = np.kron(result, gate if i == qubit else self.I)
+        return result
+
+    def quantum_feature_map(self, x: np.ndarray) -> np.ndarray:
+        """Extract quantum features from input."""
+        # Encode input into quantum state
+        U = np.eye(self.dim, dtype=complex)
+
+        # Input encoding
+        for i, val in enumerate(x[:self.n_qubits]):
+            gate = expm(-1j * val * np.pi * self.Y)
+            U = self._single_gate(gate, i) @ U
+
+        # Variational layer
+        idx = 0
+        for q in range(self.n_qubits):
+            for P in [self.X, self.Y, self.Z]:
+                gate = expm(-1j * self.quantum_params[idx] / 2 * P)
+                U = self._single_gate(gate, q) @ U
+                idx += 1
+
+        # Generate state
+        psi0 = np.zeros(self.dim, dtype=complex)
+        psi0[0] = 1.0
+        psi = U @ psi0
+
+        # Extract features (expectation values)
+        features = []
+        for q in range(self.n_qubits):
+            Z_q = self._single_gate(self.Z, q)
+            X_q = self._single_gate(self.X, q)
+            features.append(np.real(psi.conj() @ Z_q @ psi))
+            features.append(np.real(psi.conj() @ X_q @ psi))
+
+        return np.array(features)
+
+    def classical_network(self, features: np.ndarray) -> float:
+        """Classical neural network for final classification."""
+        # Hidden layer with ReLU
+        h = np.maximum(0, features @ self.classical_params['W1'] + self.classical_params['b1'])
+
+        # Output layer with sigmoid
+        logit = h @ self.classical_params['W2'] + self.classical_params['b2']
+        prob = 1 / (1 + np.exp(-logit))
+
+        return prob[0]
+
+    def forward(self, x: np.ndarray) -> float:
+        """Full forward pass."""
+        # Quantum feature extraction
+        features = self.quantum_feature_map(x)
+
+        # Classical classification
+        return self.classical_network(features)
+
+    def discriminate_batch(self, X: np.ndarray) -> np.ndarray:
+        """Process batch of inputs."""
+        return np.array([self.forward(x) for x in X])
+```
+
+---
+
+## 3. Quantum Kernel Discriminators
+
+Kernel methods provide an alternative approach to discrimination.
+
+<Definition term="Quantum Kernel Discriminator">
+Instead of learning a variational classifier, use a quantum kernel:
+
+k(x, x') = |⟨φ(x)|φ(x')⟩|²
+
+This measures similarity in the quantum feature space and can be used with classical kernel methods like SVM.
+</Definition>
+
+```python
+class QuantumKernelDiscriminator:
+    """
+    Discriminator using quantum kernel methods.
+    """
+
+    def __init__(self, n_qubits: int):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+
+        self.I = np.eye(2, dtype=complex)
+        self.Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        # Support vectors (learned from training)
+        self.support_vectors = []
+        self.support_labels = []
+        self.alphas = []
+
+    def _single_gate(self, gate: np.ndarray, qubit: int) -> np.ndarray:
+        result = np.array([[1]], dtype=complex)
+        for i in range(self.n_qubits):
+            result = np.kron(result, gate if i == qubit else self.I)
+        return result
+
+    def feature_map(self, x: np.ndarray) -> np.ndarray:
+        """Encode x into quantum state."""
+        U = np.eye(self.dim, dtype=complex)
+
+        # First layer: encode input
+        for i, val in enumerate(x[:self.n_qubits]):
+            gate = expm(-1j * val * np.pi * self.Y)
+            U = self._single_gate(gate, i) @ U
+
+        # Second layer: encode products (for non-linearity)
+        for i in range(self.n_qubits):
+            for j in range(i + 1, self.n_qubits):
+                if i < len(x) and j < len(x):
+                    angle = x[i] * x[j] * np.pi
+                    gate = expm(-1j * angle * self.Z)
+                    U = self._single_gate(gate, i) @ U
+
+        # Initial state
+        psi0 = np.zeros(self.dim, dtype=complex)
+        psi0[0] = 1.0
+
+        return U @ psi0
+
+    def kernel(self, x1: np.ndarray, x2: np.ndarray) -> float:
+        """Compute quantum kernel k(x1, x2)."""
+        psi1 = self.feature_map(x1)
+        psi2 = self.feature_map(x2)
+
+        # Fidelity
+        return np.abs(np.vdot(psi1, psi2)) ** 2
+
+    def compute_kernel_matrix(
+        self,
+        X1: np.ndarray,
+        X2: np.ndarray = None
+    ) -> np.ndarray:
+        """Compute kernel matrix K[i,j] = k(X1[i], X2[j])."""
+        if X2 is None:
+            X2 = X1
+
+        K = np.zeros((len(X1), len(X2)))
+        for i, x1 in enumerate(X1):
+            for j, x2 in enumerate(X2):
+                K[i, j] = self.kernel(x1, x2)
+
+        return K
+
+    def fit(
+        self,
+        X_real: np.ndarray,
+        X_fake: np.ndarray,
+        C: float = 1.0
+    ):
+        """
+        Train kernel discriminator using simplified SVM.
+        """
+        # Combine data
+        X = np.vstack([X_real, X_fake])
+        y = np.concatenate([np.ones(len(X_real)), -np.ones(len(X_fake))])
+
+        # Compute kernel matrix
+        K = self.compute_kernel_matrix(X)
+
+        # Simple perceptron-style training
+        n = len(X)
+        self.alphas = np.zeros(n)
+
+        for _ in range(100):  # iterations
+            for i in range(n):
+                prediction = np.sum(self.alphas * y * K[i, :])
+                if y[i] * prediction < 1:
+                    self.alphas[i] += C * y[i]
+
+        # Store support vectors
+        sv_mask = np.abs(self.alphas) > 1e-5
+        self.support_vectors = X[sv_mask]
+        self.support_labels = y[sv_mask]
+        self.alphas = self.alphas[sv_mask]
+
+    def forward(self, x: np.ndarray) -> float:
+        """Predict probability of being real."""
+        if len(self.support_vectors) == 0:
+            return 0.5
+
+        # Compute kernel with support vectors
+        decision = 0
+        for sv, label, alpha in zip(
+            self.support_vectors, self.support_labels, self.alphas
+        ):
+            decision += alpha * label * self.kernel(x, sv)
+
+        # Map to probability
+        return 1 / (1 + np.exp(-decision))
+```
+
+---
+
+## 4. Training Quantum Discriminators
+
+Training quantum discriminators requires careful gradient estimation.
+
+```python
+class DiscriminatorTrainer:
+    """
+    Training utilities for quantum discriminators.
+    """
+
+    def __init__(
+        self,
+        discriminator: QuantumDiscriminator,
+        learning_rate: float = 0.01
+    ):
+        self.D = discriminator
+        self.lr = learning_rate
+
+    def compute_loss(
+        self,
+        real_data: np.ndarray,
+        fake_data: np.ndarray,
+        params: np.ndarray = None
+    ) -> float:
+        """
+        Compute discriminator loss.
+        L_D = -E[log D(real)] - E[log(1 - D(fake))]
+        """
+        if params is None:
+            params = self.D.params
+
+        eps = 1e-8
+
+        # Loss on real data
+        D_real = self.D.discriminate_batch(real_data, params)
+        loss_real = -np.mean(np.log(D_real + eps))
+
+        # Loss on fake data
+        D_fake = self.D.discriminate_batch(fake_data, params)
+        loss_fake = -np.mean(np.log(1 - D_fake + eps))
+
+        return loss_real + loss_fake
+
+    def compute_gradient(
+        self,
+        real_data: np.ndarray,
+        fake_data: np.ndarray
+    ) -> np.ndarray:
+        """Compute gradient using parameter-shift rule."""
+        shift = np.pi / 2
+        grad = np.zeros_like(self.D.params)
+
+        for i in range(len(self.D.params)):
+            # Forward shift
+            params_plus = self.D.params.copy()
+            params_plus[i] += shift
+            loss_plus = self.compute_loss(real_data, fake_data, params_plus)
+
+            # Backward shift
+            params_minus = self.D.params.copy()
+            params_minus[i] -= shift
+            loss_minus = self.compute_loss(real_data, fake_data, params_minus)
+
+            grad[i] = (loss_plus - loss_minus) / 2
+
+        return grad
+
+    def train_step(
+        self,
+        real_data: np.ndarray,
+        fake_data: np.ndarray
+    ) -> float:
+        """One training step."""
+        # Compute gradient
+        grad = self.compute_gradient(real_data, fake_data)
+
+        # Update parameters
+        self.D.params -= self.lr * grad
+
+        # Return current loss
+        return self.compute_loss(real_data, fake_data)
+
+    def evaluate_accuracy(
+        self,
+        real_data: np.ndarray,
+        fake_data: np.ndarray
+    ) -> Dict[str, float]:
+        """Evaluate discriminator accuracy."""
+        D_real = self.D.discriminate_batch(real_data)
+        D_fake = self.D.discriminate_batch(fake_data)
+
+        real_correct = np.mean(D_real > 0.5)
+        fake_correct = np.mean(D_fake < 0.5)
+
+        return {
+            'real_accuracy': real_correct,
+            'fake_accuracy': fake_correct,
+            'total_accuracy': (real_correct + fake_correct) / 2,
+            'D_real_mean': np.mean(D_real),
+            'D_fake_mean': np.mean(D_fake)
+        }
+```
+
+---
+
+## 5. Discriminator Output Processing
+
+Different methods for computing the final discrimination probability.
+
+```python
+class DiscriminatorOutputProcessor:
+    """
+    Various output processing methods for quantum discriminators.
+    """
+
+    def __init__(self, n_qubits: int):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+
+        self.I = np.eye(2, dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    def _single_z(self, qubit: int) -> np.ndarray:
+        result = np.array([[1]], dtype=complex)
+        for i in range(self.n_qubits):
+            result = np.kron(result, self.Z if i == qubit else self.I)
+        return result
+
+    def single_qubit_expectation(
+        self,
+        psi: np.ndarray,
+        qubit: int = 0
+    ) -> float:
+        """Output based on single qubit Z expectation."""
+        Z_q = self._single_z(qubit)
+        expectation = np.real(psi.conj() @ Z_q @ psi)
+        return (expectation + 1) / 2
+
+    def parity_measurement(self, psi: np.ndarray) -> float:
+        """Output based on parity of all qubits."""
+        # Parity observable = Z⊗Z⊗...⊗Z
+        parity = np.eye(self.dim, dtype=complex)
+        for q in range(self.n_qubits):
+            parity = parity @ self._single_z(q)
+
+        expectation = np.real(psi.conj() @ parity @ psi)
+        return (expectation + 1) / 2
+
+    def probability_threshold(
+        self,
+        psi: np.ndarray,
+        threshold_states: set = None
+    ) -> float:
+        """
+        Output based on probability of specific states.
+        E.g., probability of measuring |0...0⟩
+        """
+        if threshold_states is None:
+            threshold_states = {0}  # |0...0⟩
+
+        probs = np.abs(psi) ** 2
+        return sum(probs[s] for s in threshold_states if s < len(probs))
+
+    def weighted_majority(
+        self,
+        psi: np.ndarray,
+        weights: np.ndarray = None
+    ) -> float:
+        """Weighted combination of single-qubit measurements."""
+        if weights is None:
+            weights = np.ones(self.n_qubits) / self.n_qubits
+
+        result = 0
+        for q in range(self.n_qubits):
+            exp_q = self.single_qubit_expectation(psi, q)
+            result += weights[q] * exp_q
+
+        return result
+```
+
+---
+
+## 6. Balancing Discriminator Power
+
+Preventing the discriminator from becoming too powerful or too weak.
+
+```python
+class BalancedDiscriminatorTrainer:
+    """
+    Training with balance techniques to stabilize GAN training.
+    """
+
+    def __init__(
+        self,
+        discriminator: QuantumDiscriminator,
+        target_accuracy: float = 0.7,
+        learning_rate: float = 0.01
+    ):
+        self.D = discriminator
+        self.target_accuracy = target_accuracy
+        self.base_lr = learning_rate
+        self.current_lr = learning_rate
+
+    def adaptive_learning_rate(
+        self,
+        current_accuracy: float
+    ) -> float:
+        """Adjust learning rate based on discriminator accuracy."""
+        if current_accuracy > self.target_accuracy + 0.1:
+            # D too strong, reduce learning
+            self.current_lr = self.base_lr * 0.5
+        elif current_accuracy < self.target_accuracy - 0.1:
+            # D too weak, increase learning
+            self.current_lr = self.base_lr * 1.5
+        else:
+            self.current_lr = self.base_lr
+
+        return self.current_lr
+
+    def label_smoothing(
+        self,
+        labels: np.ndarray,
+        smoothing: float = 0.1
+    ) -> np.ndarray:
+        """Apply label smoothing to prevent overconfidence."""
+        # Real labels: 1 -> 0.9
+        # Fake labels: 0 -> 0.1
+        smoothed = labels * (1 - smoothing) + (1 - labels) * smoothing
+        return smoothed
+
+    def compute_balanced_loss(
+        self,
+        real_data: np.ndarray,
+        fake_data: np.ndarray,
+        smooth: float = 0.1
+    ) -> float:
+        """Compute loss with label smoothing."""
+        eps = 1e-8
+
+        D_real = self.D.discriminate_batch(real_data)
+        D_fake = self.D.discriminate_batch(fake_data)
+
+        # Smoothed targets
+        real_target = 1 - smooth
+        fake_target = smooth
+
+        # Cross-entropy with smoothed labels
+        loss_real = -np.mean(
+            real_target * np.log(D_real + eps) +
+            (1 - real_target) * np.log(1 - D_real + eps)
+        )
+        loss_fake = -np.mean(
+            fake_target * np.log(D_fake + eps) +
+            (1 - fake_target) * np.log(1 - D_fake + eps)
+        )
+
+        return loss_real + loss_fake
+
+    def train_step_balanced(
+        self,
+        real_data: np.ndarray,
+        fake_data: np.ndarray
+    ) -> Tuple[float, float]:
+        """Training step with balancing."""
+        # Evaluate current accuracy
+        D_real = self.D.discriminate_batch(real_data)
+        D_fake = self.D.discriminate_batch(fake_data)
+        accuracy = (np.mean(D_real > 0.5) + np.mean(D_fake < 0.5)) / 2
+
+        # Adjust learning rate
+        lr = self.adaptive_learning_rate(accuracy)
+
+        # Compute gradient with label smoothing
+        shift = np.pi / 2
+        grad = np.zeros_like(self.D.params)
+
+        for i in range(len(self.D.params)):
+            params_plus = self.D.params.copy()
+            params_plus[i] += shift
+
+            params_minus = self.D.params.copy()
+            params_minus[i] -= shift
+
+            loss_plus = self._loss_with_params(real_data, fake_data, params_plus)
+            loss_minus = self._loss_with_params(real_data, fake_data, params_minus)
+
+            grad[i] = (loss_plus - loss_minus) / 2
+
+        # Update
+        self.D.params -= lr * grad
+
+        loss = self.compute_balanced_loss(real_data, fake_data)
+        return loss, accuracy
+
+    def _loss_with_params(
+        self,
+        real_data: np.ndarray,
+        fake_data: np.ndarray,
+        params: np.ndarray
+    ) -> float:
+        """Helper to compute loss with specific parameters."""
+        eps = 1e-8
+        D_real = self.D.discriminate_batch(real_data, params)
+        D_fake = self.D.discriminate_batch(fake_data, params)
+
+        return -np.mean(np.log(D_real + eps)) - np.mean(np.log(1 - D_fake + eps))
+```
+
+---
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Quantum Discriminator Architecture**: PQCs classify inputs by mapping to probability of being real
+
+2. **Hybrid Discriminators**: Combine quantum feature extraction with classical classification
+
+3. **Quantum Kernels**: Alternative approach using quantum kernel methods for discrimination
+
+4. **Training Methods**: Parameter-shift gradients enable training quantum discriminators
+
+5. **Output Processing**: Multiple ways to extract classification from quantum states
+
+6. **Balancing Techniques**: Adaptive learning rates and label smoothing prevent training collapse
+
+The next lesson covers hybrid QGAN architectures that combine quantum generators with various discriminator types.

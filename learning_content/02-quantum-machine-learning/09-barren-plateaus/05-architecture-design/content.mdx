@@ -1,0 +1,486 @@
+---
+title: "Architecture Design for Trainability"
+description: "Design quantum circuit architectures that avoid barren plateaus through careful structural choices."
+---
+
+# Architecture Design for Trainability
+
+The structure of a quantum circuit fundamentally determines its trainability. This lesson covers design principles for creating circuits that avoid barren plateaus.
+
+## Shallow Circuit Design
+
+Shallow circuits with limited depth avoid the exponential gradient suppression of deep circuits.
+
+<Definition>
+**Shallow Circuit Criterion**:
+
+For a circuit to avoid expressibility-induced barren plateaus, its depth should scale as:
+
+$$L < O(\log n)$$
+
+where $L$ is the circuit depth and $n$ is the number of qubits.
+</Definition>
+
+```python
+import numpy as np
+
+class ShallowCircuitDesigner:
+    """Design shallow circuits for trainability."""
+
+    def __init__(self, n_qubits: int):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+
+    def max_trainable_depth(self, target_variance: float = 1e-4) -> int:
+        """Estimate maximum trainable depth.
+
+        Based on variance scaling ~ 2^{-n*L/L_critical}
+        """
+        # Empirical: L_critical ~ 2 for hardware-efficient
+        L_critical = 2
+        # Solve: 2^{-n*L/L_critical} > target_variance
+        # -n*L/L_critical > log2(target_variance)
+        max_L = int(-L_critical * np.log2(target_variance) / self.n_qubits)
+        return max(1, min(max_L, self.n_qubits))
+
+    def build_shallow_circuit(self, n_layers: int):
+        """Build a shallow circuit architecture."""
+        n_params = self.n_qubits * n_layers * 2  # RY and RZ
+
+        def circuit(params):
+            state = np.zeros(self.dim, dtype=complex)
+            state[0] = 1
+            param_idx = 0
+
+            for layer in range(n_layers):
+                # Rotation layer
+                for q in range(self.n_qubits):
+                    # RY
+                    theta = params[param_idx]
+                    c, s = np.cos(theta/2), np.sin(theta/2)
+                    new_state = np.zeros_like(state)
+                    for z in range(self.dim):
+                        z_flip = z ^ (1 << (self.n_qubits - 1 - q))
+                        bit = (z >> (self.n_qubits - 1 - q)) & 1
+                        new_state[z] = c * state[z] + (1-2*bit) * s * state[z_flip]
+                    state = new_state
+                    param_idx += 1
+
+                    # RZ
+                    theta = params[param_idx]
+                    for z in range(self.dim):
+                        bit = (z >> (self.n_qubits - 1 - q)) & 1
+                        phase = np.exp(1j*theta/2) if bit else np.exp(-1j*theta/2)
+                        state[z] *= phase
+                    param_idx += 1
+
+                # Sparse entanglement (alternating pairs)
+                if layer % 2 == 0:
+                    pairs = [(i, i+1) for i in range(0, self.n_qubits-1, 2)]
+                else:
+                    pairs = [(i, i+1) for i in range(1, self.n_qubits-1, 2)]
+
+                for ctrl, tgt in pairs:
+                    new_state = np.zeros_like(state)
+                    for z in range(self.dim):
+                        c_bit = (z >> (self.n_qubits - 1 - ctrl)) & 1
+                        z_new = z ^ (1 << (self.n_qubits - 1 - tgt)) if c_bit else z
+                        new_state[z_new] += state[z]
+                    state = new_state
+
+            return state
+
+        return circuit, n_params
+
+# Analyze shallow vs deep
+print("Shallow vs Deep Circuit Trainability")
+print("=" * 60)
+
+for n_qubits in [4, 6, 8]:
+    designer = ShallowCircuitDesigner(n_qubits)
+    max_depth = designer.max_trainable_depth()
+    print(f"\nn={n_qubits}: Recommended max depth = {max_depth}")
+
+    dim = 2 ** n_qubits
+
+    def cost(state):
+        c = 0
+        for z in range(dim):
+            prob = np.abs(state[z])**2
+            parity = bin(z).count('1') % 2
+            c += prob * (1 - 2 * parity)
+        return c
+
+    for depth in [1, max_depth, n_qubits * 2]:
+        circuit, n_params = designer.build_shallow_circuit(depth)
+        grads = []
+        for _ in range(50):
+            params = np.random.uniform(0, 2*np.pi, n_params)
+            shift = np.pi / 2
+            pp, pm = params.copy(), params.copy()
+            pp[0] += shift
+            pm[0] -= shift
+            grad = (cost(circuit(pp)) - cost(circuit(pm))) / 2
+            grads.append(grad)
+
+        var = np.var(grads)
+        print(f"  Depth {depth}: Var[grad] = {var:.4e}")
+```
+
+## Entanglement Control
+
+Controlling entanglement growth is crucial for maintaining trainability.
+
+<Tip>
+Circuits with limited entanglement (below maximal) maintain gradient signal better than maximally entangling circuits.
+</Tip>
+
+```python
+import numpy as np
+
+def analyze_entanglement_architectures():
+    """Compare architectures with different entanglement patterns."""
+
+    print("\nEntanglement Architecture Comparison")
+    print("=" * 60)
+
+    n_qubits = 6
+    n_layers = 4
+    dim = 2 ** n_qubits
+
+    architectures = {
+        'no_entanglement': [],
+        'linear': lambda l: [(i, i+1) for i in range(n_qubits-1)],
+        'alternating': lambda l: [(i, i+1) for i in range(l%2, n_qubits-1, 2)],
+        'all_to_all': lambda l: [(i, j) for i in range(n_qubits)
+                                        for j in range(i+1, n_qubits)]
+    }
+
+    def build_circuit(entangle_fn):
+        n_params = n_qubits * n_layers
+
+        def circuit(params):
+            state = np.zeros(dim, dtype=complex)
+            state[0] = 1
+            param_idx = 0
+
+            for layer in range(n_layers):
+                # Rotation layer
+                for q in range(n_qubits):
+                    theta = params[param_idx]
+                    c, s = np.cos(theta/2), np.sin(theta/2)
+                    new_state = np.zeros_like(state)
+                    for z in range(dim):
+                        z_flip = z ^ (1 << (n_qubits - 1 - q))
+                        new_state[z] = c * state[z] - s * state[z_flip]
+                        new_state[z_flip] = s * state[z] + c * state[z_flip]
+                    state = new_state
+                    param_idx += 1
+
+                # Entanglement layer
+                if entangle_fn:
+                    pairs = entangle_fn(layer)
+                    for ctrl, tgt in pairs:
+                        new_state = np.zeros_like(state)
+                        for z in range(dim):
+                            c_bit = (z >> (n_qubits - 1 - ctrl)) & 1
+                            z_new = z ^ (1 << (n_qubits-1-tgt)) if c_bit else z
+                            new_state[z_new] += state[z]
+                        state = new_state
+
+            return state
+
+        return circuit, n_params
+
+    def cost(state):
+        c = 0
+        for z in range(dim):
+            prob = np.abs(state[z])**2
+            parity = bin(z).count('1') % 2
+            c += prob * (1 - 2 * parity)
+        return c
+
+    for name, entangle_fn in architectures.items():
+        circuit, n_params = build_circuit(
+            entangle_fn if name != 'no_entanglement' else None
+        )
+
+        grads = []
+        for _ in range(100):
+            params = np.random.uniform(0, 2*np.pi, n_params)
+            shift = np.pi / 2
+            pp, pm = params.copy(), params.copy()
+            pp[0] += shift
+            pm[0] -= shift
+            grad = (cost(circuit(pp)) - cost(circuit(pm))) / 2
+            grads.append(grad)
+
+        var = np.var(grads)
+        print(f"{name:<20}: Var[grad] = {var:.4e}")
+
+analyze_entanglement_architectures()
+```
+
+## Hierarchical Ansatz
+
+Hierarchical structures process information at multiple scales, avoiding global barren plateaus.
+
+```python
+import numpy as np
+
+class HierarchicalAnsatz:
+    """Hierarchical circuit structure for better trainability."""
+
+    def __init__(self, n_qubits: int):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+        # Number of hierarchical levels
+        self.n_levels = int(np.ceil(np.log2(n_qubits)))
+
+    def build_circuit(self):
+        """Build hierarchical circuit."""
+        # Parameters: 2 per qubit per level
+        n_params = 2 * self.n_qubits * self.n_levels
+
+        def circuit(params):
+            state = np.zeros(self.dim, dtype=complex)
+            state[0] = 1
+            param_idx = 0
+
+            for level in range(self.n_levels):
+                stride = 2 ** level
+
+                # Local rotations on pairs
+                for q in range(0, self.n_qubits, stride * 2):
+                    if q + stride < self.n_qubits:
+                        q1, q2 = q, q + stride
+
+                        # Rotation on q1
+                        theta = params[param_idx] if param_idx < len(params) else 0
+                        c, s = np.cos(theta/2), np.sin(theta/2)
+                        new_state = np.zeros_like(state)
+                        for z in range(self.dim):
+                            z_flip = z ^ (1 << (self.n_qubits - 1 - q1))
+                            new_state[z] = c * state[z] - s * state[z_flip]
+                            new_state[z_flip] = s * state[z] + c * state[z_flip]
+                        state = new_state
+                        param_idx += 1
+
+                        # Rotation on q2
+                        theta = params[param_idx] if param_idx < len(params) else 0
+                        c, s = np.cos(theta/2), np.sin(theta/2)
+                        new_state = np.zeros_like(state)
+                        for z in range(self.dim):
+                            z_flip = z ^ (1 << (self.n_qubits - 1 - q2))
+                            new_state[z] = c * state[z] - s * state[z_flip]
+                            new_state[z_flip] = s * state[z] + c * state[z_flip]
+                        state = new_state
+                        param_idx += 1
+
+                        # Entangle q1 and q2
+                        new_state = np.zeros_like(state)
+                        for z in range(self.dim):
+                            c_bit = (z >> (self.n_qubits - 1 - q1)) & 1
+                            z_new = z ^ (1 << (self.n_qubits-1-q2)) if c_bit else z
+                            new_state[z_new] += state[z]
+                        state = new_state
+
+            return state
+
+        return circuit, n_params
+
+def compare_hierarchical_vs_flat():
+    """Compare hierarchical ansatz to flat hardware-efficient."""
+
+    print("\nHierarchical vs Flat Architecture")
+    print("=" * 60)
+
+    for n_qubits in [4, 6, 8]:
+        dim = 2 ** n_qubits
+
+        # Hierarchical
+        hier = HierarchicalAnsatz(n_qubits)
+        hier_circuit, hier_params = hier.build_circuit()
+
+        # Flat (hardware-efficient)
+        flat_n_params = n_qubits * 3  # Similar param count
+
+        def flat_circuit(params):
+            state = np.zeros(dim, dtype=complex)
+            state[0] = 1
+            param_idx = 0
+
+            for q in range(n_qubits):
+                theta = params[param_idx] if param_idx < len(params) else 0
+                c, s = np.cos(theta/2), np.sin(theta/2)
+                new_state = np.zeros_like(state)
+                for z in range(dim):
+                    z_flip = z ^ (1 << (n_qubits - 1 - q))
+                    new_state[z] = c * state[z] - s * state[z_flip]
+                    new_state[z_flip] = s * state[z] + c * state[z_flip]
+                state = new_state
+                param_idx += 1
+
+            for q in range(n_qubits - 1):
+                new_state = np.zeros_like(state)
+                for z in range(dim):
+                    c_bit = (z >> (n_qubits - 1 - q)) & 1
+                    z_new = z ^ (1 << (n_qubits-1-(q+1))) if c_bit else z
+                    new_state[z_new] += state[z]
+                state = new_state
+
+            return state
+
+        def cost(state):
+            c = 0
+            for z in range(dim):
+                prob = np.abs(state[z])**2
+                parity = bin(z).count('1') % 2
+                c += prob * (1 - 2 * parity)
+            return c
+
+        # Measure gradient variance
+        results = {}
+        for name, circuit_fn, n_params in [
+            ('Hierarchical', hier_circuit, hier_params),
+            ('Flat', flat_circuit, flat_n_params)
+        ]:
+            grads = []
+            for _ in range(100):
+                params = np.random.uniform(0, 2*np.pi, n_params)
+                shift = np.pi / 2
+                pp, pm = params.copy(), params.copy()
+                pp[0] += shift
+                pm[0] -= shift
+                grad = (cost(circuit_fn(pp)) - cost(circuit_fn(pm))) / 2
+                grads.append(grad)
+            results[name] = np.var(grads)
+
+        print(f"\nn={n_qubits}:")
+        for name, var in results.items():
+            print(f"  {name}: Var[grad] = {var:.4e}")
+
+compare_hierarchical_vs_flat()
+```
+
+## Expressibility-Trainability Trade-off
+
+Finding the right balance between expressibility and trainability.
+
+```python
+import numpy as np
+
+def analyze_expressibility_trainability_tradeoff():
+    """Analyze the trade-off between expressibility and trainability."""
+
+    print("\nExpressibility-Trainability Trade-off")
+    print("=" * 60)
+
+    n_qubits = 5
+    dim = 2 ** n_qubits
+
+    def build_circuit(n_layers, entangle_prob=1.0):
+        """Build circuit with controllable entanglement."""
+        n_params = n_qubits * n_layers
+
+        def circuit(params):
+            state = np.zeros(dim, dtype=complex)
+            state[0] = 1
+            param_idx = 0
+
+            np.random.seed(42)  # Fixed entanglement pattern
+            for layer in range(n_layers):
+                for q in range(n_qubits):
+                    theta = params[param_idx]
+                    c, s = np.cos(theta/2), np.sin(theta/2)
+                    new_state = np.zeros_like(state)
+                    for z in range(dim):
+                        z_flip = z ^ (1 << (n_qubits - 1 - q))
+                        new_state[z] = c * state[z] - s * state[z_flip]
+                        new_state[z_flip] = s * state[z] + c * state[z_flip]
+                    state = new_state
+                    param_idx += 1
+
+                # Probabilistic entanglement
+                for q in range(n_qubits - 1):
+                    if np.random.random() < entangle_prob:
+                        new_state = np.zeros_like(state)
+                        for z in range(dim):
+                            c_bit = (z >> (n_qubits - 1 - q)) & 1
+                            z_new = z ^ (1 << (n_qubits-1-(q+1))) if c_bit else z
+                            new_state[z_new] += state[z]
+                        state = new_state
+
+            return state
+
+        return circuit, n_params
+
+    def measure_expressibility(circuit_fn, n_params, n_samples=100):
+        """Measure expressibility via fidelity distribution."""
+        fidelities = []
+        for _ in range(n_samples):
+            p1 = np.random.uniform(0, 2*np.pi, n_params)
+            p2 = np.random.uniform(0, 2*np.pi, n_params)
+            s1, s2 = circuit_fn(p1), circuit_fn(p2)
+            fidelities.append(np.abs(np.vdot(s1, s2))**2)
+
+        haar_mean = 1 / (dim + 1)
+        return 1 - abs(np.mean(fidelities) - haar_mean) / haar_mean
+
+    def measure_trainability(circuit_fn, n_params, n_samples=100):
+        """Measure trainability via gradient variance."""
+        grads = []
+
+        def cost(state):
+            c = 0
+            for z in range(dim):
+                prob = np.abs(state[z])**2
+                c += prob * (1 - 2*(bin(z).count('1')%2))
+            return c
+
+        for _ in range(n_samples):
+            params = np.random.uniform(0, 2*np.pi, n_params)
+            shift = np.pi / 2
+            pp, pm = params.copy(), params.copy()
+            pp[0] += shift
+            pm[0] -= shift
+            grad = (cost(circuit_fn(pp)) - cost(circuit_fn(pm))) / 2
+            grads.append(grad)
+
+        return np.var(grads)
+
+    # Analyze trade-off
+    print(f"{'Config':<25} {'Expressibility':<15} {'Var[grad]':<15}")
+    print("-" * 55)
+
+    configs = [
+        (1, 1.0),   # Shallow, full entanglement
+        (3, 1.0),   # Medium, full entanglement
+        (3, 0.5),   # Medium, sparse entanglement
+        (5, 1.0),   # Deep, full entanglement
+        (5, 0.3),   # Deep, sparse entanglement
+    ]
+
+    for n_layers, ent_prob in configs:
+        circuit, n_params = build_circuit(n_layers, ent_prob)
+        expr = measure_expressibility(circuit, n_params, 50)
+        train = measure_trainability(circuit, n_params, 50)
+
+        config_str = f"L={n_layers}, ent={ent_prob:.1f}"
+        print(f"{config_str:<25} {expr:<15.3f} {train:<15.4e}")
+
+analyze_expressibility_trainability_tradeoff()
+```
+
+## Summary
+
+Key architecture design principles for trainability:
+
+1. **Shallow Circuits**: Depth should scale sub-linearly with qubit count
+2. **Sparse Entanglement**: Avoid all-to-all connectivity
+3. **Hierarchical Structure**: Process information at multiple scales
+4. **Balanced Design**: Trade expressibility for trainability when needed
+
+<Warning>
+Architecture choices have profound effects on trainability. Always validate with gradient variance analysis before committing to training.
+</Warning>

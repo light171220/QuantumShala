@@ -1,0 +1,645 @@
+# Stabilizer Measurement Circuits
+
+## Introduction
+
+Measuring stabilizers without destroying the encoded quantum information is the heart of quantum error correction. In the surface code, stabilizer measurements must be performed repeatedly and fault-tolerantly using ancilla qubits. This lesson covers the circuits, scheduling, and techniques that make this possible.
+
+## Basic Measurement Circuit
+
+```
+Syndrome Extraction Principle
+═════════════════════════════
+
+To measure a stabilizer like XXXX without measuring individual qubits:
+
+1. Prepare ancilla in |+⟩ state
+2. Apply controlled operations from ancilla to data
+3. Measure ancilla in X basis
+
+For X-stabilizer (measures X₁X₂X₃X₄):
+
+    |+⟩ ─────●─────●─────●─────●───── M_X ──→ syndrome
+              │     │     │     │
+    |ψ₁⟩ ────X────────────────────────────
+              │
+    |ψ₂⟩ ──────────X───────────────────────
+              │
+    |ψ₃⟩ ────────────────X────────────────
+              │
+    |ψ₄⟩ ──────────────────────X──────────
+
+Circuit acts as:  |+⟩|ψ⟩ → (|0⟩ + X₁X₂X₃X₄|1⟩)|ψ⟩/√2
+
+After X-basis measurement:
+    +1 eigenstate → measures 0
+    -1 eigenstate → measures 1
+```
+
+## X and Z Stabilizer Circuits
+
+```python
+from typing import List, Tuple
+import numpy as np
+
+class StabilizerCircuit:
+    """
+    Generate circuits for X and Z stabilizer measurements.
+    """
+
+    def __init__(self):
+        self.gates = []
+
+    def x_stabilizer_circuit(self, ancilla: int,
+                             data_qubits: List[int]) -> List[str]:
+        """
+        Generate X-stabilizer measurement circuit.
+
+        Uses CNOT gates with ancilla as control.
+
+        Circuit:
+            ancilla: |0⟩ ─ H ─ ●─●─●─● ─ H ─ M
+                              │ │ │ │
+            data[0]: ─────────X─┼─┼─┼────────
+            data[1]: ───────────X─┼─┼────────
+            data[2]: ─────────────X─┼────────
+            data[3]: ───────────────X────────
+        """
+        circuit = []
+
+        # Initialize ancilla to |+⟩
+        circuit.append(f"H q[{ancilla}]")
+
+        # CNOT from ancilla to each data qubit
+        for dq in data_qubits:
+            circuit.append(f"CNOT q[{ancilla}], q[{dq}]")
+
+        # Measure in X basis
+        circuit.append(f"H q[{ancilla}]")
+        circuit.append(f"MEASURE q[{ancilla}]")
+
+        return circuit
+
+    def z_stabilizer_circuit(self, ancilla: int,
+                             data_qubits: List[int]) -> List[str]:
+        """
+        Generate Z-stabilizer measurement circuit.
+
+        Uses CNOT gates with data as control.
+
+        Circuit:
+            ancilla: |0⟩ ─────X─X─X─X───── M
+                              │ │ │ │
+            data[0]: ─────────●─┼─┼─┼────────
+            data[1]: ───────────●─┼─┼────────
+            data[2]: ─────────────●─┼────────
+            data[3]: ───────────────●────────
+        """
+        circuit = []
+
+        # Ancilla starts in |0⟩ (no H needed)
+
+        # CNOT from each data qubit to ancilla
+        for dq in data_qubits:
+            circuit.append(f"CNOT q[{dq}], q[{ancilla}]")
+
+        # Measure in Z basis
+        circuit.append(f"MEASURE q[{ancilla}]")
+
+        return circuit
+
+    def print_circuit(self, circuit: List[str], name: str):
+        """Display circuit nicely."""
+        print(f"\n{name}")
+        print("─" * 40)
+        for gate in circuit:
+            print(f"  {gate}")
+
+
+# Example
+sc = StabilizerCircuit()
+
+print("X-Stabilizer Measurement Circuit")
+x_circ = sc.x_stabilizer_circuit(ancilla=0, data_qubits=[1, 2, 3, 4])
+sc.print_circuit(x_circ, "X-type (XXXX)")
+
+print("\n\nZ-Stabilizer Measurement Circuit")
+z_circ = sc.z_stabilizer_circuit(ancilla=0, data_qubits=[1, 2, 3, 4])
+sc.print_circuit(z_circ, "Z-type (ZZZZ)")
+```
+
+## Measurement Scheduling
+
+```python
+class MeasurementScheduler:
+    """
+    Schedule stabilizer measurements to avoid conflicts.
+    """
+
+    def __init__(self, distance: int):
+        self.d = distance
+
+    def explain_scheduling(self):
+        """Explain why scheduling matters."""
+        print("""
+Measurement Scheduling
+══════════════════════
+
+Why scheduling matters:
+    1. CNOTs on shared qubits must not conflict
+    2. Parallel measurement improves speed
+    3. Gate ordering affects error propagation
+
+Standard scheduling uses 4 time steps per type:
+
+    Step 1: CNOTs to NW neighbors
+    Step 2: CNOTs to NE neighbors
+    Step 3: CNOTs to SW neighbors
+    Step 4: CNOTs to SE neighbors
+
+Visualization for one X-stabilizer:
+
+         Step 1           Step 2
+           ●                 ●
+          ╱                   ╲
+         X                     X
+          ╲                   ╱
+           ●───────────────────●
+
+         Step 3           Step 4
+           ●                 ●
+          ╱                   ╲
+         X                     X
+          ╲                   ╱
+           ●───────────────────●
+
+This ordering (NW, NE, SW, SE) minimizes hook errors.
+        """)
+
+    def generate_schedule(self) -> dict:
+        """
+        Generate measurement schedule for surface code.
+
+        Returns dict with time slots and operations.
+        """
+        schedule = {
+            'X_stabilizers': {
+                'step1': 'CNOT to North-West data qubit',
+                'step2': 'CNOT to North-East data qubit',
+                'step3': 'CNOT to South-West data qubit',
+                'step4': 'CNOT to South-East data qubit'
+            },
+            'Z_stabilizers': {
+                'step1': 'CNOT from North-West data qubit',
+                'step2': 'CNOT from South-East data qubit',
+                'step3': 'CNOT from North-East data qubit',
+                'step4': 'CNOT from South-West data qubit'
+            }
+        }
+
+        return schedule
+
+    def show_parallel_execution(self):
+        """Show how X and Z measurements can run in parallel."""
+        print("""
+Parallel X and Z Measurements
+═════════════════════════════
+
+X and Z stabilizers can be measured simultaneously because:
+    1. They share qubits in pairs (0 or 2 shared)
+    2. CNOT directions are opposite (control vs target)
+    3. Proper scheduling avoids CNOT-CNOT conflicts
+
+Full measurement round (8 time slots):
+
+    Slot 0: Reset all ancillas
+    Slot 1: H on X-ancillas
+    Slot 2: CNOT step 1 (both X and Z)
+    Slot 3: CNOT step 2 (both X and Z)
+    Slot 4: CNOT step 3 (both X and Z)
+    Slot 5: CNOT step 4 (both X and Z)
+    Slot 6: H on X-ancillas
+    Slot 7: Measure all ancillas
+
+Total: ~8 time units per syndrome extraction round
+
+┌─────────────────────────────────────────────────────────────────┐
+│  This parallel execution is key to the surface code's          │
+│  practical advantage: measure everything in O(1) time!          │
+└─────────────────────────────────────────────────────────────────┘
+        """)
+
+
+scheduler = MeasurementScheduler(3)
+scheduler.explain_scheduling()
+scheduler.show_parallel_execution()
+```
+
+## Hook Errors and Their Mitigation
+
+```
+Understanding Hook Errors
+═════════════════════════
+
+A "hook error" occurs when an error on the ancilla propagates
+to multiple data qubits through the measurement circuit.
+
+Example of hook error:
+
+    |+⟩ ─── X ───●───●───●───●───── M
+                 │   │   │   │
+    data 1 ──────X───┼───┼───┼──────  Now has X error!
+                     │   │   │
+    data 2 ──────────X───┼───┼──────  Now has X error!
+                         │   │
+    data 3 ──────────────X───┼──────  Now has X error!
+                             │
+    data 4 ──────────────────X──────  Now has X error!
+
+    Single X error on ancilla → Four X errors on data!
+
+This is CATASTROPHIC for error correction.
+
+CNOT Order Matters:
+━━━━━━━━━━━━━━━━━━
+
+Different orderings give different hook error patterns:
+
+    Bad ordering:            Good ordering:
+    (sequential)             (diagonal)
+
+    ●───●───●───●            ●       ●
+     \   \   \   \            \     /
+      →   →   →   →            →   ←
+       \   \   \   \          /     \
+        ●───●───●───●        ●       ●
+
+    Hook extends along       Hook creates 2 errors
+    a line (weight 4)        that look like 1 (weight 2)
+
+The "good ordering" ensures hook errors look like lower-weight
+errors that the decoder can still handle correctly.
+```
+
+## Fault-Tolerant Measurement
+
+```python
+class FaultTolerantMeasurement:
+    """
+    Implement fault-tolerant stabilizer measurement.
+    """
+
+    def __init__(self):
+        pass
+
+    def explain_fault_tolerance(self):
+        """Explain fault-tolerant measurement requirements."""
+        print("""
+Fault-Tolerant Syndrome Extraction
+══════════════════════════════════
+
+A measurement is FAULT-TOLERANT if:
+    1. A single fault creates at most d/2 data errors
+    2. A single fault creates at most one wrong syndrome bit
+
+For the surface code, this is achieved by:
+
+    1. REPEATED MEASUREMENTS
+       ─────────────────────
+       Measure each syndrome d times (or until consistent).
+       Transient errors are filtered out by majority vote.
+
+       Round 1:  0 1 0 1 0 1 ...
+       Round 2:  0 0 0 1 0 1 ...
+       Round 3:  0 0 0 0 0 1 ...
+                 ↑
+                 Transient error gets filtered
+
+    2. PROPER CNOT ORDERING
+       ────────────────────
+       Use scheduling that limits hook error weight.
+
+    3. ANCILLA VERIFICATION (optional)
+       ───────────────────────────────
+       Use cat states or other verified ancillas.
+
+Number of measurement rounds:
+┌─────────────────────────────────────────────────────────────────┐
+│  Minimum: d rounds for distance-d code                          │
+│  Practical: Often use d or d+1 rounds                           │
+│  Trade-off: More rounds = lower error rate but longer circuit   │
+└─────────────────────────────────────────────────────────────────┘
+        """)
+
+    def show_repeated_measurement(self, d: int = 3):
+        """Show syndrome history structure."""
+        print(f"\n3D Syndrome Structure for d={d}")
+        print("=" * 50)
+
+        print("""
+The syndrome forms a 3D structure: 2D space × time
+
+    Time →
+    ┌─────────────────────────────────────────┐
+    │   t=0       t=1       t=2       t=3     │
+    │                                         │
+    │   ○ ● ○     ○ ● ○     ○ ○ ○     ○ ○ ○   │
+    │   ● ○ ●     ● ○ ●     ● ○ ●     ● ○ ●   │ Space
+    │   ○ ● ○     ○ ○ ○     ○ ○ ○     ○ ○ ○   │
+    │                                         │
+    │   ● = syndrome defect (measurement = 1) │
+    │   ○ = no defect (measurement = 0)       │
+    └─────────────────────────────────────────┘
+
+Data errors create defect pairs in SPACE.
+Measurement errors create defect pairs in TIME.
+
+The decoder must match defects in 3D!
+
+        t=0      t=1      t=2
+         ↓        ↓        ↓
+        ●────────●        measurement error (time direction)
+                          (defect appears/disappears)
+
+        ●        ●        data error (space direction)
+        └────────┘        (defect pair at same time)
+        """)
+
+    def generate_repeated_circuit(self, d: int, num_rounds: int) -> List[str]:
+        """Generate repeated measurement circuit structure."""
+        circuit = []
+
+        for r in range(num_rounds):
+            circuit.append(f"# Round {r}")
+            circuit.append(f"reset_ancillas()")
+            circuit.append(f"measure_all_X_stabilizers()")
+            circuit.append(f"measure_all_Z_stabilizers()")
+            circuit.append(f"record_syndrome(round={r})")
+
+        circuit.append(f"# Final data qubit measurement")
+        circuit.append(f"measure_all_data_qubits()")
+
+        return circuit
+
+
+ftm = FaultTolerantMeasurement()
+ftm.explain_fault_tolerance()
+ftm.show_repeated_measurement()
+```
+
+## Complete Measurement Cycle
+
+```python
+class SurfaceCodeMeasurementCycle:
+    """
+    Complete syndrome extraction cycle for surface code.
+    """
+
+    def __init__(self, distance: int):
+        self.d = distance
+        self.n_data = distance * distance
+        self.n_ancilla = distance * distance - 1
+
+    def generate_cycle(self) -> List[dict]:
+        """
+        Generate complete measurement cycle.
+
+        Returns list of time steps with operations.
+        """
+        cycle = []
+
+        # Step 0: Reset ancillas
+        cycle.append({
+            'time': 0,
+            'operation': 'RESET',
+            'qubits': 'all ancillas',
+            'description': 'Initialize ancillas to |0⟩'
+        })
+
+        # Step 1: Hadamard on X-ancillas
+        cycle.append({
+            'time': 1,
+            'operation': 'H',
+            'qubits': 'X-ancillas',
+            'description': 'Prepare X-ancillas in |+⟩'
+        })
+
+        # Steps 2-5: CNOT rounds
+        cnot_schedule = ['NW', 'NE', 'SW', 'SE']
+        for i, direction in enumerate(cnot_schedule):
+            cycle.append({
+                'time': 2 + i,
+                'operation': 'CNOT',
+                'qubits': f'{direction} pairs',
+                'description': f'CNOT to {direction} neighbors'
+            })
+
+        # Step 6: Hadamard on X-ancillas
+        cycle.append({
+            'time': 6,
+            'operation': 'H',
+            'qubits': 'X-ancillas',
+            'description': 'Rotate X-ancillas back to Z basis'
+        })
+
+        # Step 7: Measure all ancillas
+        cycle.append({
+            'time': 7,
+            'operation': 'MEASURE',
+            'qubits': 'all ancillas',
+            'description': 'Extract syndrome bits'
+        })
+
+        return cycle
+
+    def print_cycle(self):
+        """Display the measurement cycle."""
+        cycle = self.generate_cycle()
+
+        print(f"\nSurface Code Measurement Cycle (d={self.d})")
+        print("=" * 60)
+
+        for step in cycle:
+            print(f"\nTime {step['time']}: {step['operation']}")
+            print(f"  Qubits: {step['qubits']}")
+            print(f"  Action: {step['description']}")
+
+        print(f"\nTotal cycle time: {len(cycle)} time steps")
+        print(f"Data qubits: {self.n_data}")
+        print(f"Ancilla qubits: {self.n_ancilla}")
+
+    def timing_analysis(self):
+        """Analyze timing for real hardware."""
+        print(f"\nTiming Analysis")
+        print("=" * 50)
+
+        # Typical gate times (superconducting qubits)
+        t_reset = 500  # ns
+        t_1q = 25      # ns
+        t_2q = 50      # ns (CNOT)
+        t_measure = 500  # ns
+
+        cycle_time = t_reset + 2*t_1q + 4*t_2q + t_measure
+
+        print(f"Assuming superconducting qubit gate times:")
+        print(f"  Reset: {t_reset} ns")
+        print(f"  1-qubit gate: {t_1q} ns")
+        print(f"  2-qubit gate: {t_2q} ns")
+        print(f"  Measurement: {t_measure} ns")
+        print(f"\nEstimated cycle time: {cycle_time} ns = {cycle_time/1000:.2f} μs")
+        print(f"Syndrome extraction rate: {1e9/cycle_time/1e6:.2f} MHz")
+
+
+cycle = SurfaceCodeMeasurementCycle(5)
+cycle.print_cycle()
+cycle.timing_analysis()
+```
+
+## Ancilla Preparation Verification
+
+```
+Verified Ancilla Preparation
+════════════════════════════
+
+For highest fault tolerance, verify ancilla states:
+
+SIMPLE APPROACH (used in practice):
+    Just prepare |0⟩ or |+⟩ directly.
+    Errors are caught by repeated measurements.
+
+CAT STATE APPROACH (theoretical):
+    Prepare entangled ancilla states that detect errors.
+
+    For 4-qubit stabilizer, use 4-qubit cat state:
+    |cat⟩ = (|0000⟩ + |1111⟩)/√2
+
+    Circuit:
+    |0⟩ ─ H ─●─────────────
+             │
+    |0⟩ ────X─●───────────
+               │
+    |0⟩ ──────X─●─────────
+                 │
+    |0⟩ ────────X─────────
+
+    Then use cat qubits instead of single ancilla.
+    Verify cat state before use.
+
+Why cat states help:
+┌─────────────────────────────────────────────────────────────────┐
+│  Single error on cat state → Detectable!                       │
+│  |0000⟩ + |1111⟩ with one flip → |0100⟩ + |1011⟩               │
+│  This is orthogonal to valid cat state.                        │
+│                                                                 │
+│  Trade-off: More qubits/gates vs better fault tolerance        │
+└─────────────────────────────────────────────────────────────────┘
+
+In practice, the surface code's high threshold means simple
+ancilla preparation with repeated measurements is sufficient.
+```
+
+## Error Propagation Analysis
+
+```python
+class ErrorPropagation:
+    """
+    Analyze how errors propagate through measurement circuits.
+    """
+
+    def __init__(self):
+        pass
+
+    def analyze_cnot_propagation(self):
+        """Show how errors propagate through CNOT."""
+        print("""
+CNOT Error Propagation
+══════════════════════
+
+CNOT acts as: |c⟩|t⟩ → |c⟩|c⊕t⟩
+
+Error propagation rules:
+
+    X error on control → X error on target
+    ─────────────────────────────────────
+    X●─┬─●     ●─┬─●
+      │   →     │
+     ─┼─       X┼X
+
+    Z error on target → Z error on control
+    ─────────────────────────────────────
+     ●─┬─●     Z●─┬─●
+       │   →     │
+     ─Z┼─       ─Z┼─
+
+    X on target stays local:
+    ●─┬─●     ●─┬─●
+      │   →     │
+    X─┼─      X─┼─
+
+    Z on control stays local:
+    Z●─┬─●    Z●─┬─●
+      │   →     │
+     ─┼─       ─┼─
+        """)
+
+    def trace_hook_error(self, ordering: str = 'sequential'):
+        """Trace hook error through circuit."""
+        print(f"\nHook Error Analysis ({ordering} ordering)")
+        print("=" * 50)
+
+        if ordering == 'sequential':
+            print("""
+Sequential ordering: 1-2-3-4
+
+    X error before first CNOT:
+
+    |+⟩ ──X──●──●──●──●── M
+              │  │  │  │
+    q1 ──────X──┼──┼──┼──   X error
+                │  │  │
+    q2 ─────────X──┼──┼──   X error
+                   │  │
+    q3 ────────────X──┼──   X error
+                      │
+    q4 ───────────────X──   X error
+
+    Result: XXXX on data = Stabilizer!
+    But looks like weight-4 error to decoder.
+            """)
+        else:
+            print("""
+Diagonal ordering: NW-SE-NE-SW (or similar)
+
+    X error before first CNOT:
+
+    |+⟩ ──X──●────●────●────●── M
+              │    │    │    │
+    NW ──────X────┼────┼────┼──   X error
+                  │    │    │
+    SE ───────────X────┼────┼──   X error
+                       │    │
+    NE ────────────────●────┼──   clean
+                            │
+    SW ─────────────────────●──   clean
+
+    Result: XX on two diagonal qubits
+    Looks like weight-2 error (matches actual!)
+            """)
+
+
+prop = ErrorPropagation()
+prop.analyze_cnot_propagation()
+prop.trace_hook_error('sequential')
+prop.trace_hook_error('diagonal')
+```
+
+## Summary
+
+Stabilizer measurements in the surface code require careful design:
+
+1. **Basic circuits**: Use ancillas with CNOTs to extract syndromes non-destructively
+2. **X vs Z**: Different CNOT directions (control/target) for X and Z types
+3. **Scheduling**: Proper CNOT ordering avoids conflicts and limits hook errors
+4. **Repeated measurements**: Multiple rounds filter transient errors
+5. **3D structure**: Syndrome history forms a 3D object for decoding
+
+These measurement circuits form the operational core of the surface code, enabling continuous error detection while preserving logical information.

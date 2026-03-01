@@ -1,0 +1,639 @@
+# Path Selection Algorithms
+
+## Introduction
+
+Selecting optimal paths in quantum networks differs fundamentally from classical routing. Quantum-specific metrics like fidelity, entanglement generation rate, and coherence time must be considered alongside traditional metrics.
+
+## Quantum Routing Metrics
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    QUANTUM ROUTING METRICS                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  CLASSICAL METRICS:              QUANTUM METRICS:                  │
+│  ┌──────────────────┐           ┌──────────────────┐               │
+│  │ • Hop count      │           │ • Fidelity       │               │
+│  │ • Latency        │           │ • Success prob   │               │
+│  │ • Bandwidth      │           │ • Coherence time │               │
+│  │ • Loss rate      │           │ • Entanglement   │               │
+│  │ • Congestion     │           │   generation rate│               │
+│  └──────────────────┘           │ • Memory capacity│               │
+│                                  │ • Purification   │               │
+│                                  │   resources      │               │
+│                                  └──────────────────┘               │
+│                                                                     │
+│  COMBINED METRICS FOR QUANTUM PATHS:                               │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │                                                              │  │
+│  │  End-to-End Fidelity:  F_total = ∏(F_i) × degradation       │  │
+│  │                                                              │  │
+│  │  Success Probability:  P_success = ∏(p_gen × p_swap)        │  │
+│  │                                                              │  │
+│  │  Latency:  T = T_gen + T_swap + T_classical                 │  │
+│  │                                                              │  │
+│  │  Resource Cost:  R = pairs_consumed + memory_time           │  │
+│  │                                                              │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Path Selection Algorithms
+
+```python
+import numpy as np
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Tuple, Set, Callable
+from enum import Enum
+import heapq
+
+class PathMetric(Enum):
+    """Path optimization metrics."""
+    FIDELITY = "fidelity"           # Maximize end-to-end fidelity
+    LATENCY = "latency"             # Minimize total latency
+    SUCCESS_PROB = "success_prob"   # Maximize success probability
+    HOP_COUNT = "hop_count"         # Minimize number of hops
+    RESOURCE_COST = "resource_cost" # Minimize resource consumption
+
+@dataclass
+class QuantumLink:
+    """Link in quantum network."""
+    source: str
+    target: str
+    fidelity: float = 0.95
+    gen_rate: float = 100.0   # Pairs per second
+    gen_prob: float = 0.9     # Success probability
+    latency_ms: float = 1.0   # Milliseconds
+
+    def expected_fidelity_contribution(self) -> float:
+        """Expected fidelity contribution of this link."""
+        return self.fidelity * self.gen_prob
+
+@dataclass
+class PathResult:
+    """Result of path selection."""
+    path: List[str]
+    total_fidelity: float
+    total_latency: float
+    success_probability: float
+    hop_count: int
+    metric_used: PathMetric
+
+class QuantumPathSelector:
+    """
+    Path selection for quantum networks.
+    """
+
+    def __init__(self):
+        self.nodes: Set[str] = set()
+        self.links: Dict[Tuple[str, str], QuantumLink] = {}
+
+    def add_node(self, node: str):
+        """Add node to network."""
+        self.nodes.add(node)
+
+    def add_link(self, link: QuantumLink):
+        """Add bidirectional link."""
+        self.links[(link.source, link.target)] = link
+        # Add reverse link
+        reverse = QuantumLink(
+            source=link.target,
+            target=link.source,
+            fidelity=link.fidelity,
+            gen_rate=link.gen_rate,
+            gen_prob=link.gen_prob,
+            latency_ms=link.latency_ms
+        )
+        self.links[(link.target, link.source)] = reverse
+
+    def get_neighbors(self, node: str) -> List[str]:
+        """Get adjacent nodes."""
+        neighbors = []
+        for (src, tgt), _ in self.links.items():
+            if src == node:
+                neighbors.append(tgt)
+        return neighbors
+
+    def dijkstra_fidelity(
+        self,
+        source: str,
+        destination: str
+    ) -> Optional[PathResult]:
+        """
+        Find path maximizing fidelity using modified Dijkstra.
+        Use negative log fidelity to convert multiplication to addition.
+        """
+        if source not in self.nodes or destination not in self.nodes:
+            return None
+
+        # Distance = -log(fidelity), so minimize distance = maximize fidelity
+        distances = {node: float('inf') for node in self.nodes}
+        distances[source] = 0
+        predecessors = {node: None for node in self.nodes}
+
+        # Priority queue: (distance, node)
+        pq = [(0, source)]
+
+        while pq:
+            dist, current = heapq.heappop(pq)
+
+            if current == destination:
+                break
+
+            if dist > distances[current]:
+                continue
+
+            for neighbor in self.get_neighbors(current):
+                link = self.links.get((current, neighbor))
+                if link:
+                    # Convert fidelity to additive metric
+                    edge_cost = -np.log(link.fidelity) if link.fidelity > 0 else float('inf')
+                    new_dist = distances[current] + edge_cost
+
+                    if new_dist < distances[neighbor]:
+                        distances[neighbor] = new_dist
+                        predecessors[neighbor] = current
+                        heapq.heappush(pq, (new_dist, neighbor))
+
+        # Reconstruct path
+        if distances[destination] == float('inf'):
+            return None
+
+        path = []
+        current = destination
+        while current is not None:
+            path.append(current)
+            current = predecessors[current]
+        path.reverse()
+
+        # Calculate metrics
+        total_fidelity = np.exp(-distances[destination])
+        total_latency = sum(
+            self.links[(path[i], path[i+1])].latency_ms
+            for i in range(len(path)-1)
+        )
+        success_prob = np.prod([
+            self.links[(path[i], path[i+1])].gen_prob
+            for i in range(len(path)-1)
+        ])
+
+        return PathResult(
+            path=path,
+            total_fidelity=total_fidelity,
+            total_latency=total_latency,
+            success_probability=success_prob,
+            hop_count=len(path) - 1,
+            metric_used=PathMetric.FIDELITY
+        )
+
+    def dijkstra_latency(
+        self,
+        source: str,
+        destination: str
+    ) -> Optional[PathResult]:
+        """Find path minimizing latency."""
+        if source not in self.nodes or destination not in self.nodes:
+            return None
+
+        distances = {node: float('inf') for node in self.nodes}
+        distances[source] = 0
+        predecessors = {node: None for node in self.nodes}
+
+        pq = [(0, source)]
+
+        while pq:
+            dist, current = heapq.heappop(pq)
+
+            if current == destination:
+                break
+
+            if dist > distances[current]:
+                continue
+
+            for neighbor in self.get_neighbors(current):
+                link = self.links.get((current, neighbor))
+                if link:
+                    new_dist = distances[current] + link.latency_ms
+
+                    if new_dist < distances[neighbor]:
+                        distances[neighbor] = new_dist
+                        predecessors[neighbor] = current
+                        heapq.heappush(pq, (new_dist, neighbor))
+
+        if distances[destination] == float('inf'):
+            return None
+
+        # Reconstruct path
+        path = []
+        current = destination
+        while current is not None:
+            path.append(current)
+            current = predecessors[current]
+        path.reverse()
+
+        # Calculate metrics
+        total_fidelity = np.prod([
+            self.links[(path[i], path[i+1])].fidelity
+            for i in range(len(path)-1)
+        ])
+        success_prob = np.prod([
+            self.links[(path[i], path[i+1])].gen_prob
+            for i in range(len(path)-1)
+        ])
+
+        return PathResult(
+            path=path,
+            total_fidelity=total_fidelity,
+            total_latency=distances[destination],
+            success_probability=success_prob,
+            hop_count=len(path) - 1,
+            metric_used=PathMetric.LATENCY
+        )
+
+    def select_path(
+        self,
+        source: str,
+        destination: str,
+        metric: PathMetric = PathMetric.FIDELITY
+    ) -> Optional[PathResult]:
+        """Select path based on specified metric."""
+        if metric == PathMetric.FIDELITY:
+            return self.dijkstra_fidelity(source, destination)
+        elif metric == PathMetric.LATENCY:
+            return self.dijkstra_latency(source, destination)
+        else:
+            # Default to fidelity
+            return self.dijkstra_fidelity(source, destination)
+
+# Demonstrate path selection
+print("Quantum Path Selection")
+print("=" * 50)
+
+selector = QuantumPathSelector()
+
+# Create network
+nodes = ["A", "B", "C", "D", "E"]
+for n in nodes:
+    selector.add_node(n)
+
+# Add links with varying properties
+selector.add_link(QuantumLink("A", "B", fidelity=0.98, latency_ms=5))
+selector.add_link(QuantumLink("A", "C", fidelity=0.85, latency_ms=1))
+selector.add_link(QuantumLink("B", "D", fidelity=0.95, latency_ms=5))
+selector.add_link(QuantumLink("C", "D", fidelity=0.90, latency_ms=2))
+selector.add_link(QuantumLink("D", "E", fidelity=0.97, latency_ms=3))
+
+# Find paths with different metrics
+for metric in [PathMetric.FIDELITY, PathMetric.LATENCY]:
+    result = selector.select_path("A", "E", metric)
+    if result:
+        print(f"\nOptimizing for {metric.value}:")
+        print(f"  Path: {' → '.join(result.path)}")
+        print(f"  Fidelity: {result.total_fidelity:.3f}")
+        print(f"  Latency: {result.total_latency:.1f}ms")
+        print(f"  Hops: {result.hop_count}")
+```
+
+## Multi-Metric Optimization
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    MULTI-METRIC OPTIMIZATION                        │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Single Metric:                                                    │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Optimize ONE of: Fidelity, Latency, Success Rate, Cost     │  │
+│  │  Problem: Other metrics may suffer                          │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  Weighted Combination:                                              │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Cost = w₁×(-log F) + w₂×Latency + w₃×(-log P)              │  │
+│  │  Tune weights based on application requirements             │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  Constrained Optimization:                                          │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Maximize Fidelity                                          │  │
+│  │  Subject to: Latency < L_max                                │  │
+│  │              Hops < H_max                                   │  │
+│  │              Cost < Budget                                  │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  Pareto Optimization:                                               │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Find all Pareto-optimal paths                              │  │
+│  │  (No other path better in ALL metrics)                      │  │
+│  │  Let application choose from Pareto set                     │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+```python
+class MultiMetricPathSelector:
+    """
+    Path selection with multiple metrics.
+    """
+
+    def __init__(self, base_selector: QuantumPathSelector):
+        self.selector = base_selector
+
+    def weighted_path(
+        self,
+        source: str,
+        destination: str,
+        weights: Dict[str, float]
+    ) -> Optional[PathResult]:
+        """
+        Find path minimizing weighted combination of metrics.
+        """
+        nodes = self.selector.nodes
+        links = self.selector.links
+
+        if source not in nodes or destination not in nodes:
+            return None
+
+        # Default weights
+        w_fidelity = weights.get("fidelity", 1.0)
+        w_latency = weights.get("latency", 0.01)  # Scale to comparable range
+
+        distances = {node: float('inf') for node in nodes}
+        distances[source] = 0
+        predecessors = {node: None for node in nodes}
+
+        pq = [(0, source)]
+
+        while pq:
+            dist, current = heapq.heappop(pq)
+
+            if current == destination:
+                break
+
+            if dist > distances[current]:
+                continue
+
+            for neighbor in self.selector.get_neighbors(current):
+                link = links.get((current, neighbor))
+                if link:
+                    # Combined cost
+                    fidelity_cost = -np.log(link.fidelity) if link.fidelity > 0 else 100
+                    latency_cost = link.latency_ms
+
+                    edge_cost = w_fidelity * fidelity_cost + w_latency * latency_cost
+                    new_dist = distances[current] + edge_cost
+
+                    if new_dist < distances[neighbor]:
+                        distances[neighbor] = new_dist
+                        predecessors[neighbor] = current
+                        heapq.heappush(pq, (new_dist, neighbor))
+
+        if distances[destination] == float('inf'):
+            return None
+
+        # Reconstruct path
+        path = []
+        current = destination
+        while current is not None:
+            path.append(current)
+            current = predecessors[current]
+        path.reverse()
+
+        # Calculate metrics
+        total_fidelity = np.prod([
+            links[(path[i], path[i+1])].fidelity
+            for i in range(len(path)-1)
+        ])
+        total_latency = sum(
+            links[(path[i], path[i+1])].latency_ms
+            for i in range(len(path)-1)
+        )
+        success_prob = np.prod([
+            links[(path[i], path[i+1])].gen_prob
+            for i in range(len(path)-1)
+        ])
+
+        return PathResult(
+            path=path,
+            total_fidelity=total_fidelity,
+            total_latency=total_latency,
+            success_probability=success_prob,
+            hop_count=len(path) - 1,
+            metric_used=PathMetric.RESOURCE_COST  # Combined
+        )
+
+    def constrained_path(
+        self,
+        source: str,
+        destination: str,
+        min_fidelity: float = 0.5,
+        max_latency: float = float('inf'),
+        max_hops: int = 100
+    ) -> Optional[PathResult]:
+        """
+        Find best path subject to constraints.
+        Uses pruned search.
+        """
+        if source not in self.selector.nodes:
+            return None
+
+        best_result = None
+
+        # BFS with pruning
+        queue = [(source, [source], 1.0, 0.0)]
+
+        while queue:
+            current, path, path_fidelity, path_latency = queue.pop(0)
+
+            # Pruning checks
+            if len(path) > max_hops + 1:
+                continue
+            if path_latency > max_latency:
+                continue
+            if path_fidelity < min_fidelity:
+                continue
+
+            if current == destination:
+                if best_result is None or path_fidelity > best_result.total_fidelity:
+                    success_prob = np.prod([
+                        self.selector.links[(path[i], path[i+1])].gen_prob
+                        for i in range(len(path)-1)
+                    ]) if len(path) > 1 else 1.0
+
+                    best_result = PathResult(
+                        path=path,
+                        total_fidelity=path_fidelity,
+                        total_latency=path_latency,
+                        success_probability=success_prob,
+                        hop_count=len(path) - 1,
+                        metric_used=PathMetric.FIDELITY
+                    )
+                continue
+
+            for neighbor in self.selector.get_neighbors(current):
+                if neighbor not in path:
+                    link = self.selector.links.get((current, neighbor))
+                    if link:
+                        new_fidelity = path_fidelity * link.fidelity
+                        new_latency = path_latency + link.latency_ms
+
+                        # Prune early if constraints violated
+                        if new_fidelity >= min_fidelity and new_latency <= max_latency:
+                            queue.append((
+                                neighbor,
+                                path + [neighbor],
+                                new_fidelity,
+                                new_latency
+                            ))
+
+        return best_result
+
+# Demonstrate multi-metric optimization
+print("\n\nMulti-Metric Path Selection")
+print("=" * 50)
+
+multi_selector = MultiMetricPathSelector(selector)
+
+# Weighted combination
+for weights in [{"fidelity": 1.0, "latency": 0.0},
+                {"fidelity": 0.5, "latency": 0.5},
+                {"fidelity": 0.0, "latency": 1.0}]:
+    result = multi_selector.weighted_path("A", "E", weights)
+    if result:
+        print(f"\nWeights: {weights}")
+        print(f"  Path: {' → '.join(result.path)}")
+        print(f"  F={result.total_fidelity:.3f}, L={result.total_latency:.1f}ms")
+
+# Constrained optimization
+result = multi_selector.constrained_path(
+    "A", "E",
+    min_fidelity=0.7,
+    max_latency=15.0
+)
+if result:
+    print(f"\nConstrained (F≥0.7, L≤15ms):")
+    print(f"  Path: {' → '.join(result.path)}")
+    print(f"  F={result.total_fidelity:.3f}, L={result.total_latency:.1f}ms")
+```
+
+## Routing Protocol Design
+
+```python
+class QuantumRoutingProtocol:
+    """
+    Quantum network routing protocol.
+    """
+
+    def __init__(self, node_id: str):
+        self.node_id = node_id
+        self.routing_table: Dict[str, str] = {}  # destination -> next_hop
+        self.link_state: Dict[str, QuantumLink] = {}  # neighbor -> link info
+        self.network_graph: Dict[str, Set[str]] = {}  # Full topology
+
+    def update_link_state(self, neighbor: str, link: QuantumLink):
+        """Update local link state."""
+        self.link_state[neighbor] = link
+
+    def receive_link_state_update(
+        self,
+        from_node: str,
+        link_states: Dict[Tuple[str, str], QuantumLink]
+    ):
+        """Process link state advertisement from neighbor."""
+        # Update network graph
+        for (src, tgt), link in link_states.items():
+            if src not in self.network_graph:
+                self.network_graph[src] = set()
+            self.network_graph[src].add(tgt)
+
+        # Recompute routing table
+        self._recompute_routes()
+
+    def _recompute_routes(self):
+        """Recompute routing table using link state."""
+        # Build path selector from network graph
+        selector = QuantumPathSelector()
+
+        for node in self.network_graph:
+            selector.add_node(node)
+
+        for src, neighbors in self.network_graph.items():
+            for tgt in neighbors:
+                selector.add_link(QuantumLink(src, tgt))
+
+        # Find best path to each destination
+        for dest in self.network_graph:
+            if dest != self.node_id:
+                result = selector.dijkstra_fidelity(self.node_id, dest)
+                if result and len(result.path) > 1:
+                    self.routing_table[dest] = result.path[1]  # Next hop
+
+    def get_next_hop(self, destination: str) -> Optional[str]:
+        """Get next hop for destination."""
+        return self.routing_table.get(destination)
+
+    def print_routing_table(self):
+        """Print routing table."""
+        print(f"\nRouting table for {self.node_id}:")
+        for dest, next_hop in sorted(self.routing_table.items()):
+            print(f"  → {dest}: via {next_hop}")
+
+# Demonstrate routing protocol
+print("\n\nQuantum Routing Protocol")
+print("=" * 50)
+
+# Create router at node A
+router_a = QuantumRoutingProtocol("A")
+
+# Simulate receiving link state from network
+link_states = {
+    ("A", "B"): QuantumLink("A", "B", 0.95),
+    ("A", "C"): QuantumLink("A", "C", 0.90),
+    ("B", "D"): QuantumLink("B", "D", 0.92),
+    ("C", "D"): QuantumLink("C", "D", 0.88),
+    ("D", "E"): QuantumLink("D", "E", 0.96),
+}
+
+# Also add reverse links
+for (src, tgt), link in list(link_states.items()):
+    link_states[(tgt, src)] = QuantumLink(tgt, src, link.fidelity)
+
+router_a.receive_link_state_update("network", link_states)
+router_a.print_routing_table()
+```
+
+## Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    PATH SELECTION SUMMARY                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Quantum Metrics:                                                   │
+│  • Fidelity: Quality of quantum states                             │
+│  • Success probability: Chance of successful transmission          │
+│  • Latency: Time including generation and swapping                 │
+│  • Resource cost: Entanglement pairs consumed                      │
+│                                                                     │
+│  Algorithms:                                                        │
+│  • Modified Dijkstra for fidelity (use -log for multiplication)    │
+│  • Standard shortest path for latency                              │
+│  • Weighted combination for trade-offs                             │
+│  • Constrained search for requirements-based selection             │
+│                                                                     │
+│  Multi-Metric Approaches:                                           │
+│  • Weighted sum: Combine metrics with tunable weights              │
+│  • Constrained optimization: Meet requirements, then optimize      │
+│  • Pareto optimization: Find non-dominated solutions               │
+│                                                                     │
+│  Protocol Design:                                                   │
+│  • Link state protocols adapted for quantum metrics                │
+│  • Dynamic updates as network conditions change                    │
+│  • Consider quantum resource availability                          │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Effective path selection balances quantum-specific constraints with traditional networking goals.

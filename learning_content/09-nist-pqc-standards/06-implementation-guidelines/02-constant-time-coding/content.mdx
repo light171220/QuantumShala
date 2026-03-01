@@ -1,0 +1,529 @@
+---
+title: "Constant-Time Implementation"
+description: "Learn techniques for implementing cryptographic code that executes in constant time to prevent timing-based side-channel attacks."
+---
+
+# Constant-Time Implementation
+
+Timing side-channel attacks exploit variations in execution time to extract secret information. Constant-time code prevents these attacks by ensuring execution time is independent of secret values.
+
+## The Timing Attack Threat
+
+### How Timing Attacks Work
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Timing Attack Model                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Attacker's View:                                               │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  Input → [Cryptographic Operation] → Output + Time       │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                        ↑                        │
+│                                        │                        │
+│                                   Attacker measures             │
+│                                   execution time                │
+│                                                                  │
+│  If time depends on secret:                                     │
+│  ┌────────────┬──────────────┬──────────────────────────────┐  │
+│  │ Secret Bit │ Time         │ Leaked Information           │  │
+│  ├────────────┼──────────────┼──────────────────────────────┤  │
+│  │ 0          │ 1.2 ms       │ Attacker learns bit = 0      │  │
+│  │ 1          │ 1.8 ms       │ Attacker learns bit = 1      │  │
+│  └────────────┴──────────────┴──────────────────────────────┘  │
+│                                                                  │
+│  After many measurements: Complete secret recovery             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Sources of Timing Variation
+
+```python
+"""
+Common sources of timing variation in cryptographic code
+"""
+
+# BAD: Secret-dependent branch
+def vulnerable_compare(a: bytes, b: bytes) -> bool:
+    """
+    VULNERABLE: Early return leaks comparison progress.
+    Attacker can determine matching prefix length.
+    """
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            return False  # Early return at first mismatch!
+    return True
+
+# BAD: Secret-dependent memory access
+def vulnerable_lookup(table: list, secret_index: int) -> int:
+    """
+    VULNERABLE: Cache timing reveals which index was accessed.
+    """
+    return table[secret_index]  # Different cache behavior per index
+
+# BAD: Secret-dependent loop count
+def vulnerable_power(base: int, secret_exp: int, mod: int) -> int:
+    """
+    VULNERABLE: Execution time proportional to exponent.
+    """
+    result = 1
+    for _ in range(secret_exp):  # Loop count reveals exponent!
+        result = (result * base) % mod
+    return result
+
+# BAD: Variable-time operations
+def vulnerable_division(a: int, secret_b: int) -> int:
+    """
+    VULNERABLE: Division time depends on operand values.
+    """
+    return a // secret_b  # Time varies with secret_b
+```
+
+## Constant-Time Patterns
+
+### Constant-Time Comparison
+
+```python
+"""
+Constant-time comparison implementation
+"""
+
+def constant_time_compare(a: bytes, b: bytes) -> bool:
+    """
+    Compare two byte strings in constant time.
+
+    Time is independent of:
+    - Where (or if) the strings differ
+    - The actual content of the strings
+
+    Only depends on:
+    - Length of the strings
+    """
+    if len(a) != len(b):
+        return False  # Length difference is often acceptable to leak
+
+    result = 0
+    for x, y in zip(a, b):
+        result |= x ^ y  # Accumulate differences without branching
+
+    return result == 0
+
+# Verification
+import time
+
+def test_timing():
+    """Test that comparison time is constant."""
+    secret = b"secret_password_123"
+
+    # Test cases: early mismatch vs late mismatch
+    test_early = b"Xecret_password_123"  # First byte different
+    test_late = b"secret_password_12X"   # Last byte different
+
+    iterations = 100000
+
+    # Time early mismatch
+    start = time.perf_counter()
+    for _ in range(iterations):
+        constant_time_compare(secret, test_early)
+    time_early = time.perf_counter() - start
+
+    # Time late mismatch
+    start = time.perf_counter()
+    for _ in range(iterations):
+        constant_time_compare(secret, test_late)
+    time_late = time.perf_counter() - start
+
+    print(f"Early mismatch: {time_early:.4f}s")
+    print(f"Late mismatch:  {time_late:.4f}s")
+    print(f"Difference:     {abs(time_early - time_late)*1000:.4f}ms")
+    print(f"Ratio:          {max(time_early, time_late) / min(time_early, time_late):.4f}")
+
+test_timing()
+```
+
+### Constant-Time Selection
+
+```python
+"""
+Constant-time conditional selection
+"""
+
+def ct_select(condition: int, a: int, b: int) -> int:
+    """
+    Return a if condition is 1, b if condition is 0.
+
+    Executes the same operations regardless of condition.
+    No branches based on condition value.
+    """
+    # Create mask: all 1s if condition=1, all 0s if condition=0
+    mask = -condition  # -1 = 0xFFFF...FFFF, 0 = 0x0000...0000
+
+    # Select without branching
+    return (a & mask) | (b & ~mask)
+
+def ct_select_bytes(condition: int, a: bytes, b: bytes) -> bytes:
+    """
+    Constant-time byte string selection.
+    """
+    if len(a) != len(b):
+        raise ValueError("Inputs must be same length")
+
+    mask = -condition & 0xFF
+    result = bytearray(len(a))
+
+    for i in range(len(a)):
+        result[i] = (a[i] & mask) | (b[i] & ~mask & 0xFF)
+
+    return bytes(result)
+
+# Example: constant-time abs()
+def ct_abs(x: int, bits: int = 32) -> int:
+    """
+    Constant-time absolute value.
+    """
+    mask = x >> (bits - 1)  # All 1s if negative, 0 if positive
+    return (x + mask) ^ mask
+
+# Example: constant-time min/max
+def ct_min(a: int, b: int) -> int:
+    """Constant-time minimum."""
+    diff = a - b
+    mask = diff >> 31  # All 1s if a < b
+    return a + (diff & mask)
+
+print(f"ct_select(1, 10, 20) = {ct_select(1, 10, 20)}")  # 10
+print(f"ct_select(0, 10, 20) = {ct_select(0, 10, 20)}")  # 20
+print(f"ct_abs(-5) = {ct_abs(-5)}")  # 5
+print(f"ct_min(3, 7) = {ct_min(3, 7)}")  # 3
+```
+
+### Constant-Time Memory Access
+
+```python
+"""
+Constant-time memory access patterns
+"""
+
+def ct_lookup(table: list, index: int) -> int:
+    """
+    Constant-time table lookup.
+
+    Reads ALL table entries to hide which one was selected.
+    Time is independent of the index value.
+    """
+    result = 0
+    for i in range(len(table)):
+        # Create mask: all 1s only when i == index
+        mask = -int(i == index)
+        result |= table[i] & mask
+    return result
+
+def ct_lookup_optimized(table: list, index: int) -> int:
+    """
+    Slightly optimized constant-time lookup using XOR.
+    """
+    result = 0
+    for i, value in enumerate(table):
+        # eq = 1 if i == index, 0 otherwise
+        eq = int(not (i ^ index))
+        mask = -eq
+        result |= value & mask
+    return result
+
+# For larger tables, use masking with SIMD if available
+def ct_array_copy(dest: bytearray, src: bytes,
+                  index: int, length: int):
+    """
+    Constant-time copy from src[index:index+length] to dest.
+    Touches all of src to hide the actual index.
+    """
+    for i in range(len(dest)):
+        dest[i] = 0
+        for j in range(len(src)):
+            # mask = 1 if j is in [index, index+length)
+            in_range = int(j >= index and j < index + length)
+            dest_idx = j - index
+            if 0 <= dest_idx < len(dest):
+                mask = -in_range
+                dest[dest_idx] |= src[j] & mask
+
+# Test
+table = [10, 20, 30, 40, 50]
+for idx in range(5):
+    result = ct_lookup(table, idx)
+    print(f"ct_lookup(table, {idx}) = {result}")
+```
+
+## PQC-Specific Constant-Time Challenges
+
+### NTT Operations
+
+```python
+"""
+Constant-time NTT (Number Theoretic Transform) considerations
+"""
+
+def ct_ntt_butterfly(a: int, b: int, w: int, q: int) -> tuple:
+    """
+    Constant-time NTT butterfly operation.
+
+    The operation itself is naturally constant-time if:
+    1. Multiplication is constant-time
+    2. Modular reduction is constant-time
+    """
+    t = (b * w) % q  # Must use ct modular reduction
+
+    # Addition and subtraction
+    a_new = (a + t) % q
+    b_new = (a - t) % q
+
+    return a_new, b_new
+
+def ct_mod_reduce(x: int, q: int, bits: int = 32) -> int:
+    """
+    Constant-time modular reduction.
+
+    Uses conditional subtraction without branching.
+    """
+    # Subtract q if x >= q
+    diff = x - q
+    mask = diff >> (bits - 1)  # All 1s if x < q
+    return (x & mask) | (diff & ~mask)
+```
+
+### Gaussian Sampling (FN-DSA)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│           Constant-Time Gaussian Sampling Challenges            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  FN-DSA uses FFT-based Gaussian sampling which requires:       │
+│                                                                  │
+│  1. FALCON Tree Traversal                                       │
+│     ├─ Must visit same nodes regardless of secret               │
+│     ├─ Random choices must not leak path                        │
+│     └─ Tree structure is secret-dependent                       │
+│                                                                  │
+│  2. Floating-Point Operations                                   │
+│     ├─ Denormalized numbers cause timing variation             │
+│     ├─ Different FP operations have different timing           │
+│     └─ Must use constant-time FP or integer-only FFT           │
+│                                                                  │
+│  3. Rejection Sampling                                          │
+│     ├─ Number of rejections must not leak                       │
+│     ├─ Each attempt must take same time                        │
+│     └─ Final signature selection must be constant-time         │
+│                                                                  │
+│  Solution Approaches:                                            │
+│  • Integer-only FFT implementation                              │
+│  • Masking techniques                                           │
+│  • Constant-time FP with flush-to-zero mode                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Rejection Sampling (ML-DSA)
+
+```python
+"""
+Constant-time rejection sampling pattern
+"""
+
+import secrets
+
+def ct_rejection_sample(max_attempts: int = 256):
+    """
+    Constant-time rejection sampling pattern.
+
+    Key principle: Always perform max_attempts iterations,
+    but only use the first valid result.
+    """
+    result = None
+    found = 0  # 0 until we find valid sample, then 1
+
+    for attempt in range(max_attempts):
+        # Generate candidate
+        candidate = secrets.randbelow(2**16)
+
+        # Check validity (example: must be < threshold)
+        threshold = 50000
+        is_valid = int(candidate < threshold)
+
+        # Only accept if this is valid AND we haven't found one yet
+        accept = is_valid & (1 - found)
+
+        # Constant-time selection
+        if accept:  # This is safe if accept is public
+            result = candidate
+        found |= is_valid
+
+    return result, found
+
+# Better pattern: accumulate all candidates, select at end
+def ct_rejection_sample_v2(max_attempts: int = 256):
+    """
+    Alternative: collect all candidates, select first valid.
+    """
+    candidates = []
+    valid_mask = []
+
+    for _ in range(max_attempts):
+        candidate = secrets.randbelow(2**16)
+        is_valid = int(candidate < 50000)
+        candidates.append(candidate)
+        valid_mask.append(is_valid)
+
+    # Find first valid using constant-time selection
+    result = 0
+    found = 0
+
+    for i in range(max_attempts):
+        # Accept if valid and not yet found
+        accept = valid_mask[i] & (1 - found)
+        mask = -accept
+        result = (result & ~mask) | (candidates[i] & mask)
+        found |= valid_mask[i]
+
+    return result
+```
+
+## Testing for Timing Leakage
+
+### Statistical Testing
+
+```python
+"""
+Timing leakage testing framework
+"""
+
+import time
+import statistics
+from typing import Callable, List
+
+def timing_test(func: Callable,
+                inputs_class_0: List,
+                inputs_class_1: List,
+                iterations: int = 10000) -> dict:
+    """
+    Test function for timing leakage between two input classes.
+
+    Returns statistical comparison of execution times.
+    """
+    times_0 = []
+    times_1 = []
+
+    # Interleave measurements to reduce systematic bias
+    for i in range(iterations):
+        # Measure class 0
+        input_0 = inputs_class_0[i % len(inputs_class_0)]
+        start = time.perf_counter_ns()
+        func(input_0)
+        times_0.append(time.perf_counter_ns() - start)
+
+        # Measure class 1
+        input_1 = inputs_class_1[i % len(inputs_class_1)]
+        start = time.perf_counter_ns()
+        func(input_1)
+        times_1.append(time.perf_counter_ns() - start)
+
+    # Statistical analysis
+    mean_0 = statistics.mean(times_0)
+    mean_1 = statistics.mean(times_1)
+    std_0 = statistics.stdev(times_0)
+    std_1 = statistics.stdev(times_1)
+
+    # T-test for difference
+    pooled_std = ((std_0**2 + std_1**2) / 2) ** 0.5
+    t_statistic = abs(mean_0 - mean_1) / (pooled_std / (iterations ** 0.5))
+
+    return {
+        "class_0_mean_ns": mean_0,
+        "class_1_mean_ns": mean_1,
+        "difference_ns": abs(mean_0 - mean_1),
+        "t_statistic": t_statistic,
+        "significant": t_statistic > 2.0,  # Rough threshold
+        "verdict": "LEAKY" if t_statistic > 2.0 else "OK"
+    }
+
+# Example test
+def test_comparison_functions():
+    """Compare vulnerable vs constant-time comparison."""
+
+    secret = b"X" * 32
+    test_early = b"Y" + b"X" * 31  # Differs at start
+    test_late = b"X" * 31 + b"Y"   # Differs at end
+
+    print("Testing vulnerable comparison:")
+    result = timing_test(
+        lambda x: vulnerable_compare(secret, x),
+        [test_early],
+        [test_late],
+        iterations=50000
+    )
+    print(f"  Difference: {result['difference_ns']:.1f} ns")
+    print(f"  T-statistic: {result['t_statistic']:.2f}")
+    print(f"  Verdict: {result['verdict']}")
+
+    print("\nTesting constant-time comparison:")
+    result = timing_test(
+        lambda x: constant_time_compare(secret, x),
+        [test_early],
+        [test_late],
+        iterations=50000
+    )
+    print(f"  Difference: {result['difference_ns']:.1f} ns")
+    print(f"  T-statistic: {result['t_statistic']:.2f}")
+    print(f"  Verdict: {result['verdict']}")
+
+# Run test
+test_comparison_functions()
+```
+
+### Tools for Timing Analysis
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Constant-Time Verification Tools                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  1. DUDECT                                                      │
+│     ├─ Statistical timing analysis                              │
+│     ├─ Black-box testing                                        │
+│     └─ Good for validating implementations                      │
+│                                                                  │
+│  2. ctgrind (Valgrind-based)                                   │
+│     ├─ Tracks secret data flow                                  │
+│     ├─ Detects secret-dependent branches                        │
+│     └─ Requires annotating secret memory                        │
+│                                                                  │
+│  3. ct-verif / CT-Wasm                                         │
+│     ├─ Formal verification approach                             │
+│     ├─ Proves absence of timing leakage                         │
+│     └─ Limited to specific languages                            │
+│                                                                  │
+│  4. timecop                                                     │
+│     ├─ Dynamic analysis                                         │
+│     ├─ Instruction-level tracking                               │
+│     └─ Requires special build                                   │
+│                                                                  │
+│  Usage Pattern:                                                  │
+│  1. Use statistical testing during development                  │
+│  2. Apply formal verification for critical code                 │
+│  3. Run continuous timing tests in CI/CD                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Summary
+
+Constant-time implementation is essential for secure PQC:
+
+1. **Timing attacks are real**: Microsecond differences can leak secret bits
+2. **Use proven patterns**: Constant-time select, compare, and lookup
+3. **Avoid**: Secret-dependent branches, memory access, and loop counts
+4. **PQC challenges**: NTT, Gaussian sampling, and rejection sampling need special care
+5. **Test thoroughly**: Use statistical and formal verification tools
+
+Always assume attackers can measure timing with nanosecond precision.

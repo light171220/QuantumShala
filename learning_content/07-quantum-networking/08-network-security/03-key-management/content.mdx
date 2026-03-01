@@ -1,0 +1,558 @@
+# Key Management in Quantum Networks
+
+## Introduction
+
+Quantum Key Distribution generates cryptographic keys, but managing those keys throughout their lifecycle is equally important. This lesson covers key management systems for quantum networks.
+
+## Key Lifecycle
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    KEY LIFECYCLE IN QKD                             │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│    ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐   │
+│    │GENERATION│───>│  STORAGE │───>│   USE    │───>│RETIREMENT│   │
+│    └──────────┘    └──────────┘    └──────────┘    └──────────┘   │
+│         │               │               │               │          │
+│         ▼               ▼               ▼               ▼          │
+│    ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐   │
+│    │ QKD      │    │ Secure   │    │Encryption│    │ Secure   │   │
+│    │ Protocol │    │ Memory   │    │   MAC    │    │ Deletion │   │
+│    │ Sifting  │    │ HSM      │    │   Auth   │    │ Zeroize  │   │
+│    │ Privacy  │    │ Key Pool │    │   Sign   │    │ Audit    │   │
+│    │   Amp    │    │          │    │          │    │          │   │
+│    └──────────┘    └──────────┘    └──────────┘    └──────────┘   │
+│                                                                     │
+│  Key Properties Tracked:                                           │
+│  • Generation time         • Usage count                           │
+│  • Security level          • Expiration policy                     │
+│  • Source (which QKD)      • Associated parties                    │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Key Management System
+
+```python
+import numpy as np
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Tuple
+from enum import Enum
+from datetime import datetime, timedelta
+import hashlib
+import secrets
+
+class KeyState(Enum):
+    """Key lifecycle states."""
+    GENERATED = "generated"
+    STORED = "stored"
+    IN_USE = "in_use"
+    EXPIRED = "expired"
+    RETIRED = "retired"
+
+class SecurityLevel(Enum):
+    """Key security levels."""
+    STANDARD = "standard"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+@dataclass
+class QuantumKey:
+    """Represents a quantum-generated key."""
+    key_id: str
+    key_material: bytes
+    creation_time: datetime
+    security_level: SecurityLevel
+    source_qkd: str
+    peer_node: str
+    state: KeyState = KeyState.GENERATED
+    usage_count: int = 0
+    max_uses: int = 1
+    expiration: Optional[datetime] = None
+
+    def __post_init__(self):
+        if self.expiration is None:
+            # Default: 24 hours for standard, less for higher
+            hours = {
+                SecurityLevel.STANDARD: 24,
+                SecurityLevel.HIGH: 4,
+                SecurityLevel.CRITICAL: 1
+            }[self.security_level]
+            self.expiration = self.creation_time + timedelta(hours=hours)
+
+    def is_valid(self) -> bool:
+        """Check if key is still valid."""
+        if self.state in [KeyState.EXPIRED, KeyState.RETIRED]:
+            return False
+        if datetime.now() > self.expiration:
+            self.state = KeyState.EXPIRED
+            return False
+        if self.usage_count >= self.max_uses:
+            return False
+        return True
+
+class KeyManagementSystem:
+    """
+    Quantum Key Management System (QKMS).
+    """
+
+    def __init__(self, node_id: str):
+        self.node_id = node_id
+        self.key_store: Dict[str, QuantumKey] = {}
+        self.key_pools: Dict[str, List[str]] = {}  # peer -> [key_ids]
+        self.audit_log: List[Dict] = []
+
+    def register_key(
+        self,
+        key_material: bytes,
+        source_qkd: str,
+        peer_node: str,
+        security_level: SecurityLevel = SecurityLevel.STANDARD
+    ) -> str:
+        """Register a new quantum-generated key."""
+        key_id = self._generate_key_id(key_material)
+
+        key = QuantumKey(
+            key_id=key_id,
+            key_material=key_material,
+            creation_time=datetime.now(),
+            security_level=security_level,
+            source_qkd=source_qkd,
+            peer_node=peer_node,
+            state=KeyState.STORED
+        )
+
+        self.key_store[key_id] = key
+
+        # Add to peer's key pool
+        if peer_node not in self.key_pools:
+            self.key_pools[peer_node] = []
+        self.key_pools[peer_node].append(key_id)
+
+        self._audit("KEY_REGISTERED", key_id, peer_node)
+        return key_id
+
+    def _generate_key_id(self, key_material: bytes) -> str:
+        """Generate unique key identifier."""
+        timestamp = datetime.now().isoformat()
+        data = key_material + timestamp.encode()
+        return hashlib.sha256(data).hexdigest()[:16]
+
+    def request_key(
+        self,
+        peer_node: str,
+        min_length: int = 256,
+        security_level: SecurityLevel = SecurityLevel.STANDARD
+    ) -> Optional[Tuple[str, bytes]]:
+        """Request a key for communication with peer."""
+        if peer_node not in self.key_pools:
+            return None
+
+        for key_id in self.key_pools[peer_node]:
+            key = self.key_store.get(key_id)
+            if key and key.is_valid():
+                if len(key.key_material) * 8 >= min_length:
+                    if key.security_level.value >= security_level.value:
+                        key.state = KeyState.IN_USE
+                        key.usage_count += 1
+                        self._audit("KEY_USED", key_id, peer_node)
+                        return (key_id, key.key_material)
+
+        return None
+
+    def retire_key(self, key_id: str):
+        """Securely retire a key."""
+        if key_id in self.key_store:
+            key = self.key_store[key_id]
+            # Secure deletion - overwrite with random
+            key.key_material = secrets.token_bytes(len(key.key_material))
+            key.state = KeyState.RETIRED
+            self._audit("KEY_RETIRED", key_id, key.peer_node)
+
+    def cleanup_expired(self) -> int:
+        """Remove expired keys."""
+        expired = []
+        for key_id, key in self.key_store.items():
+            if not key.is_valid():
+                expired.append(key_id)
+
+        for key_id in expired:
+            self.retire_key(key_id)
+
+        return len(expired)
+
+    def _audit(self, action: str, key_id: str, peer: str):
+        """Log audit entry."""
+        self.audit_log.append({
+            "timestamp": datetime.now().isoformat(),
+            "action": action,
+            "key_id": key_id,
+            "peer": peer
+        })
+
+    def get_statistics(self) -> Dict:
+        """Get key management statistics."""
+        stats = {
+            "total_keys": len(self.key_store),
+            "by_state": {},
+            "by_peer": {},
+            "by_security": {}
+        }
+
+        for key in self.key_store.values():
+            # Count by state
+            state = key.state.value
+            stats["by_state"][state] = stats["by_state"].get(state, 0) + 1
+
+            # Count by peer
+            peer = key.peer_node
+            stats["by_peer"][peer] = stats["by_peer"].get(peer, 0) + 1
+
+            # Count by security level
+            level = key.security_level.value
+            stats["by_security"][level] = stats["by_security"].get(level, 0) + 1
+
+        return stats
+
+# Demonstrate key management
+print("Quantum Key Management System")
+print("=" * 50)
+
+kms = KeyManagementSystem("Alice")
+
+# Simulate QKD key generation
+for i in range(5):
+    key_material = secrets.token_bytes(32)  # 256-bit key
+    level = [SecurityLevel.STANDARD, SecurityLevel.HIGH, SecurityLevel.CRITICAL][i % 3]
+    key_id = kms.register_key(key_material, "QKD-Link-1", "Bob", level)
+    print(f"Registered key: {key_id[:8]}... ({level.value})")
+
+# Request keys
+print("\nKey Requests:")
+result = kms.request_key("Bob", 256, SecurityLevel.STANDARD)
+if result:
+    key_id, key = result
+    print(f"  Got key {key_id[:8]}... for Bob")
+
+# Statistics
+stats = kms.get_statistics()
+print(f"\nStatistics:")
+print(f"  Total keys: {stats['total_keys']}")
+print(f"  By state: {stats['by_state']}")
+```
+
+## Key Storage Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    KEY STORAGE ARCHITECTURE                         │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │                    APPLICATION LAYER                        │   │
+│  │   ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │   │
+│  │   │Encryption│  │   VPN    │  │Secure    │  │   Auth   │   │   │
+│  │   │  App     │  │  Client  │  │Storage   │  │  Server  │   │   │
+│  │   └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘   │   │
+│  └────────┼─────────────┼─────────────┼─────────────┼─────────┘   │
+│           │             │             │             │              │
+│           └─────────────┴──────┬──────┴─────────────┘              │
+│                                │                                    │
+│  ┌─────────────────────────────┼───────────────────────────────┐   │
+│  │            KEY MANAGEMENT API                               │   │
+│  │  • Request key by peer      • Get key status                │   │
+│  │  • Register new key         • Retire key                    │   │
+│  └─────────────────────────────┼───────────────────────────────┘   │
+│                                │                                    │
+│  ┌─────────────────────────────┼───────────────────────────────┐   │
+│  │                    SECURE KEY STORE                         │   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │   │
+│  │  │  Key Pool    │  │   Metadata   │  │  Audit Log   │      │   │
+│  │  │  (Encrypted) │  │   Database   │  │  (Append)    │      │   │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘      │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                │                                    │
+│  ┌─────────────────────────────┼───────────────────────────────┐   │
+│  │               HARDWARE SECURITY MODULE                       │   │
+│  │  • Tamper-resistant storage  • Secure random generation     │   │
+│  │  • Key wrapping/unwrapping   • Access control                │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Key Synchronization
+
+```python
+class KeySynchronizer:
+    """
+    Synchronize keys between QKD peers.
+    """
+
+    def __init__(self, local_kms: KeyManagementSystem):
+        self.kms = local_kms
+        self.sync_state: Dict[str, int] = {}  # peer -> last_sync_index
+
+    def get_key_confirmation(self, key_id: str) -> bytes:
+        """Generate key confirmation hash."""
+        key = self.kms.key_store.get(key_id)
+        if key:
+            # Hash of key (not the key itself)
+            return hashlib.sha256(key.key_material).digest()[:8]
+        return b''
+
+    def verify_key_sync(
+        self,
+        key_id: str,
+        peer_confirmation: bytes
+    ) -> bool:
+        """Verify peer has same key."""
+        local_confirmation = self.get_key_confirmation(key_id)
+        return local_confirmation == peer_confirmation
+
+    def sync_key_list(self, peer: str) -> Dict:
+        """Get list of keys to sync with peer."""
+        if peer not in self.kms.key_pools:
+            return {"keys": [], "status": "no_keys"}
+
+        sync_list = []
+        for key_id in self.kms.key_pools[peer]:
+            key = self.kms.key_store.get(key_id)
+            if key and key.is_valid():
+                sync_list.append({
+                    "key_id": key_id,
+                    "confirmation": self.get_key_confirmation(key_id).hex(),
+                    "state": key.state.value
+                })
+
+        return {"keys": sync_list, "status": "ok"}
+
+class KeyPoolManager:
+    """
+    Manage key pools for different purposes.
+    """
+
+    def __init__(self, kms: KeyManagementSystem):
+        self.kms = kms
+        self.purpose_pools: Dict[str, List[str]] = {
+            "encryption": [],
+            "authentication": [],
+            "key_derivation": [],
+            "emergency": []
+        }
+
+    def allocate_key(
+        self,
+        key_id: str,
+        purpose: str
+    ) -> bool:
+        """Allocate key to specific purpose."""
+        if purpose not in self.purpose_pools:
+            return False
+
+        if key_id in self.kms.key_store:
+            self.purpose_pools[purpose].append(key_id)
+            return True
+        return False
+
+    def get_key_for_purpose(
+        self,
+        peer: str,
+        purpose: str
+    ) -> Optional[bytes]:
+        """Get key allocated for specific purpose."""
+        if purpose not in self.purpose_pools:
+            return None
+
+        for key_id in self.purpose_pools[purpose]:
+            key = self.kms.key_store.get(key_id)
+            if key and key.is_valid() and key.peer_node == peer:
+                return key.key_material
+
+        return None
+
+    def pool_status(self) -> Dict:
+        """Get status of all purpose pools."""
+        status = {}
+        for purpose, keys in self.purpose_pools.items():
+            valid = sum(1 for k in keys
+                       if k in self.kms.key_store
+                       and self.kms.key_store[k].is_valid())
+            status[purpose] = {
+                "total": len(keys),
+                "valid": valid
+            }
+        return status
+
+# Demonstrate synchronization
+print("\n\nKey Synchronization")
+print("=" * 50)
+
+syncer = KeySynchronizer(kms)
+sync_info = syncer.sync_key_list("Bob")
+print(f"Keys to sync with Bob: {len(sync_info['keys'])}")
+for key_info in sync_info['keys'][:2]:
+    print(f"  {key_info['key_id'][:8]}... conf: {key_info['confirmation'][:8]}")
+```
+
+## Key Distribution in Networks
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    NETWORK KEY DISTRIBUTION                         │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Direct QKD Links:                                                  │
+│  ┌──────┐         QKD          ┌──────┐                            │
+│  │Alice │═════════════════════│ Bob  │                            │
+│  │ KMS  │    Direct Key       │ KMS  │                            │
+│  └──────┘                      └──────┘                            │
+│                                                                     │
+│  Trusted Relay:                                                     │
+│  ┌──────┐   QKD    ┌──────┐   QKD    ┌──────┐                     │
+│  │Alice │════════│Relay │════════│ Bob  │                     │
+│  └──────┘  K_AR    └──────┘  K_RB    └──────┘                     │
+│                       │                                             │
+│            K_AB = K_AR ⊕ K_RB                                      │
+│            (XOR at relay)                                           │
+│                                                                     │
+│  Quantum Repeater Network:                                          │
+│  ┌──────┐   ~~~   ┌──────┐   ~~~   ┌──────┐                       │
+│  │Alice │ ~ ─ ~ │ Rep  │ ~ ─ ~ │ Bob  │                       │
+│  └──────┘entangle└──────┘entangle└──────┘                       │
+│                       │                                             │
+│         End-to-end entanglement → End-to-end key                   │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+```python
+class NetworkKeyDistribution:
+    """
+    Key distribution across quantum network.
+    """
+
+    def __init__(self, node_id: str, kms: KeyManagementSystem):
+        self.node_id = node_id
+        self.kms = kms
+        self.direct_peers: List[str] = []
+        self.relay_routes: Dict[str, List[str]] = {}  # dest -> path
+
+    def add_direct_link(self, peer: str):
+        """Register direct QKD link."""
+        self.direct_peers.append(peer)
+
+    def add_relay_route(self, destination: str, path: List[str]):
+        """Register path through trusted relays."""
+        self.relay_routes[destination] = path
+
+    def establish_key(
+        self,
+        destination: str,
+        key_length: int = 256
+    ) -> Optional[str]:
+        """Establish key with destination node."""
+        if destination in self.direct_peers:
+            return self._direct_key(destination, key_length)
+        elif destination in self.relay_routes:
+            return self._relay_key(destination, key_length)
+        else:
+            return None
+
+    def _direct_key(self, peer: str, length: int) -> str:
+        """Get key from direct QKD link."""
+        result = self.kms.request_key(peer, length)
+        if result:
+            return result[0]
+        return None
+
+    def _relay_key(
+        self,
+        destination: str,
+        length: int
+    ) -> Optional[str]:
+        """Establish key through relay path."""
+        path = self.relay_routes[destination]
+
+        # Simulate relay key establishment
+        # In practice: XOR keys at each relay
+        print(f"  Relay path: {self.node_id} -> {' -> '.join(path)} -> {destination}")
+
+        # Request intermediate keys
+        segment_keys = []
+        current = self.node_id
+        for next_hop in path + [destination]:
+            result = self.kms.request_key(next_hop, length)
+            if result:
+                segment_keys.append(result[1])
+            current = next_hop
+
+        if len(segment_keys) == len(path) + 1:
+            # XOR all segment keys
+            final_key = segment_keys[0]
+            for k in segment_keys[1:]:
+                final_key = bytes(a ^ b for a, b in zip(final_key, k))
+
+            # Register resulting key
+            key_id = self.kms.register_key(
+                final_key, "relay", destination
+            )
+            return key_id
+
+        return None
+
+# Demonstrate network distribution
+print("\n\nNetwork Key Distribution")
+print("=" * 50)
+
+nkd = NetworkKeyDistribution("Alice", kms)
+nkd.add_direct_link("Bob")
+nkd.add_relay_route("Charlie", ["Bob"])
+
+# Register additional keys for relay demo
+for node in ["Bob", "Charlie"]:
+    for _ in range(2):
+        key = secrets.token_bytes(32)
+        kms.register_key(key, "QKD", node)
+
+key_id = nkd.establish_key("Bob")
+print(f"Direct key with Bob: {key_id[:8] if key_id else 'None'}...")
+
+key_id = nkd.establish_key("Charlie")
+print(f"Relay key with Charlie: {key_id[:8] if key_id else 'None'}...")
+```
+
+## Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    KEY MANAGEMENT SUMMARY                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Key Lifecycle:                                                     │
+│  • Generation: QKD produces raw key material                       │
+│  • Storage: Secure key store with metadata                         │
+│  • Use: Track usage, enforce limits                                │
+│  • Retirement: Secure deletion, audit trail                        │
+│                                                                     │
+│  Storage Requirements:                                              │
+│  • Hardware Security Module for high-value keys                    │
+│  • Encrypted key pools with access control                         │
+│  • Metadata database for key tracking                              │
+│  • Tamper-evident audit logs                                       │
+│                                                                     │
+│  Synchronization:                                                   │
+│  • Key confirmation hashes (not keys!)                             │
+│  • State synchronization between peers                             │
+│  • Handle key expiration consistently                              │
+│                                                                     │
+│  Network Distribution:                                              │
+│  • Direct: QKD link provides key directly                          │
+│  • Trusted Relay: XOR keys at intermediate nodes                   │
+│  • Repeater: End-to-end via entanglement                          │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Effective key management is essential for turning QKD's security promises into practical, deployable systems.

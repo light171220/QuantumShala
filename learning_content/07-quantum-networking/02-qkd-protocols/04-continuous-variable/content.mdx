@@ -1,0 +1,826 @@
+# Continuous-Variable QKD
+
+Continuous-variable quantum key distribution (CV-QKD) encodes information in the continuous quadrature amplitudes of the electromagnetic field rather than discrete quantum states. This approach offers practical advantages including compatibility with standard telecom infrastructure and high key rates at metropolitan distances.
+
+## Continuous-Variable Quantum States
+
+Unlike discrete-variable (DV) QKD using single photons, CV-QKD uses coherent states with information encoded in field quadratures.
+
+### Quadrature Phase Space
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Phase Space Representation                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│              P (momentum quadrature)                            │
+│                     ↑                                           │
+│                     │      ●α                                   │
+│                     │     /│                                    │
+│                     │    / │                                    │
+│                     │   /  │ Im(α)                              │
+│                     │  /θ  │                                    │
+│        ─────────────●──────┼───────────→ X (position)          │
+│                   vacuum   │            quadrature              │
+│                     │      Re(α)                                │
+│                     │                                           │
+│                                                                 │
+│   Coherent state |α⟩:                                          │
+│   • X = √2 Re(α)  (position quadrature)                        │
+│   • P = √2 Im(α)  (momentum quadrature)                        │
+│   • Minimum uncertainty: ΔX·ΔP = 1/2 (vacuum units)            │
+│                                                                 │
+│   Gaussian distribution in phase space:                         │
+│   ┌──────────────────────┐                                     │
+│   │        ○             │  Vacuum state: centered at origin   │
+│   │       ╱ ╲            │  Coherent: displaced Gaussian       │
+│   │      │ ● │───→ α     │  Width = vacuum noise               │
+│   │       ╲ ╱            │                                     │
+│   │        ○             │                                     │
+│   └──────────────────────┘                                     │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Coherent State Mathematics
+
+```python
+import numpy as np
+from dataclasses import dataclass
+from typing import Tuple, List, Dict, Optional
+from scipy import special
+import math
+
+@dataclass
+class CoherentState:
+    """
+    Coherent state representation in phase space.
+
+    |α⟩ = e^(-|α|²/2) Σ (αⁿ/√n!) |n⟩
+    """
+    alpha: complex  # Complex amplitude
+
+    @property
+    def x_quadrature(self) -> float:
+        """Position quadrature X = √2 Re(α)."""
+        return np.sqrt(2) * self.alpha.real
+
+    @property
+    def p_quadrature(self) -> float:
+        """Momentum quadrature P = √2 Im(α)."""
+        return np.sqrt(2) * self.alpha.imag
+
+    @property
+    def mean_photon_number(self) -> float:
+        """Average photon number n̄ = |α|²."""
+        return abs(self.alpha) ** 2
+
+    @property
+    def phase(self) -> float:
+        """Phase angle θ = arg(α)."""
+        return np.angle(self.alpha)
+
+    def displace(self, beta: complex) -> 'CoherentState':
+        """Apply displacement operator D(β)."""
+        return CoherentState(self.alpha + beta)
+
+    def add_gaussian_noise(self, variance: float) -> Tuple[float, float]:
+        """
+        Sample measured quadratures with Gaussian noise.
+
+        Returns (x_measured, p_measured) with added vacuum noise.
+        """
+        x_noise = np.random.normal(0, np.sqrt(variance))
+        p_noise = np.random.normal(0, np.sqrt(variance))
+
+        return (self.x_quadrature + x_noise,
+                self.p_quadrature + p_noise)
+
+class GaussianState:
+    """General Gaussian state in phase space."""
+
+    def __init__(self, mean: np.ndarray, covariance: np.ndarray):
+        """
+        Args:
+            mean: First moments [⟨X⟩, ⟨P⟩]
+            covariance: Covariance matrix [[V_XX, V_XP], [V_PX, V_PP]]
+        """
+        self.mean = np.array(mean)
+        self.covariance = np.array(covariance)
+
+    @classmethod
+    def vacuum(cls) -> 'GaussianState':
+        """Create vacuum state."""
+        return cls(mean=[0, 0],
+                  covariance=[[1, 0], [0, 1]])  # Shot noise units
+
+    @classmethod
+    def coherent(cls, alpha: complex) -> 'GaussianState':
+        """Create coherent state."""
+        return cls(mean=[np.sqrt(2)*alpha.real, np.sqrt(2)*alpha.imag],
+                  covariance=[[1, 0], [0, 1]])
+
+    @classmethod
+    def thermal(cls, n_bar: float) -> 'GaussianState':
+        """Create thermal state with mean photon number n_bar."""
+        variance = 2 * n_bar + 1
+        return cls(mean=[0, 0],
+                  covariance=[[variance, 0], [0, variance]])
+
+    @classmethod
+    def squeezed(cls, r: float, phi: float = 0) -> 'GaussianState':
+        """Create squeezed state with squeezing r and angle phi."""
+        V_x = np.exp(-2*r)
+        V_p = np.exp(2*r)
+        # Rotate squeezing axis
+        c, s = np.cos(phi), np.sin(phi)
+        cov = [[V_x*c**2 + V_p*s**2, (V_x-V_p)*c*s],
+               [(V_x-V_p)*c*s, V_x*s**2 + V_p*c**2]]
+        return cls(mean=[0, 0], covariance=cov)
+
+    def purity(self) -> float:
+        """Calculate state purity = 1/√(det(V))."""
+        return 1.0 / np.sqrt(np.linalg.det(self.covariance))
+
+    def von_neumann_entropy(self) -> float:
+        """Calculate von Neumann entropy in nats."""
+        # For single-mode Gaussian: S = g(ν) where ν is symplectic eigenvalue
+        nu = np.sqrt(np.linalg.det(self.covariance))
+        if nu <= 1:
+            return 0
+        return ((nu + 1)/2) * np.log((nu + 1)/2) - ((nu - 1)/2) * np.log((nu - 1)/2)
+```
+
+## GG02 Protocol
+
+The GG02 protocol (Grosshans-Grangier 2002) is the foundational CV-QKD protocol, using Gaussian modulation of coherent states.
+
+### Protocol Structure
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     GG02 Protocol Flow                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ALICE                          BOB                            │
+│   ─────                          ───                            │
+│                                                                 │
+│   1. Generate Gaussian           4. Measure quadrature          │
+│      random (x_A, p_A)              (homodyne or heterodyne)    │
+│          │                              │                       │
+│          ▼                              │                       │
+│   2. Prepare |α⟩                        │                       │
+│      α = (x_A + ip_A)/√2               │                       │
+│          │                              │                       │
+│          ▼                              │                       │
+│   3. Send through ─────────────────────►│                       │
+│      quantum channel                    ▼                       │
+│                                  5. Obtain (x_B, p_B)           │
+│                                                                 │
+│   ═══════════════════════════════════════════════════════════   │
+│                   Classical Channel                              │
+│   ═══════════════════════════════════════════════════════════   │
+│                                                                 │
+│   6. Parameter estimation (subset of data)                      │
+│   7. Error correction (reverse/direct reconciliation)           │
+│   8. Privacy amplification                                      │
+│                                                                 │
+│   Key insight: Correlated continuous variables → discretize     │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### GG02 Implementation
+
+```python
+class GG02Protocol:
+    """
+    Gaussian-modulated coherent state protocol (GG02).
+
+    Alice: Gaussian modulation → coherent states
+    Bob: Homodyne or heterodyne detection
+    """
+
+    def __init__(self,
+                 n_signals: int,
+                 modulation_variance: float = 4.0,
+                 channel_transmission: float = 0.5,
+                 excess_noise: float = 0.01):
+        """
+        Args:
+            n_signals: Number of coherent states to send
+            modulation_variance: V_A in shot noise units
+            channel_transmission: η = 10^(-αL/10)
+            excess_noise: ε in shot noise units
+        """
+        self.n_signals = n_signals
+        self.V_A = modulation_variance
+        self.eta = channel_transmission
+        self.epsilon = excess_noise
+
+        # Shot noise variance = 1 in our units
+        self.shot_noise = 1.0
+
+        # Results storage
+        self.alice_data = None
+        self.bob_data = None
+
+    def alice_prepare(self) -> List[CoherentState]:
+        """Alice prepares Gaussian-modulated coherent states."""
+        # Generate Gaussian random variables
+        x_values = np.random.normal(0, np.sqrt(self.V_A), self.n_signals)
+        p_values = np.random.normal(0, np.sqrt(self.V_A), self.n_signals)
+
+        self.alice_data = {'x': x_values, 'p': p_values}
+
+        # Create coherent states
+        states = []
+        for x, p in zip(x_values, p_values):
+            alpha = (x + 1j * p) / np.sqrt(2)
+            states.append(CoherentState(alpha))
+
+        return states
+
+    def channel_transmission_effect(self,
+                                    state: CoherentState) -> CoherentState:
+        """Model lossy channel with excess noise."""
+        # Transmission reduces amplitude
+        new_alpha = np.sqrt(self.eta) * state.alpha
+
+        # Channel adds thermal noise
+        noise_variance = (1 - self.eta) + self.eta * self.epsilon
+
+        # Add noise to quadratures
+        noise_x = np.random.normal(0, np.sqrt(noise_variance))
+        noise_p = np.random.normal(0, np.sqrt(noise_variance))
+
+        noisy_alpha = new_alpha + (noise_x + 1j * noise_p) / np.sqrt(2)
+
+        return CoherentState(noisy_alpha)
+
+    def bob_homodyne(self, states: List[CoherentState],
+                     measure_x: bool = True) -> np.ndarray:
+        """
+        Bob performs homodyne detection.
+
+        Measures either X or P quadrature with added shot noise.
+        """
+        measurements = []
+
+        for state in states:
+            # Channel effects
+            received = self.channel_transmission_effect(state)
+
+            # Homodyne measurement with shot noise
+            if measure_x:
+                value = received.x_quadrature
+            else:
+                value = received.p_quadrature
+
+            # Add detector shot noise
+            value += np.random.normal(0, np.sqrt(self.shot_noise))
+            measurements.append(value)
+
+        return np.array(measurements)
+
+    def bob_heterodyne(self, states: List[CoherentState]) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Bob performs heterodyne detection.
+
+        Measures both X and P simultaneously with 3dB penalty.
+        """
+        x_measurements = []
+        p_measurements = []
+
+        for state in states:
+            received = self.channel_transmission_effect(state)
+
+            # Heterodyne adds extra vacuum noise (3dB penalty)
+            x = received.x_quadrature + np.random.normal(0, np.sqrt(2 * self.shot_noise))
+            p = received.p_quadrature + np.random.normal(0, np.sqrt(2 * self.shot_noise))
+
+            x_measurements.append(x)
+            p_measurements.append(p)
+
+        return np.array(x_measurements), np.array(p_measurements)
+
+    def run_protocol(self, detection: str = 'homodyne') -> Dict:
+        """Execute GG02 protocol."""
+        # Alice prepares
+        states = self.alice_prepare()
+
+        # Bob measures
+        if detection == 'homodyne':
+            # Alternate between X and P measurement
+            x_indices = list(range(0, self.n_signals, 2))
+            p_indices = list(range(1, self.n_signals, 2))
+
+            x_states = [states[i] for i in x_indices]
+            p_states = [states[i] for i in p_indices]
+
+            x_meas = self.bob_homodyne(x_states, measure_x=True)
+            p_meas = self.bob_homodyne(p_states, measure_x=False)
+
+            self.bob_data = {
+                'x': x_meas,
+                'p': p_meas,
+                'x_indices': x_indices,
+                'p_indices': p_indices
+            }
+        else:
+            x_meas, p_meas = self.bob_heterodyne(states)
+            self.bob_data = {'x': x_meas, 'p': p_meas}
+
+        # Parameter estimation
+        params = self.estimate_parameters()
+
+        # Calculate key rate
+        key_rate = self.calculate_key_rate(params, detection)
+
+        return {
+            'n_signals': self.n_signals,
+            'detection': detection,
+            'channel_transmission': self.eta,
+            'modulation_variance': self.V_A,
+            'estimated_params': params,
+            'key_rate_per_symbol': key_rate,
+            'total_key_bits': max(0, key_rate * self.n_signals)
+        }
+
+    def estimate_parameters(self) -> Dict:
+        """Estimate channel parameters from data."""
+        if self.bob_data is None or self.alice_data is None:
+            return {}
+
+        # Correlation coefficient
+        if 'x_indices' in self.bob_data:
+            alice_x = self.alice_data['x'][self.bob_data['x_indices']]
+            bob_x = self.bob_data['x']
+        else:
+            alice_x = self.alice_data['x']
+            bob_x = self.bob_data['x']
+
+        correlation = np.corrcoef(alice_x, bob_x)[0, 1]
+
+        # Estimate transmission
+        T_est = correlation ** 2
+
+        # Estimate total noise
+        bob_variance = np.var(bob_x)
+        expected_bob_var = T_est * self.V_A + 1 + self.epsilon
+
+        return {
+            'correlation': correlation,
+            'estimated_transmission': T_est,
+            'bob_variance': bob_variance,
+            'estimated_noise': bob_variance - T_est * self.V_A
+        }
+
+    def calculate_key_rate(self, params: Dict, detection: str) -> float:
+        """
+        Calculate asymptotic secret key rate.
+
+        K = βI(A:B) - χ(B:E)  (reverse reconciliation)
+
+        where:
+        - β: Reconciliation efficiency (~0.95)
+        - I(A:B): Alice-Bob mutual information
+        - χ(B:E): Eve-Bob Holevo information
+        """
+        beta = 0.95  # Reconciliation efficiency
+        eta = self.eta
+        V_A = self.V_A
+        epsilon = self.epsilon
+
+        # Total noise referred to input
+        chi = (1 - eta + eta * epsilon) / eta
+
+        # Mutual information I(A:B)
+        if detection == 'homodyne':
+            # Homodyne: I = 0.5 log(1 + SNR)
+            snr = eta * V_A / (1 + eta * epsilon)
+            I_AB = 0.5 * np.log2(1 + snr)
+        else:
+            # Heterodyne: I = log(1 + SNR) but SNR is halved
+            snr = eta * V_A / (2 + eta * epsilon)
+            I_AB = np.log2(1 + snr)
+
+        # Eve's information (Holevo bound for Gaussian attack)
+        # Simplified for collective attacks
+        V_B = eta * V_A + 1 + eta * epsilon
+        chi_BE = self._holevo_bound(V_B, eta, epsilon)
+
+        # Secret key rate
+        key_rate = beta * I_AB - chi_BE
+
+        return max(0, key_rate)
+
+    def _holevo_bound(self, V_B: float, eta: float, epsilon: float) -> float:
+        """Calculate Eve's Holevo information."""
+        # Simplified calculation for illustration
+        # Full calculation requires symplectic eigenvalues
+
+        def g(x):
+            """Bosonic entropy function."""
+            if x <= 0:
+                return 0
+            return ((x+1)/2) * np.log2((x+1)/2) - ((x-1)/2) * np.log2((x-1)/2) if x > 1 else 0
+
+        # For trusted detector scenario
+        chi_E = g(np.sqrt(V_B)) - g(np.sqrt(1 + epsilon))
+
+        return max(0, chi_E)
+
+
+# Run GG02 simulation
+gg02 = GG02Protocol(
+    n_signals=100000,
+    modulation_variance=4.0,
+    channel_transmission=0.5,  # 3 dB loss
+    excess_noise=0.01
+)
+
+result = gg02.run_protocol(detection='homodyne')
+print(f"Key rate: {result['key_rate_per_symbol']:.4f} bits/symbol")
+print(f"Total key: {result['total_key_bits']:.0f} bits")
+```
+
+## Detection Methods
+
+CV-QKD uses specialized detection techniques to measure quantum field quadratures.
+
+### Homodyne vs Heterodyne Detection
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Detection Methods Comparison                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   HOMODYNE DETECTION:                                           │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │  Signal ──────┐                                         │  │
+│   │               │                                         │  │
+│   │               ├───[50:50]───┬───[PD1]───┐              │  │
+│   │               │             │           │ Subtract      │  │
+│   │  LO (strong)──┘             └───[PD2]───┘    │         │  │
+│   │                                              ▼         │  │
+│   │                                         X or P        │  │
+│   │                                         (chosen by LO │  │
+│   │                                          phase θ)      │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│   • Measures X (θ=0) or P (θ=π/2)                              │
+│   • Full precision on one quadrature                            │
+│   • Cannot measure both simultaneously                          │
+│                                                                 │
+│   HETERODYNE DETECTION:                                         │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │  Signal ──┬───[50:50]───┬───[Homodyne θ=0]───→ X       │  │
+│   │           │             │                               │  │
+│   │           │             └───[Homodyne θ=π/2]──→ P      │  │
+│   │           │                                             │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│   • Measures both X and P simultaneously                        │
+│   • 3 dB noise penalty (adds vacuum)                           │
+│   • Equivalent to projecting onto coherent state               │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Detection Implementation
+
+```python
+class HomodyneDetector:
+    """Homodyne detection simulation."""
+
+    def __init__(self, efficiency: float = 0.95,
+                 electronic_noise: float = 0.01):
+        self.efficiency = efficiency
+        self.v_el = electronic_noise  # In shot noise units
+
+    def measure(self, state: CoherentState, lo_phase: float) -> float:
+        """
+        Measure generalized quadrature X_θ = X cos(θ) + P sin(θ).
+
+        Args:
+            state: Input coherent state
+            lo_phase: Local oscillator phase (0 for X, π/2 for P)
+
+        Returns:
+            Measurement result
+        """
+        # Generalized quadrature
+        x_theta = (state.x_quadrature * np.cos(lo_phase) +
+                   state.p_quadrature * np.sin(lo_phase))
+
+        # Finite efficiency adds vacuum noise
+        signal = np.sqrt(self.efficiency) * x_theta
+        vacuum_noise = np.sqrt(1 - self.efficiency) * np.random.normal(0, 1)
+
+        # Shot noise and electronic noise
+        shot_noise = np.random.normal(0, 1)
+        elec_noise = np.random.normal(0, np.sqrt(self.v_el))
+
+        return signal + vacuum_noise + shot_noise + elec_noise
+
+class HeterodyneDetector:
+    """Heterodyne (dual homodyne) detection."""
+
+    def __init__(self, efficiency: float = 0.95):
+        self.efficiency = efficiency
+
+    def measure(self, state: CoherentState) -> Tuple[float, float]:
+        """
+        Measure both quadratures simultaneously.
+
+        Returns:
+            Tuple (x_measured, p_measured)
+        """
+        # Signal is split 50:50
+        signal_x = state.x_quadrature / np.sqrt(2)
+        signal_p = state.p_quadrature / np.sqrt(2)
+
+        # Each measurement adds vacuum noise
+        vacuum_x = np.random.normal(0, 1)
+        vacuum_p = np.random.normal(0, 1)
+
+        # Include detector efficiency
+        x = np.sqrt(self.efficiency) * signal_x + vacuum_x
+        p = np.sqrt(self.efficiency) * signal_p + vacuum_p
+
+        # Scale back
+        return np.sqrt(2) * x, np.sqrt(2) * p
+```
+
+## Security Analysis
+
+CV-QKD security relies on quantum uncertainty and the impossibility of perfect cloning of Gaussian states.
+
+### Key Rate Bounds
+
+```python
+class CVQKDSecurityAnalysis:
+    """Security analysis for CV-QKD protocols."""
+
+    def __init__(self, V_A: float, eta: float, epsilon: float):
+        """
+        Args:
+            V_A: Modulation variance
+            eta: Channel transmission
+            epsilon: Excess noise (shot noise units)
+        """
+        self.V_A = V_A
+        self.eta = eta
+        self.epsilon = epsilon
+
+    def calculate_key_rate_vs_distance(self,
+                                       distances: np.ndarray,
+                                       fiber_loss: float = 0.2) -> Dict:
+        """
+        Calculate key rate vs distance.
+
+        Args:
+            distances: Array of distances in km
+            fiber_loss: Fiber loss in dB/km
+        """
+        key_rates_hom = []
+        key_rates_het = []
+
+        for d in distances:
+            loss_db = fiber_loss * d
+            eta = 10 ** (-loss_db / 10)
+
+            rate_hom = self._key_rate_homodyne(eta)
+            rate_het = self._key_rate_heterodyne(eta)
+
+            key_rates_hom.append(rate_hom)
+            key_rates_het.append(rate_het)
+
+        return {
+            'distances': distances,
+            'homodyne_rates': np.array(key_rates_hom),
+            'heterodyne_rates': np.array(key_rates_het)
+        }
+
+    def _key_rate_homodyne(self, eta: float) -> float:
+        """Asymptotic key rate for homodyne detection."""
+        beta = 0.95
+        V_A = self.V_A
+        epsilon = self.epsilon
+
+        # SNR
+        snr = eta * V_A / (1 + eta * epsilon)
+
+        # Mutual information
+        I_AB = 0.5 * np.log2(1 + snr)
+
+        # Eve's information (simplified Gaussian collective attack)
+        V_B = eta * V_A + 1 + eta * epsilon
+        chi_E = self._chi_gaussian(V_B, eta)
+
+        return max(0, beta * I_AB - chi_E)
+
+    def _key_rate_heterodyne(self, eta: float) -> float:
+        """Asymptotic key rate for heterodyne detection."""
+        beta = 0.95
+        V_A = self.V_A
+        epsilon = self.epsilon
+
+        # SNR (halved due to heterodyne)
+        snr = eta * V_A / (2 + eta * epsilon)
+
+        # Mutual information
+        I_AB = np.log2(1 + snr)
+
+        # Eve's information
+        V_B = eta * V_A + 2 + eta * epsilon
+        chi_E = self._chi_gaussian(V_B, eta)
+
+        return max(0, beta * I_AB - chi_E)
+
+    def _chi_gaussian(self, V_B: float, eta: float) -> float:
+        """Eve's Holevo information for Gaussian attacks."""
+        def g(x):
+            if x <= 1:
+                return 0
+            return ((x+1)/2) * np.log2((x+1)/2) - ((x-1)/2) * np.log2((x-1)/2)
+
+        # Symplectic eigenvalue (simplified)
+        nu = np.sqrt(V_B)
+        return g(nu)
+
+    def find_maximum_distance(self, target_rate: float = 0) -> float:
+        """Find maximum distance for positive key rate."""
+        for d in np.arange(0, 200, 1):
+            eta = 10 ** (-0.2 * d / 10)
+            if self._key_rate_homodyne(eta) <= target_rate:
+                return d - 1
+        return 200
+
+class CVvsDVComparison:
+    """Compare CV-QKD with DV-QKD approaches."""
+
+    @staticmethod
+    def compare_at_distance(distance_km: float) -> Dict:
+        """Compare protocols at given distance."""
+        # CV-QKD parameters
+        cv_V_A = 4.0
+        cv_epsilon = 0.01
+
+        # DV-QKD (BB84) parameters
+        dv_dark_count = 1e-6
+        dv_detector_eff = 0.9
+
+        # Channel
+        eta = 10 ** (-0.2 * distance_km / 10)
+
+        # CV key rate
+        cv_analysis = CVQKDSecurityAnalysis(cv_V_A, eta, cv_epsilon)
+        cv_rate = cv_analysis._key_rate_homodyne(eta)
+
+        # DV key rate (simplified BB84)
+        dv_detection_prob = eta * dv_detector_eff
+        dv_qber = dv_dark_count / (dv_detection_prob + dv_dark_count)
+        dv_sift = 0.5
+        h = lambda p: -p*np.log2(p)-(1-p)*np.log2(1-p) if 0 < p < 1 else 0
+        dv_secret = max(0, 1 - 2*h(dv_qber)) if dv_qber < 0.11 else 0
+        dv_rate = dv_detection_prob * dv_sift * dv_secret
+
+        return {
+            'distance_km': distance_km,
+            'cv_key_rate': cv_rate,
+            'dv_key_rate': dv_rate,
+            'cv_advantage': cv_rate > dv_rate
+        }
+
+    @staticmethod
+    def practical_comparison() -> str:
+        """Generate practical comparison summary."""
+        comparison = """
+        ╔════════════════════════════════════════════════════════════╗
+        ║           CV-QKD vs DV-QKD Practical Comparison           ║
+        ╠════════════════════════════════════════════════════════════╣
+        ║ Aspect           │ CV-QKD          │ DV-QKD              ║
+        ╠══════════════════╪═════════════════╪═════════════════════╣
+        ║ Source           │ Standard laser  │ Single-photon/WCP   ║
+        ║ Detector         │ Homodyne        │ SPD (APD/SNSPD)     ║
+        ║ Key rate (metro) │ ~Mbps           │ ~100 kbps           ║
+        ║ Distance         │ ~100 km         │ ~300 km             ║
+        ║ Telecom compat.  │ Excellent       │ Good                ║
+        ║ LO requirement   │ Yes             │ No                  ║
+        ║ Implementation   │ RF electronics  │ Timing critical     ║
+        ║ Security proofs  │ Gaussian attacks│ General attacks     ║
+        ╚════════════════════════════════════════════════════════════╝
+        """
+        return comparison
+```
+
+## Practical Considerations
+
+### Implementation Challenges
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              CV-QKD Implementation Challenges                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   1. LOCAL OSCILLATOR DISTRIBUTION                              │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ Options:                                                │  │
+│   │ • Transmitted LO: Phase-locked to signal, security risk│  │
+│   │ • Local LO: Independent laser, phase recovery needed   │  │
+│   │ • Pilot tone: Reference multiplexed with signal        │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   2. PHASE NOISE                                                │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ • Laser linewidth → phase diffusion                    │  │
+│   │ • Fiber fluctuations → random phase shifts             │  │
+│   │ • Solution: Phase tracking algorithms, narrow lasers   │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   3. EXCESS NOISE SOURCES                                       │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ • Electronic noise: ADC/amplifier contributions        │  │
+│   │ • Raman scattering: If sharing fiber with classical    │  │
+│   │ • Polarization: Mismatch adds noise                    │  │
+│   │ • Modulator: Imperfect extinction                      │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   4. RECONCILIATION                                             │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ • Reverse reconciliation: Essential for long distance  │  │
+│   │ • Efficiency β > 0.9 required for practical rates     │  │
+│   │ • LDPC codes: Best current approach                    │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+class CVQKDSystem:
+    """Complete CV-QKD system model."""
+
+    def __init__(self):
+        self.params = {
+            'laser_linewidth_hz': 100e3,
+            'modulator_extinction_db': 30,
+            'detector_efficiency': 0.6,
+            'electronic_noise_dB': -20,
+            'adc_bits': 12,
+            'symbol_rate_baud': 100e6
+        }
+
+    def calculate_excess_noise(self, distance_km: float) -> float:
+        """Estimate total excess noise."""
+        # Electronic noise
+        v_el = 10 ** (self.params['electronic_noise_dB'] / 10)
+
+        # Phase noise contribution (simplified)
+        tau = distance_km * 5e-6  # Time delay
+        linewidth = self.params['laser_linewidth_hz']
+        phase_var = 2 * np.pi * linewidth * tau
+        v_phase = phase_var * 0.1  # Phase noise effect
+
+        # Modulator leakage
+        extinction = 10 ** (-self.params['modulator_extinction_db'] / 10)
+        v_mod = extinction * 0.01
+
+        return v_el + v_phase + v_mod
+
+    def expected_performance(self, distance_km: float) -> Dict:
+        """Calculate expected system performance."""
+        eta = 10 ** (-0.2 * distance_km / 10) * self.params['detector_efficiency']
+        epsilon = self.calculate_excess_noise(distance_km)
+
+        analysis = CVQKDSecurityAnalysis(V_A=4.0, eta=eta, epsilon=epsilon)
+        key_rate = analysis._key_rate_homodyne(eta)
+
+        return {
+            'distance_km': distance_km,
+            'transmission': eta,
+            'excess_noise': epsilon,
+            'key_rate_bits_per_symbol': key_rate,
+            'key_rate_bps': key_rate * self.params['symbol_rate_baud'],
+            'secure': key_rate > 0
+        }
+
+# Example system analysis
+system = CVQKDSystem()
+for d in [10, 25, 50, 75, 100]:
+    perf = system.expected_performance(d)
+    print(f"{d:3d} km: {perf['key_rate_bps']/1e6:.2f} Mbps, noise={perf['excess_noise']:.3f}")
+```
+
+## Summary
+
+Continuous-variable QKD offers a distinct approach to quantum key distribution:
+
+- **Encoding**: Information in continuous quadrature amplitudes (X, P)
+- **GG02**: Gaussian modulation with coherent states and homodyne/heterodyne detection
+- **Advantages**: Standard telecom components, high rates at short distances
+- **Challenges**: LO distribution, phase noise, limited distance
+- **Security**: Gaussian attack bounds, approaching general security proofs
+
+CV-QKD complements DV-QKD, excelling in metropolitan networks where high key rates matter most.

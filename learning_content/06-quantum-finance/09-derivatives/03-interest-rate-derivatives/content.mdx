@@ -1,0 +1,586 @@
+---
+title: "Interest Rate Derivatives"
+duration: "45 minutes"
+---
+
+# Interest Rate Derivatives
+
+Interest rate derivatives are the largest derivatives market by notional value. They allow institutions to manage interest rate exposure, speculate on rate movements, and access desired risk profiles.
+
+## Interest Rate Swaps
+
+An interest rate swap exchanges fixed-rate payments for floating-rate payments. The most common is the "vanilla" fixed-for-floating swap.
+
+<QuizQuestion
+  question="In a plain vanilla interest rate swap, what is typically exchanged?"
+  options={[
+    "Principal amounts at maturity",
+    "Fixed rate payments for floating rate payments",
+    "Currencies between counterparties",
+    "Equity returns for bond returns"
+  ]}
+  correctAnswer={1}
+  explanation="A plain vanilla interest rate swap exchanges fixed-rate interest payments for floating-rate payments (typically based on a reference rate like SOFR). Only interest is exchanged - principal is notional and not exchanged."
+/>
+
+```python
+import numpy as np
+from dataclasses import dataclass
+from typing import List, Optional
+from datetime import date
+from enum import Enum
+
+class DayCount(Enum):
+    ACT_360 = "ACT/360"
+    ACT_365 = "ACT/365"
+    THIRTY_360 = "30/360"
+
+@dataclass
+class SwapLeg:
+    """One leg of an interest rate swap."""
+    notional: float
+    payment_dates: List[date]
+    day_count: DayCount
+    is_fixed: bool
+    rate: Optional[float] = None  # Fixed rate if is_fixed=True
+
+@dataclass
+class InterestRateSwap:
+    """
+    Plain vanilla interest rate swap.
+
+    Payer: pays fixed, receives floating
+    Receiver: receives fixed, pays floating
+    """
+    notional: float
+    fixed_rate: float
+    payment_dates: List[date]
+    day_count: DayCount
+    is_payer: bool  # True = pay fixed
+
+    def fixed_leg_value(
+        self,
+        discount_factors: np.ndarray
+    ) -> float:
+        """
+        Calculate present value of fixed leg.
+
+        PV = N * r * Σ(τᵢ * df_i)
+        """
+        n_payments = len(self.payment_dates) - 1
+        pv = 0.0
+
+        for i in range(n_payments):
+            # Year fraction
+            tau = self._year_fraction(
+                self.payment_dates[i],
+                self.payment_dates[i + 1]
+            )
+            pv += tau * discount_factors[i + 1]
+
+        return self.notional * self.fixed_rate * pv
+
+    def floating_leg_value(
+        self,
+        discount_factors: np.ndarray,
+        forward_rates: np.ndarray
+    ) -> float:
+        """
+        Calculate present value of floating leg.
+
+        PV = N * Σ(fᵢ * τᵢ * df_i)
+        """
+        n_payments = len(self.payment_dates) - 1
+        pv = 0.0
+
+        for i in range(n_payments):
+            tau = self._year_fraction(
+                self.payment_dates[i],
+                self.payment_dates[i + 1]
+            )
+            pv += forward_rates[i] * tau * discount_factors[i + 1]
+
+        return self.notional * pv
+
+    def value(
+        self,
+        discount_factors: np.ndarray,
+        forward_rates: np.ndarray
+    ) -> float:
+        """
+        Calculate swap value from payer perspective.
+
+        Value = Floating_PV - Fixed_PV (for payer)
+        """
+        fixed_pv = self.fixed_leg_value(discount_factors)
+        float_pv = self.floating_leg_value(discount_factors, forward_rates)
+
+        if self.is_payer:
+            return float_pv - fixed_pv
+        else:
+            return fixed_pv - float_pv
+
+    def par_rate(
+        self,
+        discount_factors: np.ndarray
+    ) -> float:
+        """
+        Calculate par swap rate (rate that makes swap value = 0).
+
+        par_rate = (1 - df_n) / Σ(τᵢ * df_i)
+        """
+        n = len(discount_factors)
+        annuity = 0.0
+
+        for i in range(1, n):
+            tau = self._year_fraction(
+                self.payment_dates[i - 1],
+                self.payment_dates[i]
+            )
+            annuity += tau * discount_factors[i]
+
+        return (1 - discount_factors[-1]) / annuity
+
+    def _year_fraction(self, start: date, end: date) -> float:
+        """Calculate year fraction based on day count convention."""
+        days = (end - start).days
+
+        if self.day_count == DayCount.ACT_360:
+            return days / 360
+        elif self.day_count == DayCount.ACT_365:
+            return days / 365
+        else:  # 30/360
+            return days / 360
+```
+
+## Caps and Floors
+
+Caps and floors are portfolios of options on interest rates.
+
+```python
+class Caplet:
+    """
+    Single caplet - call option on a forward rate.
+
+    Payoff = N * τ * max(0, L - K)
+    where L is the floating rate, K is the cap strike
+    """
+
+    def __init__(
+        self,
+        notional: float,
+        strike: float,
+        start_date: date,
+        end_date: date
+    ):
+        self.notional = notional
+        self.strike = strike
+        self.start_date = start_date
+        self.end_date = end_date
+
+    def black_price(
+        self,
+        forward_rate: float,
+        volatility: float,
+        time_to_expiry: float,
+        discount_factor: float
+    ) -> float:
+        """
+        Price caplet using Black's formula.
+
+        C = df * N * τ * [F*N(d1) - K*N(d2)]
+        """
+        from scipy.stats import norm
+
+        tau = (self.end_date - self.start_date).days / 360
+
+        if time_to_expiry <= 0 or volatility <= 0:
+            return max(0, forward_rate - self.strike) * tau * self.notional * discount_factor
+
+        d1 = (np.log(forward_rate / self.strike) + 0.5 * volatility**2 * time_to_expiry) / (volatility * np.sqrt(time_to_expiry))
+        d2 = d1 - volatility * np.sqrt(time_to_expiry)
+
+        price = discount_factor * self.notional * tau * (
+            forward_rate * norm.cdf(d1) - self.strike * norm.cdf(d2)
+        )
+
+        return price
+
+
+class Cap:
+    """
+    Interest rate cap - portfolio of caplets.
+    """
+
+    def __init__(
+        self,
+        notional: float,
+        strike: float,
+        payment_dates: List[date]
+    ):
+        self.notional = notional
+        self.strike = strike
+        self.caplets = []
+
+        for i in range(len(payment_dates) - 1):
+            caplet = Caplet(notional, strike, payment_dates[i], payment_dates[i + 1])
+            self.caplets.append(caplet)
+
+    def price(
+        self,
+        forward_rates: np.ndarray,
+        volatilities: np.ndarray,
+        times_to_expiry: np.ndarray,
+        discount_factors: np.ndarray
+    ) -> float:
+        """Total cap price = sum of caplet prices."""
+        total = 0.0
+
+        for i, caplet in enumerate(self.caplets):
+            total += caplet.black_price(
+                forward_rates[i],
+                volatilities[i],
+                times_to_expiry[i],
+                discount_factors[i + 1]
+            )
+
+        return total
+
+
+class Floorlet:
+    """
+    Single floorlet - put option on a forward rate.
+
+    Payoff = N * τ * max(0, K - L)
+    """
+
+    def __init__(
+        self,
+        notional: float,
+        strike: float,
+        start_date: date,
+        end_date: date
+    ):
+        self.notional = notional
+        self.strike = strike
+        self.start_date = start_date
+        self.end_date = end_date
+
+    def black_price(
+        self,
+        forward_rate: float,
+        volatility: float,
+        time_to_expiry: float,
+        discount_factor: float
+    ) -> float:
+        """Price floorlet using Black's formula."""
+        from scipy.stats import norm
+
+        tau = (self.end_date - self.start_date).days / 360
+
+        if time_to_expiry <= 0:
+            return max(0, self.strike - forward_rate) * tau * self.notional * discount_factor
+
+        d1 = (np.log(forward_rate / self.strike) + 0.5 * volatility**2 * time_to_expiry) / (volatility * np.sqrt(time_to_expiry))
+        d2 = d1 - volatility * np.sqrt(time_to_expiry)
+
+        price = discount_factor * self.notional * tau * (
+            self.strike * norm.cdf(-d2) - forward_rate * norm.cdf(-d1)
+        )
+
+        return price
+```
+
+<QuizQuestion
+  question="What is an interest rate cap?"
+  options={[
+    "A single option on an interest rate",
+    "A portfolio of call options (caplets) on forward rates",
+    "An upper limit set by the central bank",
+    "A type of interest rate swap"
+  ]}
+  correctAnswer={1}
+  explanation="An interest rate cap is a portfolio of caplets, where each caplet is a call option on a forward rate. The cap protects the buyer against rising interest rates above the strike rate."
+/>
+
+## Swaptions
+
+A swaption is an option to enter into a swap at a future date.
+
+```python
+class Swaption:
+    """
+    Option to enter into an interest rate swap.
+
+    Payer swaption: right to PAY fixed (benefits from rising rates)
+    Receiver swaption: right to RECEIVE fixed (benefits from falling rates)
+    """
+
+    def __init__(
+        self,
+        notional: float,
+        strike: float,  # Fixed rate of underlying swap
+        option_expiry: date,
+        swap_tenor: float,  # Years
+        is_payer: bool
+    ):
+        self.notional = notional
+        self.strike = strike
+        self.option_expiry = option_expiry
+        self.swap_tenor = swap_tenor
+        self.is_payer = is_payer
+
+    def black_price(
+        self,
+        forward_swap_rate: float,
+        volatility: float,
+        time_to_expiry: float,
+        annuity: float
+    ) -> float:
+        """
+        Price swaption using Black's formula.
+
+        Payer: A * [S*N(d1) - K*N(d2)]
+        Receiver: A * [K*N(-d2) - S*N(-d1)]
+
+        where A is the annuity factor
+        """
+        from scipy.stats import norm
+
+        if time_to_expiry <= 0:
+            if self.is_payer:
+                intrinsic = max(0, forward_swap_rate - self.strike)
+            else:
+                intrinsic = max(0, self.strike - forward_swap_rate)
+            return intrinsic * annuity * self.notional
+
+        d1 = (np.log(forward_swap_rate / self.strike) + 0.5 * volatility**2 * time_to_expiry) / (volatility * np.sqrt(time_to_expiry))
+        d2 = d1 - volatility * np.sqrt(time_to_expiry)
+
+        if self.is_payer:
+            price = annuity * self.notional * (
+                forward_swap_rate * norm.cdf(d1) - self.strike * norm.cdf(d2)
+            )
+        else:
+            price = annuity * self.notional * (
+                self.strike * norm.cdf(-d2) - forward_swap_rate * norm.cdf(-d1)
+            )
+
+        return price
+```
+
+## Term Structure Models
+
+Interest rate models describe how rates evolve over time.
+
+```python
+class HullWhiteModel:
+    """
+    Hull-White one-factor model.
+
+    dr = (θ(t) - a*r) dt + σ dW
+
+    Mean-reverting with time-dependent drift.
+    """
+
+    def __init__(
+        self,
+        mean_reversion: float,  # a
+        volatility: float  # σ
+    ):
+        self.a = mean_reversion
+        self.sigma = volatility
+
+    def simulate_rate(
+        self,
+        r0: float,
+        theta_func,  # θ(t) function
+        time_horizon: float,
+        num_steps: int,
+        num_paths: int
+    ) -> np.ndarray:
+        """
+        Simulate short rate paths.
+
+        Returns (num_paths, num_steps+1) array
+        """
+        dt = time_horizon / num_steps
+        rates = np.zeros((num_paths, num_steps + 1))
+        rates[:, 0] = r0
+
+        for i in range(num_steps):
+            t = i * dt
+            theta = theta_func(t)
+            dW = np.random.standard_normal(num_paths) * np.sqrt(dt)
+
+            rates[:, i + 1] = rates[:, i] + (theta - self.a * rates[:, i]) * dt + self.sigma * dW
+
+        return rates
+
+    def zero_bond_price(
+        self,
+        r: float,
+        T: float,
+        theta: float
+    ) -> float:
+        """
+        Analytical zero-coupon bond price.
+
+        P(t,T) = A(t,T) * exp(-B(t,T) * r(t))
+        """
+        B = (1 - np.exp(-self.a * T)) / self.a
+        A = np.exp(
+            (theta / self.a - 0.5 * (self.sigma / self.a)**2) * (B - T) -
+            (self.sigma**2 / (4 * self.a)) * B**2
+        )
+        return A * np.exp(-B * r)
+
+
+class VasicekModel:
+    """
+    Vasicek model: dr = a(b - r)dt + σdW
+
+    Constant parameters, mean-reverting to b.
+    """
+
+    def __init__(
+        self,
+        mean_reversion: float,  # a
+        long_term_mean: float,  # b
+        volatility: float  # σ
+    ):
+        self.a = mean_reversion
+        self.b = long_term_mean
+        self.sigma = volatility
+
+    def simulate(
+        self,
+        r0: float,
+        T: float,
+        num_steps: int,
+        num_paths: int
+    ) -> np.ndarray:
+        """Simulate rate paths under Vasicek."""
+        dt = T / num_steps
+        rates = np.zeros((num_paths, num_steps + 1))
+        rates[:, 0] = r0
+
+        for i in range(num_steps):
+            dW = np.random.standard_normal(num_paths) * np.sqrt(dt)
+            rates[:, i + 1] = (
+                rates[:, i] +
+                self.a * (self.b - rates[:, i]) * dt +
+                self.sigma * dW
+            )
+
+        return rates
+
+    def expected_rate(self, r0: float, t: float) -> float:
+        """Expected rate at time t."""
+        return self.b + (r0 - self.b) * np.exp(-self.a * t)
+
+    def rate_variance(self, t: float) -> float:
+        """Variance of rate at time t."""
+        return (self.sigma**2 / (2 * self.a)) * (1 - np.exp(-2 * self.a * t))
+```
+
+<QuizQuestion
+  question="What property makes Vasicek and Hull-White models attractive for interest rates?"
+  options={[
+    "They always produce positive rates",
+    "Mean-reversion - rates tend to return toward a long-term level",
+    "They require no calibration",
+    "They only work for short maturities"
+  ]}
+  correctAnswer={1}
+  explanation="Mean-reversion is a key property of interest rate models. Rates tend to revert toward a long-term equilibrium - when rates are high, they tend to fall; when low, they tend to rise. This matches observed market behavior."
+/>
+
+## Quantum Applications
+
+Quantum computing offers advantages for interest rate derivative pricing.
+
+```python
+class QuantumRatePricer:
+    """
+    Quantum-enhanced interest rate derivative pricing.
+    """
+
+    def __init__(self, num_qubits: int = 8):
+        self.num_qubits = num_qubits
+
+    def quantum_swap_portfolio_value(
+        self,
+        swaps: List[InterestRateSwap],
+        rate_scenarios: np.ndarray,
+        discount_scenarios: np.ndarray
+    ) -> dict:
+        """
+        Value portfolio of swaps under multiple scenarios.
+
+        Quantum parallelism can evaluate many scenarios simultaneously.
+        """
+        portfolio_values = []
+
+        for i in range(len(rate_scenarios)):
+            total_value = 0
+            for swap in swaps:
+                # Simplified - would use proper discount and forward rates
+                value = swap.value(discount_scenarios[i], rate_scenarios[i])
+                total_value += value
+            portfolio_values.append(total_value)
+
+        return {
+            'mean_value': np.mean(portfolio_values),
+            'var_95': np.percentile(portfolio_values, 5),
+            'scenarios_evaluated': len(rate_scenarios),
+            'quantum_advantage': 'Parallel scenario evaluation'
+        }
+
+    def quantum_calibration(
+        self,
+        market_prices: np.ndarray,
+        model_pricer,
+        initial_params: np.ndarray
+    ) -> dict:
+        """
+        Quantum-enhanced model calibration.
+
+        Finding optimal parameters is an optimization problem
+        where quantum algorithms can provide speedup.
+        """
+        # Would use QAOA or VQE for optimization
+        # Here simulating classical optimization
+
+        from scipy.optimize import minimize
+
+        def objective(params):
+            model_prices = model_pricer(params)
+            return np.sum((model_prices - market_prices)**2)
+
+        result = minimize(objective, initial_params, method='BFGS')
+
+        return {
+            'optimal_params': result.x,
+            'calibration_error': result.fun,
+            'quantum_application': 'Parameter optimization'
+        }
+```
+
+## Summary
+
+Interest rate derivatives are essential for managing rate exposure:
+
+- **Swaps**: Exchange fixed for floating payments
+- **Caps/Floors**: Protection against rate movements
+- **Swaptions**: Options on swaps
+
+Key modeling concepts:
+- **Discount factors** and **forward rates** from yield curves
+- **Black's formula** for caps, floors, and swaptions
+- **Term structure models** (Vasicek, Hull-White) for rate evolution
+
+Quantum computing applications include:
+- Portfolio valuation under many scenarios
+- Model calibration optimization
+- Risk measurement with faster convergence

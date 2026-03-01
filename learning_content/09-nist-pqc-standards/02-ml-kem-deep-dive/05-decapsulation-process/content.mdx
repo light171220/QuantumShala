@@ -1,0 +1,849 @@
+---
+title: "ML-KEM Decapsulation Process"
+description: "Complete walkthrough of ML-KEM decapsulation including message recovery, re-encryption verification, and implicit rejection for IND-CCA2 security."
+keywords: ["ml-kem", "decapsulation", "decaps", "fo-transform", "implicit-rejection", "cca-security"]
+---
+
+# ML-KEM Decapsulation Process
+
+Decapsulation is the process by which the holder of the decapsulation (private) key recovers the shared secret from a ciphertext. Unlike basic decryption, ML-KEM's decapsulation includes a critical re-encryption check that provides IND-CCA2 security. This lesson provides a detailed walkthrough of the ML-KEM.Decaps algorithm.
+
+## Decapsulation Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    ML-KEM DECAPSULATION                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Inputs:                                                       │
+│   ┌─────────────────┐    ┌─────────────────┐                   │
+│   │ Decapsulation   │    │   Ciphertext    │                   │
+│   │ Key (dk)        │    │     (c)         │                   │
+│   └────────┬────────┘    └────────┬────────┘                   │
+│            │                      │                             │
+│            └──────────┬───────────┘                            │
+│                       ▼                                         │
+│   ┌─────────────────────────────────────────┐                  │
+│   │        DECAPSULATION PROCESS            │                  │
+│   │                                         │                  │
+│   │  1. Parse dk into (dk_pke, ek, h, z)    │                  │
+│   │  2. Decrypt: m' = Decrypt(dk_pke, c)    │                  │
+│   │  3. Derive: (K̄', r') = G(m' ∥ h)        │                  │
+│   │  4. Re-encrypt: c' = Encrypt(ek, m', r')│                  │
+│   │  5. Compare c == c' (constant-time)     │                  │
+│   │  6. Output K or K_reject                │                  │
+│   └─────────────────┬───────────────────────┘                  │
+│                     │                                           │
+│                     ▼                                           │
+│            ┌─────────────┐                                     │
+│            │ Shared      │                                     │
+│            │ Secret (K)  │                                     │
+│            │ or K_reject │                                     │
+│            └─────────────┘                                     │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## The Fujisaki-Okamoto Transform
+
+ML-KEM achieves IND-CCA2 security through the Fujisaki-Okamoto (FO) transform:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              FUJISAKI-OKAMOTO TRANSFORM                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Purpose: Convert CPA-secure encryption to CCA-secure KEM     │
+│                                                                 │
+│   Key Insight:                                                  │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ After decrypting, RE-ENCRYPT and VERIFY the ciphertext  │  │
+│   │                                                         │  │
+│   │ If c' ≠ c: The ciphertext was tampered with or invalid │  │
+│   │ If c' = c: The ciphertext is valid and authentic       │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Security Properties Achieved:                                 │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ • IND-CCA2: Indistinguishable under adaptive chosen    │  │
+│   │             ciphertext attack                           │  │
+│   │                                                         │  │
+│   │ • Prevents oracle attacks: Decryption oracle cannot    │  │
+│   │   be used to learn anything about other ciphertexts    │  │
+│   │                                                         │  │
+│   │ • Key binding: Shared secret bound to specific         │  │
+│   │   ciphertext; modified ciphertext → different key      │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Without FO Transform:                                         │
+│   • Attacker submits modified ciphertext c*                    │
+│   • Observes behavior/timing differences                       │
+│   • Learns information about the secret key                    │
+│                                                                 │
+│   With FO Transform:                                            │
+│   • Modified ciphertext fails re-encryption check              │
+│   • Random-looking rejection key returned                      │
+│   • No information leaked                                       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Step 1: Parse Decapsulation Key
+
+The decapsulation key contains multiple components:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              DECAPSULATION KEY STRUCTURE                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   dk = dk_pke ∥ ek ∥ h ∥ z                                     │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ Component │  Size (bytes)          │ Purpose             │ │
+│   ├───────────┼────────────────────────┼─────────────────────┤ │
+│   │ dk_pke    │ 12·k·256/8 (384k)     │ PKE decryption key  │ │
+│   │ ek        │ 12·k·256/8 + 32       │ Encapsulation key   │ │
+│   │ h         │ 32                     │ H(ek) precomputed   │ │
+│   │ z         │ 32                     │ Implicit reject seed│ │
+│   └───────────┴────────────────────────┴─────────────────────┘ │
+│                                                                 │
+│   Total Sizes:                                                  │
+│   ┌──────────────┬────────────────────────────────────────┐   │
+│   │   Variant    │ dk size (bytes)                        │   │
+│   ├──────────────┼────────────────────────────────────────┤   │
+│   │ ML-KEM-512   │ 768 + 800 + 32 + 32 = 1,632           │   │
+│   │ ML-KEM-768   │ 1152 + 1184 + 32 + 32 = 2,400         │   │
+│   │ ML-KEM-1024  │ 1536 + 1568 + 32 + 32 = 3,168         │   │
+│   └──────────────┴────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+def parse_decapsulation_key(dk: bytes, k: int) -> tuple:
+    """
+    Parse decapsulation key into its components.
+
+    Args:
+        dk: Full decapsulation key
+        k: Module dimension (2, 3, or 4)
+
+    Returns:
+        (dk_pke, ek, h, z): PKE key, encapsulation key, hash, reject seed
+    """
+    dk_pke_size = 12 * k * 256 // 8  # 384k bytes
+    ek_size = 12 * k * 256 // 8 + 32  # 384k + 32 bytes
+
+    offset = 0
+
+    # Extract dk_pke (private key for PKE decryption)
+    dk_pke = dk[offset:offset + dk_pke_size]
+    offset += dk_pke_size
+
+    # Extract ek (encapsulation/public key)
+    ek = dk[offset:offset + ek_size]
+    offset += ek_size
+
+    # Extract h = H(ek) (precomputed hash)
+    h = dk[offset:offset + 32]
+    offset += 32
+
+    # Extract z (implicit rejection seed)
+    z = dk[offset:offset + 32]
+
+    return dk_pke, ek, h, z
+
+def decode_secret_vector(dk_pke: bytes, k: int) -> list:
+    """
+    Decode the secret vector ŝ from dk_pke.
+
+    Each polynomial has 256 coefficients stored in 12-bit encoding.
+    """
+    s_hat = []
+
+    for i in range(k):
+        poly_bytes = dk_pke[i * 384:(i + 1) * 384]
+        polynomial = decode_polynomial_12bit(poly_bytes)
+        s_hat.append(polynomial)
+
+    return s_hat
+```
+
+## Step 2: Parse and Decompress Ciphertext
+
+The ciphertext must be parsed and decompressed before decryption:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              CIPHERTEXT PARSING                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Ciphertext Structure: c = c₁ ∥ c₂                            │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │  c₁ (compressed u)           │  c₂ (compressed v)       │  │
+│   │  du·k·256/8 bytes            │  dv·256/8 bytes          │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Decompression:                                                │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │  Decompress_d(y) = round(q · y / 2^d)                  │  │
+│   │                                                         │  │
+│   │  • Takes d-bit value y                                 │  │
+│   │  • Returns value in range [0, q-1]                     │  │
+│   │  • Approximates original coefficient                   │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Size by Variant:                                              │
+│   ┌──────────────┬──────┬──────┬─────────┬─────────┬─────────┐│
+│   │   Variant    │  du  │  dv  │ c₁ size │ c₂ size │  Total  ││
+│   ├──────────────┼──────┼──────┼─────────┼─────────┼─────────┤│
+│   │ ML-KEM-512   │  10  │   4  │   640   │   128   │   768   ││
+│   │ ML-KEM-768   │  10  │   4  │   960   │   128   │  1,088  ││
+│   │ ML-KEM-1024  │  11  │   5  │  1,408  │   160   │  1,568  ││
+│   └──────────────┴──────┴──────┴─────────┴─────────┴─────────┘│
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+Q = 3329
+
+def decompress(y: int, d: int) -> int:
+    """
+    Decompress a single coefficient from d bits to mod q.
+
+    Decompress_d(y) = round(q · y / 2^d)
+    """
+    # Use integer arithmetic: round(q * y / 2^d) = (q * y + 2^(d-1)) >> d
+    decompressed = (Q * y + (1 << (d - 1))) >> d
+    return decompressed
+
+def parse_ciphertext(c: bytes, k: int, du: int, dv: int) -> tuple:
+    """
+    Parse and decompress ciphertext into u and v.
+
+    Args:
+        c: Ciphertext bytes
+        k: Module dimension
+        du: Compression parameter for u
+        dv: Compression parameter for v
+
+    Returns:
+        (u, v): Decompressed u vector and v polynomial
+    """
+    # Calculate sizes
+    c1_size = du * k * 256 // 8
+    c2_size = dv * 256 // 8
+
+    # Split ciphertext
+    c1 = c[:c1_size]
+    c2 = c[c1_size:c1_size + c2_size]
+
+    # Decompress u (k polynomials)
+    u = decompress_vector(c1, k, du)
+
+    # Decompress v (1 polynomial)
+    v = decompress_polynomial(c2, dv)
+
+    return u, v
+
+def decompress_vector(data: bytes, k: int, d: int) -> list:
+    """Decompress u vector from bytes."""
+    u = []
+    coeffs_per_poly = 256
+    bits = bytes_to_bits(data)
+    bit_offset = 0
+
+    for _ in range(k):
+        polynomial = []
+        for _ in range(coeffs_per_poly):
+            # Extract d bits
+            compressed = bits_to_int(bits[bit_offset:bit_offset + d])
+            bit_offset += d
+            # Decompress
+            decompressed = decompress(compressed, d)
+            polynomial.append(decompressed)
+        u.append(polynomial)
+
+    return u
+
+def decompress_polynomial(data: bytes, d: int) -> list:
+    """Decompress v polynomial from bytes."""
+    bits = bytes_to_bits(data)
+    polynomial = []
+
+    for i in range(256):
+        compressed = bits_to_int(bits[i * d:(i + 1) * d])
+        decompressed = decompress(compressed, d)
+        polynomial.append(decompressed)
+
+    return polynomial
+```
+
+## Step 3: Decrypt the Message
+
+The core decryption recovers the encoded message from the ciphertext:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  MESSAGE RECOVERY                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Decryption Formula:                                           │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   m' = Decode(Compress(v - ŝ^T · NTT(u), 1))           │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step-by-step:                                                 │
+│                                                                 │
+│   1. Convert u to NTT domain: û = NTT(u)                       │
+│                                                                 │
+│   2. Compute inner product: w = NTT⁻¹(ŝ^T · û)                 │
+│      ┌─────────────────────────────────────────────────────┐   │
+│      │  w = NTT⁻¹(Σᵢ ŝ[i] ⊙ û[i])                         │   │
+│      │                                                     │   │
+│      │  where ⊙ is pointwise multiplication               │   │
+│      └─────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   3. Recover noisy message: μ' = v - w                         │
+│      ┌─────────────────────────────────────────────────────┐   │
+│      │  μ' ≈ μ + noise                                     │   │
+│      │                                                     │   │
+│      │  The noise comes from:                              │   │
+│      │  • Compression rounding errors                      │   │
+│      │  • The added error terms e₁, e₂                    │   │
+│      └─────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   4. Decode message: m' = Decode(μ')                           │
+│      ┌─────────────────────────────────────────────────────┐   │
+│      │  For each coefficient in μ':                        │   │
+│      │  • If closer to 0: bit = 0                         │   │
+│      │  • If closer to q/2: bit = 1                       │   │
+│      │                                                     │   │
+│      │  Decision boundary at q/4 ≈ 832                    │   │
+│      └─────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+def decrypt_message(s_hat: list, u: list, v: list, k: int) -> bytes:
+    """
+    Decrypt message from ciphertext using secret key.
+
+    This is the PKE.Decrypt function from FIPS 203.
+
+    Args:
+        s_hat: Secret vector in NTT domain
+        u: Decompressed u vector (normal domain)
+        v: Decompressed v polynomial (normal domain)
+        k: Module dimension
+
+    Returns:
+        Recovered 32-byte message
+    """
+    # Convert u to NTT domain
+    u_hat = [ntt(poly) for poly in u]
+
+    # Compute inner product: s_hat^T · u_hat
+    inner_product = [0] * 256
+    for i in range(k):
+        product = pointwise_multiply(s_hat[i], u_hat[i])
+        inner_product = add_polynomials(inner_product, product)
+
+    # Convert back to normal domain
+    w = ntt_inverse(inner_product)
+
+    # Compute v - w (this should be approximately the encoded message)
+    mu_noisy = subtract_polynomials(v, w)
+
+    # Decode the message
+    m_prime = decode_noisy_message(mu_noisy)
+
+    return m_prime
+
+def subtract_polynomials(a: list, b: list) -> list:
+    """Subtract polynomials mod q."""
+    return [(a[i] - b[i]) % Q for i in range(256)]
+
+def decode_noisy_message(mu_noisy: list) -> bytes:
+    """
+    Decode noisy polynomial to message bits.
+
+    Each coefficient is decoded as:
+    - 0 if closer to 0
+    - 1 if closer to q/2
+
+    The decision boundary is q/4.
+    """
+    bits = []
+    threshold = Q // 4  # ≈ 832
+
+    for coeff in mu_noisy:
+        # Coefficient is in [0, q-1]
+        # Check if it's in the "1" region: [q/4, 3q/4)
+        # Which is equivalent to: q/4 <= coeff < 3q/4
+
+        # Distance to 0 (considering wrap-around)
+        dist_to_zero = min(coeff, Q - coeff)
+
+        # Distance to q/2
+        dist_to_half = abs(coeff - Q // 2)
+
+        # Decode based on which is closer
+        if dist_to_half < dist_to_zero:
+            bits.append(1)
+        else:
+            bits.append(0)
+
+    # Convert bits to bytes
+    return bits_to_bytes(bits)
+
+def bits_to_bytes(bits: list) -> bytes:
+    """Convert 256 bits to 32 bytes."""
+    byte_array = bytearray(32)
+    for i, bit in enumerate(bits):
+        if bit:
+            byte_array[i // 8] |= (1 << (i % 8))
+    return bytes(byte_array)
+```
+
+## Step 4: Re-derive and Re-encrypt
+
+The critical FO transform step: re-derive randomness and re-encrypt:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              RE-ENCRYPTION VERIFICATION                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Using the recovered message m', repeat the encapsulation:    │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │  Step A: Re-derive (K̄', r') = G(m' ∥ h)                │  │
+│   │                                                         │  │
+│   │  Step B: Re-encrypt c' = Encrypt(ek, m', r')           │  │
+│   │                                                         │  │
+│   │  Step C: Compare c == c' (constant-time!)              │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Why This Works:                                               │
+│                                                                 │
+│   If ciphertext c is VALID:                                    │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │  • m' = m (correctly decrypted)                        │  │
+│   │  • (K̄', r') = (K̄, r) (same derivation)                 │  │
+│   │  • c' = c (identical encryption)                       │  │
+│   │  • Output: K = KDF(K̄' ∥ H(c))                          │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   If ciphertext c is INVALID (tampered or malformed):          │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │  • m' ≠ m (incorrect message recovered)                │  │
+│   │  • (K̄', r') ≠ (K̄, r) (different derivation)            │  │
+│   │  • c' ≠ c (different ciphertext)                       │  │
+│   │  • Output: K_reject = KDF(z ∥ H(c))                    │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+import hashlib
+
+def re_encrypt_and_verify(m_prime: bytes, ek: bytes, h: bytes,
+                          c: bytes, k: int, params: dict) -> tuple:
+    """
+    Re-encrypt with recovered message and verify against original ciphertext.
+
+    Args:
+        m_prime: Recovered message
+        ek: Encapsulation key
+        h: Precomputed H(ek)
+        c: Original ciphertext
+        k: Module dimension
+        params: Algorithm parameters
+
+    Returns:
+        (K_bar_prime, c_prime, is_valid): Re-derived values and validity
+    """
+    # Re-derive K_bar' and r' using G function
+    g_input = m_prime + h
+    g_output = hashlib.sha3_512(g_input).digest()
+
+    K_bar_prime = g_output[:32]
+    r_prime = g_output[32:]
+
+    # Re-encrypt using the encapsulation key
+    c_prime = encrypt_internal(ek, m_prime, r_prime, k, params)
+
+    # Constant-time comparison
+    is_valid = constant_time_compare(c, c_prime)
+
+    return K_bar_prime, c_prime, is_valid
+
+def constant_time_compare(a: bytes, b: bytes) -> bool:
+    """
+    Compare two byte strings in constant time.
+
+    CRITICAL: This must not leak timing information!
+    """
+    if len(a) != len(b):
+        return False
+
+    result = 0
+    for x, y in zip(a, b):
+        result |= x ^ y
+
+    return result == 0
+```
+
+## Step 5: Implicit Rejection
+
+ML-KEM uses implicit rejection to prevent timing attacks:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  IMPLICIT REJECTION                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Key Concept: ALWAYS return a 32-byte value                   │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │  if c == c':                                           │  │
+│   │      K = KDF(K̄' ∥ H(c))    ← Real shared secret       │  │
+│   │  else:                                                 │  │
+│   │      K = KDF(z ∥ H(c))     ← Pseudorandom rejection   │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Security Properties:                                          │
+│                                                                 │
+│   1. No Error Signal                                            │
+│      ┌────────────────────────────────────────────────────┐    │
+│      │ The function NEVER returns an error or failure     │    │
+│      │ Attacker cannot distinguish valid from invalid     │    │
+│      └────────────────────────────────────────────────────┘    │
+│                                                                 │
+│   2. Rejection Key is Unpredictable                            │
+│      ┌────────────────────────────────────────────────────┐    │
+│      │ K_reject = KDF(z ∥ H(c)) where z is secret        │    │
+│      │ Looks random to attacker without z                 │    │
+│      │ Different for each invalid ciphertext              │    │
+│      └────────────────────────────────────────────────────┘    │
+│                                                                 │
+│   3. Constant-Time Execution                                    │
+│      ┌────────────────────────────────────────────────────┐    │
+│      │ ALL code paths must take same time                 │    │
+│      │ Use conditional selection, not branching          │    │
+│      │ Both K options computed, one selected             │    │
+│      └────────────────────────────────────────────────────┘    │
+│                                                                 │
+│   Why 'z' Exists:                                               │
+│      • z is a 32-byte secret random value                     │
+│      • Stored in the decapsulation key                        │
+│      • Makes rejection keys unpredictable                     │
+│      • Binds rejection to specific ciphertext via H(c)        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+def compute_shared_secret(K_bar_prime: bytes, z: bytes, c: bytes,
+                          is_valid: bool) -> bytes:
+    """
+    Compute final shared secret using implicit rejection.
+
+    Args:
+        K_bar_prime: Re-derived pre-shared secret
+        z: Implicit rejection seed from decapsulation key
+        c: Ciphertext
+        is_valid: Whether re-encryption matched
+
+    Returns:
+        Shared secret K (always 32 bytes, regardless of validity)
+    """
+    # Hash the ciphertext
+    c_hash = hashlib.sha3_256(c).digest()
+
+    # Compute both possible outputs
+    K_success = hashlib.shake_256(K_bar_prime + c_hash).digest(32)
+    K_reject = hashlib.shake_256(z + c_hash).digest(32)
+
+    # Select output in constant time
+    K = constant_time_select(is_valid, K_success, K_reject)
+
+    return K
+
+def constant_time_select(condition: bool, if_true: bytes, if_false: bytes) -> bytes:
+    """
+    Select between two values in constant time.
+
+    CRITICAL: No timing side-channel!
+    """
+    assert len(if_true) == len(if_false)
+
+    # Create mask: 0xFF if condition true, 0x00 if false
+    mask = -int(condition) & 0xFF
+
+    result = bytearray(len(if_true))
+    for i in range(len(if_true)):
+        result[i] = (if_true[i] & mask) | (if_false[i] & (~mask & 0xFF))
+
+    return bytes(result)
+```
+
+## Complete Decapsulation Algorithm
+
+```python
+class MLKEMDecapsulation:
+    """Complete ML-KEM decapsulation implementation."""
+
+    def __init__(self, variant: str = "ML-KEM-768"):
+        params = {
+            "ML-KEM-512":  {"k": 2, "eta1": 3, "eta2": 2, "du": 10, "dv": 4},
+            "ML-KEM-768":  {"k": 3, "eta1": 2, "eta2": 2, "du": 10, "dv": 4},
+            "ML-KEM-1024": {"k": 4, "eta1": 2, "eta2": 2, "du": 11, "dv": 5},
+        }
+        self.params = params[variant]
+
+    def decaps(self, dk: bytes, c: bytes) -> bytes:
+        """
+        ML-KEM.Decaps algorithm as per FIPS 203.
+
+        Args:
+            dk: Decapsulation key (private key)
+            c: Ciphertext
+
+        Returns:
+            K: Shared secret (32 bytes)
+
+        Note: This function NEVER fails. It always returns a 32-byte
+        value. Invalid ciphertexts result in a pseudorandom rejection
+        key that is unpredictable to attackers.
+        """
+        k = self.params["k"]
+        du, dv = self.params["du"], self.params["dv"]
+
+        # Step 1: Parse decapsulation key
+        dk_pke, ek, h, z = parse_decapsulation_key(dk, k)
+
+        # Step 2: Parse and decompress ciphertext
+        u, v = parse_ciphertext(c, k, du, dv)
+
+        # Step 3: Decode secret vector
+        s_hat = decode_secret_vector(dk_pke, k)
+
+        # Step 4: Decrypt to recover message
+        m_prime = decrypt_message(s_hat, u, v, k)
+
+        # Step 5: Re-derive and re-encrypt
+        K_bar_prime, c_prime, is_valid = re_encrypt_and_verify(
+            m_prime, ek, h, c, k, self.params
+        )
+
+        # Step 6: Compute shared secret (with implicit rejection)
+        K = compute_shared_secret(K_bar_prime, z, c, is_valid)
+
+        return K
+```
+
+## Decapsulation Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                COMPLETE DECAPSULATION FLOW                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ┌──────────┐     ┌──────────┐                                │
+│   │    dk    │     │    c     │                                │
+│   └────┬─────┘     └────┬─────┘                                │
+│        │                │                                       │
+│        ▼                │                                       │
+│   ┌──────────────────┐  │                                      │
+│   │ Parse dk into:   │  │                                      │
+│   │ dk_pke, ek, h, z │  │                                      │
+│   └────────┬─────────┘  │                                      │
+│            │            │                                       │
+│            │            ▼                                       │
+│            │   ┌──────────────────┐                            │
+│            │   │ Decompress c     │                            │
+│            │   │ into u, v        │                            │
+│            │   └────────┬─────────┘                            │
+│            │            │                                       │
+│            ▼            ▼                                       │
+│   ┌───────────────────────────────────────────────────────┐    │
+│   │                                                       │    │
+│   │   μ' = v - NTT⁻¹(ŝ^T · NTT(u))                       │    │
+│   │                                                       │    │
+│   │   m' = Decode(μ')                                    │    │
+│   │                                                       │    │
+│   └───────────────────────┬───────────────────────────────┘    │
+│                           │                                     │
+│                           ▼                                     │
+│   ┌───────────────────────────────────────────────────────┐    │
+│   │   (K̄', r') = G(m' ∥ h)                                │    │
+│   └───────────────────────┬───────────────────────────────┘    │
+│                           │                                     │
+│                           ▼                                     │
+│   ┌───────────────────────────────────────────────────────┐    │
+│   │   c' = Encrypt(ek, m', r')                           │    │
+│   └───────────────────────┬───────────────────────────────┘    │
+│                           │                                     │
+│                           ▼                                     │
+│   ┌───────────────────────────────────────────────────────┐    │
+│   │         Constant-time comparison: c == c'?           │    │
+│   └───────────────────────┬───────────────────────────────┘    │
+│                           │                                     │
+│           ┌───────────────┴───────────────┐                    │
+│           │                               │                     │
+│           ▼                               ▼                     │
+│   ┌───────────────┐               ┌───────────────┐            │
+│   │   c == c'     │               │   c ≠ c'      │            │
+│   │   (VALID)     │               │   (INVALID)   │            │
+│   └───────┬───────┘               └───────┬───────┘            │
+│           │                               │                     │
+│           ▼                               ▼                     │
+│   ┌───────────────┐               ┌───────────────┐            │
+│   │K=KDF(K̄'∥H(c))│               │K=KDF(z∥H(c)) │            │
+│   └───────┬───────┘               └───────┬───────┘            │
+│           │                               │                     │
+│           └───────────────┬───────────────┘                    │
+│                           │  (constant-time select)            │
+│                           ▼                                     │
+│                   ┌───────────────┐                            │
+│                   │       K       │                            │
+│                   │  (32 bytes)   │                            │
+│                   └───────────────┘                            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Common Implementation Pitfalls
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              IMPLEMENTATION PITFALLS                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   1. TIMING LEAKS                                               │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   ✗ BAD:                                                │  │
+│   │   if c == c_prime:                                      │  │
+│   │       return K_success    # Different timing!          │  │
+│   │   else:                                                 │  │
+│   │       return K_reject                                   │  │
+│   │                                                         │  │
+│   │   ✓ GOOD:                                               │  │
+│   │   K_success = ...  # Always compute both               │  │
+│   │   K_reject = ...                                        │  │
+│   │   return constant_time_select(valid, K_success, K_reject)│  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   2. EARLY RETURNS                                              │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   ✗ BAD:                                                │  │
+│   │   if not valid_ciphertext(c):                          │  │
+│   │       return error    # Leaks information!             │  │
+│   │                                                         │  │
+│   │   ✓ GOOD:                                               │  │
+│   │   # Process everything, use implicit rejection          │  │
+│   │   # Never return error, always return 32 bytes         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   3. MEMORY ACCESS PATTERNS                                     │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   ✗ BAD:                                                │  │
+│   │   key = keys[valid_index]  # Data-dependent access     │  │
+│   │                                                         │  │
+│   │   ✓ GOOD:                                               │  │
+│   │   # Access all data, mask out unwanted                 │  │
+│   │   key = (keys[0] & mask) | (keys[1] & ~mask)          │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   4. COMPARISON SHORTCUTS                                       │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   ✗ BAD:                                                │  │
+│   │   for i in range(len(a)):                              │  │
+│   │       if a[i] != b[i]:                                 │  │
+│   │           return False    # Early exit leaks info!    │  │
+│   │                                                         │  │
+│   │   ✓ GOOD:                                               │  │
+│   │   result = 0                                            │  │
+│   │   for i in range(len(a)):                              │  │
+│   │       result |= a[i] ^ b[i]    # No early exit        │  │
+│   │   return result == 0                                   │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Performance Characteristics
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              DECAPSULATION PERFORMANCE                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Operation Breakdown (ML-KEM-768):                            │
+│                                                                 │
+│   ┌─────────────────────────────────┬────────┬────────────────┐│
+│   │ Operation                       │ Count  │ Notes          ││
+│   ├─────────────────────────────────┼────────┼────────────────┤│
+│   │ Ciphertext decompression        │   4    │ k+1 polynomials││
+│   │ NTT (for u vector)              │   3    │ k polynomials  ││
+│   │ NTT inverse                     │   1    │ For w          ││
+│   │ Pointwise multiply              │   3    │ s^T · u        ││
+│   │ Message decoding                │   1    │ 256 decisions  ││
+│   │ Re-encryption (full encaps)     │   1    │ Most expensive ││
+│   │ Constant-time comparison        │   1    │ ~1KB compare   ││
+│   │ KDF computations                │   2    │ Both outputs   ││
+│   └─────────────────────────────────┴────────┴────────────────┘│
+│                                                                 │
+│   Typical Timings:                                              │
+│   ┌──────────────┬─────────────┬───────────────────────────┐   │
+│   │   Variant    │ Decaps Time │  Notes                    │   │
+│   ├──────────────┼─────────────┼───────────────────────────┤   │
+│   │ ML-KEM-512   │  ~25 μs     │ Fastest variant          │   │
+│   │ ML-KEM-768   │  ~35 μs     │ Recommended default      │   │
+│   │ ML-KEM-1024  │  ~50 μs     │ Highest security         │   │
+│   └──────────────┴─────────────┴───────────────────────────┘   │
+│                                                                 │
+│   Decapsulation ≈ Encapsulation + Decryption overhead          │
+│   (Re-encryption dominates the computation)                    │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Summary
+
+The ML-KEM decapsulation process:
+
+1. **Parses** the decapsulation key into its components (dk_pke, ek, h, z)
+2. **Decompresses** the ciphertext to recover u and v
+3. **Decrypts** to recover the message m' using w = s^T · u
+4. **Re-derives** (K̄', r') from the recovered message
+5. **Re-encrypts** to produce c' and compares with original c
+6. **Outputs** either the real shared secret or an implicit rejection key
+
+The Fujisaki-Okamoto transform ensures:
+- IND-CCA2 security against adaptive chosen-ciphertext attacks
+- No information leakage through timing or error responses
+- Binding between ciphertext and shared secret
+
+Critical implementation requirements:
+- All operations must be constant-time
+- Never return errors or failures explicitly
+- Always compute both success and rejection outputs
+- Use implicit rejection with the secret seed z

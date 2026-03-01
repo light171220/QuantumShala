@@ -1,0 +1,761 @@
+---
+title: "SLH-DSA Signing and Verification"
+description: "Detailed walkthrough of SLH-DSA key generation, signing, and verification operations with implementation examples."
+keywords: ["slh-dsa", "signing", "verification", "keygen", "sphincs+", "implementation"]
+---
+
+# SLH-DSA Signing and Verification
+
+This lesson provides a detailed walkthrough of SLH-DSA operations including key generation, signing, and verification. We'll examine the algorithms at a level suitable for implementation understanding.
+
+## Key Generation
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SLH-DSA KEY GENERATION                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   slh_keygen():                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   1. Sample random seeds:                              │  │
+│   │      SK.seed ←$ {0,1}^n   (Secret seed)               │  │
+│   │      SK.prf  ←$ {0,1}^n   (PRF key for signing)       │  │
+│   │      PK.seed ←$ {0,1}^n   (Public seed)               │  │
+│   │                                                         │  │
+│   │   2. Compute public key root:                          │  │
+│   │      PK.root = xmss_PKgen(SK.seed, PK.seed, 0, d-1)   │  │
+│   │      (Root of top-level XMSS tree)                     │  │
+│   │                                                         │  │
+│   │   3. Output:                                           │  │
+│   │      SK = (SK.seed, SK.prf, PK.seed, PK.root)         │  │
+│   │      PK = (PK.seed, PK.root)                          │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Key Sizes:                                                    │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   Secret Key: 4n bytes (seed, prf, PK.seed, PK.root)  │  │
+│   │   Public Key: 2n bytes (PK.seed, PK.root)             │  │
+│   │                                                         │  │
+│   │   Example (n=32): SK = 128 bytes, PK = 64 bytes       │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Note: Full key generation is lazy - only top tree computed  │
+│   Other trees are generated on-demand during signing          │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Address Scheme
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SLH-DSA ADDRESS STRUCTURE                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Addresses uniquely identify each value in the hypertree:     │
+│                                                                 │
+│   ADRS (32 bytes):                                              │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   Bytes 0-3:   Layer address                           │  │
+│   │   Bytes 4-15:  Tree address (within layer)             │  │
+│   │   Bytes 16-19: Type (WOTS/FORS/tree)                   │  │
+│   │   Bytes 20-31: Type-specific fields                    │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Address Types:                                                │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   WOTS+ Hash Address:                                  │  │
+│   │   ┌──────┬──────┬──────┬──────┬──────┬──────┐          │  │
+│   │   │Layer │Tree  │Type=0│KeyPair│Chain │Hash  │          │  │
+│   │   │(4B)  │(12B) │(4B)  │Addr(4)│Addr(4)│Addr(4)│         │  │
+│   │   └──────┴──────┴──────┴──────┴──────┴──────┘          │  │
+│   │                                                         │  │
+│   │   WOTS+ Public Key Compression:                        │  │
+│   │   ┌──────┬──────┬──────┬──────┬────────────┐           │  │
+│   │   │Layer │Tree  │Type=1│KeyPair│  Padding   │           │  │
+│   │   │(4B)  │(12B) │(4B)  │Addr(4)│   (8B)     │           │  │
+│   │   └──────┴──────┴──────┴──────┴────────────┘           │  │
+│   │                                                         │  │
+│   │   Tree Hash Address:                                    │  │
+│   │   ┌──────┬──────┬──────┬──────┬──────┬──────┐          │  │
+│   │   │Layer │Tree  │Type=2│Padding│TreeHt│TreeIdx│         │  │
+│   │   │(4B)  │(12B) │(4B)  │(4B)   │(4B)  │(4B)  │          │  │
+│   │   └──────┴──────┴──────┴──────┴──────┴──────┘          │  │
+│   │                                                         │  │
+│   │   FORS Tree Address:                                    │  │
+│   │   ┌──────┬──────┬──────┬──────┬──────┬──────┐          │  │
+│   │   │Layer │Tree  │Type=3│KeyPair│TreeHt│TreeIdx│         │  │
+│   │   │(4B)  │(12B) │(4B)  │Addr(4)│(4B)  │(4B)  │          │  │
+│   │   └──────┴──────┴──────┴──────┴──────┴──────┘          │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Signing Algorithm
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SLH-DSA SIGNING ALGORITHM                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   slh_sign(M, SK, opt_rand = None):                            │
+│                                                                 │
+│   Step 1: Generate Randomness                                   │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   if opt_rand is None:                                 │  │
+│   │       opt_rand = random(n)  # Randomized signing      │  │
+│   │   # Or opt_rand = zeros(n) for deterministic signing  │  │
+│   │                                                         │  │
+│   │   R = PRFmsg(SK.prf, opt_rand, M)                      │  │
+│   │   # R binds signature to message and provides          │  │
+│   │   # additional randomness                              │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step 2: Compute Message Digest                               │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   digest = Hmsg(R, PK.seed, PK.root, M)                │  │
+│   │                                                         │  │
+│   │   # Split digest into:                                 │  │
+│   │   md = digest[0 : ceil(k*a/8)]     # FORS message     │  │
+│   │   tmp_idx_tree = digest[...next h-h/d bits...]        │  │
+│   │   tmp_idx_leaf = digest[...next h/d bits...]          │  │
+│   │                                                         │  │
+│   │   idx_tree = tmp_idx_tree mod 2^(h - h/d)             │  │
+│   │   idx_leaf = tmp_idx_leaf mod 2^(h/d)                 │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step 3: Sign with FORS                                       │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   ADRS = new_address()                                 │  │
+│   │   ADRS.set_layer(0)                                    │  │
+│   │   ADRS.set_tree(idx_tree)                              │  │
+│   │   ADRS.set_type(FORS_TREE)                             │  │
+│   │   ADRS.set_keypair(idx_leaf)                           │  │
+│   │                                                         │  │
+│   │   SIG_FORS = fors_sign(md, SK.seed, PK.seed, ADRS)    │  │
+│   │   PK_FORS = fors_pkFromSig(SIG_FORS, md, PK.seed, ADRS)│  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step 4: Sign Through Hypertree                               │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   SIG_HT = ht_sign(PK_FORS, SK.seed, PK.seed,         │  │
+│   │                    idx_tree, idx_leaf)                 │  │
+│   │                                                         │  │
+│   │   # ht_sign does:                                      │  │
+│   │   # For each layer 0 to d-1:                          │  │
+│   │   #   1. WOTS+ sign the current root                  │  │
+│   │   #   2. Compute and include auth path                │  │
+│   │   #   3. Compute root for next layer                  │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step 5: Output Signature                                     │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   return SIG = (R, SIG_FORS, SIG_HT)                  │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Verification Algorithm
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SLH-DSA VERIFICATION ALGORITHM                     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   slh_verify(M, SIG, PK):                                      │
+│                                                                 │
+│   Step 1: Parse Signature                                      │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   (R, SIG_FORS, SIG_HT) = SIG                          │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step 2: Recompute Message Digest                             │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   digest = Hmsg(R, PK.seed, PK.root, M)                │  │
+│   │   (md, idx_tree, idx_leaf) = split(digest)             │  │
+│   │   # Same splitting as signing                          │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step 3: Compute FORS Public Key from Signature               │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   ADRS = new_address()                                 │  │
+│   │   ADRS.set_layer(0)                                    │  │
+│   │   ADRS.set_tree(idx_tree)                              │  │
+│   │   ADRS.set_type(FORS_TREE)                             │  │
+│   │   ADRS.set_keypair(idx_leaf)                           │  │
+│   │                                                         │  │
+│   │   PK_FORS = fors_pkFromSig(SIG_FORS, md, PK.seed, ADRS)│  │
+│   │                                                         │  │
+│   │   # This computes the FORS root from the revealed     │  │
+│   │   # leaves and authentication paths                    │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step 4: Verify Hypertree Signature                           │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   computed_root = ht_verify(PK_FORS, SIG_HT, PK.seed, │  │
+│   │                             idx_tree, idx_leaf)        │  │
+│   │                                                         │  │
+│   │   # ht_verify does:                                    │  │
+│   │   # For each layer 0 to d-1:                          │  │
+│   │   #   1. Compute WOTS+ pk from signature              │  │
+│   │   #   2. Use auth path to compute tree root           │  │
+│   │   #   3. This root is signed by next layer           │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step 5: Compare with Public Key                              │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   return (computed_root == PK.root)                    │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Implementation: Core Operations
+
+```python
+import hashlib
+import os
+from typing import Tuple, List
+from dataclasses import dataclass
+
+@dataclass
+class SLHDSAParams:
+    """SLH-DSA parameters (simplified for demonstration)."""
+    n: int      # Security parameter
+    h: int      # Total tree height
+    d: int      # Layers
+    a: int      # FORS tree height
+    k: int      # FORS trees
+    w: int      # Winternitz parameter
+
+    @property
+    def h_prime(self) -> int:
+        return self.h // self.d
+
+# Example: SLH-DSA-128f-like parameters (simplified)
+PARAMS_128F = SLHDSAParams(n=16, h=66, d=22, a=6, k=33, w=16)
+
+class Address:
+    """SLH-DSA address structure."""
+
+    def __init__(self):
+        self.data = bytearray(32)
+
+    def set_layer(self, layer: int):
+        self.data[0:4] = layer.to_bytes(4, 'big')
+
+    def set_tree(self, tree: int):
+        self.data[4:16] = tree.to_bytes(12, 'big')
+
+    def set_type(self, addr_type: int):
+        self.data[16:20] = addr_type.to_bytes(4, 'big')
+
+    def set_keypair(self, keypair: int):
+        self.data[20:24] = keypair.to_bytes(4, 'big')
+
+    def set_chain(self, chain: int):
+        self.data[24:28] = chain.to_bytes(4, 'big')
+
+    def set_hash(self, hash_idx: int):
+        self.data[28:32] = hash_idx.to_bytes(4, 'big')
+
+    def set_tree_height(self, height: int):
+        self.data[24:28] = height.to_bytes(4, 'big')
+
+    def set_tree_index(self, index: int):
+        self.data[28:32] = index.to_bytes(4, 'big')
+
+    def copy(self) -> 'Address':
+        new_addr = Address()
+        new_addr.data = bytearray(self.data)
+        return new_addr
+
+    def to_bytes(self) -> bytes:
+        return bytes(self.data)
+
+
+class SLHDSA:
+    """
+    Simplified SLH-DSA implementation for educational purposes.
+    NOT FOR PRODUCTION USE.
+    """
+
+    # Address types
+    WOTS_HASH = 0
+    WOTS_PK = 1
+    TREE = 2
+    FORS_TREE = 3
+    FORS_ROOTS = 4
+
+    def __init__(self, params: SLHDSAParams):
+        self.params = params
+        self.n = params.n
+
+    def _hash(self, *args) -> bytes:
+        """Basic hash function."""
+        return hashlib.sha256(b''.join(args)).digest()[:self.n]
+
+    def _prf(self, key: bytes, addr: Address) -> bytes:
+        """Pseudorandom function."""
+        return self._hash(key, addr.to_bytes())
+
+    def _prf_msg(self, sk_prf: bytes, opt_rand: bytes, msg: bytes) -> bytes:
+        """PRF for message randomization."""
+        return self._hash(sk_prf, opt_rand, msg)
+
+    def _h_msg(self, r: bytes, pk_seed: bytes, pk_root: bytes, msg: bytes) -> bytes:
+        """Message hash function - produces longer output."""
+        # Simplified: use hash chain for longer output
+        result = b''
+        counter = 0
+        target_len = (self.params.k * self.params.a + 7) // 8 + 16
+        while len(result) < target_len:
+            result += self._hash(r, pk_seed, pk_root, msg, counter.to_bytes(4, 'big'))
+            counter += 1
+        return result[:target_len]
+
+    def _f(self, pk_seed: bytes, addr: Address, msg: bytes) -> bytes:
+        """Tweakable hash F (for WOTS+ chains)."""
+        return self._hash(pk_seed, addr.to_bytes(), msg)
+
+    def _t(self, pk_seed: bytes, addr: Address, msgs: List[bytes]) -> bytes:
+        """Tweakable hash T (for tree nodes)."""
+        return self._hash(pk_seed, addr.to_bytes(), b''.join(msgs))
+
+    def keygen(self) -> Tuple[bytes, bytes]:
+        """
+        Generate SLH-DSA key pair.
+
+        Returns:
+            (secret_key, public_key)
+        """
+        # Generate random seeds
+        sk_seed = os.urandom(self.n)
+        sk_prf = os.urandom(self.n)
+        pk_seed = os.urandom(self.n)
+
+        # Compute root of top-level tree
+        pk_root = self._xmss_keygen(sk_seed, pk_seed, 0, self.params.d - 1)
+
+        # Construct keys
+        sk = sk_seed + sk_prf + pk_seed + pk_root
+        pk = pk_seed + pk_root
+
+        return sk, pk
+
+    def _xmss_keygen(self, sk_seed: bytes, pk_seed: bytes,
+                     tree_idx: int, layer: int) -> bytes:
+        """Generate XMSS tree root."""
+        # Simplified: compute root by building tree
+        addr = Address()
+        addr.set_layer(layer)
+        addr.set_tree(tree_idx)
+
+        # For demo, just return a hash of the parameters
+        # Real implementation would build full tree
+        return self._hash(sk_seed, pk_seed,
+                         layer.to_bytes(4, 'big'),
+                         tree_idx.to_bytes(4, 'big'))
+
+    def sign(self, msg: bytes, sk: bytes, opt_rand: bytes = None) -> bytes:
+        """
+        Sign a message.
+
+        Args:
+            msg: Message to sign
+            sk: Secret key
+            opt_rand: Optional randomness (None for random, zeros for deterministic)
+
+        Returns:
+            Signature bytes
+        """
+        # Parse secret key
+        sk_seed = sk[0:self.n]
+        sk_prf = sk[self.n:2*self.n]
+        pk_seed = sk[2*self.n:3*self.n]
+        pk_root = sk[3*self.n:4*self.n]
+
+        # Generate R
+        if opt_rand is None:
+            opt_rand = os.urandom(self.n)
+
+        r = self._prf_msg(sk_prf, opt_rand, msg)
+
+        # Compute message digest
+        digest = self._h_msg(r, pk_seed, pk_root, msg)
+
+        # Parse digest into md, idx_tree, idx_leaf
+        md_len = (self.params.k * self.params.a + 7) // 8
+        md = digest[:md_len]
+
+        tree_bits = self.params.h - self.params.h_prime
+        tree_bytes = (tree_bits + 7) // 8
+        idx_tree = int.from_bytes(digest[md_len:md_len+tree_bytes], 'big')
+        idx_tree = idx_tree % (2 ** tree_bits)
+
+        leaf_bytes = (self.params.h_prime + 7) // 8
+        idx_leaf = int.from_bytes(digest[md_len+tree_bytes:md_len+tree_bytes+leaf_bytes], 'big')
+        idx_leaf = idx_leaf % (2 ** self.params.h_prime)
+
+        # Sign with FORS
+        addr = Address()
+        addr.set_layer(0)
+        addr.set_tree(idx_tree)
+        addr.set_type(self.FORS_TREE)
+        addr.set_keypair(idx_leaf)
+
+        sig_fors, pk_fors = self._fors_sign(md, sk_seed, pk_seed, addr)
+
+        # Sign through hypertree
+        sig_ht = self._ht_sign(pk_fors, sk_seed, pk_seed, idx_tree, idx_leaf)
+
+        # Combine signature components
+        signature = r + sig_fors + sig_ht
+
+        return signature
+
+    def _fors_sign(self, md: bytes, sk_seed: bytes, pk_seed: bytes,
+                   addr: Address) -> Tuple[bytes, bytes]:
+        """Sign with FORS (simplified)."""
+        # Parse md into k indices
+        indices = self._parse_fors_indices(md)
+
+        sig_parts = []
+        roots = []
+
+        for i in range(self.params.k):
+            tree_addr = addr.copy()
+            tree_addr.set_tree_height(0)
+            tree_addr.set_tree_index(i)
+
+            # Get leaf value
+            leaf_addr = tree_addr.copy()
+            leaf_addr.set_tree_index(indices[i])
+            leaf = self._prf(sk_seed, leaf_addr)
+            sig_parts.append(leaf)
+
+            # Generate auth path (simplified)
+            auth_path = self._fors_auth_path(sk_seed, pk_seed, indices[i], tree_addr)
+            sig_parts.extend(auth_path)
+
+            # Compute root
+            root = self._compute_fors_root(leaf, indices[i], auth_path, pk_seed, tree_addr)
+            roots.append(root)
+
+        # Compute FORS public key
+        roots_addr = addr.copy()
+        roots_addr.set_type(self.FORS_ROOTS)
+        pk_fors = self._t(pk_seed, roots_addr, roots)
+
+        return b''.join(sig_parts), pk_fors
+
+    def _parse_fors_indices(self, md: bytes) -> List[int]:
+        """Parse message digest into FORS indices."""
+        bits = []
+        for byte in md:
+            for i in range(8):
+                bits.append((byte >> (7-i)) & 1)
+
+        indices = []
+        for i in range(self.params.k):
+            idx = 0
+            for j in range(self.params.a):
+                bit_pos = i * self.params.a + j
+                if bit_pos < len(bits):
+                    idx = (idx << 1) | bits[bit_pos]
+            indices.append(idx)
+        return indices
+
+    def _fors_auth_path(self, sk_seed: bytes, pk_seed: bytes,
+                        idx: int, addr: Address) -> List[bytes]:
+        """Generate FORS authentication path (simplified)."""
+        # Simplified: return placeholder auth nodes
+        path = []
+        for h in range(self.params.a):
+            node_addr = addr.copy()
+            node_addr.set_tree_height(h)
+            sibling_idx = idx ^ 1  # Flip last bit for sibling
+            node_addr.set_tree_index(sibling_idx >> h)
+            path.append(self._prf(sk_seed, node_addr))
+            idx >>= 1
+        return path
+
+    def _compute_fors_root(self, leaf: bytes, idx: int, auth_path: List[bytes],
+                           pk_seed: bytes, addr: Address) -> bytes:
+        """Compute FORS tree root from leaf and auth path."""
+        current = self._f(pk_seed, addr, leaf)
+
+        for h, sibling in enumerate(auth_path):
+            node_addr = addr.copy()
+            node_addr.set_tree_height(h + 1)
+            node_addr.set_tree_index(idx >> (h + 1))
+
+            if (idx >> h) & 1 == 0:
+                current = self._t(pk_seed, node_addr, [current, sibling])
+            else:
+                current = self._t(pk_seed, node_addr, [sibling, current])
+
+        return current
+
+    def _ht_sign(self, msg: bytes, sk_seed: bytes, pk_seed: bytes,
+                 idx_tree: int, idx_leaf: int) -> bytes:
+        """Sign through hypertree (simplified)."""
+        sig_parts = []
+        current_msg = msg
+
+        for layer in range(self.params.d):
+            # WOTS+ sign
+            addr = Address()
+            addr.set_layer(layer)
+            addr.set_tree(idx_tree)
+            addr.set_type(self.WOTS_HASH)
+            addr.set_keypair(idx_leaf)
+
+            wots_sig = self._wots_sign(current_msg, sk_seed, pk_seed, addr)
+            sig_parts.append(wots_sig)
+
+            # Auth path
+            auth = self._xmss_auth_path(sk_seed, pk_seed, idx_leaf, addr)
+            sig_parts.extend(auth)
+
+            # Compute root for next layer
+            wots_pk = self._wots_pk_from_sig(wots_sig, current_msg, pk_seed, addr)
+            current_msg = self._compute_tree_root(wots_pk, idx_leaf, auth, pk_seed, addr)
+
+            # Update indices for next layer
+            idx_leaf = idx_tree % (2 ** self.params.h_prime)
+            idx_tree = idx_tree >> self.params.h_prime
+
+        return b''.join(sig_parts)
+
+    def _wots_sign(self, msg: bytes, sk_seed: bytes, pk_seed: bytes,
+                   addr: Address) -> bytes:
+        """WOTS+ signing (simplified)."""
+        # Simplified: return hash chain values
+        sig = b''
+        for i in range(35):  # Approximate chain count
+            chain_addr = addr.copy()
+            chain_addr.set_chain(i)
+            chain_addr.set_hash(0)
+            sig += self._prf(sk_seed, chain_addr)
+        return sig
+
+    def _wots_pk_from_sig(self, sig: bytes, msg: bytes, pk_seed: bytes,
+                          addr: Address) -> bytes:
+        """Compute WOTS+ public key from signature."""
+        # Simplified
+        pk_addr = addr.copy()
+        pk_addr.set_type(self.WOTS_PK)
+        return self._hash(pk_seed, pk_addr.to_bytes(), sig, msg)
+
+    def _xmss_auth_path(self, sk_seed: bytes, pk_seed: bytes,
+                        idx: int, addr: Address) -> List[bytes]:
+        """Generate XMSS authentication path."""
+        path = []
+        for h in range(self.params.h_prime):
+            node_addr = addr.copy()
+            node_addr.set_type(self.TREE)
+            node_addr.set_tree_height(h)
+            node_addr.set_tree_index((idx >> h) ^ 1)
+            path.append(self._prf(sk_seed, node_addr))
+        return path
+
+    def _compute_tree_root(self, leaf: bytes, idx: int, auth: List[bytes],
+                           pk_seed: bytes, addr: Address) -> bytes:
+        """Compute tree root from leaf and auth path."""
+        current = leaf
+        for h, sibling in enumerate(auth):
+            node_addr = addr.copy()
+            node_addr.set_type(self.TREE)
+            node_addr.set_tree_height(h + 1)
+            node_addr.set_tree_index(idx >> (h + 1))
+
+            if (idx >> h) & 1 == 0:
+                current = self._t(pk_seed, node_addr, [current, sibling])
+            else:
+                current = self._t(pk_seed, node_addr, [sibling, current])
+        return current
+
+    def verify(self, msg: bytes, sig: bytes, pk: bytes) -> bool:
+        """
+        Verify a signature.
+
+        Returns:
+            True if signature is valid
+        """
+        # Parse public key
+        pk_seed = pk[:self.n]
+        pk_root = pk[self.n:2*self.n]
+
+        # Parse signature
+        r = sig[:self.n]
+        sig_rest = sig[self.n:]
+
+        # Recompute message digest
+        digest = self._h_msg(r, pk_seed, pk_root, msg)
+
+        # Parse digest
+        md_len = (self.params.k * self.params.a + 7) // 8
+        md = digest[:md_len]
+
+        tree_bits = self.params.h - self.params.h_prime
+        tree_bytes = (tree_bits + 7) // 8
+        idx_tree = int.from_bytes(digest[md_len:md_len+tree_bytes], 'big')
+        idx_tree = idx_tree % (2 ** tree_bits)
+
+        leaf_bytes = (self.params.h_prime + 7) // 8
+        idx_leaf = int.from_bytes(digest[md_len+tree_bytes:md_len+tree_bytes+leaf_bytes], 'big')
+        idx_leaf = idx_leaf % (2 ** self.params.h_prime)
+
+        # Compute FORS pk from signature
+        addr = Address()
+        addr.set_layer(0)
+        addr.set_tree(idx_tree)
+        addr.set_type(self.FORS_TREE)
+        addr.set_keypair(idx_leaf)
+
+        # Parse FORS signature (simplified size calculation)
+        fors_sig_size = self.params.k * self.n * (1 + self.params.a)
+        sig_fors = sig_rest[:fors_sig_size]
+        sig_ht = sig_rest[fors_sig_size:]
+
+        pk_fors = self._fors_pk_from_sig(sig_fors, md, pk_seed, addr)
+
+        # Verify hypertree
+        computed_root = self._ht_verify(pk_fors, sig_ht, pk_seed, idx_tree, idx_leaf)
+
+        return computed_root == pk_root
+
+    def _fors_pk_from_sig(self, sig: bytes, md: bytes, pk_seed: bytes,
+                          addr: Address) -> bytes:
+        """Compute FORS public key from signature."""
+        indices = self._parse_fors_indices(md)
+        roots = []
+        offset = 0
+
+        for i in range(self.params.k):
+            tree_addr = addr.copy()
+            tree_addr.set_tree_index(i)
+
+            # Extract leaf
+            leaf = sig[offset:offset+self.n]
+            offset += self.n
+
+            # Extract auth path
+            auth = [sig[offset+j*self.n:offset+(j+1)*self.n]
+                    for j in range(self.params.a)]
+            offset += self.params.a * self.n
+
+            # Compute root
+            root = self._compute_fors_root(leaf, indices[i], auth, pk_seed, tree_addr)
+            roots.append(root)
+
+        # Compute FORS public key
+        roots_addr = addr.copy()
+        roots_addr.set_type(self.FORS_ROOTS)
+        return self._t(pk_seed, roots_addr, roots)
+
+    def _ht_verify(self, msg: bytes, sig: bytes, pk_seed: bytes,
+                   idx_tree: int, idx_leaf: int) -> bytes:
+        """Verify hypertree signature and return computed root."""
+        current = msg
+        offset = 0
+
+        wots_sig_size = 35 * self.n  # Approximate
+        auth_size = self.params.h_prime * self.n
+
+        for layer in range(self.params.d):
+            addr = Address()
+            addr.set_layer(layer)
+            addr.set_tree(idx_tree)
+            addr.set_type(self.WOTS_HASH)
+            addr.set_keypair(idx_leaf)
+
+            # Extract WOTS+ signature
+            wots_sig = sig[offset:offset+wots_sig_size]
+            offset += wots_sig_size
+
+            # Extract auth path
+            auth = [sig[offset+j*self.n:offset+(j+1)*self.n]
+                    for j in range(self.params.h_prime)]
+            offset += auth_size
+
+            # Compute WOTS+ pk
+            wots_pk = self._wots_pk_from_sig(wots_sig, current, pk_seed, addr)
+
+            # Compute tree root
+            current = self._compute_tree_root(wots_pk, idx_leaf, auth, pk_seed, addr)
+
+            # Update indices
+            idx_leaf = idx_tree % (2 ** self.params.h_prime)
+            idx_tree = idx_tree >> self.params.h_prime
+
+        return current
+
+
+# Demonstration
+print("SLH-DSA Operation Demo (Educational)")
+print("=" * 50)
+
+# Use smaller parameters for demo
+demo_params = SLHDSAParams(n=16, h=12, d=3, a=4, k=6, w=16)
+slh = SLHDSA(demo_params)
+
+# Key generation
+print("\n1. Key Generation")
+sk, pk = slh.keygen()
+print(f"   Secret key: {len(sk)} bytes")
+print(f"   Public key: {len(pk)} bytes ({pk.hex()[:32]}...)")
+
+# Signing
+print("\n2. Signing")
+message = b"Test message for SLH-DSA signing demo"
+signature = slh.sign(message, sk)
+print(f"   Message: {message.decode()}")
+print(f"   Signature: {len(signature)} bytes")
+
+# Verification
+print("\n3. Verification")
+is_valid = slh.verify(message, signature, pk)
+print(f"   Valid signature: {is_valid}")
+
+# Tampered message
+print("\n4. Tampered Message Test")
+tampered = b"Tampered message for SLH-DSA signing demo"
+is_valid_tampered = slh.verify(tampered, signature, pk)
+print(f"   Tampered message verified: {is_valid_tampered}")
+```
+
+## Summary
+
+SLH-DSA operations in detail:
+
+**Key Generation:**
+- Sample three random seeds: SK.seed, SK.prf, PK.seed
+- Compute root of top-level XMSS tree
+- Secret key includes all seeds plus public key root
+- Public key is just PK.seed and PK.root (2n bytes)
+
+**Address System:**
+- 32-byte addresses uniquely identify every value
+- Types: WOTS hash, WOTS PK, tree, FORS tree, FORS roots
+- Enables domain separation for all hash calls
+
+**Signing:**
+1. Generate randomizer R from SK.prf, optional randomness, message
+2. Hash to get message digest, parse into md, idx_tree, idx_leaf
+3. FORS sign the message digest at selected position
+4. WOTS+ sign FORS public key through all hypertree layers
+5. Return (R, SIG_FORS, SIG_HT)
+
+**Verification:**
+1. Recompute message digest from R and message
+2. Compute FORS public key from signature and digest
+3. Verify hypertree signature by climbing up all layers
+4. Compare final computed root with public key root

@@ -1,0 +1,526 @@
+# Resource Allocation
+
+## Introduction
+
+Quantum networks have limited resources: quantum memory slots, entanglement pairs, and link capacity. Efficient allocation of these resources is critical for network performance and fairness.
+
+## Quantum Resources
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    QUANTUM NETWORK RESOURCES                        │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  QUANTUM MEMORY                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  • Limited slots per node                                    │  │
+│  │  • Time-limited (coherence)                                  │  │
+│  │  • Used for: Buffering, swapping, purification              │  │
+│  │  • Decoherence rate determines holding time                 │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  ENTANGLEMENT PAIRS                                                 │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  • Generated at limited rate                                 │  │
+│  │  • Consumed by: Teleportation, swapping                     │  │
+│  │  • Fidelity degrades over time                              │  │
+│  │  • Purification consumes multiple pairs                     │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  LINK CAPACITY                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  • Classical channel bandwidth                              │  │
+│  │  • Quantum channel rate (photons/sec)                       │  │
+│  │  • Time slots for multiplexing                              │  │
+│  │  • Processing capacity at nodes                             │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  KEY CONSTRAINT: All resources are scarce and time-sensitive!     │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Resource Allocation Model
+
+```python
+import numpy as np
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Tuple
+from enum import Enum
+from collections import deque
+import heapq
+
+class ResourceType(Enum):
+    """Types of quantum resources."""
+    MEMORY_SLOT = "memory_slot"
+    ENTANGLEMENT = "entanglement"
+    LINK_SLOT = "link_slot"
+    PROCESSING = "processing"
+
+@dataclass
+class ResourceRequest:
+    """Request for quantum resources."""
+    request_id: str
+    source: str
+    destination: str
+    resource_type: ResourceType
+    amount: int
+    priority: int = 0
+    deadline_ms: float = 1000.0
+    arrival_time: float = 0.0
+
+    def __lt__(self, other):
+        # Higher priority first, then earlier deadline
+        if self.priority != other.priority:
+            return self.priority > other.priority
+        return self.deadline_ms < other.deadline_ms
+
+@dataclass
+class ResourcePool:
+    """Pool of available resources."""
+    total: int
+    available: int
+    allocations: Dict[str, int] = field(default_factory=dict)  # request_id -> amount
+
+    def allocate(self, request_id: str, amount: int) -> bool:
+        """Allocate resources to request."""
+        if amount <= self.available:
+            self.allocations[request_id] = amount
+            self.available -= amount
+            return True
+        return False
+
+    def release(self, request_id: str):
+        """Release allocated resources."""
+        if request_id in self.allocations:
+            self.available += self.allocations[request_id]
+            del self.allocations[request_id]
+
+class QuantumResourceManager:
+    """
+    Manage quantum network resources.
+    """
+
+    def __init__(self, node_id: str):
+        self.node_id = node_id
+        self.resources: Dict[ResourceType, ResourcePool] = {
+            ResourceType.MEMORY_SLOT: ResourcePool(total=10, available=10),
+            ResourceType.ENTANGLEMENT: ResourcePool(total=20, available=20),
+            ResourceType.LINK_SLOT: ResourcePool(total=100, available=100),
+            ResourceType.PROCESSING: ResourcePool(total=4, available=4)
+        }
+        self.pending_queue: List[ResourceRequest] = []
+        self.current_time = 0.0
+
+    def request_resources(self, request: ResourceRequest) -> bool:
+        """Submit resource request."""
+        pool = self.resources.get(request.resource_type)
+        if not pool:
+            return False
+
+        # Try immediate allocation
+        if pool.allocate(request.request_id, request.amount):
+            return True
+
+        # Queue for later
+        heapq.heappush(self.pending_queue, request)
+        return False
+
+    def release_resources(
+        self,
+        request_id: str,
+        resource_type: ResourceType
+    ):
+        """Release resources from completed request."""
+        pool = self.resources.get(resource_type)
+        if pool:
+            pool.release(request_id)
+            # Try to satisfy pending requests
+            self._process_pending_queue()
+
+    def _process_pending_queue(self):
+        """Process pending requests after resource release."""
+        satisfied = []
+
+        for i, request in enumerate(self.pending_queue):
+            pool = self.resources.get(request.resource_type)
+            if pool and pool.available >= request.amount:
+                if pool.allocate(request.request_id, request.amount):
+                    satisfied.append(i)
+
+        # Remove satisfied requests
+        for i in reversed(satisfied):
+            self.pending_queue.pop(i)
+
+    def get_utilization(self) -> Dict[ResourceType, float]:
+        """Get resource utilization."""
+        return {
+            rt: 1 - (pool.available / pool.total) if pool.total > 0 else 0
+            for rt, pool in self.resources.items()
+        }
+
+    def print_status(self):
+        """Print resource status."""
+        print(f"\nResource Status for Node {self.node_id}")
+        print("-" * 40)
+        for rt, pool in self.resources.items():
+            util = (pool.total - pool.available) / pool.total * 100
+            print(f"  {rt.value}: {pool.available}/{pool.total} "
+                  f"({util:.0f}% used)")
+        print(f"  Pending requests: {len(self.pending_queue)}")
+
+# Demonstrate resource management
+print("Quantum Resource Management")
+print("=" * 50)
+
+manager = QuantumResourceManager("R1")
+
+# Submit requests
+requests = [
+    ResourceRequest("req1", "A", "B", ResourceType.MEMORY_SLOT, 3),
+    ResourceRequest("req2", "A", "C", ResourceType.MEMORY_SLOT, 5),
+    ResourceRequest("req3", "B", "C", ResourceType.ENTANGLEMENT, 10),
+]
+
+for req in requests:
+    success = manager.request_resources(req)
+    print(f"Request {req.request_id}: {'Granted' if success else 'Queued'}")
+
+manager.print_status()
+
+# Release some resources
+manager.release_resources("req1", ResourceType.MEMORY_SLOT)
+print("\nAfter releasing req1:")
+manager.print_status()
+```
+
+## Scheduling Algorithms
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    SCHEDULING ALGORITHMS                            │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  FIRST-COME-FIRST-SERVED (FCFS)                                    │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  • Simple queue order                                        │  │
+│  │  • Fair in arrival order                                     │  │
+│  │  • May starve urgent requests                               │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  PRIORITY SCHEDULING                                                │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  • Higher priority served first                              │  │
+│  │  • Good for time-critical requests                          │  │
+│  │  • May starve low-priority                                  │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  EARLIEST DEADLINE FIRST (EDF)                                     │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  • Deadline-aware scheduling                                 │  │
+│  │  • Critical for quantum (coherence limits)                  │  │
+│  │  • Optimal for meeting deadlines                            │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  WEIGHTED FAIR QUEUING                                              │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  • Proportional allocation by weight                        │  │
+│  │  • Fairness among competing flows                           │  │
+│  │  • Prevents starvation                                      │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+```python
+class SchedulingPolicy(Enum):
+    """Scheduling policies."""
+    FCFS = "first_come_first_served"
+    PRIORITY = "priority"
+    EDF = "earliest_deadline_first"
+    WFQ = "weighted_fair_queuing"
+
+class QuantumScheduler:
+    """
+    Scheduler for quantum resource requests.
+    """
+
+    def __init__(self, policy: SchedulingPolicy = SchedulingPolicy.FCFS):
+        self.policy = policy
+        self.queue: List[ResourceRequest] = []
+        self.current_time = 0.0
+        self.flow_credits: Dict[str, float] = {}  # For WFQ
+        self.flow_weights: Dict[str, float] = {}  # For WFQ
+
+    def submit(self, request: ResourceRequest):
+        """Submit request to scheduler."""
+        request.arrival_time = self.current_time
+        self.queue.append(request)
+
+    def get_next(self) -> Optional[ResourceRequest]:
+        """Get next request to service."""
+        if not self.queue:
+            return None
+
+        if self.policy == SchedulingPolicy.FCFS:
+            return self._fcfs_next()
+        elif self.policy == SchedulingPolicy.PRIORITY:
+            return self._priority_next()
+        elif self.policy == SchedulingPolicy.EDF:
+            return self._edf_next()
+        elif self.policy == SchedulingPolicy.WFQ:
+            return self._wfq_next()
+
+        return self._fcfs_next()
+
+    def _fcfs_next(self) -> ResourceRequest:
+        """First-come-first-served selection."""
+        return self.queue.pop(0)
+
+    def _priority_next(self) -> ResourceRequest:
+        """Highest priority first."""
+        idx = max(range(len(self.queue)),
+                  key=lambda i: self.queue[i].priority)
+        return self.queue.pop(idx)
+
+    def _edf_next(self) -> ResourceRequest:
+        """Earliest deadline first."""
+        idx = min(range(len(self.queue)),
+                  key=lambda i: self.queue[i].deadline_ms)
+        return self.queue.pop(idx)
+
+    def _wfq_next(self) -> ResourceRequest:
+        """Weighted fair queuing."""
+        # Group by flow (source-destination pair)
+        flows = {}
+        for i, req in enumerate(self.queue):
+            flow_id = f"{req.source}-{req.destination}"
+            if flow_id not in flows:
+                flows[flow_id] = []
+            flows[flow_id].append(i)
+
+        # Select flow with lowest virtual time
+        best_flow = None
+        best_time = float('inf')
+
+        for flow_id, indices in flows.items():
+            weight = self.flow_weights.get(flow_id, 1.0)
+            credit = self.flow_credits.get(flow_id, 0.0)
+            virtual_time = credit / weight
+
+            if virtual_time < best_time:
+                best_time = virtual_time
+                best_flow = flow_id
+
+        if best_flow and flows[best_flow]:
+            idx = flows[best_flow][0]
+            req = self.queue.pop(idx)
+
+            # Update credit
+            self.flow_credits[best_flow] = self.flow_credits.get(best_flow, 0) + req.amount
+            return req
+
+        return self.queue.pop(0)
+
+    def set_flow_weight(self, source: str, destination: str, weight: float):
+        """Set weight for flow in WFQ."""
+        flow_id = f"{source}-{destination}"
+        self.flow_weights[flow_id] = weight
+
+    def tick(self, delta_time: float):
+        """Advance time."""
+        self.current_time += delta_time
+
+        # Remove expired requests
+        self.queue = [
+            req for req in self.queue
+            if req.deadline_ms > self.current_time - req.arrival_time
+        ]
+
+# Demonstrate scheduling
+print("\n\nQuantum Scheduling")
+print("=" * 50)
+
+for policy in [SchedulingPolicy.FCFS, SchedulingPolicy.PRIORITY, SchedulingPolicy.EDF]:
+    scheduler = QuantumScheduler(policy)
+
+    # Submit requests with different properties
+    scheduler.submit(ResourceRequest("r1", "A", "B", ResourceType.MEMORY_SLOT, 2,
+                                     priority=1, deadline_ms=100))
+    scheduler.submit(ResourceRequest("r2", "A", "C", ResourceType.MEMORY_SLOT, 1,
+                                     priority=3, deadline_ms=50))
+    scheduler.submit(ResourceRequest("r3", "B", "C", ResourceType.MEMORY_SLOT, 3,
+                                     priority=2, deadline_ms=200))
+
+    print(f"\n{policy.value}:")
+    order = []
+    while True:
+        req = scheduler.get_next()
+        if not req:
+            break
+        order.append(req.request_id)
+    print(f"  Service order: {' → '.join(order)}")
+```
+
+## Admission Control
+
+```python
+class AdmissionController:
+    """
+    Admission control for quantum network requests.
+    """
+
+    def __init__(self, resource_manager: QuantumResourceManager):
+        self.manager = resource_manager
+        self.admission_policy = "conservative"  # or "aggressive"
+        self.reservation_ratio = 0.2  # Reserve 20% for emergencies
+
+    def can_admit(self, request: ResourceRequest) -> Tuple[bool, str]:
+        """
+        Determine if request can be admitted.
+        """
+        pool = self.manager.resources.get(request.resource_type)
+        if not pool:
+            return False, "Unknown resource type"
+
+        # Calculate available after reservation
+        reserved = int(pool.total * self.reservation_ratio)
+        effective_available = pool.available - reserved
+
+        if self.admission_policy == "conservative":
+            # Only admit if immediate resources available
+            if request.amount <= effective_available:
+                return True, "Resources available"
+            else:
+                return False, f"Insufficient resources: need {request.amount}, have {effective_available}"
+
+        else:  # aggressive
+            # Admit if resources might become available by deadline
+            expected_release = self._estimate_release(
+                request.resource_type,
+                request.deadline_ms
+            )
+            if request.amount <= effective_available + expected_release:
+                return True, "Expected resources by deadline"
+            else:
+                return False, "Cannot meet deadline"
+
+    def _estimate_release(
+        self,
+        resource_type: ResourceType,
+        time_window: float
+    ) -> int:
+        """Estimate resources that will be released."""
+        # Simplified: assume constant release rate
+        pool = self.manager.resources.get(resource_type)
+        if not pool:
+            return 0
+
+        allocated = pool.total - pool.available
+        # Assume 10% released per 100ms
+        release_rate = 0.1 * allocated / 100
+        return int(release_rate * time_window)
+
+    def admit_or_reject(
+        self,
+        request: ResourceRequest
+    ) -> Dict:
+        """Process admission decision."""
+        can_admit, reason = self.can_admit(request)
+
+        if can_admit:
+            success = self.manager.request_resources(request)
+            return {
+                "admitted": success,
+                "reason": "Allocated" if success else "Queued",
+                "request_id": request.request_id
+            }
+        else:
+            return {
+                "admitted": False,
+                "reason": reason,
+                "request_id": request.request_id
+            }
+
+# Demonstrate admission control
+print("\n\nAdmission Control")
+print("=" * 50)
+
+manager2 = QuantumResourceManager("R2")
+admission = AdmissionController(manager2)
+
+# Fill up some resources
+for i in range(7):
+    req = ResourceRequest(f"fill{i}", "X", "Y", ResourceType.MEMORY_SLOT, 1)
+    manager2.request_resources(req)
+
+# Try to admit new request
+new_req = ResourceRequest("new1", "A", "B", ResourceType.MEMORY_SLOT, 5)
+result = admission.admit_or_reject(new_req)
+
+print(f"Request {result['request_id']}: {result['reason']}")
+manager2.print_status()
+```
+
+## Fair Allocation
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    FAIR ALLOCATION STRATEGIES                       │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  PROPORTIONAL FAIRNESS:                                            │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Maximize: Σ log(allocation_i)                              │  │
+│  │  Results in proportional sharing based on demand            │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  MAX-MIN FAIRNESS:                                                  │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Maximize minimum allocation first                          │  │
+│  │  Then maximize second-minimum, etc.                         │  │
+│  │  Good for ensuring baseline for all users                   │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  WEIGHTED FAIRNESS:                                                 │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Different users have different weights                     │  │
+│  │  Allocation proportional to weight                          │  │
+│  │  Supports service differentiation                           │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    RESOURCE ALLOCATION SUMMARY                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Quantum Resources:                                                 │
+│  • Memory slots: Limited, time-constrained                         │
+│  • Entanglement: Generated at limited rate, consumed on use        │
+│  • Link capacity: Shared among flows                               │
+│                                                                     │
+│  Scheduling Policies:                                               │
+│  • FCFS: Simple, fair by arrival                                   │
+│  • Priority: Good for critical requests                            │
+│  • EDF: Deadline-aware, important for coherence                    │
+│  • WFQ: Fair among competing flows                                 │
+│                                                                     │
+│  Admission Control:                                                 │
+│  • Gate-keeping to prevent overload                                │
+│  • Conservative vs aggressive policies                             │
+│  • Resource reservation for emergencies                            │
+│                                                                     │
+│  Fairness:                                                          │
+│  • Proportional: Based on demand                                   │
+│  • Max-min: Baseline for all users                                 │
+│  • Weighted: Service differentiation                               │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Effective resource allocation ensures efficient use of precious quantum resources while maintaining fairness.

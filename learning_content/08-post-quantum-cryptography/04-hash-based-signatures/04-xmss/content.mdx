@@ -1,0 +1,915 @@
+---
+title: "XMSS: The NIST-Recommended Stateful Hash-Based Signature"
+description: "Master XMSS (eXtended Merkle Signature Scheme), the NIST SP 800-208 recommended stateful signature scheme. Understand its construction, multi-tree variants, and proper deployment."
+duration: 75
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Explain XMSS construction and improvements over basic MSS
+- Understand XMSS^MT (multi-tree) for larger signature capacities
+- Implement core XMSS algorithms
+- Analyze XMSS parameter sets and security levels
+- Apply best practices for stateful signature deployment
+
+## 1. XMSS Overview
+
+<Definition term="XMSS (eXtended Merkle Signature Scheme)">
+A stateful hash-based signature scheme standardized in RFC 8391 and recommended by NIST SP 800-208. Key features:
+- Uses WOTS+ for one-time signatures
+- L-trees for WOTS+ public key compression
+- Bitmasks for improved security proofs
+- Multi-tree variant (XMSS^MT) for larger capacities
+</Definition>
+
+```python
+import hashlib
+import secrets
+from typing import List, Tuple, Optional, Dict
+import math
+
+class XMSSParameters:
+    """
+    XMSS parameter sets from RFC 8391 and NIST SP 800-208.
+    """
+    
+    # Parameter sets: (n, w, h, algorithm OID)
+    PARAMS = {
+        # SHA2-256 based
+        'XMSS-SHA2_10_256': {
+            'n': 32,           # Hash output length
+            'w': 16,           # Winternitz parameter
+            'h': 10,           # Tree height
+            'hash': 'sha256',
+            'signatures': 2**10,
+            'security_bits': 256
+        },
+        'XMSS-SHA2_16_256': {
+            'n': 32,
+            'w': 16,
+            'h': 16,
+            'hash': 'sha256',
+            'signatures': 2**16,
+            'security_bits': 256
+        },
+        'XMSS-SHA2_20_256': {
+            'n': 32,
+            'w': 16,
+            'h': 20,
+            'hash': 'sha256',
+            'signatures': 2**20,
+            'security_bits': 256
+        },
+        # SHAKE256 based (recommended for post-quantum)
+        'XMSS-SHAKE_10_256': {
+            'n': 32,
+            'w': 16,
+            'h': 10,
+            'hash': 'shake256',
+            'signatures': 2**10,
+            'security_bits': 256
+        },
+        'XMSS-SHAKE_16_256': {
+            'n': 32,
+            'w': 16,
+            'h': 16,
+            'hash': 'shake256',
+            'signatures': 2**16,
+            'security_bits': 256
+        },
+        'XMSS-SHAKE_20_256': {
+            'n': 32,
+            'w': 16,
+            'h': 20,
+            'hash': 'shake256',
+            'signatures': 2**20,
+            'security_bits': 256
+        }
+    }
+    
+    @classmethod
+    def get_sizes(cls, param_set: str) -> Dict:
+        """Calculate key and signature sizes."""
+        p = cls.PARAMS[param_set]
+        n, w, h = p['n'], p['w'], p['h']
+        
+        # WOTS+ parameters
+        log_w = int(math.log2(w))
+        l1 = math.ceil(8 * n / log_w)
+        l2 = math.floor(math.log2(l1 * (w - 1)) / log_w) + 1
+        l = l1 + l2
+        
+        # Sizes
+        wots_sig = l * n
+        auth_path = h * n
+        
+        return {
+            'public_key_bytes': 2 * n,  # root + SEED
+            'secret_key_bytes': 4 * n + 4,  # idx + SK_SEED + SK_PRF + root + SEED
+            'signature_bytes': 4 + n + wots_sig + auth_path,  # idx + r + WOTS sig + auth
+            'wots_chains': l,
+            'max_signatures': 2**h
+        }
+
+
+def display_xmss_parameters():
+    """Display XMSS parameter comparison."""
+    print("XMSS PARAMETER SETS (RFC 8391 / NIST SP 800-208)")
+    print("=" * 75)
+    
+    print(f"\n{'Parameter Set':<22} {'n':<4} {'w':<4} {'h':<4} {'Signatures':<12} {'Security'}")
+    print("-" * 75)
+    
+    for name, params in XMSSParameters.PARAMS.items():
+        print(f"{name:<22} {params['n']:<4} {params['w']:<4} {params['h']:<4} "
+              f"2^{int(math.log2(params['signatures'])):<10} {params['security_bits']}-bit")
+    
+    print(f"\n{'Parameter Set':<22} {'PK':<8} {'SK':<8} {'Sig':<10} {'WOTS chains'}")
+    print("-" * 75)
+    
+    for name in XMSSParameters.PARAMS:
+        sizes = XMSSParameters.get_sizes(name)
+        print(f"{name:<22} {sizes['public_key_bytes']:<8} {sizes['secret_key_bytes']:<8} "
+              f"{sizes['signature_bytes']:<10} {sizes['wots_chains']}")
+
+display_xmss_parameters()
+```
+
+## 2. XMSS Address Scheme
+
+XMSS uses a sophisticated address scheme for domain separation.
+
+```python
+class XMSSAddress:
+    """
+    XMSS Address structure for domain separation.
+    
+    Addresses ensure different hash calls produce independent outputs,
+    preventing multi-target attacks.
+    
+    Address fields (32 bytes total):
+    - Layer address (4 bytes): Tree layer in XMSS^MT
+    - Tree address (8 bytes): Tree index within layer
+    - Type (4 bytes): 0=OTS, 1=L-tree, 2=Hash tree
+    - Type-specific fields (16 bytes)
+    """
+    
+    # Address types
+    OTS_ADDR = 0
+    LTREE_ADDR = 1
+    TREE_ADDR = 2
+    
+    def __init__(self):
+        self.data = bytearray(32)
+    
+    def set_layer(self, layer: int):
+        """Set layer address (for XMSS^MT)."""
+        self.data[0:4] = layer.to_bytes(4, 'big')
+    
+    def set_tree(self, tree: int):
+        """Set tree address."""
+        self.data[4:12] = tree.to_bytes(8, 'big')
+    
+    def set_type(self, addr_type: int):
+        """Set address type."""
+        self.data[12:16] = addr_type.to_bytes(4, 'big')
+        # Clear type-specific fields
+        self.data[16:32] = bytes(16)
+    
+    def set_ots_address(self, ots_idx: int):
+        """Set OTS key pair index."""
+        self.data[16:20] = ots_idx.to_bytes(4, 'big')
+    
+    def set_chain_address(self, chain: int):
+        """Set WOTS chain index."""
+        self.data[20:24] = chain.to_bytes(4, 'big')
+    
+    def set_hash_address(self, hash_idx: int):
+        """Set hash index within chain."""
+        self.data[24:28] = hash_idx.to_bytes(4, 'big')
+    
+    def set_ltree_address(self, ltree_idx: int):
+        """Set L-tree index."""
+        self.data[16:20] = ltree_idx.to_bytes(4, 'big')
+    
+    def set_tree_height(self, height: int):
+        """Set tree height."""
+        self.data[24:28] = height.to_bytes(4, 'big')
+    
+    def set_tree_index(self, index: int):
+        """Set tree node index."""
+        self.data[28:32] = index.to_bytes(4, 'big')
+    
+    def to_bytes(self) -> bytes:
+        return bytes(self.data)
+
+
+def demonstrate_addresses():
+    """Show how addresses provide domain separation."""
+    print("\nXMSS ADDRESS SCHEME")
+    print("=" * 65)
+    
+    addr = XMSSAddress()
+    
+    # OTS address example
+    addr.set_layer(0)
+    addr.set_tree(0)
+    addr.set_type(XMSSAddress.OTS_ADDR)
+    addr.set_ots_address(5)
+    addr.set_chain_address(10)
+    addr.set_hash_address(3)
+    
+    print("OTS Address (leaf 5, chain 10, hash step 3):")
+    print(f"  {addr.to_bytes().hex()}")
+    
+    # Tree address example
+    addr.set_type(XMSSAddress.TREE_ADDR)
+    addr.set_tree_height(2)
+    addr.set_tree_index(1)
+    
+    print("\nTree Address (height 2, index 1):")
+    print(f"  {addr.to_bytes().hex()}")
+    
+    print("""
+    PURPOSE OF ADDRESSES:
+    
+    • Each hash call includes unique address
+    • Prevents related-key attacks
+    • Ensures independent random oracle instances
+    • Critical for security proofs in standard model
+    """)
+
+demonstrate_addresses()
+```
+
+## 3. XMSS Hash Functions
+
+```python
+class XMSSHash:
+    """
+    XMSS hash function family.
+    
+    XMSS uses multiple hash functions derived from a base hash:
+    - F: Keyed hash for WOTS+ chains
+    - H: Hash for Merkle tree nodes
+    - PRF: Pseudorandom function for key derivation
+    - H_msg: Randomized message hash
+    """
+    
+    def __init__(self, n: int = 32, hash_func: str = 'sha256'):
+        self.n = n
+        self.hash_func = hash_func
+    
+    def _core_hash(self, data: bytes) -> bytes:
+        """Core hash function."""
+        if self.hash_func == 'sha256':
+            return hashlib.sha256(data).digest()[:self.n]
+        elif self.hash_func == 'shake256':
+            return hashlib.shake_256(data).digest(self.n)
+        else:
+            raise ValueError(f"Unknown hash: {self.hash_func}")
+    
+    def F(self, key: bytes, data: bytes, address: bytes) -> bytes:
+        """
+        Keyed hash for WOTS+ chain computation.
+        
+        F(KEY, M) = H(toByte(0, n) || KEY || M)
+        With address for domain separation.
+        """
+        prefix = b'\x00' * self.n
+        return self._core_hash(prefix + key + address + data)
+    
+    def H(self, key: bytes, left: bytes, right: bytes, address: bytes) -> bytes:
+        """
+        Hash for tree node computation.
+        
+        H(KEY, M) = H(toByte(1, n) || KEY || M)
+        Used to combine child nodes in Merkle tree.
+        """
+        prefix = b'\x01' * self.n
+        return self._core_hash(prefix + key + address + left + right)
+    
+    def PRF(self, key: bytes, input_data: bytes) -> bytes:
+        """
+        Pseudorandom function for key derivation.
+        
+        PRF(KEY, M) = H(toByte(2, n) || KEY || M)
+        """
+        prefix = b'\x02' * self.n
+        return self._core_hash(prefix + key + input_data)
+    
+    def H_msg(self, r: bytes, root: bytes, idx: int, message: bytes) -> bytes:
+        """
+        Randomized message hash.
+        
+        H_msg(r, ROOT, idx, M) = H(toByte(3, n) || r || ROOT || idx || M)
+        
+        r provides randomization for security.
+        """
+        prefix = b'\x03' * self.n
+        idx_bytes = idx.to_bytes(self.n, 'big')
+        return self._core_hash(prefix + r + root + idx_bytes + message)
+    
+    def PRF_keygen(self, sk_seed: bytes, address: bytes) -> bytes:
+        """Generate WOTS+ secret key from seed and address."""
+        return self.PRF(sk_seed, address)
+
+
+def demonstrate_hash_functions():
+    """Demonstrate XMSS hash functions."""
+    print("\nXMSS HASH FUNCTION FAMILY")
+    print("=" * 65)
+    
+    xh = XMSSHash(32, 'sha256')
+    
+    key = secrets.token_bytes(32)
+    data = b"test data"
+    address = secrets.token_bytes(32)
+    
+    print("Hash Functions (all produce 32-byte outputs):")
+    print(f"  F(key, data, addr): {xh.F(key, data, address)[:16].hex()}...")
+    print(f"  H(key, L, R, addr): {xh.H(key, data, data, address)[:16].hex()}...")
+    print(f"  PRF(key, input):    {xh.PRF(key, data)[:16].hex()}...")
+    
+    print("""
+    SEPARATION OF CONCERNS:
+    
+    • F: Used only in WOTS+ chains
+    • H: Used only for tree node hashing
+    • PRF: Used only for key derivation
+    • H_msg: Used only for message hashing
+    
+    Different prefixes (0x00, 0x01, 0x02, 0x03) ensure
+    these are effectively independent hash functions.
+    """)
+
+demonstrate_hash_functions()
+```
+
+## 4. WOTS+ in XMSS
+
+```python
+class WOTSPlusXMSS:
+    """
+    WOTS+ as used in XMSS with address-based domain separation.
+    """
+    
+    def __init__(self, n: int = 32, w: int = 16):
+        self.n = n
+        self.w = w
+        self.log_w = int(math.log2(w))
+        
+        # Calculate chain counts
+        self.l1 = math.ceil(8 * n / self.log_w)
+        self.l2 = math.floor(math.log2(self.l1 * (w - 1)) / self.log_w) + 1
+        self.l = self.l1 + self.l2
+        
+        self.hash = XMSSHash(n)
+    
+    def _chain(self, x: bytes, start: int, steps: int, 
+               seed: bytes, address: XMSSAddress) -> bytes:
+        """
+        Compute hash chain with domain separation.
+        
+        chain(X, i, s) = F(F(...F(X)...)) applied s times
+        Each application uses different address.
+        """
+        result = x
+        for j in range(steps):
+            address.set_hash_address(start + j)
+            result = self.hash.F(seed, result, address.to_bytes())
+        return result
+    
+    def _base_w(self, data: bytes, out_len: int) -> List[int]:
+        """Convert to base-w representation."""
+        total = 0
+        bits = 0
+        result = []
+        
+        for byte in data:
+            total = (total << 8) | byte
+            bits += 8
+            
+            while bits >= self.log_w and len(result) < out_len:
+                bits -= self.log_w
+                result.append((total >> bits) & (self.w - 1))
+        
+        while len(result) < out_len:
+            result.append(0)
+        
+        return result
+    
+    def keygen(self, sk_seed: bytes, seed: bytes, 
+               address: XMSSAddress) -> Tuple[List[bytes], bytes]:
+        """
+        Generate WOTS+ key pair.
+        
+        Returns:
+            sk: List of l secret key values
+            pk: Compressed public key (via L-tree)
+        """
+        sk = []
+        pk_values = []
+        
+        address.set_type(XMSSAddress.OTS_ADDR)
+        
+        for i in range(self.l):
+            address.set_chain_address(i)
+            
+            # Derive secret from seed
+            sk_i = self.hash.PRF_keygen(sk_seed, address.to_bytes())
+            sk.append(sk_i)
+            
+            # Public key = end of chain
+            address.set_hash_address(0)
+            pk_i = self._chain(sk_i, 0, self.w - 1, seed, address)
+            pk_values.append(pk_i)
+        
+        # Compress public key using L-tree
+        pk = self._ltree(pk_values, seed, address)
+        
+        return sk, pk
+    
+    def _ltree(self, values: List[bytes], seed: bytes, 
+               address: XMSSAddress) -> bytes:
+        """
+        L-tree: compress WOTS+ public key to single hash.
+        
+        Similar to Merkle tree but handles non-power-of-2 leaves.
+        """
+        address.set_type(XMSSAddress.LTREE_ADDR)
+        
+        current = list(values)
+        height = 0
+        
+        while len(current) > 1:
+            address.set_tree_height(height)
+            next_level = []
+            
+            i = 0
+            while i < len(current):
+                if i + 1 < len(current):
+                    address.set_tree_index(i // 2)
+                    combined = self.hash.H(seed, current[i], current[i + 1], 
+                                          address.to_bytes())
+                    next_level.append(combined)
+                    i += 2
+                else:
+                    # Odd node: promote to next level
+                    next_level.append(current[i])
+                    i += 1
+            
+            current = next_level
+            height += 1
+        
+        return current[0]
+    
+    def sign(self, message: bytes, sk_seed: bytes, seed: bytes,
+             address: XMSSAddress) -> List[bytes]:
+        """Sign message with WOTS+."""
+        address.set_type(XMSSAddress.OTS_ADDR)
+        
+        # Convert message to base-w with checksum
+        msg_digits = self._base_w(message, self.l1)
+        checksum = sum(self.w - 1 - d for d in msg_digits)
+        
+        # Checksum needs ceil(log2(l1 * (w-1)) / log_w) + 1 digits
+        cs_bytes = checksum.to_bytes((self.l2 * self.log_w + 7) // 8, 'big')
+        cs_digits = self._base_w(cs_bytes, self.l2)
+        
+        all_digits = msg_digits + cs_digits
+        
+        # Generate signature
+        signature = []
+        for i in range(self.l):
+            address.set_chain_address(i)
+            
+            # Get secret key
+            sk_i = self.hash.PRF_keygen(sk_seed, address.to_bytes())
+            
+            # Chain to position all_digits[i]
+            sig_i = self._chain(sk_i, 0, all_digits[i], seed, address)
+            signature.append(sig_i)
+        
+        return signature
+    
+    def verify(self, message: bytes, signature: List[bytes], 
+               pk: bytes, seed: bytes, address: XMSSAddress) -> bool:
+        """Verify WOTS+ signature."""
+        # Recompute digits
+        msg_digits = self._base_w(message, self.l1)
+        checksum = sum(self.w - 1 - d for d in msg_digits)
+        cs_bytes = checksum.to_bytes((self.l2 * self.log_w + 7) // 8, 'big')
+        cs_digits = self._base_w(cs_bytes, self.l2)
+        all_digits = msg_digits + cs_digits
+        
+        # Complete chains to get public key values
+        address.set_type(XMSSAddress.OTS_ADDR)
+        pk_values = []
+        
+        for i in range(self.l):
+            address.set_chain_address(i)
+            remaining = self.w - 1 - all_digits[i]
+            pk_i = self._chain(signature[i], all_digits[i], remaining, seed, address)
+            pk_values.append(pk_i)
+        
+        # Compress and compare
+        computed_pk = self._ltree(pk_values, seed, address)
+        return computed_pk == pk
+
+
+def demonstrate_wots_plus():
+    """Demonstrate WOTS+ in XMSS."""
+    print("\nWOTS+ IN XMSS")
+    print("=" * 65)
+    
+    wots = WOTSPlusXMSS(32, 16)
+    
+    print(f"Parameters:")
+    print(f"  n = {wots.n} bytes")
+    print(f"  w = {wots.w}")
+    print(f"  l1 = {wots.l1} (message chains)")
+    print(f"  l2 = {wots.l2} (checksum chains)")
+    print(f"  l = {wots.l} (total chains)")
+    
+    # Generate keys
+    sk_seed = secrets.token_bytes(32)
+    seed = secrets.token_bytes(32)
+    address = XMSSAddress()
+    address.set_ots_address(0)
+    
+    sk, pk = wots.keygen(sk_seed, seed, address)
+    print(f"\nKey Generation:")
+    print(f"  Secret: {len(sk)} chain seeds")
+    print(f"  Public: {pk[:16].hex()}... (L-tree compressed)")
+    
+    # Sign
+    message = hashlib.sha256(b"Test message").digest()
+    signature = wots.sign(message, sk_seed, seed, address)
+    print(f"\nSignature: {len(signature)} chain values")
+    
+    # Verify
+    valid = wots.verify(message, signature, pk, seed, address)
+    print(f"Verification: {valid}")
+
+demonstrate_wots_plus()
+```
+
+## 5. Complete XMSS Implementation
+
+```python
+class XMSS:
+    """
+    XMSS (eXtended Merkle Signature Scheme).
+    
+    Complete implementation following RFC 8391.
+    """
+    
+    def __init__(self, param_set: str = 'XMSS-SHA2_10_256'):
+        params = XMSSParameters.PARAMS[param_set]
+        self.n = params['n']
+        self.w = params['w']
+        self.h = params['h']
+        self.hash_func = params['hash']
+        
+        self.wots = WOTSPlusXMSS(self.n, self.w)
+        self.xhash = XMSSHash(self.n, self.hash_func)
+        
+        # State
+        self.idx = 0
+        self.sk_seed = None
+        self.sk_prf = None
+        self.seed = None
+        self.root = None
+    
+    def _tree_hash(self, sk_seed: bytes, seed: bytes, 
+                   start: int, height: int) -> bytes:
+        """
+        Compute subtree root.
+        
+        Recursive tree construction from WOTS+ leaf nodes.
+        """
+        if height == 0:
+            # Leaf: WOTS+ public key
+            address = XMSSAddress()
+            address.set_ots_address(start)
+            _, pk = self.wots.keygen(sk_seed, seed, address)
+            return pk
+        
+        # Internal node: hash of children
+        left = self._tree_hash(sk_seed, seed, start, height - 1)
+        right = self._tree_hash(sk_seed, seed, start + 2**(height-1), height - 1)
+        
+        address = XMSSAddress()
+        address.set_type(XMSSAddress.TREE_ADDR)
+        address.set_tree_height(height - 1)
+        address.set_tree_index(start // (2**height))
+        
+        return self.xhash.H(seed, left, right, address.to_bytes())
+    
+    def keygen(self, sk_seed: bytes = None) -> Tuple[bytes, bytes]:
+        """
+        Generate XMSS key pair.
+        
+        Returns:
+            public_key: root || SEED
+            secret_key: idx || SK_SEED || SK_PRF || root || SEED
+        """
+        # Generate seeds if not provided
+        if sk_seed is None:
+            sk_seed = secrets.token_bytes(self.n)
+        
+        self.sk_seed = sk_seed
+        self.sk_prf = secrets.token_bytes(self.n)
+        self.seed = secrets.token_bytes(self.n)
+        
+        # Build tree and compute root
+        print(f"Building XMSS tree (height {self.h}, {2**self.h} leaves)...")
+        self.root = self._tree_hash(self.sk_seed, self.seed, 0, self.h)
+        
+        # Construct keys
+        public_key = self.root + self.seed
+        secret_key = (self.idx.to_bytes(4, 'big') + 
+                     self.sk_seed + self.sk_prf + self.root + self.seed)
+        
+        return public_key, secret_key
+    
+    def _compute_auth_path(self, idx: int) -> List[bytes]:
+        """Compute authentication path for leaf idx."""
+        auth_path = []
+        
+        for level in range(self.h):
+            # Sibling subtree root
+            sibling_start = idx ^ (1 << level)
+            sibling_root = self._tree_hash(
+                self.sk_seed, self.seed,
+                (sibling_start >> level) << level,
+                level
+            )
+            auth_path.append(sibling_root)
+            idx >>= 1
+        
+        return auth_path
+    
+    def sign(self, message: bytes) -> Optional[bytes]:
+        """
+        Sign a message.
+        
+        Returns:
+            Signature: idx || r || WOTS_sig || AUTH
+        """
+        if self.idx >= 2**self.h:
+            return None  # Exhausted
+        
+        idx = self.idx
+        self.idx += 1  # Update state FIRST (before any failure)
+        
+        # Randomized message hash
+        r = self.xhash.PRF(self.sk_prf, idx.to_bytes(self.n, 'big'))
+        msg_hash = self.xhash.H_msg(r, self.root, idx, message)
+        
+        # WOTS+ signature
+        address = XMSSAddress()
+        address.set_ots_address(idx)
+        wots_sig = self.wots.sign(msg_hash, self.sk_seed, self.seed, address)
+        
+        # Authentication path
+        auth_path = self._compute_auth_path(idx)
+        
+        # Encode signature
+        sig = idx.to_bytes(4, 'big') + r
+        for s in wots_sig:
+            sig += s
+        for a in auth_path:
+            sig += a
+        
+        return sig
+    
+    def verify(self, public_key: bytes, message: bytes, 
+               signature: bytes) -> bool:
+        """
+        Verify an XMSS signature.
+        """
+        # Parse public key
+        root = public_key[:self.n]
+        seed = public_key[self.n:2*self.n]
+        
+        # Parse signature
+        idx = int.from_bytes(signature[:4], 'big')
+        r = signature[4:4+self.n]
+        
+        # WOTS+ signature
+        wots_sig_start = 4 + self.n
+        wots_sig = []
+        for i in range(self.wots.l):
+            start = wots_sig_start + i * self.n
+            wots_sig.append(signature[start:start+self.n])
+        
+        # Authentication path
+        auth_start = wots_sig_start + self.wots.l * self.n
+        auth_path = []
+        for i in range(self.h):
+            start = auth_start + i * self.n
+            auth_path.append(signature[start:start+self.n])
+        
+        # Recompute message hash
+        msg_hash = self.xhash.H_msg(r, root, idx, message)
+        
+        # Verify WOTS+ and get leaf
+        address = XMSSAddress()
+        address.set_ots_address(idx)
+        
+        # Compute WOTS+ public key from signature
+        msg_digits = self.wots._base_w(msg_hash, self.wots.l1)
+        checksum = sum(self.wots.w - 1 - d for d in msg_digits)
+        cs_bytes = checksum.to_bytes((self.wots.l2 * self.wots.log_w + 7) // 8, 'big')
+        cs_digits = self.wots._base_w(cs_bytes, self.wots.l2)
+        all_digits = msg_digits + cs_digits
+        
+        address.set_type(XMSSAddress.OTS_ADDR)
+        pk_values = []
+        for i in range(self.wots.l):
+            address.set_chain_address(i)
+            remaining = self.wots.w - 1 - all_digits[i]
+            pk_i = self.wots._chain(wots_sig[i], all_digits[i], remaining, seed, address)
+            pk_values.append(pk_i)
+        
+        leaf = self.wots._ltree(pk_values, seed, address)
+        
+        # Verify authentication path
+        current = leaf
+        node_idx = idx
+        
+        for level in range(self.h):
+            address.set_type(XMSSAddress.TREE_ADDR)
+            address.set_tree_height(level)
+            address.set_tree_index(node_idx // 2)
+            
+            if node_idx % 2 == 0:
+                current = self.xhash.H(seed, current, auth_path[level], 
+                                       address.to_bytes())
+            else:
+                current = self.xhash.H(seed, auth_path[level], current,
+                                       address.to_bytes())
+            node_idx //= 2
+        
+        return current == root
+
+
+def demonstrate_xmss():
+    """Demonstrate complete XMSS."""
+    print("\nXMSS DEMONSTRATION")
+    print("=" * 65)
+    
+    # Use small tree for demo
+    xmss = XMSS('XMSS-SHA2_10_256')
+    
+    print(f"Parameter set: XMSS-SHA2_10_256")
+    print(f"  Tree height: {xmss.h}")
+    print(f"  Max signatures: {2**xmss.h}")
+    
+    # Key generation (slow for large trees)
+    print("\n1. KEY GENERATION")
+    pk, sk = xmss.keygen()
+    print(f"   Public key: {len(pk)} bytes")
+    print(f"   Secret key: {len(sk)} bytes")
+    print(f"   Root: {xmss.root[:16].hex()}...")
+    
+    # Sign
+    print("\n2. SIGNING")
+    message = b"Important document to sign"
+    signature = xmss.sign(message)
+    print(f"   Message: {message}")
+    print(f"   Signature: {len(signature)} bytes")
+    print(f"   Leaf index used: 0")
+    
+    # Verify
+    print("\n3. VERIFICATION")
+    valid = xmss.verify(pk, message, signature)
+    print(f"   Valid: {valid}")
+    
+    # State
+    print(f"\n4. STATE")
+    print(f"   Next index: {xmss.idx}")
+    print(f"   Remaining signatures: {2**xmss.h - xmss.idx}")
+
+# Only run for small trees
+demonstrate_xmss()
+```
+
+## 6. XMSS^MT: Multi-Tree Extension
+
+```python
+def explain_xmss_mt():
+    """Explain XMSS^MT for larger signature capacities."""
+    print("\nXMSS^MT (MULTI-TREE EXTENSION)")
+    print("=" * 65)
+    
+    explanation = """
+    PROBLEM WITH SINGLE TREE:
+    
+    For h=20: 2^20 ≈ 1 million signatures (often enough)
+    For h=40: 2^40 ≈ 1 trillion signatures
+    
+    But h=40 single tree:
+    - Key generation: compute 2^40 WOTS+ keys (IMPOSSIBLE)
+    - Each signature: 40 auth path nodes (manageable)
+    
+    SOLUTION: XMSS^MT (Multi-Tree)
+    
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                          TOP TREE                               │
+    │                    (signs middle tree roots)                    │
+    │                                                                 │
+    │                            Root                                 │
+    │                           /    \                                │
+    │                         ...    ...                              │
+    │                        /          \                             │
+    │                    Leaf_0  ...  Leaf_{2^d-1}                    │
+    │                       ↓              ↓                          │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                     MIDDLE TREES                                │
+    │               (each signs lower tree roots)                     │
+    │                                                                 │
+    │              Tree_0    Tree_1    ...    Tree_{2^d-1}            │
+    │                ↓         ↓                  ↓                   │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                     BOTTOM TREES                                │
+    │                  (sign actual messages)                         │
+    │                                                                 │
+    │     Tree_0,0  Tree_0,1  ...  Tree_{2^d-1,2^d-1}                │
+    └─────────────────────────────────────────────────────────────────┘
+    
+    PARAMETERS:
+    
+    • Total height H = h (per tree) × d (layers)
+    • Total signatures: 2^H = (2^h)^d
+    
+    Example: H=60, h=10, d=6
+    • 6 layers of trees, each height 10
+    • 2^60 total signatures
+    • Only need to generate one tree at a time!
+    
+    SIGNING PROCESS:
+    
+    1. Use bottom tree to sign message
+    2. When bottom tree exhausted, use next bottom tree
+    3. Sign new bottom tree's root with parent tree
+    4. Continue up the hierarchy as needed
+    
+    STATE MANAGEMENT:
+    
+    • More complex: track state across all layers
+    • But allows much larger signature capacity
+    • RFC 8391 defines XMSSMT-SHA2_20/2_256, etc.
+    """
+    print(explanation)
+    
+    # Parameter examples
+    print("\nXMSS^MT PARAMETER SETS:")
+    print("-" * 60)
+    
+    mt_params = [
+        ('XMSSMT-SHA2_20/2_256', 20, 2, 256),
+        ('XMSSMT-SHA2_20/4_256', 20, 4, 256),
+        ('XMSSMT-SHA2_40/2_256', 40, 2, 256),
+        ('XMSSMT-SHA2_40/4_256', 40, 4, 256),
+        ('XMSSMT-SHA2_40/8_256', 40, 8, 256),
+        ('XMSSMT-SHA2_60/3_256', 60, 3, 256),
+        ('XMSSMT-SHA2_60/6_256', 60, 6, 256),
+    ]
+    
+    print(f"{'Parameter Set':<25} {'H':<4} {'d':<4} {'h':<4} {'Total Sigs'}")
+    print("-" * 60)
+    
+    for name, H, d, n in mt_params:
+        h = H // d
+        total_sigs = f"2^{H}"
+        print(f"{name:<25} {H:<4} {d:<4} {h:<4} {total_sigs}")
+
+explain_xmss_mt()
+```
+
+## Summary
+
+In this lesson, you learned about XMSS:
+
+1. **XMSS Overview**: RFC 8391, NIST SP 800-208 recommended
+2. **Address Scheme**: Domain separation for security proofs
+3. **Hash Functions**: F, H, PRF, H_msg with distinct prefixes
+4. **WOTS+ Integration**: One-time signatures with L-tree compression
+5. **Tree Construction**: Merkle tree over WOTS+ public keys
+6. **Signature Structure**: idx || r || WOTS_sig || AUTH_path
+7. **XMSS^MT**: Multi-tree for larger signature capacities
+8. **State Management**: Critical for security, must be persistent
+
+XMSS is recommended for applications that can manage state securely, offering smaller signatures than stateless alternatives.
+
+## Further Reading
+
+- Next lesson: SPHINCS+ (Stateless Hash-Based Signatures)
+- Related: LMS (Leighton-Micali Signature)
+- Advanced: BDS tree traversal algorithm

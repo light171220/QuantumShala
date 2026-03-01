@@ -1,0 +1,482 @@
+---
+title: "ML-DSA Signing Process"
+description: "Step-by-step walkthrough of the ML-DSA signing algorithm including commitment, challenge generation, response computation, and rejection sampling."
+keywords: ["ml-dsa", "signing", "digital-signature", "commitment", "challenge", "rejection-sampling"]
+---
+
+# ML-DSA Signing Process
+
+The signing process is the heart of ML-DSA. It implements the Fiat-Shamir with Aborts paradigm, converting an identification protocol into a digital signature scheme while ensuring no information about the secret key leaks through signatures.
+
+## Signing Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    ML-DSA SIGNING FLOW                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Inputs:                                                       │
+│   ┌─────────────────┐    ┌─────────────────┐                   │
+│   │ Secret Key (sk) │    │   Message (M)   │                   │
+│   └────────┬────────┘    └────────┬────────┘                   │
+│            │                      │                             │
+│            └──────────┬───────────┘                            │
+│                       │                                         │
+│                       ▼                                         │
+│   ┌─────────────────────────────────────────┐                  │
+│   │           SIGNING LOOP                   │                  │
+│   │  (may restart multiple times)            │                  │
+│   │                                          │                  │
+│   │  1. Sample masking y                     │                  │
+│   │  2. Compute commitment w = Ay            │                  │
+│   │  3. Derive challenge c = H(w₁, M)        │                  │
+│   │  4. Compute response z = y + cs₁         │                  │
+│   │  5. CHECK: Reject if z or hints bad     │ ─┐               │
+│   │  6. If rejected: restart from step 1    │ ◄┘               │
+│   │                                          │                  │
+│   └─────────────────┬───────────────────────┘                  │
+│                     │                                           │
+│                     ▼ (on success)                             │
+│            ┌─────────────────┐                                 │
+│            │  Signature σ    │                                 │
+│            │  = (c̃, z, h)   │                                 │
+│            └─────────────────┘                                 │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Step 1: Parse Secret Key
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SECRET KEY STRUCTURE                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   sk = (ρ, K, tr, s₁, s₂, t₀)                                  │
+│                                                                 │
+│   ┌────────────┬───────────┬───────────────────────────────┐   │
+│   │ Component  │   Size    │        Purpose                │   │
+│   ├────────────┼───────────┼───────────────────────────────┤   │
+│   │ ρ          │ 32 bytes  │ Seed for matrix A             │   │
+│   │ K          │ 32 bytes  │ Seed for signing randomness   │   │
+│   │ tr         │ 64 bytes  │ H(pk) - public key hash       │   │
+│   │ s₁         │ l×32η B   │ Secret vector (l polynomials) │   │
+│   │ s₂         │ k×32η B   │ Secret vector (k polynomials) │   │
+│   │ t₀         │ k×416 B   │ Low bits of t                 │   │
+│   └────────────┴───────────┴───────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+def parse_secret_key(sk: bytes, k: int, l: int, eta: int) -> dict:
+    """Parse ML-DSA secret key into components."""
+    offset = 0
+
+    # Fixed-size components
+    rho = sk[offset:offset+32]; offset += 32
+    K = sk[offset:offset+32]; offset += 32
+    tr = sk[offset:offset+64]; offset += 64
+
+    # Variable-size secret vectors
+    s1_size = l * 32 * eta
+    s1 = decode_secret_vector(sk[offset:offset+s1_size], l, eta)
+    offset += s1_size
+
+    s2_size = k * 32 * eta
+    s2 = decode_secret_vector(sk[offset:offset+s2_size], k, eta)
+    offset += s2_size
+
+    # Low bits of t
+    t0 = decode_t0(sk[offset:], k)
+
+    return {'rho': rho, 'K': K, 'tr': tr, 's1': s1, 's2': s2, 't0': t0}
+```
+
+## Step 2: Message Preprocessing
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              MESSAGE PREPROCESSING                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Compute message representative μ:                            │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   μ = H(tr ∥ M, 64)                                    │  │
+│   │                                                         │  │
+│   │   where:                                                │  │
+│   │   • tr is the 64-byte hash of the public key           │  │
+│   │   • M is the message to sign                           │  │
+│   │   • H is SHAKE-256, output 64 bytes                    │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Purpose:                                                      │
+│   • Binds signature to specific public key                    │
+│   • Prevents signature transplant attacks                      │
+│   • Creates domain separation                                  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Step 3: Generate Masking Vector y
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              MASKING VECTOR GENERATION                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Sample random masking vector y:                              │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   For each polynomial y[i] in y (i = 0 to l-1):        │  │
+│   │                                                         │  │
+│   │   For each coefficient j in y[i] (j = 0 to 255):       │  │
+│   │       y[i][j] ← uniform random in [-γ₁+1, γ₁]          │  │
+│   │                                                         │  │
+│   │   Total: l × 256 coefficients                          │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   γ₁ by variant:                                               │
+│   • ML-DSA-44: γ₁ = 2¹⁷ = 131,072                            │
+│   • ML-DSA-65: γ₁ = 2¹⁹ = 524,288                            │
+│   • ML-DSA-87: γ₁ = 2¹⁹ = 524,288                            │
+│                                                                 │
+│   Randomness derivation (deterministic signing):               │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   seed = H(K ∥ rnd ∥ μ, 64)                            │  │
+│   │                                                         │  │
+│   │   where rnd is optional external randomness            │  │
+│   │   (32 bytes of zeros for deterministic mode)          │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Step 4: Compute Commitment
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              COMMITMENT COMPUTATION                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Compute w = A · y:                                           │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │     ┌───────────────┐   ┌───────┐   ┌───────┐          │  │
+│   │     │      A        │ × │   y   │ = │   w   │          │  │
+│   │     │   (k × l)     │   │  (l)  │   │  (k)  │          │  │
+│   │     └───────────────┘   └───────┘   └───────┘          │  │
+│   │                                                         │  │
+│   │   A is regenerated from seed ρ using ExpandA           │  │
+│   │   Multiplication uses NTT for efficiency               │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Decompose w into high and low parts:                         │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   (w₁, w₀) = Decompose(w)                              │  │
+│   │                                                         │  │
+│   │   w₁ = HighBits(w, 2γ₂)    (used for challenge)        │  │
+│   │   w₀ = LowBits(w, 2γ₂)     (used later for hints)      │  │
+│   │                                                         │  │
+│   │   This splits each coefficient into:                   │  │
+│   │   • High bits: coarse representation                   │  │
+│   │   • Low bits: fine-grained residual                   │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Step 5: Generate Challenge
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              CHALLENGE GENERATION                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Hash commitment and message to create challenge:             │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   c̃ = H(μ ∥ w₁, 32)                                   │  │
+│   │                                                         │  │
+│   │   c = SampleInBall(c̃, τ)                               │  │
+│   │                                                         │  │
+│   │   where:                                                │  │
+│   │   • μ is the message representative (64 bytes)         │  │
+│   │   • w₁ is the high bits of commitment                 │  │
+│   │   • c̃ is the 32-byte challenge seed                   │  │
+│   │   • c is polynomial with τ non-zero coefficients      │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   SampleInBall algorithm:                                       │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   1. c ← all zeros (256 coefficients)                  │  │
+│   │   2. Use c̃ as XOF seed                                │  │
+│   │   3. For i from 256-τ to 255:                         │  │
+│   │      - Sample random j ∈ [0, i]                       │  │
+│   │      - Swap c[i] and c[j]                             │  │
+│   │      - Sample random sign bit b                       │  │
+│   │      - Set c[i] ← (-1)^b                              │  │
+│   │   4. Result: c has exactly τ coefficients = ±1        │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Step 6: Compute Response
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              RESPONSE COMPUTATION                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Compute response z = y + c·s₁:                               │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   For each polynomial i from 0 to l-1:                 │  │
+│   │                                                         │  │
+│   │       z[i] = y[i] + c · s₁[i]                          │  │
+│   │                                                         │  │
+│   │   where c · s₁[i] is polynomial multiplication         │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Also compute r₀ for rejection check:                         │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   r₀ = w₀ - c·s₂                                       │  │
+│   │                                                         │  │
+│   │   This represents the low bits of what the verifier    │  │
+│   │   would compute as A·z - c·t                           │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Step 7: Rejection Sampling
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              REJECTION CHECKS                                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Check 1: z infinity norm                                      │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   If ||z||∞ ≥ γ₁ - β:                                  │  │
+│   │       REJECT (restart from y generation)               │  │
+│   │                                                         │  │
+│   │   Where β = τ · η (maximum norm of c·s₁)              │  │
+│   │                                                         │  │
+│   │   This ensures z doesn't reveal too much about s₁     │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Check 2: r₀ low bits norm                                    │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   If ||r₀||∞ ≥ γ₂ - β:                                 │  │
+│   │       REJECT (restart from y generation)               │  │
+│   │                                                         │  │
+│   │   This ensures the hint can correctly guide verifier   │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Check 3: Hint count                                          │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   If number of 1s in h > ω:                            │  │
+│   │       REJECT (restart from y generation)               │  │
+│   │                                                         │  │
+│   │   ω limits hint size (affects signature size)         │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   If all checks pass: proceed to output signature              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Step 8: Compute Hint
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              HINT COMPUTATION                                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   The hint helps verifier compute w₁ without knowing s₂:      │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Verifier computes:  w' = A·z - c·t                   │  │
+│   │                                                         │  │
+│   │   Problem: HighBits(w') may differ from HighBits(w)    │  │
+│   │   due to the subtracted c·t₀ term                     │  │
+│   │                                                         │  │
+│   │   Solution: Include hint h that indicates where        │  │
+│   │   high bits differ                                     │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Hint computation:                                             │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   h = MakeHint(r₀, r₁)                                 │  │
+│   │                                                         │  │
+│   │   where r₁ = w₁ is the original high bits             │  │
+│   │   and r₀ = w₀ - c·s₂                                  │  │
+│   │                                                         │  │
+│   │   h[i][j] = 1 if adding r₀[i][j] to r₁[i][j]·(2γ₂)   │  │
+│   │            would change the high bits                  │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Complete Signing Algorithm
+
+```python
+def ml_dsa_sign(sk: bytes, M: bytes, k: int, l: int, params: dict) -> bytes:
+    """
+    ML-DSA signing algorithm.
+
+    Args:
+        sk: Secret key
+        M: Message to sign
+        k, l: Matrix dimensions
+        params: Algorithm parameters
+
+    Returns:
+        Signature bytes
+    """
+    # Parse parameters
+    gamma1 = params['gamma1']
+    gamma2 = params['gamma2']
+    beta = params['beta']
+    tau = params['tau']
+    omega = params['omega']
+
+    # Parse secret key
+    rho, K, tr, s1, s2, t0 = parse_secret_key(sk, k, l, params['eta'])
+
+    # Regenerate matrix A
+    A = expand_A(rho, k, l)
+
+    # Message representative
+    mu = shake256(tr + M, 64)
+
+    # Signing loop with rejection sampling
+    kappa = 0  # Attempt counter
+    while True:
+        # Generate masking vector y
+        y = expand_mask(rho_prime, kappa, l, gamma1)
+        kappa += l
+
+        # Compute commitment w = A·y
+        w = matrix_vector_ntt(A, ntt_vector(y))
+        w = inverse_ntt_vector(w)
+
+        # Decompose w
+        w1, w0 = decompose(w, gamma2)
+
+        # Challenge
+        c_tilde = shake256(mu + encode_w1(w1), 32)
+        c = sample_in_ball(c_tilde, tau)
+
+        # Compute response z = y + c·s1
+        cs1 = multiply_poly_vector(c, s1)
+        z = add_vectors(y, cs1)
+
+        # Compute r0 = w0 - c·s2
+        cs2 = multiply_poly_vector(c, s2)
+        r0 = subtract_vectors(w0, cs2)
+
+        # Rejection check 1: z norm
+        if infinity_norm(z) >= gamma1 - beta:
+            continue  # Restart
+
+        # Rejection check 2: r0 norm
+        if infinity_norm(r0) >= gamma2 - beta:
+            continue  # Restart
+
+        # Compute hint
+        ct0 = multiply_poly_vector(c, t0)
+        h = make_hint(subtract_vectors(r0, ct0), w1, gamma2)
+
+        # Rejection check 3: hint count
+        if count_ones(h) > omega:
+            continue  # Restart
+
+        # Success! Encode and return signature
+        return encode_signature(c_tilde, z, h)
+```
+
+## Signing Complexity
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SIGNING COMPLEXITY                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Per-Attempt Operations:                                       │
+│   ┌───────────────────────────────┬─────────────────────────┐  │
+│   │ Operation                     │ Count (ML-DSA-65)       │  │
+│   ├───────────────────────────────┼─────────────────────────┤  │
+│   │ SHAKE-256 calls               │ ~3 (expand, hash)      │  │
+│   │ NTT transforms                │ l + k = 11             │  │
+│   │ Inverse NTT                   │ k = 6                  │  │
+│   │ Polynomial multiplications    │ k × l = 30             │  │
+│   │ Polynomial additions          │ ~20                    │  │
+│   │ Norm checks                   │ l + k = 11             │  │
+│   └───────────────────────────────┴─────────────────────────┘  │
+│                                                                 │
+│   Expected Number of Attempts:                                  │
+│   ┌──────────────┬───────────────────────────────────────────┐ │
+│   │   Variant    │ Expected attempts                         │ │
+│   ├──────────────┼───────────────────────────────────────────┤ │
+│   │ ML-DSA-44    │ ~4.25                                     │ │
+│   │ ML-DSA-65    │ ~5.1                                      │ │
+│   │ ML-DSA-87    │ ~3.85                                     │ │
+│   └──────────────┴───────────────────────────────────────────┘ │
+│                                                                 │
+│   Total Signing Time:                                           │
+│   ~100-500 microseconds depending on variant and hardware      │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Summary
+
+The ML-DSA signing process:
+
+1. **Parse** secret key into components (ρ, K, tr, s₁, s₂, t₀)
+2. **Preprocess** message to create representative μ = H(tr ∥ M)
+3. **Generate** random masking vector y with large coefficients
+4. **Compute** commitment w = A·y and decompose into (w₁, w₀)
+5. **Challenge** c = SampleInBall(H(μ ∥ w₁)) - sparse polynomial
+6. **Response** z = y + c·s₁ and r₀ = w₀ - c·s₂
+7. **Reject** if z or r₀ norms too large, restart from step 3
+8. **Hint** h encodes where high bits differ
+9. **Output** signature σ = (c̃, z, h)
+
+Key properties:
+- Rejection sampling ensures z is independent of s₁
+- Hint enables efficient verification without s₂
+- ~4-5 attempts on average per successful signature

@@ -1,0 +1,95 @@
+{
+  "exerciseId": "05-05-signing-verification-exercises",
+  "title": "Exercises: FN-DSA Signing and Verification",
+  "exercises": [
+    {
+      "id": "ex1",
+      "title": "Signature Compression Analysis",
+      "type": "coding",
+      "difficulty": "intermediate",
+      "points": 25,
+      "description": "Implement and analyze Golomb-Rice encoding for FN-DSA signatures.",
+      "tasks": [
+        "Implement Golomb-Rice encoding for integers",
+        "Implement the decoding function",
+        "Test with Gaussian-distributed values",
+        "Compare compressed size vs raw encoding",
+        "Calculate compression ratio for typical FN-DSA signatures"
+      ],
+      "starterCode": "import numpy as np\n\ndef golomb_rice_encode(value: int, k: int) -> str:\n    \"\"\"\n    Encode integer using Golomb-Rice coding.\n    \n    Args:\n        value: Signed integer to encode\n        k: Rice parameter (bits for remainder)\n    \n    Returns:\n        Binary string representation\n    \"\"\"\n    # Map signed to unsigned\n    if value >= 0:\n        v = 2 * value\n    else:\n        v = 2 * (-value) - 1\n    \n    # Split into quotient and remainder\n    q = v >> k\n    r = v & ((1 << k) - 1)\n    \n    # Encode: q ones, one zero, k bits for remainder\n    encoded = '1' * q + '0' + format(r, f'0{k}b')\n    \n    return encoded\n\ndef golomb_rice_decode(bits: str, k: int) -> tuple:\n    \"\"\"\n    Decode Golomb-Rice encoded value.\n    \n    Returns:\n        (decoded_value, bits_consumed)\n    \"\"\"\n    # Count leading ones (quotient)\n    q = 0\n    while bits[q] == '1':\n        q += 1\n    \n    # Skip the zero\n    pos = q + 1\n    \n    # Read k bits for remainder\n    r = int(bits[pos:pos+k], 2)\n    \n    # Reconstruct unsigned value\n    v = (q << k) | r\n    \n    # Map back to signed\n    if v % 2 == 0:\n        value = v // 2\n    else:\n        value = -(v + 1) // 2\n    \n    return value, pos + k\n\n# Test with Gaussian-distributed values\nnp.random.seed(42)\nsigma = 165.7  # FN-DSA-512 parameter\nvalues = np.random.normal(0, sigma, 512).astype(int)\n\nk = 8  # Rice parameter\ntotal_bits = 0\n\nfor v in values:\n    encoded = golomb_rice_encode(v, k)\n    total_bits += len(encoded)\n\nprint(f\"Compression Analysis (n=512, σ={sigma})\")\nprint(f\"Raw encoding: {512 * 12} bits ({512 * 12 // 8} bytes)\")\nprint(f\"Compressed: {total_bits} bits ({total_bits // 8} bytes)\")\nprint(f\"Compression ratio: {(512 * 12) / total_bits:.2f}x\")",
+      "expectedOutput": "Working Golomb-Rice encoder/decoder with compression analysis",
+      "hints": [
+        "Map signed integers to unsigned using zigzag encoding",
+        "Quotient is encoded as unary (ones followed by zero)",
+        "Remainder is encoded as k-bit binary",
+        "Optimal k depends on value distribution"
+      ]
+    },
+    {
+      "id": "ex2",
+      "title": "Verification Implementation",
+      "type": "coding",
+      "difficulty": "intermediate",
+      "points": 30,
+      "description": "Implement FN-DSA verification logic.",
+      "tasks": [
+        "Implement polynomial multiplication mod (X^n + 1)",
+        "Implement coefficient centering",
+        "Implement squared norm computation",
+        "Implement complete verification function",
+        "Test with known-good and known-bad signatures"
+      ],
+      "starterCode": "import numpy as np\nimport hashlib\n\ndef poly_mul_ntt(a: np.ndarray, b: np.ndarray, q: int) -> np.ndarray:\n    \"\"\"\n    Multiply polynomials mod (X^n + 1) mod q.\n    Uses negacyclic convolution.\n    \"\"\"\n    n = len(a)\n    \n    # Standard convolution\n    product = np.convolve(a, b)\n    \n    # Reduce mod X^n + 1 (negacyclic)\n    result = product[:n] - product[n:2*n-1]\n    if len(product) > 2*n - 1:\n        result[:len(product)-2*n+1] -= product[2*n-1:]\n    \n    # Pad if needed\n    result = np.pad(result, (0, n - len(result)))\n    \n    return result % q\n\ndef center_coefficients(poly: np.ndarray, q: int) -> np.ndarray:\n    \"\"\"\n    Center coefficients to range [-(q-1)/2, (q-1)/2].\n    \"\"\"\n    result = poly.copy().astype(np.int64)\n    half_q = (q - 1) // 2\n    result[result > half_q] -= q\n    return result\n\ndef squared_norm(s1: np.ndarray, s2: np.ndarray, q: int) -> int:\n    \"\"\"\n    Compute ||(s1, s2)||² with centered coefficients.\n    \"\"\"\n    s1_centered = center_coefficients(s1, q)\n    s2_centered = center_coefficients(s2, q)\n    return int(np.sum(s1_centered**2) + np.sum(s2_centered**2))\n\ndef verify_fndsa(message: bytes, signature: dict, \n                  public_key: np.ndarray, q: int = 12289) -> bool:\n    \"\"\"\n    Verify FN-DSA signature.\n    \n    Args:\n        message: Original message\n        signature: Dict with 'r' (nonce) and 's2' (polynomial)\n        public_key: h polynomial\n        q: Modulus\n    \n    Returns:\n        True if valid, False otherwise\n    \"\"\"\n    n = len(public_key)\n    \n    # 1. Recompute c = HashToPoint(r || message)\n    h = hashlib.shake_256(signature['r'] + message)\n    c = np.array([int.from_bytes(h.digest(n*2)[i*2:(i+1)*2], 'big') % q \n                  for i in range(n)])\n    \n    # 2. Recover s1 = c - h * s2 mod q\n    h_times_s2 = poly_mul_ntt(public_key, signature['s2'], q)\n    s1 = (c - h_times_s2) % q\n    \n    # 3. Check norm bound\n    norm_sq = squared_norm(s1, signature['s2'], q)\n    \n    # Norm bounds from FALCON spec\n    if n == 512:\n        max_norm_sq = 34034726\n    else:  # n == 1024\n        max_norm_sq = 70265242\n    \n    return norm_sq <= max_norm_sq\n\n# Test\nnp.random.seed(42)\nn = 64  # Small for testing\nq = 12289\n\n# Create mock public key and signature\npk = np.random.randint(0, q, n)\nmessage = b\"Test message\"\n\n# Create a \"good\" signature (small coefficients)\ns2_good = np.random.randint(-3, 4, n)\nsig_good = {\n    'r': b'\\x00' * 40,\n    's2': s2_good\n}\n\nprint(\"Verification test:\")\nresult = verify_fndsa(message, sig_good, pk, q)\nprint(f\"Good signature: {result}\")",
+      "expectedOutput": "Working verification implementation with test cases",
+      "hints": [
+        "Use centered coefficients for norm computation",
+        "Negacyclic convolution: X^n = -1",
+        "Recovery: s1 = c - h·s2 mod q"
+      ]
+    },
+    {
+      "id": "ex3",
+      "title": "Norm Bound Analysis",
+      "type": "calculation",
+      "difficulty": "advanced",
+      "points": 25,
+      "description": "Analyze the signature norm bounds in FN-DSA.",
+      "tasks": [
+        "Calculate expected norm for Gaussian-sampled signatures",
+        "Verify the official norm bounds match expected distributions",
+        "Calculate rejection probability (norm exceeds bound)",
+        "Analyze how norm relates to signature security",
+        "Compare with ML-DSA coefficient bounds"
+      ],
+      "expectedOutput": "Statistical analysis of FN-DSA norm bounds",
+      "hints": [
+        "For Gaussian with σ, expected ||x||² = n·σ²",
+        "Signature has 2n coefficients (s1 and s2)",
+        "Bound should accommodate ~99.9% of signatures",
+        "Rejection = signatures exceeding bound"
+      ]
+    },
+    {
+      "id": "ex4",
+      "title": "Key Generation Complexity",
+      "type": "analysis",
+      "difficulty": "advanced",
+      "points": 20,
+      "description": "Analyze FN-DSA key generation complexity and failure probability.",
+      "tasks": [
+        "Research the NTRU solving algorithm",
+        "Calculate expected iterations to find good (f, g)",
+        "Analyze Gram-Schmidt bound checking",
+        "Compare key generation time with ML-DSA",
+        "Propose optimizations for key generation"
+      ],
+      "expectedOutput": "Key generation complexity analysis",
+      "hints": [
+        "f must be invertible mod q (probability ~1/q of failure)",
+        "Gram-Schmidt reduction needs ~100 attempts typically",
+        "NTRU solving uses extended GCD",
+        "FALCON tree adds O(n log n) overhead"
+      ]
+    }
+  ]
+}

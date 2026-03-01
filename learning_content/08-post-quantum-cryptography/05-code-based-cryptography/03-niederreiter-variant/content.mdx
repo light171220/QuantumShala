@@ -1,0 +1,412 @@
+---
+title: "Niederreiter Variant: Syndrome-Based Code Encryption"
+description: "Learn the Niederreiter cryptosystem, the dual formulation of McEliece using syndrome encoding. Understand its efficiency advantages and equivalence to McEliece security."
+duration: 60
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the duality between McEliece and Niederreiter
+- Implement syndrome-based encryption and decryption
+- Compare efficiency of both variants
+- Explain why security is equivalent
+
+## 1. From McEliece to Niederreiter
+
+<Definition term="Niederreiter Cryptosystem">
+Instead of encoding messages and adding errors, Niederreiter encrypts by computing the syndrome of an error vector. The message IS the error pattern, making ciphertext smaller than the public key row.
+</Definition>
+
+```python
+import numpy as np
+from typing import Tuple, Optional, List
+from itertools import combinations
+import secrets
+
+def compare_mceliece_niederreiter():
+    """Compare the two formulations."""
+    print("McELIECE vs NIEDERREITER")
+    print("=" * 70)
+    
+    comparison = """
+    McELIECE ENCRYPTION:
+    ━━━━━━━━━━━━━━━━━━━━
+    
+    Public Key:  G' = S·G·P      (k × n matrix)
+    Encryption:  c = m·G' + e    (m is k-bit message, e is n-bit error)
+    Ciphertext:  n bits
+    
+    Message encoded in codeword, error adds randomness.
+    
+    
+    NIEDERREITER ENCRYPTION:
+    ━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Public Key:  H' = S·H·P      ((n-k) × n matrix)  
+    Encryption:  c = H'·e^T      (e is weight-t error vector)
+    Ciphertext:  (n-k) bits
+    
+    Message encoded in error pattern, syndrome is ciphertext.
+    
+    
+    KEY INSIGHT:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ In Niederreiter, the MESSAGE is encoded as the ERROR POSITIONS     │
+    │                                                                     │
+    │ A weight-t error has C(n,t) possibilities ≈ 2^k bits of info       │
+    │ So t error positions encode k message bits!                         │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    EFFICIENCY COMPARISON:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Property          │ McEliece        │ Niederreiter                 │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ Public Key        │ k × n bits      │ (n-k) × n bits               │
+    │ Ciphertext        │ n bits          │ (n-k) bits                   │
+    │ Message           │ k bits          │ log2(C(n,t)) bits            │
+    │ Encryption        │ Matrix mult     │ Sparse matrix mult           │
+    │ Decryption        │ Decode + mult   │ Decode (error = message)     │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    For typical parameters (n >> k):
+    • Niederreiter has LARGER public key
+    • Niederreiter has SMALLER ciphertext
+    • Both have EQUIVALENT security
+    """
+    print(comparison)
+
+compare_mceliece_niederreiter()
+
+
+class NiederreiterCryptosystem:
+    """
+    The Niederreiter Public-Key Cryptosystem.
+    
+    Dual formulation of McEliece using syndrome encoding.
+    """
+    
+    def __init__(self, n: int, t: int, seed: int = None):
+        """
+        Initialize Niederreiter cryptosystem.
+        
+        Args:
+            n: Code length
+            t: Error weight (determines message size)
+            seed: Random seed
+        """
+        if seed is not None:
+            np.random.seed(seed)
+        
+        self.n = n
+        self.t = t
+        
+        # Compute parameters
+        self.m = int(np.ceil(np.log2(n)))
+        self.r = self.m * t  # Parity check rows
+        self.k = n - self.r
+        
+        if self.r >= n:
+            raise ValueError("Invalid parameters")
+        
+        # Generate secret parity-check matrix
+        self.H_secret = self._generate_parity_check()
+        
+        # Generate scrambling and permutation
+        self.S = self._random_invertible(self.r)
+        self.perm = np.random.permutation(n)
+        self.P = np.eye(n, dtype=int)[self.perm]
+        
+        # Public key: H' = S · H · P
+        self.H_public = (self.S @ self.H_secret @ self.P) % 2
+        
+        # Precompute inverses
+        self.S_inv = self._invert_matrix(self.S)
+        self.P_inv = self.P.T
+    
+    def _generate_parity_check(self) -> np.ndarray:
+        """Generate random full-rank parity-check matrix."""
+        while True:
+            H = np.random.randint(0, 2, size=(self.r, self.n))
+            if np.linalg.matrix_rank(H.astype(float)) == self.r:
+                return H
+    
+    def _random_invertible(self, size: int) -> np.ndarray:
+        """Generate random invertible binary matrix."""
+        while True:
+            M = np.random.randint(0, 2, size=(size, size))
+            try:
+                self._invert_matrix(M)
+                return M
+            except:
+                continue
+    
+    def _invert_matrix(self, M: np.ndarray) -> np.ndarray:
+        """Invert binary matrix."""
+        n = M.shape[0]
+        aug = np.hstack([M.copy(), np.eye(n, dtype=int)]) % 2
+        
+        for col in range(n):
+            pivot = None
+            for row in range(col, n):
+                if aug[row, col] == 1:
+                    pivot = row
+                    break
+            if pivot is None:
+                raise ValueError("Singular")
+            aug[[col, pivot]] = aug[[pivot, col]]
+            for row in range(n):
+                if row != col and aug[row, col] == 1:
+                    aug[row] = (aug[row] + aug[col]) % 2
+        
+        return aug[:, n:]
+    
+    def message_capacity(self) -> int:
+        """Return message capacity in bits."""
+        import math
+        # C(n, t) possible error patterns
+        log_capacity = sum(math.log2(self.n - i) - math.log2(i + 1) 
+                          for i in range(self.t))
+        return int(log_capacity)
+    
+    def encode_message_as_error(self, message_bits: np.ndarray) -> np.ndarray:
+        """
+        Encode message bits as a weight-t error vector.
+        
+        Uses combinatorial number system for bijective encoding.
+        """
+        # Convert bits to integer
+        msg_int = int(''.join(map(str, message_bits)), 2)
+        
+        # Convert integer to t positions using combinatorial encoding
+        positions = []
+        remaining = msg_int
+        
+        for i in range(self.t - 1, -1, -1):
+            # Find largest n' such that C(n', i+1) <= remaining
+            for n_prime in range(self.n - 1, i, -1):
+                comb = self._binomial(n_prime, i + 1)
+                if comb <= remaining:
+                    positions.append(n_prime)
+                    remaining -= comb
+                    break
+        
+        # Create error vector
+        error = np.zeros(self.n, dtype=int)
+        for pos in positions:
+            error[pos] = 1
+        
+        # Fill remaining positions if needed
+        while np.sum(error) < self.t:
+            for i in range(self.n):
+                if error[i] == 0:
+                    error[i] = 1
+                    break
+        
+        return error
+    
+    def decode_error_to_message(self, error: np.ndarray) -> np.ndarray:
+        """Decode error vector back to message bits."""
+        positions = sorted(np.where(error == 1)[0], reverse=True)
+        
+        # Convert positions to integer using combinatorial encoding
+        msg_int = sum(self._binomial(pos, i + 1) 
+                     for i, pos in enumerate(positions))
+        
+        # Convert to bits
+        capacity = self.message_capacity()
+        bits = [(msg_int >> i) & 1 for i in range(capacity)]
+        return np.array(bits[::-1])
+    
+    def _binomial(self, n: int, k: int) -> int:
+        """Compute binomial coefficient."""
+        if k < 0 or k > n:
+            return 0
+        if k == 0 or k == n:
+            return 1
+        result = 1
+        for i in range(min(k, n - k)):
+            result = result * (n - i) // (i + 1)
+        return result
+    
+    def encrypt(self, error: np.ndarray) -> np.ndarray:
+        """
+        Encrypt by computing syndrome.
+        
+        Args:
+            error: Weight-t error vector (the message)
+        
+        Returns:
+            Syndrome (ciphertext)
+        """
+        if np.sum(error) != self.t:
+            raise ValueError(f"Error must have weight {self.t}")
+        
+        return (self.H_public @ error) % 2
+    
+    def decrypt(self, syndrome: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Decrypt by finding the error pattern.
+        
+        Steps:
+        1. Transform syndrome: s' = S^{-1} · s
+        2. Decode to find e' (error in original code)
+        3. Unpermute: e = P^{-1} · e'
+        """
+        # Step 1: Remove scrambling
+        s_prime = (self.S_inv @ syndrome) % 2
+        
+        # Step 2: Find error pattern with this syndrome (simplified decoder)
+        for positions in combinations(range(self.n), self.t):
+            e_prime = np.zeros(self.n, dtype=int)
+            for p in positions:
+                e_prime[p] = 1
+            
+            if np.array_equal((self.H_secret @ e_prime) % 2, s_prime):
+                # Step 3: Unpermute
+                error = np.zeros(self.n, dtype=int)
+                for i, p in enumerate(self.perm):
+                    error[p] = e_prime[i]
+                return error
+        
+        return None
+
+
+def demonstrate_niederreiter():
+    """Demonstrate Niederreiter encryption."""
+    print("\nNIEDERREITER CRYPTOSYSTEM DEMONSTRATION")
+    print("=" * 65)
+    
+    # Small parameters for demonstration
+    nied = NiederreiterCryptosystem(n=15, t=2, seed=42)
+    
+    print(f"Parameters:")
+    print(f"  n = {nied.n} (code length)")
+    print(f"  t = {nied.t} (error weight)")
+    print(f"  r = {nied.r} (parity check rows)")
+    print(f"  Message capacity: {nied.message_capacity()} bits")
+    
+    print(f"\nPublic Key H' shape: {nied.H_public.shape}")
+    print(f"Ciphertext size: {nied.r} bits")
+    
+    # Create error vector as message
+    error = np.zeros(nied.n, dtype=int)
+    positions = np.random.choice(nied.n, nied.t, replace=False)
+    error[positions] = 1
+    
+    print(f"\nMessage (as error positions): {sorted(positions)}")
+    print(f"Error vector: {error}")
+    
+    # Encrypt
+    syndrome = nied.encrypt(error)
+    print(f"\nCiphertext (syndrome): {syndrome}")
+    
+    # Decrypt
+    recovered = nied.decrypt(syndrome)
+    print(f"\nRecovered error: {recovered}")
+    print(f"Decryption correct: {np.array_equal(error, recovered)}")
+
+demonstrate_niederreiter()
+```
+
+## 2. Security Equivalence
+
+```python
+def security_equivalence():
+    """Explain security equivalence of McEliece and Niederreiter."""
+    print("\nSECURITY EQUIVALENCE")
+    print("=" * 65)
+    
+    explanation = """
+    THEOREM (Equivalent Security):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Breaking McEliece ⟺ Breaking Niederreiter
+    
+    Given an oracle that breaks one, we can break the other.
+    
+    
+    REDUCTION: McEliece → Niederreiter
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    McEliece ciphertext: c = m·G' + e
+    
+    Compute syndrome: s = H'·c^T = H'·(m·G' + e)^T = H'·G'^T·m^T + H'·e^T
+    
+    But H'·G'^T = 0 (by definition of parity-check and generator)
+    
+    So: s = H'·e^T (Niederreiter ciphertext!)
+    
+    If we can decrypt Niederreiter (find e from s), we can then
+    compute m = (c - e)·G'^{-1} to decrypt McEliece.
+    
+    
+    REDUCTION: Niederreiter → McEliece
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Niederreiter ciphertext: s = H'·e^T
+    
+    Construct McEliece ciphertext: c = 0·G' + e = e
+    
+    If we can decrypt McEliece (find m and e from c = m·G' + e),
+    we recover the error e, which is the Niederreiter message.
+    
+    
+    BOTH RELY ON THE SAME HARD PROBLEM:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Given disguised parity-check matrix H' and syndrome s,             │
+    │ find low-weight e such that H'·e = s                               │
+    │                                                                     │
+    │ This is the SYNDROME DECODING PROBLEM (NP-complete)                │
+    └─────────────────────────────────────────────────────────────────────┘
+    """
+    print(explanation)
+
+security_equivalence()
+```
+
+## Summary
+
+In this lesson, you learned about the Niederreiter variant:
+
+1. **Duality**: Niederreiter uses syndromes instead of codewords
+2. **Message Encoding**: Message is the error pattern itself
+3. **Smaller Ciphertext**: Only (n-k) bits instead of n bits
+4. **Equivalent Security**: Both reduce to syndrome decoding
+5. **Combinatorial Encoding**: Map message bits to error positions
+6. **Classic McEliece**: Uses Niederreiter formulation for efficiency
+
+Both variants are equally secure and offer different tradeoffs.
+
+## Further Reading
+
+- Next lesson: BIKE (Bit Flipping Key Encapsulation)
+- Related: Combinatorial number systems
+- Advanced: Niederreiter for digital signatures
+
+## 6. Comparison with McEliece
+
+```python
+def comparison_mceliece():
+    """Compare Niederreiter with McEliece."""
+    print("\nNIEDERREITER vs McELIECE")
+    print("=" * 70)
+    
+    print("""
+    ┌─────────────────────────────────────────────────────────────────┐
+    │ Property          │ McEliece        │ Niederreiter             │
+    ├───────────────────┼─────────────────┼──────────────────────────┤
+    │ Message encoding  │ Error vector    │ Syndrome                 │
+    │ Public key        │ Generator matrix│ Parity check matrix      │
+    │ Ciphertext size   │ Larger          │ Smaller                  │
+    │ Security proof    │ Equivalent      │ Equivalent               │
+    │ Used in           │ Classic McEliece│ Basis for hybrids        │
+    └─────────────────────────────────────────────────────────────────┘
+    
+    Both are duals of each other with equivalent security.
+    """)
+
+comparison_mceliece()
+```

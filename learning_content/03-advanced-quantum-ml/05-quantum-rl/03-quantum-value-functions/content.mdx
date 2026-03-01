@@ -1,0 +1,614 @@
+---
+title: "Quantum Value Function Approximation"
+description: "Learn to use quantum circuits for value function approximation in reinforcement learning, including Q-function estimation and temporal difference methods."
+estimatedMinutes: 60
+difficulty: "advanced"
+tags: ["quantum-value-function", "q-learning", "td-learning", "function-approximation", "quantum-q-network", "value-estimation"]
+---
+
+# Quantum Value Function Approximation
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Design quantum circuits for value estimation
+- Implement quantum Q-function approximators
+- Apply TD learning with quantum value functions
+- Combine quantum value estimation with classical control
+- Handle function approximation errors
+- Train quantum value networks efficiently
+
+## 1. Quantum Value Function Architecture
+
+<Definition term="Quantum Q-Network">
+A parameterized quantum circuit that takes encoded state (and optionally action) as input and outputs an estimate of the Q-value Q(s,a) through expectation value measurement.
+</Definition>
+
+<Formula>
+\text{Quantum Q-function:}
+\\[8pt]
+Q_\theta(s, a) = \langle 0|U^\dagger(s,a,\theta) \cdot O \cdot U(s,a,\theta)|0\rangle
+\\[8pt]
+\text{where } O \text{ is an observable (e.g., } Z_0\text{) and } U \text{ encodes state, action, and parameters}
+</Formula>
+
+```python
+import numpy as np
+from typing import Tuple, List, Dict
+
+class QuantumQFunction:
+    """Quantum circuit for Q-value estimation."""
+
+    def __init__(self, n_qubits: int, n_actions: int, n_layers: int = 3):
+        self.n_qubits = n_qubits
+        self.n_actions = n_actions
+        self.n_layers = n_layers
+        self.dim = 2**n_qubits
+
+        # Parameters: separate circuit per action or shared with action encoding
+        params_per_layer = 2 * n_qubits
+        self.params = np.random.randn(n_layers * params_per_layer) * 0.1
+
+    def _ry_gate(self, theta: float) -> np.ndarray:
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        return np.array([[c, -s], [s, c]])
+
+    def _rz_gate(self, theta: float) -> np.ndarray:
+        return np.array([[np.exp(-1j*theta/2), 0],
+                        [0, np.exp(1j*theta/2)]])
+
+    def _apply_gate(self, state: np.ndarray, gate: np.ndarray,
+                    qubit: int) -> np.ndarray:
+        full_gate = np.eye(1)
+        for q in range(self.n_qubits):
+            full_gate = np.kron(full_gate,
+                               gate if q == qubit else np.eye(2))
+        return full_gate @ state
+
+    def encode_state_action(self, s: np.ndarray, a: int) -> np.ndarray:
+        """Encode state and action into quantum state."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1.0
+
+        # State encoding
+        for i in range(min(len(s), self.n_qubits - 1)):
+            angle = np.pi * np.tanh(s[i])
+            ry = self._ry_gate(angle)
+            state = self._apply_gate(state, ry, i)
+
+        # Action encoding on last qubit(s)
+        action_angle = np.pi * a / self.n_actions
+        ry = self._ry_gate(action_angle)
+        state = self._apply_gate(state, ry, self.n_qubits - 1)
+
+        return state
+
+    def variational_circuit(self, state: np.ndarray) -> np.ndarray:
+        """Apply variational layers."""
+        params_per_layer = 2 * self.n_qubits
+
+        for layer in range(self.n_layers):
+            layer_params = self.params[layer*params_per_layer:
+                                       (layer+1)*params_per_layer]
+
+            for q in range(self.n_qubits):
+                ry = self._ry_gate(layer_params[q])
+                rz = self._rz_gate(layer_params[self.n_qubits + q])
+                state = self._apply_gate(state, ry, q)
+                state = self._apply_gate(state, rz, q)
+
+            # Entanglement
+            if layer < self.n_layers - 1:
+                for q in range(self.n_qubits - 1):
+                    for i in range(self.dim):
+                        bits = format(i, f'0{self.n_qubits}b')
+                        if bits[q] == '1' and bits[q+1] == '1':
+                            state[i] *= -1
+
+        return state
+
+    def get_q_value(self, s: np.ndarray, a: int) -> float:
+        """Compute Q(s, a)."""
+        state = self.encode_state_action(s, a)
+        state = self.variational_circuit(state)
+
+        # Measure ⟨Z_0⟩ as Q-value
+        probs = np.abs(state)**2
+        p0 = sum(probs[i] for i in range(self.dim)
+                 if (i >> (self.n_qubits - 1)) & 1 == 0)
+        expectation = 2 * p0 - 1  # Map to [-1, 1]
+
+        # Scale to reasonable Q-value range
+        return expectation * 10  # Adjust scaling as needed
+
+    def get_all_q_values(self, s: np.ndarray) -> np.ndarray:
+        """Get Q-values for all actions."""
+        return np.array([self.get_q_value(s, a)
+                        for a in range(self.n_actions)])
+
+    def get_best_action(self, s: np.ndarray) -> int:
+        """Get action with highest Q-value."""
+        return np.argmax(self.get_all_q_values(s))
+```
+
+## 2. Separate Q-Networks Per Action
+
+```python
+class SeparateQNetworks:
+    """Individual quantum circuit per action."""
+
+    def __init__(self, n_qubits: int, n_actions: int, n_layers: int = 2):
+        self.n_qubits = n_qubits
+        self.n_actions = n_actions
+        self.n_layers = n_layers
+        self.dim = 2**n_qubits
+
+        # Separate parameters for each action
+        params_per_layer = 2 * n_qubits
+        params_per_action = n_layers * params_per_layer
+        self.params = np.random.randn(n_actions, params_per_action) * 0.1
+
+    def _ry_gate(self, theta: float) -> np.ndarray:
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        return np.array([[c, -s], [s, c]])
+
+    def _apply_gate(self, state: np.ndarray, gate: np.ndarray,
+                    qubit: int) -> np.ndarray:
+        full_gate = np.eye(1)
+        for q in range(self.n_qubits):
+            full_gate = np.kron(full_gate,
+                               gate if q == qubit else np.eye(2))
+        return full_gate @ state
+
+    def encode_state(self, s: np.ndarray) -> np.ndarray:
+        """Encode state only."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1.0
+
+        for i in range(min(len(s), self.n_qubits)):
+            angle = np.pi * np.tanh(s[i])
+            ry = self._ry_gate(angle)
+            state = self._apply_gate(state, ry, i)
+
+        return state
+
+    def get_q_value(self, s: np.ndarray, a: int) -> float:
+        """Get Q(s,a) using action-specific circuit."""
+        state = self.encode_state(s)
+
+        # Apply action-specific variational layers
+        params = self.params[a]
+        params_per_layer = 2 * self.n_qubits
+
+        for layer in range(self.n_layers):
+            layer_params = params[layer*params_per_layer:
+                                  (layer+1)*params_per_layer]
+
+            for q in range(self.n_qubits):
+                ry = self._ry_gate(layer_params[q])
+                state = self._apply_gate(state, ry, q)
+
+        # Measure
+        probs = np.abs(state)**2
+        p0 = sum(probs[i] for i in range(self.dim)
+                 if (i >> (self.n_qubits - 1)) & 1 == 0)
+
+        return (2 * p0 - 1) * 10
+
+    def get_all_q_values(self, s: np.ndarray) -> np.ndarray:
+        return np.array([self.get_q_value(s, a)
+                        for a in range(self.n_actions)])
+```
+
+## 3. Quantum TD Learning
+
+<Warning>
+TD learning with quantum value functions requires computing gradients of the TD error, which involves both the parameter-shift rule and careful handling of bootstrap targets.
+</Warning>
+
+```python
+class QuantumTDLearner:
+    """TD learning with quantum value function."""
+
+    def __init__(self, q_function: QuantumQFunction,
+                 alpha: float = 0.1, gamma: float = 0.99,
+                 epsilon: float = 0.1):
+        self.q_func = q_function
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.shift = np.pi / 2
+
+    def select_action(self, s: np.ndarray) -> int:
+        """Epsilon-greedy action selection."""
+        if np.random.random() < self.epsilon:
+            return np.random.randint(self.q_func.n_actions)
+        return self.q_func.get_best_action(s)
+
+    def compute_td_error(self, s: np.ndarray, a: int, r: float,
+                         s_next: np.ndarray, done: bool) -> float:
+        """Compute TD error."""
+        q_current = self.q_func.get_q_value(s, a)
+
+        if done:
+            td_target = r
+        else:
+            q_next = np.max(self.q_func.get_all_q_values(s_next))
+            td_target = r + self.gamma * q_next
+
+        return td_target - q_current
+
+    def compute_gradient(self, s: np.ndarray, a: int) -> np.ndarray:
+        """Compute gradient of Q(s,a) w.r.t. parameters."""
+        gradients = np.zeros_like(self.q_func.params)
+        original_params = self.q_func.params.copy()
+
+        for i in range(len(self.q_func.params)):
+            # Forward shift
+            self.q_func.params = original_params.copy()
+            self.q_func.params[i] += self.shift
+            q_plus = self.q_func.get_q_value(s, a)
+
+            # Backward shift
+            self.q_func.params = original_params.copy()
+            self.q_func.params[i] -= self.shift
+            q_minus = self.q_func.get_q_value(s, a)
+
+            gradients[i] = (q_plus - q_minus) / 2
+
+        self.q_func.params = original_params
+        return gradients
+
+    def update(self, s: np.ndarray, a: int, r: float,
+               s_next: np.ndarray, done: bool):
+        """Perform TD update."""
+        td_error = self.compute_td_error(s, a, r, s_next, done)
+        gradient = self.compute_gradient(s, a)
+
+        # Semi-gradient update (don't differentiate through target)
+        self.q_func.params += self.alpha * td_error * gradient
+
+    def train_episode(self, env, max_steps: int = 100) -> float:
+        """Train for one episode."""
+        state = env.reset()
+        state_vec = self._to_vector(state)
+        total_reward = 0
+
+        for _ in range(max_steps):
+            action = self.select_action(state_vec)
+            next_state, reward, done = env.step(action)
+            next_state_vec = self._to_vector(next_state)
+
+            self.update(state_vec, action, reward, next_state_vec, done)
+
+            total_reward += reward
+            state_vec = next_state_vec
+
+            if done:
+                break
+
+        return total_reward
+
+    def _to_vector(self, state) -> np.ndarray:
+        """Convert state to vector."""
+        if isinstance(state, np.ndarray):
+            return state
+        return np.array([state])
+```
+
+## 4. Experience Replay for Quantum Q-Learning
+
+```python
+class ExperienceReplay:
+    """Experience replay buffer for stable quantum Q-learning."""
+
+    def __init__(self, capacity: int = 10000):
+        self.capacity = capacity
+        self.buffer = []
+        self.position = 0
+
+    def push(self, state: np.ndarray, action: int, reward: float,
+             next_state: np.ndarray, done: bool):
+        """Store transition."""
+        if len(self.buffer) < self.capacity:
+            self.buffer.append(None)
+        self.buffer[self.position] = (state, action, reward, next_state, done)
+        self.position = (self.position + 1) % self.capacity
+
+    def sample(self, batch_size: int) -> List[Tuple]:
+        """Sample random batch."""
+        indices = np.random.randint(0, len(self.buffer), batch_size)
+        return [self.buffer[i] for i in indices]
+
+    def __len__(self):
+        return len(self.buffer)
+
+
+class QuantumDQN:
+    """Deep Q-Network with quantum value function."""
+
+    def __init__(self, n_qubits: int, n_actions: int,
+                 alpha: float = 0.01, gamma: float = 0.99,
+                 epsilon_start: float = 1.0, epsilon_end: float = 0.1,
+                 epsilon_decay: float = 0.995,
+                 buffer_size: int = 10000, batch_size: int = 32,
+                 target_update: int = 100):
+        self.q_network = QuantumQFunction(n_qubits, n_actions)
+        self.target_network = QuantumQFunction(n_qubits, n_actions)
+        self.target_network.params = self.q_network.params.copy()
+
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon_start
+        self.epsilon_end = epsilon_end
+        self.epsilon_decay = epsilon_decay
+        self.batch_size = batch_size
+        self.target_update = target_update
+
+        self.replay_buffer = ExperienceReplay(buffer_size)
+        self.steps = 0
+        self.shift = np.pi / 2
+
+    def select_action(self, s: np.ndarray) -> int:
+        """Epsilon-greedy with decay."""
+        if np.random.random() < self.epsilon:
+            return np.random.randint(self.q_network.n_actions)
+        return self.q_network.get_best_action(s)
+
+    def train_step(self):
+        """Train on batch from replay buffer."""
+        if len(self.replay_buffer) < self.batch_size:
+            return
+
+        batch = self.replay_buffer.sample(self.batch_size)
+
+        for state, action, reward, next_state, done in batch:
+            # TD target using target network
+            if done:
+                target = reward
+            else:
+                q_next = np.max(self.target_network.get_all_q_values(next_state))
+                target = reward + self.gamma * q_next
+
+            # Current Q-value and gradient
+            q_current = self.q_network.get_q_value(state, action)
+            td_error = target - q_current
+
+            gradient = self._compute_gradient(state, action)
+            self.q_network.params += self.alpha * td_error * gradient
+
+        self.steps += 1
+
+        # Update target network
+        if self.steps % self.target_update == 0:
+            self.target_network.params = self.q_network.params.copy()
+
+        # Decay epsilon
+        self.epsilon = max(self.epsilon_end,
+                          self.epsilon * self.epsilon_decay)
+
+    def _compute_gradient(self, s: np.ndarray, a: int) -> np.ndarray:
+        """Gradient using parameter-shift."""
+        gradients = np.zeros_like(self.q_network.params)
+        original = self.q_network.params.copy()
+
+        for i in range(len(self.q_network.params)):
+            self.q_network.params = original.copy()
+            self.q_network.params[i] += self.shift
+            q_plus = self.q_network.get_q_value(s, a)
+
+            self.q_network.params = original.copy()
+            self.q_network.params[i] -= self.shift
+            q_minus = self.q_network.get_q_value(s, a)
+
+            gradients[i] = (q_plus - q_minus) / 2
+
+        self.q_network.params = original
+        return gradients
+
+    def train_episode(self, env, max_steps: int = 100) -> float:
+        """Train for one episode."""
+        state = env.reset()
+        total_reward = 0
+
+        for _ in range(max_steps):
+            action = self.select_action(state)
+            next_state, reward, done = env.step(action)
+
+            self.replay_buffer.push(state, action, reward, next_state, done)
+            self.train_step()
+
+            total_reward += reward
+            state = next_state
+
+            if done:
+                break
+
+        return total_reward
+```
+
+## 5. Quantum State-Value Functions
+
+```python
+class QuantumVFunction:
+    """Quantum circuit for state-value estimation V(s)."""
+
+    def __init__(self, n_qubits: int, n_layers: int = 3):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dim = 2**n_qubits
+
+        params_per_layer = 2 * n_qubits
+        self.params = np.random.randn(n_layers * params_per_layer) * 0.1
+
+    def _ry_gate(self, theta: float) -> np.ndarray:
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        return np.array([[c, -s], [s, c]])
+
+    def _apply_gate(self, state: np.ndarray, gate: np.ndarray,
+                    qubit: int) -> np.ndarray:
+        full_gate = np.eye(1)
+        for q in range(self.n_qubits):
+            full_gate = np.kron(full_gate,
+                               gate if q == qubit else np.eye(2))
+        return full_gate @ state
+
+    def get_value(self, s: np.ndarray) -> float:
+        """Compute V(s)."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1.0
+
+        # Encode state
+        for i in range(min(len(s), self.n_qubits)):
+            ry = self._ry_gate(np.pi * np.tanh(s[i]))
+            state = self._apply_gate(state, ry, i)
+
+        # Variational
+        params_per_layer = 2 * self.n_qubits
+        for layer in range(self.n_layers):
+            layer_params = self.params[layer*params_per_layer:
+                                       (layer+1)*params_per_layer]
+            for q in range(self.n_qubits):
+                ry = self._ry_gate(layer_params[q])
+                state = self._apply_gate(state, ry, q)
+
+        # Measure
+        probs = np.abs(state)**2
+        p0 = sum(probs[i] for i in range(self.dim)
+                 if (i >> (self.n_qubits - 1)) & 1 == 0)
+
+        return (2 * p0 - 1) * 10
+
+
+class QuantumAdvantageActorCritic:
+    """A2C with quantum policy and value function."""
+
+    def __init__(self, n_qubits: int, n_actions: int,
+                 actor_lr: float = 0.01, critic_lr: float = 0.1,
+                 gamma: float = 0.99):
+        from typing import TYPE_CHECKING
+        # Assume QuantumPolicy from previous lesson
+        self.actor_params = np.random.randn(2 * n_qubits * 2) * 0.1
+        self.critic = QuantumVFunction(n_qubits)
+
+        self.n_qubits = n_qubits
+        self.n_actions = n_actions
+        self.actor_lr = actor_lr
+        self.critic_lr = critic_lr
+        self.gamma = gamma
+        self.shift = np.pi / 2
+
+    def get_policy(self, s: np.ndarray) -> np.ndarray:
+        """Simple policy from actor params."""
+        logits = np.zeros(self.n_actions)
+        for a in range(self.n_actions):
+            logits[a] = np.sum(s * self.actor_params[a*len(s):(a+1)*len(s)]
+                               if (a+1)*len(s) <= len(self.actor_params)
+                               else self.actor_params[:len(s)])
+        exp_logits = np.exp(logits - np.max(logits))
+        return exp_logits / exp_logits.sum()
+
+    def select_action(self, s: np.ndarray) -> int:
+        probs = self.get_policy(s)
+        return np.random.choice(self.n_actions, p=probs)
+
+    def update(self, s: np.ndarray, a: int, r: float,
+               s_next: np.ndarray, done: bool):
+        """Update actor and critic."""
+        # Advantage
+        v_current = self.critic.get_value(s)
+        v_next = 0 if done else self.critic.get_value(s_next)
+        td_target = r + self.gamma * v_next
+        advantage = td_target - v_current
+
+        # Critic update (gradient descent on TD error)
+        critic_grad = self._critic_gradient(s)
+        self.critic.params += self.critic_lr * advantage * critic_grad
+
+        # Actor update (policy gradient)
+        probs = self.get_policy(s)
+        grad = np.zeros_like(self.actor_params)
+        for i in range(min(len(s), len(grad) // self.n_actions)):
+            grad[a*len(s) + i] = s[i] * (1 - probs[a])
+            for a2 in range(self.n_actions):
+                if a2 != a:
+                    grad[a2*len(s) + i] = -s[i] * probs[a2]
+        self.actor_params += self.actor_lr * advantage * grad
+
+    def _critic_gradient(self, s: np.ndarray) -> np.ndarray:
+        """Parameter-shift gradient for critic."""
+        gradients = np.zeros_like(self.critic.params)
+        original = self.critic.params.copy()
+
+        for i in range(len(self.critic.params)):
+            self.critic.params = original.copy()
+            self.critic.params[i] += self.shift
+            v_plus = self.critic.get_value(s)
+
+            self.critic.params = original.copy()
+            self.critic.params[i] -= self.shift
+            v_minus = self.critic.get_value(s)
+
+            gradients[i] = (v_plus - v_minus) / 2
+
+        self.critic.params = original
+        return gradients
+```
+
+## 6. Training Considerations
+
+```python
+class QuantumValueTrainingUtils:
+    """Utilities for training quantum value functions."""
+
+    @staticmethod
+    def normalize_rewards(rewards: np.ndarray) -> np.ndarray:
+        """Normalize rewards for stable training."""
+        if len(rewards) > 1:
+            return (rewards - np.mean(rewards)) / (np.std(rewards) + 1e-8)
+        return rewards
+
+    @staticmethod
+    def polyak_average(target_params: np.ndarray,
+                       source_params: np.ndarray,
+                       tau: float = 0.01) -> np.ndarray:
+        """Soft update for target network."""
+        return tau * source_params + (1 - tau) * target_params
+
+    @staticmethod
+    def clip_gradients(gradients: np.ndarray,
+                       max_norm: float = 1.0) -> np.ndarray:
+        """Clip gradient norm."""
+        norm = np.linalg.norm(gradients)
+        if norm > max_norm:
+            return gradients * (max_norm / norm)
+        return gradients
+
+    @staticmethod
+    def double_q_target(q1: QuantumQFunction, q2: QuantumQFunction,
+                        s_next: np.ndarray, gamma: float,
+                        reward: float, done: bool) -> float:
+        """Double Q-learning target."""
+        if done:
+            return reward
+
+        # Use q1 to select action, q2 to evaluate
+        best_action = q1.get_best_action(s_next)
+        q_value = q2.get_q_value(s_next, best_action)
+
+        return reward + gamma * q_value
+```
+
+## Summary
+
+In this lesson, you learned:
+
+- **Quantum Q-networks**: Circuits that estimate Q(s,a) through expectation values
+- **Action encoding**: Shared vs. separate networks for different actions
+- **Quantum TD learning**: Combining parameter-shift with TD updates
+- **Experience replay**: Stabilizing quantum Q-learning with replay buffers
+- **Target networks**: Reducing instability with slowly-updated targets
+- **Value vs. Q-functions**: State-value estimation for actor-critic methods
+
+Quantum value functions leverage circuit expressiveness while maintaining compatibility with classical RL algorithms.

@@ -1,0 +1,766 @@
+---
+title: "Hard Lattice Problems: SVP, CVP, and the Foundations of Security"
+description: "Deep dive into the computational problems that make lattice-based cryptography secure. Understand SVP, CVP, their approximation variants, and why these problems resist quantum attacks."
+duration: 75
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Define and distinguish SVP, CVP, SIVP, and their variants
+- Understand the complexity landscape of lattice problems
+- Explain approximation factors and their role in security
+- Analyze why no efficient quantum algorithms exist for these problems
+- Implement and visualize solutions to small lattice problems
+- Connect problem hardness to cryptographic security
+
+## 1. The Shortest Vector Problem (SVP)
+
+The Shortest Vector Problem is the most fundamental hard problem on lattices.
+
+<Definition term="Shortest Vector Problem (SVP)">
+Given a lattice basis $\mathbf{B}$, find a nonzero lattice vector $\mathbf{v} \in \mathcal{L}(\mathbf{B})$ such that $\|\mathbf{v}\| = \lambda_1(\mathcal{L})$, where $\lambda_1$ is the first successive minimum (length of shortest nonzero vector).
+</Definition>
+
+### SVP Variants
+
+<Formula>
+$$\text{Exact SVP: Find } \mathbf{v} \text{ with } \|\mathbf{v}\| = \lambda_1$$
+$$\gamma\text{-SVP: Find } \mathbf{v} \text{ with } \|\mathbf{v}\| \leq \gamma \cdot \lambda_1$$
+$$\text{GapSVP}_\gamma: \text{Decide if } \lambda_1 \leq 1 \text{ or } \lambda_1 > \gamma$$
+</Formula>
+
+```python
+import numpy as np
+from typing import List, Tuple, Optional
+from itertools import product
+
+class SVPSolver:
+    """
+    Solvers for the Shortest Vector Problem.
+    
+    WARNING: These are exponential-time algorithms suitable only
+    for small dimensions. They demonstrate the problem, not
+    practical cryptanalysis.
+    """
+    
+    def __init__(self, basis: np.ndarray):
+        """Initialize with lattice basis."""
+        self.basis = np.array(basis, dtype=float)
+        self.dimension = basis.shape[0]
+        self.rank = basis.shape[1]
+    
+    def enumerate_svp(self, bound: int = 10) -> Tuple[np.ndarray, float]:
+        """
+        Solve SVP by exhaustive enumeration.
+        
+        Enumerate all lattice vectors with coefficients in [-bound, bound]
+        and return the shortest nonzero one.
+        
+        Complexity: O((2*bound+1)^n) - exponential!
+        
+        Args:
+            bound: Search range for coefficients
+        
+        Returns:
+            (shortest_vector, length)
+        """
+        shortest_vec = None
+        shortest_len = float('inf')
+        
+        # Generate all coefficient combinations
+        ranges = [range(-bound, bound + 1) for _ in range(self.rank)]
+        
+        for coeffs in product(*ranges):
+            if all(c == 0 for c in coeffs):
+                continue  # Skip zero vector
+            
+            # Generate lattice point
+            vec = self.basis @ np.array(coeffs)
+            length = np.linalg.norm(vec)
+            
+            if length < shortest_len:
+                shortest_len = length
+                shortest_vec = vec.copy()
+        
+        return shortest_vec, shortest_len
+    
+    def schnorr_euchner_enum(self, radius: float) -> List[np.ndarray]:
+        """
+        Schnorr-Euchner enumeration within a given radius.
+        
+        More sophisticated than naive enumeration, uses
+        Gram-Schmidt to prune the search tree.
+        
+        Args:
+            radius: Maximum length of vectors to find
+        
+        Returns:
+            List of all lattice vectors with length ≤ radius
+        """
+        n = self.rank
+        
+        # Gram-Schmidt orthogonalization
+        B = self.basis.copy()
+        B_star = np.zeros_like(B)
+        mu = np.zeros((n, n))
+        
+        for i in range(n):
+            B_star[:, i] = B[:, i]
+            for j in range(i):
+                mu[i, j] = np.dot(B[:, i], B_star[:, j]) / np.dot(B_star[:, j], B_star[:, j])
+                B_star[:, i] -= mu[i, j] * B_star[:, j]
+        
+        # GS norms squared
+        gs_norms_sq = np.array([np.dot(B_star[:, i], B_star[:, i]) for i in range(n)])
+        
+        # Enumeration with pruning
+        found = []
+        
+        def enumerate_recursive(k: int, remaining_radius_sq: float, 
+                                partial_coeffs: List[int], center: np.ndarray):
+            """Recursively enumerate with pruning."""
+            if k < 0:
+                # Complete vector found
+                vec = self.basis @ np.array(partial_coeffs[::-1])
+                if np.linalg.norm(vec) > 1e-10:  # Non-zero
+                    found.append(vec)
+                return
+            
+            # Compute bounds for coefficient k
+            proj = np.dot(center, B_star[:, k]) / gs_norms_sq[k]
+            
+            # Range of valid coefficients
+            delta = np.sqrt(remaining_radius_sq / gs_norms_sq[k])
+            c_min = int(np.ceil(proj - delta))
+            c_max = int(np.floor(proj + delta))
+            
+            # Enumerate in Schnorr-Euchner order (closest to proj first)
+            candidates = sorted(range(c_min, c_max + 1), 
+                              key=lambda c: abs(c - proj))
+            
+            for c in candidates:
+                new_remaining = remaining_radius_sq - gs_norms_sq[k] * (c - proj)**2
+                if new_remaining < 0:
+                    continue
+                
+                new_center = center - c * B[:, k]
+                enumerate_recursive(k - 1, new_remaining, 
+                                  partial_coeffs + [c], new_center)
+        
+        enumerate_recursive(n - 1, radius**2, [], np.zeros(self.dimension))
+        return found
+
+
+def demonstrate_svp():
+    """
+    Demonstrate SVP on small lattices.
+    """
+    print("SHORTEST VECTOR PROBLEM DEMONSTRATION")
+    print("=" * 60)
+    
+    # Example 1: Simple 2D lattice
+    B1 = np.array([
+        [4, 1],
+        [0, 3]
+    ])
+    
+    solver1 = SVPSolver(B1)
+    shortest, length = solver1.enumerate_svp(bound=20)
+    
+    print(f"\nLattice 1:")
+    print(f"Basis:\n{B1}")
+    print(f"Shortest vector: {shortest}")
+    print(f"Length (λ₁): {length:.4f}")
+    
+    # Verify with determinant bound
+    det = abs(np.linalg.det(B1))
+    n = 2
+    minkowski = np.sqrt(n) * (det ** (1/n))
+    print(f"Minkowski bound: {minkowski:.4f}")
+    print(f"Satisfies bound: {length <= minkowski}")
+    
+    # Example 2: "Bad" basis for the same lattice  
+    # Same lattice, different basis
+    U = np.array([[1, 1], [0, 1]])  # Unimodular
+    B2 = B1 @ U
+    
+    solver2 = SVPSolver(B2)
+    shortest2, length2 = solver2.enumerate_svp(bound=20)
+    
+    print(f"\nLattice 2 (same lattice, different basis):")
+    print(f"Basis:\n{B2}")
+    print(f"Shortest vector: {shortest2}")
+    print(f"Length (λ₁): {length2:.4f}")
+    print(f"Same λ₁ as Lattice 1: {np.isclose(length, length2)}")
+
+demonstrate_svp()
+```
+
+## 2. The Closest Vector Problem (CVP)
+
+<Definition term="Closest Vector Problem (CVP)">
+Given a lattice basis $\mathbf{B}$ and a target vector $\mathbf{t}$, find a lattice vector $\mathbf{v} \in \mathcal{L}(\mathbf{B})$ that minimizes $\|\mathbf{v} - \mathbf{t}\|$.
+</Definition>
+
+CVP is at least as hard as SVP, and is central to many lattice-based encryption schemes.
+
+### Relationship Between SVP and CVP
+
+<Formula>
+$$\text{CVP} \geq_P \text{SVP}$$
+$$\text{(CVP is at least as hard as SVP)}$$
+</Formula>
+
+```python
+class CVPSolver:
+    """
+    Solvers for the Closest Vector Problem.
+    """
+    
+    def __init__(self, basis: np.ndarray):
+        self.basis = np.array(basis, dtype=float)
+        self.dimension = basis.shape[0]
+        self.rank = basis.shape[1]
+    
+    def enumerate_cvp(self, target: np.ndarray, bound: int = 10) -> Tuple[np.ndarray, float]:
+        """
+        Solve CVP by exhaustive enumeration.
+        
+        Args:
+            target: Target vector
+            bound: Search range for coefficients
+        
+        Returns:
+            (closest_vector, distance)
+        """
+        target = np.array(target, dtype=float)
+        closest_vec = None
+        closest_dist = float('inf')
+        
+        ranges = [range(-bound, bound + 1) for _ in range(self.rank)]
+        
+        for coeffs in product(*ranges):
+            vec = self.basis @ np.array(coeffs)
+            dist = np.linalg.norm(vec - target)
+            
+            if dist < closest_dist:
+                closest_dist = dist
+                closest_vec = vec.copy()
+        
+        return closest_vec, closest_dist
+    
+    def babai_nearest_plane(self, target: np.ndarray) -> np.ndarray:
+        """
+        Babai's nearest plane algorithm (approximate CVP).
+        
+        Polynomial time but only gives approximate answer.
+        Quality depends on basis quality.
+        """
+        target = np.array(target, dtype=float)
+        B = self.basis.copy()
+        n = self.rank
+        
+        # Gram-Schmidt
+        B_star = np.zeros_like(B)
+        mu = np.zeros((n, n))
+        
+        for i in range(n):
+            B_star[:, i] = B[:, i]
+            for j in range(i):
+                mu[i, j] = np.dot(B[:, i], B_star[:, j]) / np.dot(B_star[:, j], B_star[:, j])
+                B_star[:, i] -= mu[i, j] * B_star[:, j]
+        
+        # Nearest plane
+        b = target.copy()
+        coeffs = np.zeros(n)
+        
+        for i in range(n - 1, -1, -1):
+            norm_sq = np.dot(B_star[:, i], B_star[:, i])
+            coeffs[i] = round(np.dot(b, B_star[:, i]) / norm_sq)
+            b -= coeffs[i] * B[:, i]
+        
+        return self.basis @ coeffs
+    
+    def cvp_via_svp(self, target: np.ndarray, bound: int = 10) -> np.ndarray:
+        """
+        Reduce CVP to SVP using embedding technique.
+        
+        Embed target into an (n+1)-dimensional lattice:
+        L' = [(B, 0), (t, M)]
+        
+        A short vector in L' reveals close vectors to t.
+        """
+        target = np.array(target, dtype=float)
+        n = self.rank
+        m = self.dimension
+        
+        # Embedding constant (should be large)
+        M = bound * np.max(np.abs(self.basis))
+        
+        # Construct embedded lattice
+        # New basis has dimension (m+1) x (n+1)
+        B_embedded = np.zeros((m + 1, n + 1))
+        B_embedded[:m, :n] = self.basis
+        B_embedded[:m, n] = target
+        B_embedded[m, n] = M
+        
+        # Solve SVP on embedded lattice
+        svp_solver = SVPSolver(B_embedded)
+        shortest, _ = svp_solver.enumerate_svp(bound=bound)
+        
+        # Extract CVP solution from last coordinate
+        if abs(shortest[-1]) > 1e-10:
+            k = round(shortest[-1] / M)
+            if k != 0:
+                cvp_solution = (target - shortest[:-1]) / k
+                return self.babai_nearest_plane(cvp_solution)  # Snap to lattice
+        
+        return self.babai_nearest_plane(target)
+
+
+def demonstrate_cvp():
+    """
+    Demonstrate CVP on small lattices.
+    """
+    print("\nCLOSEST VECTOR PROBLEM DEMONSTRATION")
+    print("=" * 60)
+    
+    # Create lattice
+    B = np.array([
+        [3, 1],
+        [1, 2]
+    ])
+    
+    # Target point (not on lattice)
+    target = np.array([4.7, 3.2])
+    
+    solver = CVPSolver(B)
+    
+    # Exact solution by enumeration
+    closest, dist = solver.enumerate_cvp(target, bound=20)
+    
+    # Approximate solution by Babai
+    approx = solver.babai_nearest_plane(target)
+    approx_dist = np.linalg.norm(approx - target)
+    
+    print(f"\nBasis:\n{B}")
+    print(f"Target: {target}")
+    print(f"\nExact CVP solution: {closest}")
+    print(f"Distance: {dist:.4f}")
+    print(f"\nBabai approximation: {approx}")
+    print(f"Distance: {approx_dist:.4f}")
+    print(f"Approximation ratio: {approx_dist/dist:.4f}")
+
+demonstrate_cvp()
+```
+
+## 3. SIVP and Other Variants
+
+<Definition term="Shortest Independent Vectors Problem (SIVP)">
+Given a lattice basis $\mathbf{B}$, find $n$ linearly independent lattice vectors $\mathbf{v}_1, \ldots, \mathbf{v}_n$ such that $\max_i \|\mathbf{v}_i\| = \lambda_n(\mathcal{L})$, the $n$-th successive minimum.
+</Definition>
+
+### Problem Hierarchy
+
+```python
+def problem_hierarchy():
+    """
+    Overview of lattice problem variants and their relationships.
+    """
+    problems = {
+        'Exact Problems': {
+            'SVP': 'Find shortest nonzero vector',
+            'CVP': 'Find closest lattice vector to target',
+            'SIVP': 'Find n shortest independent vectors',
+            'Complexity': 'NP-hard (under randomized reductions)'
+        },
+        'Approximate Problems': {
+            'γ-SVP': f'Find v with ||v|| ≤ γ·λ₁',
+            'γ-CVP': f'Find v with ||v-t|| ≤ γ·dist(t,L)',
+            'γ-SIVP': f'Find n vectors with max ||vᵢ|| ≤ γ·λₙ',
+            'Complexity': 'Hard for polynomial γ, easy for exponential γ'
+        },
+        'Gap Problems': {
+            'GapSVP_γ': 'Decide if λ₁ ≤ 1 or λ₁ > γ',
+            'GapCVP_γ': 'Decide if dist(t,L) ≤ 1 or > γ',
+            'Use': 'Foundation for worst-case to average-case reductions'
+        },
+        'Search vs Decision': {
+            'Search': 'Find the vector (harder)',
+            'Decision': 'Decide yes/no (might be easier)',
+            'Relationship': 'For lattice problems, often equivalent'
+        }
+    }
+    
+    print("LATTICE PROBLEM HIERARCHY")
+    print("=" * 60)
+    
+    for category, details in problems.items():
+        print(f"\n{category}")
+        print("-" * 40)
+        for name, description in details.items():
+            print(f"  {name}: {description}")
+
+problem_hierarchy()
+```
+
+## 4. Complexity of Lattice Problems
+
+### Hardness Results
+
+<Formula>
+$$\text{SVP is NP-hard under randomized reductions (Ajtai, 1998)}$$
+$$\text{CVP is NP-hard (van Emde Boas, 1981)}$$
+$$\text{GapSVP}_\gamma \text{ is NP-hard for } \gamma = O(1) \text{ (Micciancio, 2001)}$$
+</Formula>
+
+```python
+def complexity_landscape():
+    """
+    The complexity landscape of lattice problems.
+    """
+    complexity = {
+        'Exact SVP': {
+            'classical': 'NP-hard',
+            'best_algorithm': '2^O(n) time (enumeration)',
+            'quantum': 'No significant speedup known',
+            'practical_limit': 'n ≈ 70-80 dimensions'
+        },
+        'Approx SVP (γ = poly(n))': {
+            'classical': 'Believed hard',
+            'best_algorithm': '2^O(n) time (BKZ with large block)',
+            'quantum': 'No significant speedup known',
+            'security_basis': 'Kyber, Dilithium security'
+        },
+        'Approx SVP (γ = 2^O(n))': {
+            'classical': 'Polynomial time',
+            'best_algorithm': 'LLL algorithm',
+            'quantum': 'N/A (already easy)',
+            'use': 'Cryptanalysis tool, not secure'
+        },
+        'Exact CVP': {
+            'classical': 'NP-hard',
+            'best_algorithm': '2^O(n) time',
+            'quantum': 'No significant speedup known',
+            'relationship': 'At least as hard as SVP'
+        }
+    }
+    
+    print("COMPLEXITY LANDSCAPE OF LATTICE PROBLEMS")
+    print("=" * 60)
+    
+    for problem, details in complexity.items():
+        print(f"\n{problem}")
+        print("-" * 40)
+        for aspect, value in details.items():
+            print(f"  {aspect}: {value}")
+    
+    print("\n" + "=" * 60)
+    print("KEY INSIGHT FOR CRYPTOGRAPHY:")
+    print("Lattice problems with polynomial approximation factors")
+    print("appear to require exponential time, even for quantum computers.")
+
+complexity_landscape()
+```
+
+## 5. Best Known Algorithms
+
+### Enumeration Algorithms
+
+```python
+def algorithm_comparison():
+    """
+    Compare major algorithms for solving lattice problems.
+    """
+    algorithms = {
+        'Exhaustive Enumeration': {
+            'time': '2^O(n²)',
+            'space': 'Polynomial',
+            'approach': 'Try all coefficient combinations',
+            'practical': 'Only for n < 30'
+        },
+        'Kannan Enumeration': {
+            'time': 'n^(n/2+o(n))',
+            'space': 'Polynomial',
+            'approach': 'Smart tree traversal with pruning',
+            'practical': 'State-of-art for exact SVP'
+        },
+        'LLL Algorithm': {
+            'time': 'Polynomial: O(n^6 log³B)',
+            'space': 'Polynomial',
+            'approach': 'Iterative basis reduction',
+            'approximation': '2^(n/2) factor',
+            'practical': 'Standard preprocessing step'
+        },
+        'BKZ (Block Korkine-Zolotarev)': {
+            'time': '2^O(β) per block, poly iterations',
+            'space': 'Polynomial',
+            'approach': 'Block-wise SVP + LLL',
+            'approximation': '~β^(n/β) for block size β',
+            'practical': 'Adjustable time/quality tradeoff'
+        },
+        'Sieving (e.g., Hashsieve)': {
+            'time': '2^(0.292n + o(n))',
+            'space': '2^(0.2075n + o(n))',
+            'approach': 'Collect and combine short vectors',
+            'practical': 'Best asymptotic time, huge memory'
+        }
+    }
+    
+    print("LATTICE ALGORITHM COMPARISON")
+    print("=" * 60)
+    
+    for algo, details in algorithms.items():
+        print(f"\n{algo}")
+        print("-" * 40)
+        for key, value in details.items():
+            print(f"  {key}: {value}")
+
+algorithm_comparison()
+```
+
+### The BKZ Algorithm
+
+```python
+def bkz_conceptual(B: np.ndarray, block_size: int = 2) -> np.ndarray:
+    """
+    Simplified BKZ algorithm demonstration.
+    
+    BKZ processes the basis in blocks of size β, solving
+    SVP on each block to reduce the basis progressively.
+    
+    Args:
+        B: Input basis
+        block_size: β parameter (larger = better reduction, slower)
+    
+    Returns:
+        BKZ-reduced basis
+    """
+    from scipy.linalg import qr
+    
+    B = np.array(B, dtype=float)
+    n = B.shape[1]
+    
+    if block_size > n:
+        block_size = n
+    
+    # Simplified BKZ (not production quality)
+    changed = True
+    iterations = 0
+    max_iterations = 100
+    
+    while changed and iterations < max_iterations:
+        changed = False
+        iterations += 1
+        
+        for k in range(n - block_size + 1):
+            # Extract block
+            block_indices = range(k, min(k + block_size, n))
+            
+            # Project onto span of block (simplified)
+            block_basis = B[:, list(block_indices)]
+            
+            # Find shortest vector in projected block
+            # (In real BKZ, this uses enumeration or sieving)
+            if block_size <= 3:
+                solver = SVPSolver(block_basis)
+                try:
+                    sv, _ = solver.enumerate_svp(bound=50)
+                    
+                    # Try to improve basis
+                    # (Simplified insertion logic)
+                    if np.linalg.norm(sv) < np.linalg.norm(B[:, k]) * 0.99:
+                        # Find integer coefficients
+                        coeffs = np.linalg.lstsq(block_basis, sv, rcond=None)[0]
+                        if np.allclose(coeffs, np.round(coeffs), atol=1e-9):
+                            # Valid improvement found
+                            # In full BKZ, this triggers re-insertion
+                            changed = True
+                except:
+                    pass
+        
+        # Apply LLL to maintain size reduction
+        B = lll_reduce_simple(B)
+    
+    return B
+
+
+def lll_reduce_simple(B: np.ndarray, delta: float = 0.75) -> np.ndarray:
+    """Simple LLL for BKZ."""
+    B = np.array(B, dtype=float)
+    n = B.shape[1]
+    
+    def gs(B):
+        B_star = np.zeros_like(B)
+        mu = np.zeros((n, n))
+        for i in range(n):
+            B_star[:, i] = B[:, i]
+            for j in range(i):
+                if np.dot(B_star[:, j], B_star[:, j]) > 1e-10:
+                    mu[i, j] = np.dot(B[:, i], B_star[:, j]) / np.dot(B_star[:, j], B_star[:, j])
+                    B_star[:, i] -= mu[i, j] * B_star[:, j]
+        return B_star, mu
+    
+    k = 1
+    while k < n:
+        B_star, mu = gs(B)
+        
+        for j in range(k - 1, -1, -1):
+            if abs(mu[k, j]) > 0.5:
+                B[:, k] -= round(mu[k, j]) * B[:, j]
+                B_star, mu = gs(B)
+        
+        norm_k = np.dot(B_star[:, k], B_star[:, k])
+        norm_k1 = np.dot(B_star[:, k-1], B_star[:, k-1])
+        
+        if norm_k >= (delta - mu[k, k-1]**2) * norm_k1:
+            k += 1
+        else:
+            B[:, [k, k-1]] = B[:, [k-1, k]]
+            k = max(k - 1, 1)
+    
+    return B
+```
+
+## 6. Quantum Resistance
+
+<Warning>
+**Critical Point:** Unlike integer factorization or discrete logarithm, there are no known polynomial-time quantum algorithms for SVP or CVP.
+</Warning>
+
+### Why Lattice Problems Resist Quantum Attacks
+
+```python
+def quantum_resistance_analysis():
+    """
+    Analyze why lattice problems resist quantum attacks.
+    """
+    analysis = {
+        'No Hidden Subgroup Structure': {
+            'explanation': '''Shor's algorithm exploits the hidden subgroup 
+structure of factoring/DLP. Lattice problems don't have this structure.''',
+            'implication': 'Shor-like algorithms don\'t apply'
+        },
+        'No Quantum Speedup Known': {
+            'classical_svp': '2^(0.292n) sieving',
+            'quantum_svp': '2^(0.265n) quantum sieving (minor improvement)',
+            'speedup': 'Only polynomial, not exponential',
+            'implication': 'Quantum computers provide little advantage'
+        },
+        'Worst-Case Hardness': {
+            'explanation': '''Lattice problems are hard in the worst case,
+and average-case hardness can be proven to be equivalent.''',
+            'implication': 'No weak instances to exploit'
+        },
+        'No Period Finding': {
+            'explanation': '''The QFT-based period finding at the heart of
+Shor's algorithm has no analog for lattice problems.''',
+            'implication': 'Need fundamentally new quantum techniques'
+        }
+    }
+    
+    print("WHY LATTICE PROBLEMS ARE QUANTUM-RESISTANT")
+    print("=" * 60)
+    
+    for reason, details in analysis.items():
+        print(f"\n{reason}")
+        print("-" * 50)
+        for key, value in details.items():
+            if '\n' in str(value):
+                print(f"  {key}:")
+                for line in value.strip().split('\n'):
+                    print(f"    {line}")
+            else:
+                print(f"  {key}: {value}")
+    
+    print("\n" + "=" * 60)
+    print("CONCLUSION: Lattice problems are believed to be")
+    print("exponentially hard for both classical AND quantum computers.")
+
+quantum_resistance_analysis()
+```
+
+## 7. Security Parameters in Practice
+
+### NIST Security Levels
+
+```python
+def security_parameter_analysis():
+    """
+    How hard lattice problems translate to security levels.
+    """
+    # Root Hermite factor δ relates to approximation quality
+    # Best known attacks achieve δ ≈ 1.005 for large dimensions
+    
+    def required_dimension(security_bits: int, delta: float = 1.005) -> int:
+        """
+        Estimate lattice dimension for target security.
+        
+        Based on: log(δ) ≈ (log(δ))² · n / (4 · security_bits)
+        """
+        # Rough estimate based on sieving complexity
+        # 2^(0.292n) = 2^security_bits
+        # n ≈ security_bits / 0.292
+        return int(security_bits / 0.265)  # Quantum sieving constant
+    
+    security_levels = {
+        'NIST Level 1': {
+            'target_bits': 128,
+            'equivalent': 'AES-128 key search',
+            'dimension': required_dimension(128)
+        },
+        'NIST Level 3': {
+            'target_bits': 192,
+            'equivalent': 'AES-192 key search',
+            'dimension': required_dimension(192)
+        },
+        'NIST Level 5': {
+            'target_bits': 256,
+            'equivalent': 'AES-256 key search',
+            'dimension': required_dimension(256)
+        }
+    }
+    
+    print("SECURITY PARAMETERS FOR LATTICE-BASED CRYPTO")
+    print("=" * 60)
+    
+    for level, params in security_levels.items():
+        print(f"\n{level}")
+        print(f"  Target security: {params['target_bits']} bits")
+        print(f"  Equivalent to: {params['equivalent']}")
+        print(f"  Required dimension: ~{params['dimension']}")
+    
+    print("\n" + "-" * 60)
+    print("\nActual parameters from NIST standards:")
+    print("  Kyber-512:   n=512   (Level 1)")
+    print("  Kyber-768:   n=768   (Level 3)")
+    print("  Kyber-1024:  n=1024  (Level 5)")
+    print("\n(Actual security involves additional factors like")
+    print(" noise distribution, modulus choice, and structure.)")
+
+security_parameter_analysis()
+```
+
+## Summary
+
+In this lesson, you learned about hard lattice problems:
+
+1. **SVP** asks for the shortest nonzero vector in a lattice
+2. **CVP** asks for the closest lattice vector to a target
+3. **Approximation variants** (γ-SVP, γ-CVP) relax the exactness requirement
+4. **NP-hardness** results provide theoretical foundation for security
+5. **Best algorithms** (enumeration, sieving) are exponential in dimension
+6. **No quantum speedup** is known beyond minor polynomial factors
+7. **Security parameters** are chosen to make problems computationally infeasible
+8. **Worst-case to average-case reductions** ensure typical instances are hard
+
+These hard problems form the security foundation for all lattice-based cryptography. In the next lesson, we'll see how the Learning With Errors (LWE) problem builds on these foundations.
+
+## Further Reading
+
+- Next lesson: LWE Foundations
+- Related: BKZ algorithm analysis
+- Advanced: Lattice sieving algorithms

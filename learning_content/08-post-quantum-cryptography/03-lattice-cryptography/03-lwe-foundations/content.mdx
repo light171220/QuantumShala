@@ -1,0 +1,861 @@
+---
+title: "Learning With Errors: The Foundation of Modern Lattice Cryptography"
+description: "Master the Learning With Errors (LWE) problem, the cornerstone of post-quantum cryptographic constructions. Understand its mathematical formulation, security proofs, and why it enables secure encryption."
+duration: 80
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Define the LWE problem precisely in both search and decision variants
+- Understand the role of error distributions in LWE security
+- Explain the worst-case to average-case reduction
+- Implement LWE-based encryption from scratch
+- Analyze parameter selection for concrete security
+- Connect LWE to the hardness of lattice problems
+
+## 1. The Learning With Errors Problem
+
+<Definition term="Learning With Errors (LWE)">
+Given $m$ samples of the form $(\mathbf{a}_i, b_i) \in \mathbb{Z}_q^n \times \mathbb{Z}_q$ where:
+
+$$b_i = \langle \mathbf{a}_i, \mathbf{s} \rangle + e_i \pmod{q}$$
+
+for a secret $\mathbf{s} \in \mathbb{Z}_q^n$ and small errors $e_i$ drawn from a distribution $\chi$, the LWE problem asks to recover $\mathbf{s}$.
+</Definition>
+
+### The Key Insight
+
+Without the error term, this would be a system of linear equations—easily solvable with Gaussian elimination in polynomial time. The small errors make the problem computationally hard.
+
+```python
+import numpy as np
+from typing import Tuple, List
+from scipy.stats import norm
+
+class LWEInstance:
+    """
+    Learning With Errors problem instance.
+    
+    The LWE problem: Given (A, b = As + e mod q), find s.
+    
+    Parameters:
+        n: Secret dimension (security parameter)
+        m: Number of samples
+        q: Modulus
+        sigma: Standard deviation of error distribution
+    """
+    
+    def __init__(self, n: int, m: int, q: int, sigma: float):
+        """
+        Initialize LWE parameters.
+        
+        Args:
+            n: Dimension of secret vector
+            m: Number of samples (typically m > n)
+            q: Modulus (typically prime, q > 2√n · σ)
+            sigma: Gaussian error parameter
+        """
+        self.n = n
+        self.m = m
+        self.q = q
+        self.sigma = sigma
+        
+        # Validate parameters
+        if sigma >= q / (2 * np.sqrt(n)):
+            print(f"Warning: σ={sigma} may be too large relative to q={q}")
+    
+    def sample_secret(self) -> np.ndarray:
+        """Sample a uniformly random secret s ∈ Z_q^n."""
+        return np.random.randint(0, self.q, size=self.n)
+    
+    def sample_error(self, size: int = 1) -> np.ndarray:
+        """
+        Sample discrete Gaussian errors.
+        
+        We use rounded continuous Gaussian as approximation.
+        In practice, proper discrete Gaussian sampling is used.
+        """
+        continuous = np.random.normal(0, self.sigma, size=size)
+        discrete = np.round(continuous).astype(int)
+        return discrete % self.q
+    
+    def generate_samples(self, s: np.ndarray, num_samples: int = None
+                        ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Generate LWE samples (A, b) where b = As + e mod q.
+        
+        Args:
+            s: Secret vector
+            num_samples: Number of samples (default: self.m)
+        
+        Returns:
+            A: m × n matrix of uniform random elements
+            b: m-dimensional vector b = As + e mod q
+        """
+        if num_samples is None:
+            num_samples = self.m
+        
+        # Sample uniform random matrix A
+        A = np.random.randint(0, self.q, size=(num_samples, self.n))
+        
+        # Compute As mod q
+        As = (A @ s) % self.q
+        
+        # Sample errors
+        e = self.sample_error(num_samples)
+        
+        # Compute b = As + e mod q
+        b = (As + e) % self.q
+        
+        return A, b
+    
+    def verify_solution(self, A: np.ndarray, b: np.ndarray, 
+                       s_guess: np.ndarray) -> Tuple[bool, float]:
+        """
+        Verify if s_guess is the correct secret.
+        
+        Returns:
+            (is_correct, error_magnitude)
+        """
+        # Compute b - As_guess mod q
+        residual = (b - A @ s_guess) % self.q
+        
+        # Convert to centered representation
+        residual = np.where(residual > self.q // 2, 
+                           residual - self.q, residual)
+        
+        error_mag = np.max(np.abs(residual))
+        
+        # If residual is small (consistent with error distribution), likely correct
+        is_correct = error_mag < 3 * self.sigma
+        
+        return is_correct, error_mag
+
+
+def demonstrate_lwe_basics():
+    """
+    Demonstrate basic LWE concepts.
+    """
+    print("LEARNING WITH ERRORS DEMONSTRATION")
+    print("=" * 60)
+    
+    # Small parameters for demonstration (NOT secure!)
+    n, m, q, sigma = 4, 10, 97, 2.0
+    
+    lwe = LWEInstance(n, m, q, sigma)
+    
+    print(f"\nParameters:")
+    print(f"  n (dimension): {n}")
+    print(f"  m (samples):   {m}")
+    print(f"  q (modulus):   {q}")
+    print(f"  σ (error std): {sigma}")
+    
+    # Generate secret and samples
+    s = lwe.sample_secret()
+    A, b = lwe.generate_samples(s)
+    
+    print(f"\nSecret s: {s}")
+    print(f"\nSample matrix A (first 3 rows):")
+    print(A[:3])
+    print(f"\nSample vector b (first 3): {b[:3]}")
+    
+    # Show that without errors, we could solve easily
+    print(f"\n--- Without errors (standard linear algebra) ---")
+    As_exact = (A @ s) % q
+    print(f"As mod q (first 3): {As_exact[:3]}")
+    print(f"b = As + e (first 3): {b[:3]}")
+    print(f"Error e (first 3): {(b - As_exact) % q}")
+    
+    # Verify correct solution
+    correct, error = lwe.verify_solution(A, b, s)
+    print(f"\nVerification of true secret:")
+    print(f"  Correct: {correct}, Max error: {error:.2f}")
+    
+    # Try a wrong solution
+    s_wrong = (s + 1) % q
+    correct_wrong, error_wrong = lwe.verify_solution(A, b, s_wrong)
+    print(f"\nVerification of wrong secret:")
+    print(f"  Correct: {correct_wrong}, Max error: {error_wrong:.2f}")
+
+demonstrate_lwe_basics()
+```
+
+## 2. Search-LWE vs Decision-LWE
+
+<Definition term="Search-LWE">
+Given LWE samples $(\mathbf{A}, \mathbf{b} = \mathbf{A}\mathbf{s} + \mathbf{e})$, find the secret $\mathbf{s}$.
+</Definition>
+
+<Definition term="Decision-LWE">
+Distinguish between:
+1. LWE samples $(\mathbf{A}, \mathbf{b} = \mathbf{A}\mathbf{s} + \mathbf{e})$
+2. Uniformly random $(\mathbf{A}, \mathbf{u})$ where $\mathbf{u} \xleftarrow{\$} \mathbb{Z}_q^m$
+</Definition>
+
+<Formula>
+$$\text{Search-LWE} \leq_P \text{Decision-LWE}$$
+$$\text{(If you can solve Search, you can solve Decision)}$$
+$$\text{But remarkably, the converse also holds for appropriate parameters!}$$
+</Formula>
+
+```python
+def demonstrate_decision_lwe():
+    """
+    Demonstrate the Decision-LWE problem.
+    """
+    print("\nDECISION-LWE DEMONSTRATION")
+    print("=" * 60)
+    
+    n, m, q, sigma = 8, 20, 257, 3.0
+    lwe = LWEInstance(n, m, q, sigma)
+    
+    # Generate real LWE samples
+    s = lwe.sample_secret()
+    A_real, b_real = lwe.generate_samples(s)
+    
+    # Generate uniform random samples
+    A_random = np.random.randint(0, q, size=(m, n))
+    b_random = np.random.randint(0, q, size=m)
+    
+    print("Challenge: Which is the real LWE sample?")
+    print("\nSample 1:")
+    print(f"  A[0]: {A_real[0]}")
+    print(f"  b[0]: {b_real[0]}")
+    
+    print("\nSample 2:")
+    print(f"  A[0]: {A_random[0]}")
+    print(f"  b[0]: {b_random[0]}")
+    
+    # Statistical test: check if b has structure
+    # For real LWE, residuals b - As should be small
+    # For random, residuals have no pattern
+    
+    print("\n--- Analysis (with knowledge of s) ---")
+    residual_real = (b_real - A_real @ s) % q
+    residual_real = np.where(residual_real > q//2, residual_real - q, residual_real)
+    
+    print(f"Real LWE residuals (should be small): {residual_real[:5]}")
+    print(f"  Standard deviation: {np.std(residual_real):.2f}")
+    print(f"  Expected σ: {sigma}")
+    
+    # For random, any "guess" gives large residuals
+    residual_random = (b_random - A_random @ s) % q
+    residual_random = np.where(residual_random > q//2, residual_random - q, residual_random)
+    
+    print(f"\nRandom residuals (should be ~q/√12): {residual_random[:5]}")
+    print(f"  Standard deviation: {np.std(residual_random):.2f}")
+    print(f"  Expected for uniform: {q/np.sqrt(12):.2f}")
+    
+    print("\nConclusion: Without knowing s, distinguishing is hard!")
+
+demonstrate_decision_lwe()
+```
+
+## 3. The Error Distribution
+
+The error distribution $\chi$ is crucial for both security and correctness.
+
+<Definition term="Discrete Gaussian Distribution">
+The discrete Gaussian distribution $D_{\mathbb{Z}, \sigma}$ over the integers with parameter $\sigma$ assigns probability proportional to $\exp(-x^2 / (2\sigma^2))$ to each integer $x$.
+</Definition>
+
+### Why Gaussian Errors?
+
+```python
+def analyze_error_distribution():
+    """
+    Analyze properties of the error distribution.
+    """
+    print("\nERROR DISTRIBUTION ANALYSIS")
+    print("=" * 60)
+    
+    q = 3329  # Kyber's modulus
+    sigmas = [1.0, 2.0, 3.19, 5.0, 10.0]
+    
+    print(f"Modulus q = {q}")
+    print(f"\n{'σ':<8} {'3σ bound':<12} {'Prob(|e|>3σ)':<15} {'Security'}")
+    print("-" * 55)
+    
+    for sigma in sigmas:
+        bound_3sigma = 3 * sigma
+        prob_exceed = 2 * (1 - norm.cdf(3))  # ~0.27%
+        
+        # Security consideration: errors must be small relative to q
+        # but large enough to hide information
+        ratio = sigma / q
+        if ratio < 0.001:
+            security = "Too small (insecure)"
+        elif ratio > 0.1:
+            security = "Too large (decryption fails)"
+        else:
+            security = "Good range"
+        
+        print(f"{sigma:<8.2f} {bound_3sigma:<12.2f} {prob_exceed:<15.4f} {security}")
+    
+    # Visualize distributions
+    print("\nError Distribution Comparison:")
+    print("(Showing probability mass for small errors)")
+    
+    sigma = 3.19  # Kyber-like parameter
+    print(f"\nσ = {sigma}:")
+    for e in range(-10, 11):
+        prob = np.exp(-e**2 / (2*sigma**2))
+        bar = "█" * int(prob * 40)
+        print(f"  e={e:+3d}: {bar}")
+
+analyze_error_distribution()
+```
+
+### Choosing σ: The Security-Correctness Tradeoff
+
+<Formula>
+$$\text{Security: } \sigma \text{ must be large enough that errors hide information}$$
+$$\text{Correctness: } \sigma \text{ must be small enough that decryption succeeds}$$
+$$\text{Rule of thumb: } \sigma \approx \sqrt{n} \text{ for balanced security}$$
+</Formula>
+
+```python
+def error_parameter_selection():
+    """
+    Demonstrate error parameter selection.
+    """
+    print("\nERROR PARAMETER SELECTION")
+    print("=" * 60)
+    
+    # For LWE security, we need σ ≥ 2√n for worst-case hardness
+    # For decryption, we need total error < q/4
+    
+    def analyze_params(n, q, sigma):
+        # Minimum σ for security (Regev's reduction)
+        min_sigma_security = 2 * np.sqrt(n)
+        
+        # Maximum σ for correctness depends on scheme
+        # For basic Regev: error accumulates as ~σ√(n+1)
+        # Need σ√(n+1) < q/4 for high probability correctness
+        max_sigma_correctness = q / (4 * np.sqrt(n + 1))
+        
+        # Actual security level (bits)
+        # Based on BKZ complexity for LWE
+        delta = 1.005  # Root Hermite factor for moderate security
+        security_bits = 0.265 * n  # Rough quantum security
+        
+        return {
+            'min_sigma_security': min_sigma_security,
+            'max_sigma_correctness': max_sigma_correctness,
+            'chosen_sigma': sigma,
+            'security_ok': sigma >= min_sigma_security,
+            'correctness_ok': sigma <= max_sigma_correctness,
+            'estimated_security_bits': security_bits
+        }
+    
+    # Standard parameter sets (Kyber-like)
+    param_sets = [
+        ('Toy', 64, 257, 3.0),
+        ('Small', 256, 3329, 3.19),
+        ('Medium', 512, 3329, 3.19),
+        ('Large', 1024, 3329, 3.19),
+    ]
+    
+    print(f"{'Name':<10} {'n':<6} {'q':<6} {'σ':<6} {'σ_min':<8} {'σ_max':<10} {'Secure?':<10} {'Bits'}")
+    print("-" * 75)
+    
+    for name, n, q, sigma in param_sets:
+        analysis = analyze_params(n, q, sigma)
+        status = "✓" if analysis['security_ok'] and analysis['correctness_ok'] else "✗"
+        print(f"{name:<10} {n:<6} {q:<6} {sigma:<6.2f} "
+              f"{analysis['min_sigma_security']:<8.2f} "
+              f"{analysis['max_sigma_correctness']:<10.2f} "
+              f"{status:<10} "
+              f"{analysis['estimated_security_bits']:.0f}")
+
+error_parameter_selection()
+```
+
+## 4. The Worst-Case to Average-Case Reduction
+
+This is the theoretical foundation making LWE cryptographically useful.
+
+<Definition term="Worst-Case to Average-Case Reduction">
+Regev (2005) proved: If there exists an efficient algorithm solving Decision-LWE with non-negligible advantage, then there exists an efficient quantum algorithm solving worst-case lattice problems (GapSVP and SIVP) with polynomial approximation factors.
+</Definition>
+
+```python
+def explain_reduction():
+    """
+    Explain the worst-case to average-case reduction.
+    """
+    reduction = """
+    WORST-CASE TO AVERAGE-CASE REDUCTION
+    ════════════════════════════════════════════════════════════
+    
+    Regev's Theorem (2005):
+    
+    For any n, q = poly(n), and σ ≥ 2√n:
+    
+    ┌─────────────────────────────────────────────────────────┐
+    │  If LWE_{n,q,σ} can be solved efficiently,              │
+    │  then GapSVP_{γ} and SIVP_{γ} can be solved            │
+    │  efficiently (by a quantum algorithm)                   │
+    │  for γ = Õ(n·q/σ)                                       │
+    └─────────────────────────────────────────────────────────┘
+    
+    What this means:
+    
+    1. AVERAGE-CASE HARDNESS
+       - Every LWE instance is hard (not just specially constructed ones)
+       - No "weak keys" or "bad randomness" can make LWE easy
+       - Security doesn't depend on specific instance
+    
+    2. WORST-CASE FOUNDATION
+       - Security based on hardest instances of lattice problems
+       - GapSVP and SIVP are believed hard even for quantum computers
+       - Decades of cryptanalysis support this belief
+    
+    3. CONCRETE IMPLICATIONS
+       - Breaking LWE would break ALL hard lattice instances
+       - This would be a major mathematical breakthrough
+       - Currently believed to require exponential time
+    
+    The Reduction Chain:
+    
+    ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+    │   Break      │     │   Solve      │     │   Solve      │
+    │   LWE        │ ──► │   BDD        │ ──► │   GapSVP     │
+    │   (average)  │     │   (average)  │     │   (worst)    │
+    └──────────────┘     └──────────────┘     └──────────────┘
+    
+    BDD = Bounded Distance Decoding (finding close lattice vector)
+    """
+    print(reduction)
+
+explain_reduction()
+```
+
+## 5. LWE-Based Encryption: Regev's Scheme
+
+Now let's build encryption from LWE!
+
+<Definition term="Regev's Encryption Scheme">
+A public-key encryption scheme based on the hardness of Decision-LWE:
+- **KeyGen**: Sample $\mathbf{A}$, $\mathbf{s}$, compute $\mathbf{b} = \mathbf{A}\mathbf{s} + \mathbf{e}$. Public key: $(\mathbf{A}, \mathbf{b})$, Secret key: $\mathbf{s}$
+- **Encrypt**: To encrypt bit $\mu$, sample subset $S$, compute ciphertext from sums
+- **Decrypt**: Use secret key to remove $\mathbf{A}\mathbf{s}$ term, recover $\mu$ from noise level
+</Definition>
+
+```python
+class RegevEncryption:
+    """
+    Regev's LWE-based public-key encryption scheme.
+    
+    This is a foundational construction that encrypts single bits.
+    Modern schemes like Kyber extend this to encrypt more data efficiently.
+    """
+    
+    def __init__(self, n: int = 256, m: int = 512, q: int = 3329, sigma: float = 3.19):
+        """
+        Initialize Regev encryption parameters.
+        
+        Args:
+            n: Security parameter (dimension of secret)
+            m: Number of LWE samples in public key
+            q: Modulus
+            sigma: Error standard deviation
+        """
+        self.n = n
+        self.m = m
+        self.q = q
+        self.sigma = sigma
+        self.lwe = LWEInstance(n, m, q, sigma)
+    
+    def keygen(self) -> Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray]:
+        """
+        Generate public and secret keys.
+        
+        Returns:
+            public_key: (A, b) where b = As + e
+            secret_key: s
+        """
+        # Sample secret
+        s = self.lwe.sample_secret()
+        
+        # Generate LWE samples as public key
+        A, b = self.lwe.generate_samples(s)
+        
+        return (A, b), s
+    
+    def encrypt_bit(self, public_key: Tuple[np.ndarray, np.ndarray], 
+                    bit: int) -> Tuple[np.ndarray, int]:
+        """
+        Encrypt a single bit.
+        
+        Args:
+            public_key: (A, b)
+            bit: 0 or 1
+        
+        Returns:
+            ciphertext: (u, v) where
+                u = Σ_{i∈S} a_i mod q
+                v = Σ_{i∈S} b_i + bit·⌊q/2⌋ mod q
+        """
+        A, b = public_key
+        
+        # Sample random subset S ⊆ {0, 1, ..., m-1}
+        # We represent S as a binary vector
+        S = np.random.randint(0, 2, size=self.m)
+        
+        # Compute u = Σ_{i∈S} A[i] mod q
+        u = (S @ A) % self.q
+        
+        # Compute v = Σ_{i∈S} b[i] + bit·⌊q/2⌋ mod q
+        v = (S @ b + bit * (self.q // 2)) % self.q
+        
+        return (u, int(v))
+    
+    def decrypt_bit(self, secret_key: np.ndarray, 
+                    ciphertext: Tuple[np.ndarray, int]) -> int:
+        """
+        Decrypt a ciphertext to recover the bit.
+        
+        Args:
+            secret_key: s
+            ciphertext: (u, v)
+        
+        Returns:
+            Decrypted bit (0 or 1)
+        """
+        s = secret_key
+        u, v = ciphertext
+        
+        # Compute v - <u, s> mod q
+        inner = int(np.dot(u, s)) % self.q
+        result = (v - inner) % self.q
+        
+        # Convert to centered representation
+        if result > self.q // 2:
+            result -= self.q
+        
+        # Decode: if close to 0, return 0; if close to q/2, return 1
+        threshold = self.q // 4
+        
+        if abs(result) < threshold:
+            return 0
+        else:
+            return 1
+    
+    def encrypt_bytes(self, public_key: Tuple[np.ndarray, np.ndarray], 
+                      data: bytes) -> List[Tuple[np.ndarray, int]]:
+        """
+        Encrypt arbitrary bytes (bit by bit).
+        """
+        ciphertexts = []
+        for byte in data:
+            for i in range(8):
+                bit = (byte >> (7 - i)) & 1
+                ct = self.encrypt_bit(public_key, bit)
+                ciphertexts.append(ct)
+        return ciphertexts
+    
+    def decrypt_bytes(self, secret_key: np.ndarray, 
+                      ciphertexts: List[Tuple[np.ndarray, int]]) -> bytes:
+        """
+        Decrypt ciphertexts to bytes.
+        """
+        bits = [self.decrypt_bit(secret_key, ct) for ct in ciphertexts]
+        
+        # Convert bits to bytes
+        result = []
+        for i in range(0, len(bits), 8):
+            byte = 0
+            for j in range(8):
+                if i + j < len(bits):
+                    byte = (byte << 1) | bits[i + j]
+            result.append(byte)
+        
+        return bytes(result)
+
+
+def demonstrate_regev_encryption():
+    """
+    Demonstrate Regev's encryption scheme.
+    """
+    print("\nREGEV'S LWE-BASED ENCRYPTION")
+    print("=" * 60)
+    
+    # Use small parameters for demonstration
+    regev = RegevEncryption(n=64, m=128, q=257, sigma=2.0)
+    
+    print(f"Parameters: n={regev.n}, m={regev.m}, q={regev.q}, σ={regev.sigma}")
+    
+    # Key generation
+    print("\n1. KEY GENERATION")
+    pk, sk = regev.keygen()
+    A, b = pk
+    print(f"   Public key: A is {A.shape}, b is {b.shape}")
+    print(f"   Secret key: s is {sk.shape}")
+    
+    # Encrypt single bits
+    print("\n2. BIT ENCRYPTION")
+    for bit in [0, 1]:
+        ct = regev.encrypt_bit(pk, bit)
+        decrypted = regev.decrypt_bit(sk, ct)
+        print(f"   Bit {bit} → encrypted → decrypted: {decrypted} {'✓' if bit == decrypted else '✗'}")
+    
+    # Encrypt a message
+    print("\n3. MESSAGE ENCRYPTION")
+    message = b"Hi"
+    print(f"   Original: {message}")
+    
+    ciphertexts = regev.encrypt_bytes(pk, message)
+    print(f"   Ciphertext: {len(ciphertexts)} encrypted bits")
+    
+    decrypted = regev.decrypt_bytes(sk, ciphertexts)
+    print(f"   Decrypted: {decrypted}")
+    print(f"   Success: {message == decrypted}")
+    
+    # Demonstrate correctness analysis
+    print("\n4. CORRECTNESS ANALYSIS")
+    errors = 0
+    trials = 100
+    for _ in range(trials):
+        bit = np.random.randint(0, 2)
+        ct = regev.encrypt_bit(pk, bit)
+        dec = regev.decrypt_bit(sk, ct)
+        if dec != bit:
+            errors += 1
+    print(f"   Decryption errors: {errors}/{trials} ({100*errors/trials:.1f}%)")
+
+demonstrate_regev_encryption()
+```
+
+## 6. Why LWE Encryption Works
+
+Let's trace through the mathematics:
+
+<Formula>
+$$\text{Encryption of bit } \mu:$$
+$$u = \sum_{i \in S} \mathbf{a}_i, \quad v = \sum_{i \in S} b_i + \mu \cdot \lfloor q/2 \rfloor$$
+
+$$\text{Decryption:}$$
+$$v - \langle u, s \rangle = \sum_{i \in S} (b_i - \langle \mathbf{a}_i, s \rangle) + \mu \cdot \lfloor q/2 \rfloor$$
+$$= \sum_{i \in S} e_i + \mu \cdot \lfloor q/2 \rfloor$$
+$$\approx \mu \cdot \lfloor q/2 \rfloor \text{ (since errors are small)}$$
+</Formula>
+
+```python
+def trace_encryption_math():
+    """
+    Trace through the mathematics of LWE encryption.
+    """
+    print("\nMATHEMATICAL TRACE OF LWE ENCRYPTION")
+    print("=" * 60)
+    
+    # Very small example for clarity
+    n, m, q, sigma = 3, 5, 97, 1.5
+    
+    # Setup
+    s = np.array([23, 45, 67])  # Secret
+    print(f"Secret s = {s}")
+    print(f"Modulus q = {q}")
+    
+    # Generate LWE samples manually
+    np.random.seed(42)
+    A = np.random.randint(0, q, size=(m, n))
+    e = np.round(np.random.normal(0, sigma, size=m)).astype(int)
+    b = (A @ s + e) % q
+    
+    print(f"\nPublic key generation:")
+    print(f"  A = \n{A}")
+    print(f"  e = {e}")
+    print(f"  b = As + e mod q = {b}")
+    
+    # Encrypt bit = 1
+    mu = 1
+    S = np.array([1, 0, 1, 0, 1])  # Select rows 0, 2, 4
+    
+    print(f"\nEncrypting μ = {mu}:")
+    print(f"  Subset S (as vector): {S}")
+    print(f"  Selected rows: {np.where(S == 1)[0]}")
+    
+    u = (S @ A) % q
+    v = (S @ b + mu * (q // 2)) % q
+    
+    print(f"  u = Σ A[i] for i∈S = {u}")
+    print(f"  v = Σ b[i] + μ·⌊q/2⌋ = {v}")
+    print(f"     = {S @ b} + {mu * (q//2)} mod {q}")
+    
+    # Decrypt
+    print(f"\nDecrypting:")
+    us = (u @ s) % q
+    diff = (v - us) % q
+    if diff > q // 2:
+        diff -= q
+    
+    print(f"  <u, s> = {us}")
+    print(f"  v - <u, s> = {diff}")
+    print(f"  Threshold = q/4 = {q//4}")
+    
+    decoded = 1 if abs(diff - q//2) < q//4 or abs(diff + q//2) < q//4 else 0
+    # More careful decoding
+    if abs(diff) < q // 4:
+        decoded = 0
+    else:
+        decoded = 1
+    
+    print(f"  Decoded bit: {decoded}")
+    
+    # Show the error accumulation
+    sum_e = S @ e
+    print(f"\nError analysis:")
+    print(f"  Sum of errors: Σ e[i] for i∈S = {sum_e}")
+    print(f"  This is why decryption works when errors are small!")
+
+trace_encryption_math()
+```
+
+## 7. Security Analysis
+
+```python
+def security_analysis():
+    """
+    Analyze security of LWE-based encryption.
+    """
+    print("\nLWE SECURITY ANALYSIS")
+    print("=" * 60)
+    
+    security = {
+        'CPA Security': {
+            'basis': 'Decision-LWE hardness',
+            'explanation': '''Ciphertext (u, v) is computationally indistinguishable 
+from uniform random when LWE is hard. An attacker cannot tell 
+if v encodes 0 or 1 without solving LWE.''',
+            'reduction': 'Tight reduction to Decision-LWE'
+        },
+        'Semantic Security': {
+            'basis': 'Probabilistic encryption',
+            'explanation': '''Each encryption uses fresh randomness (subset S),
+so the same message encrypts to different ciphertexts.
+No information leaks from ciphertext patterns.''',
+            'feature': 'Built-in by design'
+        },
+        'Quantum Security': {
+            'basis': 'Lattice problem hardness',
+            'explanation': '''Best known quantum attacks on LWE are only 
+polynomially faster than classical attacks.
+No Shor-like exponential speedup exists.''',
+            'estimate': '2^(0.265n) quantum complexity'
+        }
+    }
+    
+    print("\nSecurity Properties:")
+    for prop, details in security.items():
+        print(f"\n{prop}")
+        print("-" * 40)
+        for key, value in details.items():
+            if '\n' in str(value):
+                print(f"  {key}:")
+                for line in value.strip().split('\n'):
+                    print(f"    {line}")
+            else:
+                print(f"  {key}: {value}")
+    
+    # Concrete security estimates
+    print("\n" + "=" * 60)
+    print("CONCRETE SECURITY ESTIMATES")
+    print("-" * 40)
+    
+    param_sets = [
+        ('Kyber-512', 256, 3329, 3.19, 'Level 1 (128-bit)'),
+        ('Kyber-768', 384, 3329, 3.19, 'Level 3 (192-bit)'),
+        ('Kyber-1024', 512, 3329, 3.19, 'Level 5 (256-bit)'),
+    ]
+    
+    print(f"{'Scheme':<15} {'n':<6} {'q':<6} {'σ':<6} {'Security'}")
+    print("-" * 50)
+    for name, n, q, sigma, security in param_sets:
+        print(f"{name:<15} {n:<6} {q:<6} {sigma:<6.2f} {security}")
+
+security_analysis()
+```
+
+## 8. Connection to Lattices
+
+<Definition term="LWE Lattice">
+The LWE problem can be viewed as a lattice problem. Given $(\mathbf{A}, \mathbf{b})$, define the lattice:
+
+$$\Lambda_q(\mathbf{A}) = \{\mathbf{x} \in \mathbb{Z}^m : \mathbf{x} = \mathbf{A}\mathbf{s} \pmod{q} \text{ for some } \mathbf{s}\}$$
+
+Then $\mathbf{b}$ is close to this lattice (distance = error magnitude).
+</Definition>
+
+```python
+def lwe_as_lattice_problem():
+    """
+    Show how LWE relates to lattice problems.
+    """
+    print("\nLWE AS A LATTICE PROBLEM")
+    print("=" * 60)
+    
+    # Small example
+    n, m, q = 2, 4, 17
+    
+    # LWE instance
+    A = np.array([
+        [3, 5],
+        [7, 2],
+        [11, 9],
+        [4, 13]
+    ])
+    s = np.array([2, 7])
+    e = np.array([1, -1, 0, 1])
+    b = (A @ s + e) % q
+    
+    print(f"LWE instance:")
+    print(f"  A = \n{A}")
+    print(f"  s = {s}")
+    print(f"  e = {e}")
+    print(f"  b = As + e mod {q} = {b}")
+    
+    # Construct the lattice
+    print(f"\nLattice interpretation:")
+    print(f"  Λ_q(A) = {{x ∈ Z^{m} : x = As mod q for some s}}")
+    
+    # Generate some lattice points
+    print(f"\n  Some lattice points Λ_q(A):")
+    for s_test in [[0,0], [1,0], [0,1], [1,1], [2,7]]:
+        point = (A @ np.array(s_test)) % q
+        print(f"    s={s_test} → {point}")
+    
+    # Show b is close to the lattice
+    print(f"\n  Target vector b = {b}")
+    print(f"  Closest lattice point (As mod q) = {(A @ s) % q}")
+    print(f"  Distance (error) = {e}")
+    print(f"  ||e|| = {np.linalg.norm(e):.4f}")
+    
+    print(f"\n  Solving LWE ≡ Finding closest lattice point to b")
+    print(f"  This is the Bounded Distance Decoding (BDD) problem!")
+
+lwe_as_lattice_problem()
+```
+
+## Summary
+
+In this lesson, you learned about the Learning With Errors problem:
+
+1. **LWE Definition**: $b_i = \langle a_i, s \rangle + e_i \pmod{q}$ with small errors
+2. **Search vs Decision**: Both variants are equivalent for appropriate parameters
+3. **Error Distribution**: Discrete Gaussian, crucial for security/correctness balance
+4. **Worst-Case Reduction**: Average-case LWE is as hard as worst-case lattice problems
+5. **Regev Encryption**: Practical public-key encryption from LWE
+6. **Security**: Based on hardness of Decision-LWE, believed quantum-resistant
+7. **Lattice Connection**: LWE is equivalent to Bounded Distance Decoding
+
+LWE is the foundation for Kyber (encryption) and contributes to Dilithium (signatures). The next lesson covers Ring-LWE, which enables more efficient implementations.
+
+## Further Reading
+
+- Next lesson: Ring-LWE and Module-LWE
+- Related: Regev's original paper (2005)
+- Advanced: LWE security reductions

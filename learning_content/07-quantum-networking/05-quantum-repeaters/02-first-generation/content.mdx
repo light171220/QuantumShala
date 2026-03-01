@@ -1,0 +1,553 @@
+# First-Generation Repeaters
+
+## Introduction
+
+First-generation quantum repeaters represent the most mature approach to long-distance quantum communication. They combine heralded entanglement generation, entanglement swapping, and purification to create high-fidelity end-to-end entanglement. While probabilistic in nature, they transform the exponential scaling problem into a polynomial one.
+
+## First-Generation Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              FIRST-GENERATION REPEATER ARCHITECTURE                 │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Step 1: Elementary Link Generation (parallel)                      │
+│  ┌─────┐    ┌─────┐    ┌─────┐    ┌─────┐    ┌─────┐              │
+│  │  A  │════│ R₁  │════│ R₂  │════│ R₃  │════│  B  │              │
+│  └──┬──┘    └──┬──┘    └──┬──┘    └──┬──┘    └──┬──┘              │
+│     │ Link 1   │ Link 2   │ Link 3   │ Link 4   │                  │
+│     ├──────────┼──────────┼──────────┼──────────┤                  │
+│     │  Memory  │  Memory  │  Memory  │  Memory  │                  │
+│     │  Store   │  Store   │  Store   │  Store   │                  │
+│                                                                     │
+│  Step 2: Nested Swapping                                            │
+│  ┌─────┐         ┌─────┐         ┌─────┐         ┌─────┐          │
+│  │  A  │═════════│ R₁  │═════════│ R₃  │═════════│  B  │          │
+│  └─────┘   BSM   └─────┘   BSM   └─────┘   BSM   └─────┘          │
+│            at R₁          at R₂          at R₃                     │
+│                                                                     │
+│  Step 3: Purification (if needed)                                   │
+│  ┌─────┐                                          ┌─────┐          │
+│  │  A  │══════════════════════════════════════════│  B  │          │
+│  └─────┘         Purify noisy A-B pair            └─────┘          │
+│                                                                     │
+│  Key: All operations are probabilistic, heralded                   │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## DLCZ-Type Protocol
+
+The DLCZ (Duan-Lukin-Cirac-Zoller) protocol is the canonical first-generation approach:
+
+```python
+import numpy as np
+from dataclasses import dataclass
+from typing import Tuple, List, Dict, Optional
+from enum import Enum
+
+class LinkState(Enum):
+    """State of an elementary link."""
+    EMPTY = "empty"
+    PENDING = "pending"
+    ENTANGLED = "entangled"
+    EXPIRED = "expired"
+
+@dataclass
+class ElementaryLink:
+    """Represents one elementary link in the repeater chain."""
+    left_node: int
+    right_node: int
+    state: LinkState = LinkState.EMPTY
+    fidelity: float = 0.0
+    creation_time: float = 0.0
+    attempts: int = 0
+
+class DLCZRepeater:
+    """
+    DLCZ-type first-generation quantum repeater.
+
+    Uses atomic ensembles for quantum memory and
+    photon interference for heralded entanglement.
+    """
+
+    def __init__(
+        self,
+        n_nodes: int = 5,
+        total_distance: float = 500,  # km
+        memory_time: float = 0.1,      # seconds
+        write_probability: float = 0.01,
+        fiber_loss_db_km: float = 0.2,
+        detector_efficiency: float = 0.9,
+        bsm_efficiency: float = 0.5
+    ):
+        self.n_nodes = n_nodes
+        self.n_links = n_nodes - 1
+        self.total_distance = total_distance
+        self.link_distance = total_distance / self.n_links
+        self.memory_time = memory_time
+        self.write_probability = write_probability
+        self.fiber_loss = fiber_loss_db_km
+        self.detector_efficiency = detector_efficiency
+        self.bsm_efficiency = bsm_efficiency
+
+        # Initialize links
+        self.links = [
+            ElementaryLink(left_node=i, right_node=i+1)
+            for i in range(self.n_links)
+        ]
+
+        # Protocol state
+        self.current_time = 0.0
+        self.attempt_period = 1e-6  # 1 μs between attempts
+
+    def link_success_probability(self) -> float:
+        """Probability of successful heralded link creation."""
+        # DLCZ: p_success ≈ p_write² × η_fiber × η_detect × p_herald
+        eta_fiber = 10**(-self.fiber_loss * self.link_distance / 2 / 10)
+        p_herald = 0.5  # Beam splitter
+        return (self.write_probability**2 * eta_fiber**2 *
+                self.detector_efficiency**2 * p_herald)
+
+    def attempt_link_generation(self, link: ElementaryLink) -> bool:
+        """Attempt to generate entanglement for one link."""
+        link.attempts += 1
+
+        if np.random.random() < self.link_success_probability():
+            link.state = LinkState.ENTANGLED
+            link.creation_time = self.current_time
+            # Initial fidelity from DLCZ process
+            link.fidelity = 0.95 - 0.001 * self.link_distance
+            return True
+
+        return False
+
+    def check_link_validity(self, link: ElementaryLink) -> bool:
+        """Check if link is still valid (not expired)."""
+        if link.state != LinkState.ENTANGLED:
+            return False
+
+        age = self.current_time - link.creation_time
+        if age > self.memory_time:
+            link.state = LinkState.EXPIRED
+            return False
+
+        # Fidelity decay
+        decay = np.exp(-age / self.memory_time)
+        link.fidelity *= decay
+
+        return True
+
+    def attempt_swapping(
+        self,
+        left_link: ElementaryLink,
+        right_link: ElementaryLink
+    ) -> Tuple[bool, float]:
+        """Attempt entanglement swapping between adjacent links."""
+        # Check both links valid
+        if not (self.check_link_validity(left_link) and
+                self.check_link_validity(right_link)):
+            return False, 0.0
+
+        # BSM success
+        if np.random.random() > self.bsm_efficiency:
+            # Failed BSM - links consumed but no result
+            left_link.state = LinkState.EMPTY
+            right_link.state = LinkState.EMPTY
+            return False, 0.0
+
+        # Success - combine fidelities
+        F_out = left_link.fidelity * right_link.fidelity
+
+        # Mark links as consumed
+        left_link.state = LinkState.EMPTY
+        right_link.state = LinkState.EMPTY
+
+        return True, F_out
+
+    def run_protocol(
+        self,
+        max_time: float = 10.0,
+        target_fidelity: float = 0.7
+    ) -> Dict:
+        """Run complete first-generation protocol."""
+        self.current_time = 0.0
+        total_attempts = 0
+        successful_distributions = 0
+        fidelities = []
+
+        while self.current_time < max_time:
+            # Phase 1: Generate all elementary links
+            all_links_ready = False
+
+            while not all_links_ready and self.current_time < max_time:
+                all_links_ready = True
+
+                for link in self.links:
+                    # Check if expired
+                    if link.state == LinkState.ENTANGLED:
+                        if not self.check_link_validity(link):
+                            link.state = LinkState.EMPTY
+
+                    # Attempt generation if needed
+                    if link.state != LinkState.ENTANGLED:
+                        all_links_ready = False
+                        self.attempt_link_generation(link)
+
+                self.current_time += self.attempt_period
+                total_attempts += 1
+
+            if not all_links_ready:
+                break  # Timeout
+
+            # Phase 2: Nested swapping
+            current_pairs = [(link.left_node, link.right_node, link.fidelity)
+                            for link in self.links]
+
+            swap_level = 0
+            while len(current_pairs) > 1:
+                new_pairs = []
+                i = 0
+
+                while i + 1 < len(current_pairs):
+                    # Swap pairs i and i+1
+                    left = current_pairs[i]
+                    right = current_pairs[i + 1]
+
+                    if np.random.random() < self.bsm_efficiency:
+                        # Success
+                        F_out = left[2] * right[2]
+                        new_pairs.append((left[0], right[1], F_out))
+                    else:
+                        # Failure - need to restart
+                        break
+
+                    i += 2
+
+                if len(new_pairs) != len(current_pairs) // 2:
+                    # Swapping failed - reset all links
+                    for link in self.links:
+                        link.state = LinkState.EMPTY
+                    break
+
+                current_pairs = new_pairs
+                swap_level += 1
+
+            if len(current_pairs) == 1:
+                # Successfully created end-to-end entanglement!
+                final_fidelity = current_pairs[0][2]
+
+                if final_fidelity >= target_fidelity:
+                    successful_distributions += 1
+                    fidelities.append(final_fidelity)
+
+                # Reset for next attempt
+                for link in self.links:
+                    link.state = LinkState.EMPTY
+
+        return {
+            "total_time": self.current_time,
+            "total_attempts": total_attempts,
+            "successful_distributions": successful_distributions,
+            "rate": successful_distributions / self.current_time if self.current_time > 0 else 0,
+            "mean_fidelity": np.mean(fidelities) if fidelities else 0,
+            "target_fidelity": target_fidelity
+        }
+
+# Demonstrate DLCZ repeater
+print("DLCZ First-Generation Repeater")
+print("=" * 60)
+
+repeater = DLCZRepeater(
+    n_nodes=5,
+    total_distance=500,
+    memory_time=0.1
+)
+
+print(f"Configuration:")
+print(f"  Distance: {repeater.total_distance} km")
+print(f"  Nodes: {repeater.n_nodes}")
+print(f"  Link distance: {repeater.link_distance:.0f} km")
+print(f"  Link success prob: {repeater.link_success_probability():.2e}")
+
+result = repeater.run_protocol(max_time=1.0)
+print(f"\nResults (1 second):")
+print(f"  Successful distributions: {result['successful_distributions']}")
+print(f"  Distribution rate: {result['rate']:.2f} Hz")
+print(f"  Mean fidelity: {result['mean_fidelity']:.4f}")
+```
+
+## Purification Strategies
+
+First-generation repeaters often need purification to achieve target fidelity:
+
+```python
+class PurificationStrategy:
+    """
+    Purification strategies for first-generation repeaters.
+    """
+
+    def __init__(self):
+        pass
+
+    def single_round_purify(
+        self,
+        F1: float,
+        F2: float = None
+    ) -> Tuple[bool, float]:
+        """One round of BBPSSW purification."""
+        if F2 is None:
+            F2 = F1
+
+        # Success probability
+        p_success = F1 * F2 + (1 - F1) * (1 - F2) / 3
+
+        if np.random.random() > p_success:
+            return False, 0.0
+
+        # Output fidelity
+        F_out = (F1 * F2) / p_success
+
+        return True, F_out
+
+    def multi_round_purify(
+        self,
+        initial_fidelity: float,
+        target_fidelity: float,
+        max_rounds: int = 10
+    ) -> Dict:
+        """Iterative purification to reach target."""
+        F = initial_fidelity
+        rounds = 0
+        pairs_consumed = 1
+        success = True
+
+        while F < target_fidelity and rounds < max_rounds:
+            success, F_new = self.single_round_purify(F)
+
+            if not success:
+                return {
+                    "success": False,
+                    "final_fidelity": 0,
+                    "rounds": rounds + 1,
+                    "pairs_consumed": pairs_consumed * 2
+                }
+
+            F = F_new
+            rounds += 1
+            pairs_consumed *= 2
+
+        return {
+            "success": True,
+            "final_fidelity": F,
+            "rounds": rounds,
+            "pairs_consumed": pairs_consumed,
+            "target_reached": F >= target_fidelity
+        }
+
+class FirstGenRepeaterWithPurification:
+    """
+    First-generation repeater with integrated purification.
+    """
+
+    def __init__(
+        self,
+        n_nodes: int = 5,
+        total_distance: float = 500,
+        target_fidelity: float = 0.95
+    ):
+        self.repeater = DLCZRepeater(n_nodes=n_nodes, total_distance=total_distance)
+        self.purifier = PurificationStrategy()
+        self.target_fidelity = target_fidelity
+
+    def generate_with_purification(
+        self,
+        purify_level: str = "end_to_end"
+    ) -> Tuple[bool, float, Dict]:
+        """
+        Generate end-to-end entanglement with purification.
+
+        purify_level: 'end_to_end', 'per_segment', or 'nested'
+        """
+        # First, get raw end-to-end pair
+        result = self.repeater.run_protocol(max_time=0.1)
+
+        if result['successful_distributions'] == 0:
+            return False, 0.0, {"reason": "generation_failed"}
+
+        raw_fidelity = result['mean_fidelity']
+
+        if raw_fidelity >= self.target_fidelity:
+            return True, raw_fidelity, {"purification": "not_needed"}
+
+        if purify_level == "end_to_end":
+            # Purify at the end
+            purify_result = self.purifier.multi_round_purify(
+                raw_fidelity, self.target_fidelity
+            )
+
+            if purify_result['target_reached']:
+                return True, purify_result['final_fidelity'], purify_result
+            else:
+                return False, purify_result['final_fidelity'], purify_result
+
+        return False, raw_fidelity, {"reason": "invalid_strategy"}
+
+# Demonstrate purification
+print("\nFirst-Gen Repeater with Purification")
+print("=" * 60)
+
+repeater_purify = FirstGenRepeaterWithPurification(
+    n_nodes=5,
+    total_distance=500,
+    target_fidelity=0.95
+)
+
+successes = 0
+fidelities = []
+
+for _ in range(100):
+    success, F, info = repeater_purify.generate_with_purification()
+    if success:
+        successes += 1
+        fidelities.append(F)
+
+print(f"Success rate: {successes}%")
+print(f"Mean output fidelity: {np.mean(fidelities):.4f}" if fidelities else "No successes")
+```
+
+## Rate Analysis
+
+```python
+class FirstGenRateAnalysis:
+    """
+    Analyze rate scaling for first-generation repeaters.
+    """
+
+    def __init__(self):
+        pass
+
+    def calculate_rate(
+        self,
+        total_distance: float,
+        n_segments: int,
+        fiber_loss_db_km: float = 0.2,
+        memory_time: float = 0.1,
+        source_rate: float = 1e6,
+        p_write: float = 0.01,
+        bsm_efficiency: float = 0.5
+    ) -> float:
+        """Calculate expected end-to-end rate."""
+        L_seg = total_distance / n_segments
+
+        # Segment success probability
+        eta = 10**(-fiber_loss_db_km * L_seg / 2 / 10)
+        p_seg = p_write**2 * eta**2 * bsm_efficiency
+
+        # Time to generate all segments
+        T_gen = n_segments / (source_rate * p_seg)
+
+        # Check against memory time
+        if T_gen > memory_time * 10:
+            return 0.0  # Too slow, memories expire
+
+        # Swapping success probability
+        p_swap_total = bsm_efficiency ** (n_segments - 1)
+
+        # Approximate rate
+        rate = p_seg * source_rate * p_swap_total / n_segments
+
+        return rate
+
+    def optimize_segments(
+        self,
+        total_distance: float,
+        **kwargs
+    ) -> Tuple[int, float]:
+        """Find optimal number of segments."""
+        best_n = 1
+        best_rate = 0
+
+        for n in range(2, 50):
+            rate = self.calculate_rate(total_distance, n, **kwargs)
+            if rate > best_rate:
+                best_rate = rate
+                best_n = n
+
+        return best_n, best_rate
+
+    def scaling_analysis(
+        self,
+        distances: List[float]
+    ) -> Dict:
+        """Analyze rate scaling with distance."""
+        results = {
+            "distance": distances,
+            "optimal_segments": [],
+            "optimal_rate": [],
+            "direct_rate": []
+        }
+
+        for d in distances:
+            n_opt, rate_opt = self.optimize_segments(d)
+            results["optimal_segments"].append(n_opt)
+            results["optimal_rate"].append(rate_opt)
+
+            # Direct rate for comparison
+            eta_direct = 10**(-0.2 * d / 10)
+            results["direct_rate"].append(1e6 * eta_direct)
+
+        return results
+
+# Rate analysis
+analyzer = FirstGenRateAnalysis()
+
+print("\nFirst-Generation Rate Analysis")
+print("=" * 60)
+
+distances = [100, 200, 500, 1000]
+scaling = analyzer.scaling_analysis(distances)
+
+print("\nDistance | Opt Segments | Repeater Rate | Direct Rate | Improvement")
+print("-" * 70)
+
+for i, d in enumerate(distances):
+    print(f"  {d:4d} km |     {scaling['optimal_segments'][i]:2d}       |"
+          f" {scaling['optimal_rate'][i]:.2e} Hz  |"
+          f" {scaling['direct_rate'][i]:.2e} |"
+          f" {scaling['optimal_rate'][i]/scaling['direct_rate'][i]:.0e}×")
+```
+
+## Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              FIRST-GENERATION REPEATERS SUMMARY                     │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Architecture:                                                      │
+│  • Heralded entanglement generation per segment                    │
+│  • Quantum memories store successful segments                      │
+│  • Nested entanglement swapping                                    │
+│  • Optional purification for fidelity                              │
+│                                                                     │
+│  Protocols:                                                         │
+│  • DLCZ: Atomic ensembles + photon interference                    │
+│  • Single-photon: Direct heralding with matter qubits              │
+│  • Two-photon: Midpoint BSM with dual sources                      │
+│                                                                     │
+│  Performance:                                                       │
+│  • Rate: Polynomial in distance (vs exponential direct)            │
+│  • Fidelity: Depends on memory coherence and gate quality          │
+│  • Demonstrated: ~100 km with atomic systems                       │
+│                                                                     │
+│  Challenges:                                                        │
+│  • Memory coherence time limits waiting                            │
+│  • Probabilistic BSM (50% with linear optics)                      │
+│  • Fidelity degrades through multiple swaps                        │
+│  • Resource overhead from purification                             │
+│                                                                     │
+│  Current Status: Lab demonstrations, moving toward deployment      │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```

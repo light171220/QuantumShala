@@ -1,0 +1,423 @@
+---
+title: "ML-DSA Verification Process"
+description: "Complete walkthrough of ML-DSA signature verification including challenge reconstruction, hint usage, and validity checks."
+keywords: ["ml-dsa", "verification", "digital-signature", "challenge", "hint"]
+---
+
+# ML-DSA Verification Process
+
+Verification is the complementary operation to signing. Given a public key, message, and signature, the verifier determines whether the signature is valid. ML-DSA verification is significantly simpler than signing—no rejection sampling, always succeeds or fails in a fixed time.
+
+## Verification Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   ML-DSA VERIFICATION FLOW                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Inputs:                                                       │
+│   ┌────────────┐  ┌────────────┐  ┌────────────────────────┐   │
+│   │ Public Key │  │  Message   │  │  Signature (c̃, z, h)  │   │
+│   │   (pk)     │  │    (M)     │  │                        │   │
+│   └──────┬─────┘  └──────┬─────┘  └───────────┬────────────┘   │
+│          │               │                     │                │
+│          └───────────────┼─────────────────────┘                │
+│                          │                                      │
+│                          ▼                                      │
+│   ┌─────────────────────────────────────────┐                  │
+│   │           VERIFICATION                   │                  │
+│   │                                          │                  │
+│   │  1. Decode signature (c̃, z, h)          │                  │
+│   │  2. Reconstruct challenge c              │                  │
+│   │  3. Compute w' = Az - ct                │                  │
+│   │  4. Apply hint: w₁' = UseHint(h, w')    │                  │
+│   │  5. Recompute c̃' = H(μ ∥ w₁')           │                  │
+│   │  6. Check: c̃ == c̃' and norms valid     │                  │
+│   │                                          │                  │
+│   └─────────────────┬───────────────────────┘                  │
+│                     │                                           │
+│                     ▼                                           │
+│            ┌─────────────────┐                                 │
+│            │  Valid / Invalid │                                │
+│            └─────────────────┘                                 │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Step 1: Parse Public Key
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              PUBLIC KEY STRUCTURE                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   pk = (ρ, t₁)                                                 │
+│                                                                 │
+│   ┌────────────┬───────────┬───────────────────────────────┐   │
+│   │ Component  │   Size    │        Purpose                │   │
+│   ├────────────┼───────────┼───────────────────────────────┤   │
+│   │ ρ          │ 32 bytes  │ Seed for matrix A             │   │
+│   │ t₁         │ k×320 B   │ High bits of t (k polys)      │   │
+│   └────────────┴───────────┴───────────────────────────────┘   │
+│                                                                 │
+│   Also compute:                                                 │
+│   • tr = H(pk, 64) - public key hash                          │
+│   • A = ExpandA(ρ) - regenerate matrix from seed              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Step 2: Decode Signature
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SIGNATURE DECODING                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   σ = (c̃, z, h)                                               │
+│                                                                 │
+│   ┌────────────┬───────────────────┬────────────────────────┐  │
+│   │ Component  │      Size         │     Contents           │  │
+│   ├────────────┼───────────────────┼────────────────────────┤  │
+│   │ c̃         │ 32 bytes          │ Challenge seed         │  │
+│   │ z          │ l × (γ₁ bits)     │ Response vector        │  │
+│   │ h          │ ≤ ω + k bytes     │ Encoded hint          │  │
+│   └────────────┴───────────────────┴────────────────────────┘  │
+│                                                                 │
+│   Decoding checks:                                              │
+│   • z coefficients in [-γ₁+1, γ₁-β]                           │
+│   • h has at most ω ones                                       │
+│   • All encodings are valid                                    │
+│                                                                 │
+│   If any check fails: immediately return INVALID               │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Step 3: Reconstruct Challenge
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              CHALLENGE RECONSTRUCTION                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   From challenge seed c̃, regenerate polynomial c:             │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   c = SampleInBall(c̃, τ)                                │  │
+│   │                                                         │  │
+│   │   Same algorithm as signing:                            │  │
+│   │   • Deterministic from c̃                               │  │
+│   │   • Produces polynomial with τ non-zero coefficients   │  │
+│   │   • Each non-zero is ±1                                │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Step 4: Compute w'
+
+The key verification computation:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              VERIFICATION COMPUTATION                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Compute w' = A·z - c·t:                                      │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   w'[i] = Σⱼ A[i][j]·z[j] - c·t₁[i]·2^d               │  │
+│   │                                                         │  │
+│   │   Where:                                                │  │
+│   │   • A is the k×l public matrix                         │  │
+│   │   • z is the l-element response vector                 │  │
+│   │   • t₁ is the k-element high bits of t                │  │
+│   │   • d = 13 (power-of-2 rounding)                      │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Why this works (correctness):                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   During signing: z = y + c·s₁                         │  │
+│   │   And: t = A·s₁ + s₂                                   │  │
+│   │                                                         │  │
+│   │   So: A·z - c·t                                        │  │
+│   │     = A·(y + c·s₁) - c·(A·s₁ + s₂)                    │  │
+│   │     = A·y + c·A·s₁ - c·A·s₁ - c·s₂                    │  │
+│   │     = A·y - c·s₂                                       │  │
+│   │     = w - c·s₂                                         │  │
+│   │     ≈ w (with hint adjustment)                         │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+def compute_w_prime(A: list, z: list, c: list, t1: list, k: int, l: int) -> list:
+    """
+    Compute w' = A·z - c·t₁·2^d for verification.
+    """
+    # Convert to NTT domain for efficient multiplication
+    z_ntt = [ntt(poly) for poly in z]
+    c_ntt = ntt(c)
+
+    w_prime = []
+    for i in range(k):
+        # Compute A[i] · z
+        acc = [0] * 256
+        for j in range(l):
+            product = pointwise_multiply(A[i][j], z_ntt[j])
+            acc = add_polynomials(acc, product)
+
+        # Convert back and subtract c·t₁[i]·2^d
+        w_i = inverse_ntt(acc)
+
+        # t₁ is stored as high bits, needs scaling by 2^d
+        ct1_scaled = scalar_multiply(
+            multiply_polynomials(c, t1[i]),
+            2**13
+        )
+        w_prime.append(subtract_polynomials(w_i, ct1_scaled))
+
+    return w_prime
+```
+
+## Step 5: Apply Hint
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              HINT APPLICATION                                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Use hint to get correct high bits:                           │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   w₁' = UseHint(h, w')                                 │  │
+│   │                                                         │  │
+│   │   For each coefficient w'[i][j]:                       │  │
+│   │                                                         │  │
+│   │   1. Decompose: (r₁, r₀) = Decompose(w'[i][j])        │  │
+│   │   2. If h[i][j] == 0: w₁'[i][j] = r₁                  │  │
+│   │   3. If h[i][j] == 1:                                  │  │
+│   │      • If r₀ > 0: w₁'[i][j] = r₁ + 1                  │  │
+│   │      • If r₀ ≤ 0: w₁'[i][j] = r₁ - 1                  │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Why hints are needed:                                         │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   w' = A·z - c·t                                       │  │
+│   │   w  = A·y  (original commitment)                      │  │
+│   │                                                         │  │
+│   │   Difference: w - w' = c·s₂ + c·t₀                    │  │
+│   │   (includes low-order term t₀)                        │  │
+│   │                                                         │  │
+│   │   Hint indicates where this causes high bits to differ │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Step 6: Verify Challenge
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              CHALLENGE VERIFICATION                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Recompute challenge and compare:                             │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   1. Compute message representative:                    │  │
+│   │      μ = H(tr ∥ M, 64)                                 │  │
+│   │                                                         │  │
+│   │   2. Recompute challenge seed:                         │  │
+│   │      c̃' = H(μ ∥ w₁', 32)                              │  │
+│   │                                                         │  │
+│   │   3. Compare:                                           │  │
+│   │      If c̃ ≠ c̃': return INVALID                        │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   If challenge matches: signature correctly binds to message  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Complete Verification Algorithm
+
+```python
+def ml_dsa_verify(pk: bytes, M: bytes, sigma: bytes,
+                   k: int, l: int, params: dict) -> bool:
+    """
+    ML-DSA verification algorithm.
+
+    Args:
+        pk: Public key
+        M: Message
+        sigma: Signature
+        k, l: Matrix dimensions
+        params: Algorithm parameters
+
+    Returns:
+        True if valid, False if invalid
+    """
+    gamma1 = params['gamma1']
+    gamma2 = params['gamma2']
+    beta = params['beta']
+    tau = params['tau']
+    omega = params['omega']
+
+    # Step 1: Parse public key
+    rho = pk[:32]
+    t1 = decode_t1(pk[32:], k)
+
+    # Compute public key hash
+    tr = shake256(pk, 64)
+
+    # Regenerate matrix A
+    A = expand_A(rho, k, l)
+
+    # Step 2: Decode signature
+    try:
+        c_tilde, z, h = decode_signature(sigma, l, gamma1, omega, k)
+    except DecodingError:
+        return False
+
+    # Check z norm bound
+    if infinity_norm(z) >= gamma1 - beta:
+        return False
+
+    # Step 3: Reconstruct challenge polynomial
+    c = sample_in_ball(c_tilde, tau)
+
+    # Step 4: Compute w' = A·z - c·t₁·2^d
+    z_ntt = [ntt(poly) for poly in z]
+    c_ntt = ntt(c)
+
+    w_prime = []
+    for i in range(k):
+        # A[i] · z
+        acc = vector_matrix_multiply_row(A[i], z_ntt)
+        w_i = inverse_ntt(acc)
+
+        # Subtract c · t₁[i] · 2^13
+        ct1 = multiply_and_scale(c, t1[i], 13)
+        w_prime.append(subtract_polynomials(w_i, ct1))
+
+    # Step 5: Apply hint to get w₁'
+    w1_prime = use_hint(h, w_prime, gamma2)
+
+    # Step 6: Verify challenge
+    mu = shake256(tr + M, 64)
+    c_tilde_prime = shake256(mu + encode_w1(w1_prime), 32)
+
+    if c_tilde != c_tilde_prime:
+        return False
+
+    # All checks passed
+    return True
+```
+
+## Verification Complexity
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              VERIFICATION COMPLEXITY                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Operations (ML-DSA-65):                                       │
+│   ┌───────────────────────────────┬─────────────────────────┐  │
+│   │ Operation                     │ Count                   │  │
+│   ├───────────────────────────────┼─────────────────────────┤  │
+│   │ SHAKE-256/128 calls           │ ~3                      │  │
+│   │ ExpandA (matrix generation)   │ 1 (k×l = 30 polys)     │  │
+│   │ NTT transforms                │ l + 1 = 6              │  │
+│   │ Inverse NTT                   │ k = 6                  │  │
+│   │ Polynomial multiplications    │ k × l + k = 36        │  │
+│   │ Polynomial additions/subs     │ ~20                    │  │
+│   │ Hint applications             │ k × 256 = 1536        │  │
+│   │ Norm checks                   │ l = 5                  │  │
+│   │ Byte comparisons              │ 32                     │  │
+│   └───────────────────────────────┴─────────────────────────┘  │
+│                                                                 │
+│   Timing Comparison:                                            │
+│   ┌──────────────┬─────────────┬─────────────────────────────┐ │
+│   │   Variant    │  Verify     │   vs Signing               │ │
+│   ├──────────────┼─────────────┼─────────────────────────────┤ │
+│   │ ML-DSA-44    │  ~70 μs     │  ~3× faster than sign     │ │
+│   │ ML-DSA-65    │  ~110 μs    │  ~3× faster than sign     │ │
+│   │ ML-DSA-87    │  ~170 μs    │  ~3× faster than sign     │ │
+│   └──────────────┴─────────────┴─────────────────────────────┘ │
+│                                                                 │
+│   Key differences from signing:                                │
+│   • No rejection loop (always single pass)                    │
+│   • No secret key operations (only public)                    │
+│   • Deterministic timing (no variance)                        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Verification Failure Modes
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              VERIFICATION FAILURES                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Signature Decoding Failures:                                  │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ • Invalid encoding of z (coefficients out of range)    │  │
+│   │ • Invalid hint encoding                                │  │
+│   │ • Hint has too many ones (> ω)                        │  │
+│   │ • Signature wrong length                               │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Norm Check Failures:                                          │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ • ||z||∞ ≥ γ₁ - β                                      │  │
+│   │ (Response coefficients too large)                      │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Challenge Mismatch:                                           │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ • c̃ ≠ H(μ ∥ w₁')                                      │  │
+│   │                                                         │  │
+│   │ This can happen if:                                    │  │
+│   │ • Message was modified                                 │  │
+│   │ • Signature was modified                               │  │
+│   │ • Wrong public key used                               │  │
+│   │ • Signature is a forgery attempt                      │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   All failures return INVALID (no information leakage)        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Summary
+
+ML-DSA verification:
+
+1. **Parse** public key to extract ρ and t₁, compute tr = H(pk)
+2. **Decode** signature into (c̃, z, h), check basic validity
+3. **Reconstruct** challenge c = SampleInBall(c̃)
+4. **Compute** w' = A·z - c·t₁·2^d using NTT
+5. **Apply** hint: w₁' = UseHint(h, w')
+6. **Verify** c̃ == H(μ ∥ w₁') where μ = H(tr ∥ M)
+
+Key properties:
+- Deterministic (no randomness needed)
+- Constant time (no rejection loop)
+- ~3× faster than signing
+- Only uses public key (no secrets)

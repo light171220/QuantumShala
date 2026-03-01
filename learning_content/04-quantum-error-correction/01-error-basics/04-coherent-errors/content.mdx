@@ -1,0 +1,703 @@
+# Coherent Errors: Systematic Rotations and Control Imperfections
+
+## Introduction
+
+Not all quantum errors are random. Coherent errors arise from systematic imperfections in quantum control, such as miscalibrated gates, frequency drifts, and pulse distortions. Unlike stochastic noise, coherent errors can accumulate constructively, making them particularly dangerous for quantum computation.
+
+## Coherent vs Incoherent Errors
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              COHERENT VS INCOHERENT ERRORS                         │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  INCOHERENT (Stochastic):                                          │
+│  ┌─────┐                                                           │
+│  │  ρ  │──► E(ρ) = Σₖ pₖ Uₖ ρ Uₖ†   (random application)          │
+│  └─────┘                                                           │
+│  • Random errors with probability pₖ                               │
+│  • Errors add in quadrature: ε_total ∝ √n                         │
+│  • Shrinks Bloch sphere (mixed states)                            │
+│                                                                     │
+│  COHERENT (Systematic):                                            │
+│  ┌─────┐                                                           │
+│  │  ρ  │──► U_err ρ U_err†   (deterministic rotation)             │
+│  └─────┘                                                           │
+│  • Same error every time                                           │
+│  • Errors add linearly: ε_total ∝ n                               │
+│  • Rotates Bloch sphere (pure states stay pure)                   │
+│                                                                     │
+│  CRITICAL DIFFERENCE:                                              │
+│  After n gates with error ε per gate:                             │
+│  • Incoherent: total error ~ √n × ε                               │
+│  • Coherent: total error ~ n × ε   ← MUCH WORSE!                  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Mathematical Framework
+
+```python
+import numpy as np
+from typing import List, Tuple
+
+# Pauli matrices
+I = np.eye(2, dtype=complex)
+X = np.array([[0, 1], [1, 0]], dtype=complex)
+Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+def rotation_matrix(axis: str, angle: float) -> np.ndarray:
+    """
+    Generate rotation matrix for single-qubit rotation.
+
+    R_n(θ) = cos(θ/2)I - i·sin(θ/2)·n·σ
+    """
+    if axis == 'x':
+        return np.cos(angle/2) * I - 1j * np.sin(angle/2) * X
+    elif axis == 'y':
+        return np.cos(angle/2) * I - 1j * np.sin(angle/2) * Y
+    elif axis == 'z':
+        return np.cos(angle/2) * I - 1j * np.sin(angle/2) * Z
+    else:
+        raise ValueError(f"Unknown axis: {axis}")
+
+class CoherentErrorModel:
+    """
+    Model coherent errors as systematic rotations.
+
+    Coherent Error Types:
+    ┌────────────────────────────────────────────────────────┐
+    │                                                        │
+    │  OVER-ROTATION:     θ_actual = θ_intended + δθ        │
+    │                     ─────────────────────────          │
+    │  AXIS ERROR:        n_actual ≠ n_intended             │
+    │                     ─────────────────────────          │
+    │  FREQUENCY DRIFT:   ω(t) = ω₀ + δω(t)                 │
+    │                     ─────────────────────────          │
+    │  CROSSTALK:         U_actual = U_target ⊗ U_leak      │
+    │                                                        │
+    └────────────────────────────────────────────────────────┘
+    """
+
+    def __init__(self):
+        self.error_history = []
+
+    def over_rotation_error(self, target_gate: np.ndarray,
+                            axis: str, delta_angle: float) -> np.ndarray:
+        """
+        Model gate with over/under-rotation error.
+
+        U_actual = R_axis(δθ) · U_target
+        """
+        error_rotation = rotation_matrix(axis, delta_angle)
+        actual_gate = error_rotation @ target_gate
+        return actual_gate
+
+    def axis_error(self, intended_axis: str, angle: float,
+                   axis_deviation: Tuple[float, float, float]) -> np.ndarray:
+        """
+        Model rotation about wrong axis.
+
+        Args:
+            intended_axis: 'x', 'y', or 'z'
+            angle: Rotation angle
+            axis_deviation: (δx, δy, δz) deviation from intended axis
+        """
+        dx, dy, dz = axis_deviation
+
+        # Normalize actual axis
+        if intended_axis == 'x':
+            n = np.array([1 + dx, dy, dz])
+        elif intended_axis == 'y':
+            n = np.array([dx, 1 + dy, dz])
+        else:  # z
+            n = np.array([dx, dy, 1 + dz])
+
+        n = n / np.linalg.norm(n)
+
+        # General rotation about axis n
+        sigma_n = n[0] * X + n[1] * Y + n[2] * Z
+        U = np.cos(angle/2) * I - 1j * np.sin(angle/2) * sigma_n
+
+        return U
+
+    def frequency_drift_error(self, intended_angle: float,
+                              drift_rate: float, gate_time: float) -> np.ndarray:
+        """
+        Model error from frequency drift during gate.
+
+        Phase accumulated: φ = ∫ δω(t) dt
+        """
+        # Simple linear drift model
+        phase_error = drift_rate * gate_time
+        actual_angle = intended_angle + phase_error
+
+        return rotation_matrix('z', actual_angle)
+
+# Demonstrate coherent error accumulation
+def coherent_error_accumulation(n_gates: int, error_per_gate: float) -> float:
+    """
+    Show how coherent errors accumulate linearly.
+
+    Each gate has over-rotation by error_per_gate radians.
+    """
+    # Target: n identity gates (should give |0⟩ → |0⟩)
+    state = np.array([1, 0], dtype=complex)  # |0⟩
+
+    # Apply n gates, each with coherent Z error
+    error_gate = rotation_matrix('z', error_per_gate)
+
+    for _ in range(n_gates):
+        state = error_gate @ state
+
+    # Measure fidelity with |0⟩
+    fidelity = np.abs(state[0])**2
+
+    # Accumulated phase error
+    total_phase = n_gates * error_per_gate
+    expected_fidelity = np.cos(total_phase / 2)**2
+
+    return fidelity, expected_fidelity
+
+# Compare coherent vs incoherent
+print("Error Accumulation Comparison")
+print("=" * 60)
+
+error_per_gate = 0.01  # 0.01 radian error per gate
+
+for n_gates in [10, 100, 1000]:
+    # Coherent
+    fid_coherent, expected = coherent_error_accumulation(n_gates, error_per_gate)
+
+    # Incoherent (theoretical)
+    # For depolarizing, infidelity adds: (1-F_total) ≈ n × (1-F_single)
+    # For coherent, phase error adds: total_phase = n × phase_error
+    incoherent_infidelity = n_gates * (error_per_gate**2 / 4)  # Approx
+
+    print(f"n = {n_gates:4d}:")
+    print(f"  Coherent infidelity:   {1 - fid_coherent:.6f}")
+    print(f"  Expected (n×ε)²/4:     {(n_gates * error_per_gate)**2 / 4:.6f}")
+    print(f"  Incoherent (√n×ε)²/4:  {incoherent_infidelity:.6f}")
+    print()
+```
+
+## Visualizing Coherent Errors
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                BLOCH SPHERE VISUALIZATION                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  IDEAL GATE (X gate):               OVER-ROTATION:                 │
+│       z                                   z                         │
+│       │                                   │                         │
+│       ○ |0⟩                               ○ |0⟩                     │
+│      /│\                                 /│\                        │
+│     / │ \                               / │ \                       │
+│  ──●──┼──●── y                       ──●──┼──●── y                  │
+│     \ │ /                               \ │ /                       │
+│      \│/                                 \│/                        │
+│       ●────────→|1⟩                       ●────→ (not quite |1⟩)   │
+│       │           ↑                       │        ↑                │
+│       │    Perfect rotation              │   Systematic offset     │
+│                                                                     │
+│  INCOHERENT ERROR:                  COHERENT ERROR:                │
+│       z                                   z                         │
+│       │                                   │                         │
+│       ○                                   ○                         │
+│      ╱│╲                                 /│\                        │
+│     ╱ │ ╲  ← Sphere shrinks             / │ \                       │
+│  ──●──┼──●── y  (mixed state)        ──●──┼──●── y                  │
+│     ╲ │ ╱                               \ │◀────── Rotated but     │
+│      ╲│╱                                 \│/       still pure!     │
+│       ●                                   ●                         │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+```python
+import numpy as np
+
+def bloch_vector(rho: np.ndarray) -> np.ndarray:
+    """Extract Bloch vector from single-qubit density matrix."""
+    rx = 2 * np.real(rho[0, 1])
+    ry = 2 * np.imag(rho[1, 0])
+    rz = np.real(rho[0, 0] - rho[1, 1])
+    return np.array([rx, ry, rz])
+
+def bloch_length(rho: np.ndarray) -> float:
+    """Calculate Bloch vector length (purity measure)."""
+    r = bloch_vector(rho)
+    return np.linalg.norm(r)
+
+class ErrorVisualization:
+    """
+    Visualize difference between coherent and incoherent errors.
+    """
+
+    def __init__(self):
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    def apply_coherent_error(self, rho: np.ndarray,
+                             error_angle: float) -> np.ndarray:
+        """Apply coherent Z rotation error."""
+        U = np.cos(error_angle/2) * self.I - 1j * np.sin(error_angle/2) * self.Z
+        return U @ rho @ U.conj().T
+
+    def apply_incoherent_error(self, rho: np.ndarray,
+                               error_prob: float) -> np.ndarray:
+        """Apply incoherent depolarizing error."""
+        return (1 - error_prob) * rho + (error_prob / 3) * (
+            self.X @ rho @ self.X + self.Y @ rho @ self.Y + self.Z @ rho @ self.Z
+        )
+
+    def compare_errors(self, n_gates: int, error_strength: float):
+        """
+        Compare effect of coherent vs incoherent errors.
+        """
+        # Start with |+⟩ state
+        plus = np.array([1, 1], dtype=complex) / np.sqrt(2)
+        rho_coherent = np.outer(plus, plus.conj())
+        rho_incoherent = np.outer(plus, plus.conj())
+
+        results = {
+            'coherent_bloch': [],
+            'incoherent_bloch': [],
+            'coherent_purity': [],
+            'incoherent_purity': []
+        }
+
+        for i in range(n_gates):
+            # Apply errors
+            rho_coherent = self.apply_coherent_error(rho_coherent, error_strength)
+            rho_incoherent = self.apply_incoherent_error(rho_incoherent, error_strength**2)
+
+            # Record Bloch vectors
+            results['coherent_bloch'].append(bloch_vector(rho_coherent))
+            results['incoherent_bloch'].append(bloch_vector(rho_incoherent))
+
+            # Record purities
+            results['coherent_purity'].append(np.real(np.trace(rho_coherent @ rho_coherent)))
+            results['incoherent_purity'].append(np.real(np.trace(rho_incoherent @ rho_incoherent)))
+
+        return results
+
+# Demonstrate
+viz = ErrorVisualization()
+results = viz.compare_errors(50, 0.05)
+
+print("Purity comparison after 50 gates:")
+print(f"Coherent error purity:   {results['coherent_purity'][-1]:.4f}")
+print(f"Incoherent error purity: {results['incoherent_purity'][-1]:.4f}")
+print()
+print("Key insight: Coherent errors preserve purity (unitary evolution)")
+print("             Incoherent errors decrease purity (mixed states)")
+```
+
+## Sources of Coherent Errors
+
+```python
+import numpy as np
+
+class CoherentErrorSources:
+    """
+    Model physical sources of coherent errors.
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                 SOURCES OF COHERENT ERRORS                       │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                                                                  │
+    │  1. PULSE CALIBRATION:                                          │
+    │     • Amplitude miscalibration → over/under rotation            │
+    │     • Duration error → wrong rotation angle                     │
+    │     • DRAG parameter → leakage to non-computational states     │
+    │                                                                  │
+    │  2. FREQUENCY ERRORS:                                           │
+    │     • Qubit frequency drift                                     │
+    │     • AC Stark shifts from nearby drives                        │
+    │     • Slow environmental fluctuations                           │
+    │                                                                  │
+    │  3. CROSSTALK:                                                  │
+    │     • Microwave leakage to neighboring qubits                   │
+    │     • Always-on ZZ coupling                                     │
+    │     • Control line coupling                                     │
+    │                                                                  │
+    │  4. SYSTEMATIC HARDWARE IMPERFECTIONS:                          │
+    │     • Non-ideal pulse shapes                                    │
+    │     • DAC quantization                                          │
+    │     • Impedance mismatches                                      │
+    │                                                                  │
+    └─────────────────────────────────────────────────────────────────┘
+    """
+
+    def __init__(self, qubit_freq: float = 5e9, T1: float = 50e-6):
+        self.qubit_freq = qubit_freq
+        self.T1 = T1
+
+    def pulse_calibration_error(self, target_angle: float,
+                                amplitude_error: float = 0.01,
+                                duration_error: float = 0.0) -> dict:
+        """
+        Model pulse calibration errors.
+
+        Angle = amplitude × duration × constant
+        """
+        # Actual angle with errors
+        actual_angle = target_angle * (1 + amplitude_error) * (1 + duration_error)
+
+        # Over-rotation error
+        angle_error = actual_angle - target_angle
+
+        return {
+            'target_angle': target_angle,
+            'actual_angle': actual_angle,
+            'angle_error': angle_error,
+            'relative_error': angle_error / target_angle
+        }
+
+    def frequency_drift_error(self, gate_time: float,
+                              drift_rate: float = 1e3) -> dict:
+        """
+        Model frequency drift during computation.
+
+        Args:
+            gate_time: Single gate time in seconds
+            drift_rate: Frequency drift in Hz/s
+        """
+        # Phase error from frequency drift
+        # Δφ = 2π × Δf × t
+        freq_drift = drift_rate * gate_time
+        phase_error = 2 * np.pi * freq_drift * gate_time
+
+        return {
+            'gate_time': gate_time,
+            'freq_drift_hz': freq_drift,
+            'phase_error_rad': phase_error,
+            'phase_error_deg': np.degrees(phase_error)
+        }
+
+    def zz_crosstalk_error(self, zz_strength: float,
+                           idle_time: float) -> dict:
+        """
+        Model always-on ZZ coupling between qubits.
+
+        H_ZZ = J_ZZ × Z⊗Z
+        Accumulates phase during idle times.
+        """
+        # Phase accumulated
+        phase = 2 * zz_strength * idle_time
+
+        # Conditional phase error
+        # |00⟩ and |11⟩ accumulate +phase
+        # |01⟩ and |10⟩ accumulate -phase
+
+        return {
+            'zz_coupling_hz': zz_strength,
+            'idle_time': idle_time,
+            'conditional_phase': phase,
+            'equivalent_cz_error': phase / np.pi
+        }
+
+# Example calculations
+sources = CoherentErrorSources()
+
+print("Coherent Error Sources Analysis")
+print("=" * 60)
+
+# Pulse calibration
+pulse_err = sources.pulse_calibration_error(np.pi/2, amplitude_error=0.01)
+print(f"\nPulse calibration (1% amplitude error on π/2 pulse):")
+print(f"  Angle error: {np.degrees(pulse_err['angle_error']):.2f}°")
+
+# Frequency drift
+freq_err = sources.frequency_drift_error(gate_time=50e-9, drift_rate=1e3)
+print(f"\nFrequency drift (1 kHz/s, 50ns gate):")
+print(f"  Phase error: {freq_err['phase_error_deg']:.4f}°")
+
+# ZZ crosstalk
+zz_err = sources.zz_crosstalk_error(zz_strength=100e3, idle_time=1e-6)
+print(f"\nZZ crosstalk (100 kHz coupling, 1μs idle):")
+print(f"  Conditional phase: {np.degrees(zz_err['conditional_phase']):.2f}°")
+print(f"  Equivalent CZ error: {zz_err['equivalent_cz_error']:.3f}")
+```
+
+## Randomized Compiling
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    RANDOMIZED COMPILING                             │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  IDEA: Convert coherent errors to incoherent (stochastic) errors   │
+│        by randomizing the frame of each gate.                      │
+│                                                                     │
+│  ORIGINAL CIRCUIT:                                                 │
+│  ┌───┐ ┌───┐ ┌───┐ ┌───┐                                          │
+│  │ G │─│ G │─│ G │─│ G │   Each G has coherent error ε            │
+│  └───┘ └───┘ └───┘ └───┘   Total error ∝ n × ε (adds up!)         │
+│                                                                     │
+│  RANDOMIZED CIRCUIT:                                               │
+│  ┌───┐┌───┐ ┌───┐┌───┐ ┌───┐┌───┐ ┌───┐┌───┐                      │
+│  │P₁ ││ G ││P₁†││P₂ ││ G ││P₂†││P₃ ││ G │...                       │
+│  └───┘└───┘ └───┘└───┘ └───┘└───┘ └───┘└───┘                       │
+│                                                                     │
+│  Each Pᵢ is a random Pauli, P†GP implements same logical gate    │
+│  Errors randomized → average to depolarizing noise                 │
+│                                                                     │
+│  BENEFIT: Error ∝ √n × ε instead of n × ε                         │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+```python
+import numpy as np
+from typing import List, Callable
+
+class RandomizedCompiling:
+    """
+    Implement randomized compiling to convert coherent to incoherent errors.
+    """
+
+    def __init__(self):
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+        self.paulis = [self.I, self.X, self.Y, self.Z]
+
+    def pauli_twirl_clifford(self, gate: np.ndarray,
+                             pre_pauli: np.ndarray,
+                             post_pauli: np.ndarray) -> np.ndarray:
+        """
+        Apply Pauli twirl to a Clifford gate.
+
+        For Clifford C: P·C·P' = C (up to phase) for appropriate P, P'
+        """
+        return post_pauli @ gate @ pre_pauli
+
+    def random_pauli(self) -> np.ndarray:
+        """Get random Pauli operator."""
+        return self.paulis[np.random.randint(4)]
+
+    def twirl_single_qubit_gate(self, gate: np.ndarray,
+                                error: Callable[[np.ndarray], np.ndarray],
+                                n_samples: int = 100) -> np.ndarray:
+        """
+        Average noisy gate over random Pauli twirls.
+
+        Result is equivalent to depolarizing channel.
+        """
+        d = 2
+        averaged_choi = np.zeros((d*d, d*d), dtype=complex)
+
+        for _ in range(n_samples):
+            # Random Pauli before gate
+            P = self.random_pauli()
+
+            # Compute what Pauli is needed after to preserve gate
+            # For Clifford G: G·P·G† is also a Pauli
+            P_after = gate @ P @ gate.conj().T
+
+            # Apply gate with error, surrounded by Paulis
+            noisy_gate = error(gate)
+            twirled_gate = P_after.conj().T @ noisy_gate @ P
+
+            # Add to average (in Choi representation)
+            choi = self._gate_to_choi(twirled_gate)
+            averaged_choi += choi
+
+        averaged_choi /= n_samples
+        return averaged_choi
+
+    def _gate_to_choi(self, gate: np.ndarray) -> np.ndarray:
+        """Convert unitary gate to Choi matrix."""
+        d = gate.shape[0]
+
+        # |Φ⁺⟩ = (1/√d) Σᵢ |ii⟩
+        phi = np.zeros((d*d,), dtype=complex)
+        for i in range(d):
+            phi[i*d + i] = 1 / np.sqrt(d)
+
+        # Apply gate ⊗ I to |Φ⁺⟩
+        gate_ext = np.kron(gate, np.eye(d))
+        phi_out = gate_ext @ phi
+
+        return np.outer(phi_out, phi_out.conj())
+
+    def demonstrate_twirling(self, n_gates: int = 100):
+        """
+        Show how twirling converts coherent to incoherent errors.
+        """
+        # Coherent error: over-rotation
+        epsilon = 0.05
+
+        def coherent_error(gate):
+            error_rot = np.cos(epsilon/2) * self.I - 1j * np.sin(epsilon/2) * self.Z
+            return error_rot @ gate
+
+        # Without twirling: coherent errors accumulate
+        state = np.array([1, 0], dtype=complex)
+        for _ in range(n_gates):
+            state = coherent_error(self.I) @ state
+
+        fidelity_no_twirl = np.abs(state[0])**2
+
+        # With twirling (simulated): errors become incoherent
+        rho = np.outer(state, state.conj())
+        rho = np.array([[1, 0], [0, 0]], dtype=complex)  # |0><0|
+
+        for _ in range(n_gates):
+            # Twirled error is approximately depolarizing
+            p_error = epsilon**2 / 4  # Effective depolarizing probability
+            rho = (1 - p_error) * rho + p_error * self.I / 2
+
+        fidelity_with_twirl = np.real(rho[0, 0])
+
+        return {
+            'n_gates': n_gates,
+            'coherent_fidelity': fidelity_no_twirl,
+            'twirled_fidelity': fidelity_with_twirl,
+            'coherent_infidelity': 1 - fidelity_no_twirl,
+            'twirled_infidelity': 1 - fidelity_with_twirl
+        }
+
+# Demonstrate
+rc = RandomizedCompiling()
+result = rc.demonstrate_twirling(n_gates=100)
+
+print("Randomized Compiling Demonstration")
+print("=" * 60)
+print(f"After {result['n_gates']} gates with ε=0.05 error per gate:")
+print(f"  Without twirling (coherent): infidelity = {result['coherent_infidelity']:.4f}")
+print(f"  With twirling (incoherent):  infidelity = {result['twirled_infidelity']:.6f}")
+print()
+print(f"Improvement ratio: {result['coherent_infidelity']/result['twirled_infidelity']:.1f}×")
+```
+
+## Impact on Error Correction
+
+```python
+import numpy as np
+
+class CoherentErrorImpact:
+    """
+    Analyze how coherent errors affect quantum error correction.
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │           COHERENT ERRORS AND ERROR CORRECTION                   │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                                                                  │
+    │  PROBLEM:                                                       │
+    │  • Standard QEC assumes stochastic (Pauli) errors               │
+    │  • Coherent errors don't commute nicely with stabilizers        │
+    │  • Can cause correlated logical errors                          │
+    │                                                                  │
+    │  EFFECT ON THRESHOLD:                                           │
+    │  • Incoherent threshold: ~1%                                    │
+    │  • Coherent threshold: ~0.1% (order of magnitude worse!)        │
+    │                                                                  │
+    │  SOLUTIONS:                                                      │
+    │  1. Randomized compiling (convert to incoherent)                │
+    │  2. Better calibration (reduce coherent errors)                 │
+    │  3. Modified decoders (account for coherence)                   │
+    │  4. Composite pulse sequences (suppress systematic errors)      │
+    │                                                                  │
+    └─────────────────────────────────────────────────────────────────┘
+    """
+
+    def threshold_comparison(self, physical_error_rate: float,
+                             code_distance: int) -> dict:
+        """
+        Compare logical error rates for coherent vs incoherent errors.
+
+        Simplified model assuming surface code.
+        """
+        # Incoherent: logical error ~ (p/p_th)^((d+1)/2)
+        p_th_incoherent = 0.01
+
+        # Coherent: effectively lower threshold
+        p_th_coherent = 0.001
+
+        # Logical error rates
+        if physical_error_rate < p_th_incoherent:
+            logical_incoherent = (physical_error_rate / p_th_incoherent) ** ((code_distance + 1) / 2)
+        else:
+            logical_incoherent = 1.0
+
+        if physical_error_rate < p_th_coherent:
+            logical_coherent = (physical_error_rate / p_th_coherent) ** ((code_distance + 1) / 2)
+        else:
+            logical_coherent = 1.0
+
+        return {
+            'physical_error': physical_error_rate,
+            'code_distance': code_distance,
+            'logical_incoherent': logical_incoherent,
+            'logical_coherent': logical_coherent,
+            'coherent_penalty': logical_coherent / logical_incoherent
+        }
+
+    def composite_pulse_suppression(self, rotation_error: float,
+                                    n_pulses: int = 5) -> float:
+        """
+        Model error suppression from composite pulse sequences.
+
+        SK1, BB1 sequences can suppress systematic rotation errors.
+        """
+        # BB1 sequence suppresses first-order rotation errors
+        # Error scales as (ε)^n for n-pulse sequences
+
+        suppression_factor = rotation_error ** (n_pulses - 1)
+        return suppression_factor
+
+# Example analysis
+impact = CoherentErrorImpact()
+
+print("Coherent Error Impact on QEC")
+print("=" * 60)
+
+for p in [0.001, 0.003, 0.005]:
+    result = impact.threshold_comparison(p, code_distance=5)
+    print(f"\nPhysical error rate: {p*100:.2f}%")
+    print(f"  Logical error (incoherent): {result['logical_incoherent']:.2e}")
+    print(f"  Logical error (coherent):   {result['logical_coherent']:.2e}")
+    print(f"  Coherent penalty:           {result['coherent_penalty']:.1f}×")
+```
+
+## Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    COHERENT ERRORS SUMMARY                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  KEY CONCEPTS:                                                      │
+│  • Coherent errors = systematic, deterministic rotations            │
+│  • Accumulate linearly (n×ε) vs incoherent (√n×ε)                  │
+│  • Preserve purity but can cause large fidelity loss               │
+│                                                                     │
+│  SOURCES:                                                           │
+│  • Pulse miscalibration                                            │
+│  • Frequency drifts                                                │
+│  • Crosstalk between qubits                                        │
+│  • Systematic hardware imperfections                               │
+│                                                                     │
+│  MITIGATION:                                                        │
+│  • Randomized compiling → converts to incoherent                   │
+│  • Composite pulses → suppresses systematic errors                 │
+│  • Frequent recalibration                                          │
+│  • Modified QEC decoders                                           │
+│                                                                     │
+│  IMPLICATIONS FOR QEC:                                              │
+│  • Lower effective threshold                                       │
+│  • Must be addressed for fault tolerance                           │
+│  • Twirling essential for practical implementations                │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Understanding and mitigating coherent errors is crucial for achieving fault-tolerant quantum computation. While they can be more damaging than random noise, techniques like randomized compiling provide effective solutions.

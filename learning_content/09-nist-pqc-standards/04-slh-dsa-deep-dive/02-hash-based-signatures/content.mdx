@@ -1,0 +1,726 @@
+---
+title: "Hash-Based Signature Fundamentals"
+description: "Understanding the building blocks of hash-based signatures including one-time signatures, Merkle trees, and the Winternitz scheme (WOTS+)."
+keywords: ["hash-based", "lamport", "wots+", "merkle-tree", "one-time-signature", "sphincs"]
+---
+
+# Hash-Based Signature Fundamentals
+
+Hash-based signatures build cryptographic signatures from hash functions alone. Understanding the fundamental building blocks - one-time signatures, Merkle trees, and the Winternitz optimization - is essential for understanding SLH-DSA.
+
+## Lamport One-Time Signatures
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              LAMPORT ONE-TIME SIGNATURES                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Key Generation (for n-bit message):                          │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   For each bit position i ∈ {1, ..., n}:               │  │
+│   │     • Generate random sk[i][0], sk[i][1]               │  │
+│   │     • Compute pk[i][0] = H(sk[i][0])                   │  │
+│   │     • Compute pk[i][1] = H(sk[i][1])                   │  │
+│   │                                                         │  │
+│   │   Secret Key: SK = {sk[i][b] : i ∈ [n], b ∈ {0,1}}    │  │
+│   │   Public Key: PK = {pk[i][b] : i ∈ [n], b ∈ {0,1}}    │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Signing (message m with bits m₁m₂...mₙ):                    │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   σ = (sk[1][m₁], sk[2][m₂], ..., sk[n][mₙ])          │  │
+│   │                                                         │  │
+│   │   For each bit position, reveal the secret key         │  │
+│   │   corresponding to that bit's value                    │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Verification:                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   For each i: check H(σᵢ) == pk[i][mᵢ]                │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Lamport Signature Example
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              LAMPORT EXAMPLE (4-BIT MESSAGE)                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Key Generation:                                               │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │  Bit 1:  sk[1][0]=a₀  sk[1][1]=a₁                      │  │
+│   │          pk[1][0]=H(a₀) pk[1][1]=H(a₁)                 │  │
+│   │                                                         │  │
+│   │  Bit 2:  sk[2][0]=b₀  sk[2][1]=b₁                      │  │
+│   │          pk[2][0]=H(b₀) pk[2][1]=H(b₁)                 │  │
+│   │                                                         │  │
+│   │  Bit 3:  sk[3][0]=c₀  sk[3][1]=c₁                      │  │
+│   │          pk[3][0]=H(c₀) pk[3][1]=H(c₁)                 │  │
+│   │                                                         │  │
+│   │  Bit 4:  sk[4][0]=d₀  sk[4][1]=d₁                      │  │
+│   │          pk[4][0]=H(d₀) pk[4][1]=H(d₁)                 │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Sign message m = 1011:                                        │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   m₁=1 → reveal sk[1][1] = a₁                         │  │
+│   │   m₂=0 → reveal sk[2][0] = b₀                         │  │
+│   │   m₃=1 → reveal sk[3][1] = c₁                         │  │
+│   │   m₄=1 → reveal sk[4][1] = d₁                         │  │
+│   │                                                         │  │
+│   │   Signature: σ = (a₁, b₀, c₁, d₁)                     │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Why ONE-TIME only?                                            │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   If we sign m = 1011: reveal (a₁, b₀, c₁, d₁)        │  │
+│   │   If we sign m' = 1111: reveal (a₁, b₁, c₁, d₁)       │  │
+│   │                                                         │  │
+│   │   Attacker now knows: a₁, b₀, b₁, c₁, d₁              │  │
+│   │   Can forge signature on m'' = 1001: (a₁, b₀, c₀?, d₁)│  │
+│   │                                                         │  │
+│   │   With more signatures, more forgery possibilities!   │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Lamport Signature Implementation
+
+```python
+import hashlib
+import os
+
+class LamportOTS:
+    """
+    Lamport One-Time Signature scheme.
+    Educational implementation - not for production use.
+    """
+
+    def __init__(self, n_bits: int = 256, hash_bytes: int = 32):
+        self.n_bits = n_bits
+        self.hash_bytes = hash_bytes
+        self.sk = None
+        self.pk = None
+        self.used = False
+
+    def _hash(self, data: bytes) -> bytes:
+        """Hash function H"""
+        return hashlib.sha256(data).digest()
+
+    def keygen(self):
+        """Generate Lamport key pair"""
+        # Generate 2n random values for secret key
+        self.sk = [
+            [os.urandom(self.hash_bytes), os.urandom(self.hash_bytes)]
+            for _ in range(self.n_bits)
+        ]
+
+        # Compute public key as hashes
+        self.pk = [
+            [self._hash(self.sk[i][0]), self._hash(self.sk[i][1])]
+            for i in range(self.n_bits)
+        ]
+
+        self.used = False
+        return self.pk
+
+    def sign(self, message: bytes) -> list:
+        """Sign a message (can only be called once!)"""
+        if self.used:
+            raise ValueError("This key has already been used!")
+
+        # Hash message to fixed size
+        msg_hash = self._hash(message)
+
+        # Convert to bits
+        bits = []
+        for byte in msg_hash:
+            for i in range(8):
+                bits.append((byte >> (7-i)) & 1)
+
+        # Select secret key values based on message bits
+        signature = [self.sk[i][bits[i]] for i in range(self.n_bits)]
+
+        self.used = True
+        return signature
+
+    def verify(self, message: bytes, signature: list, public_key: list) -> bool:
+        """Verify a Lamport signature"""
+        msg_hash = self._hash(message)
+
+        bits = []
+        for byte in msg_hash:
+            for i in range(8):
+                bits.append((byte >> (7-i)) & 1)
+
+        # Check each signature component
+        for i in range(self.n_bits):
+            expected = public_key[i][bits[i]]
+            actual = self._hash(signature[i])
+            if actual != expected:
+                return False
+
+        return True
+
+# Demonstration
+lamport = LamportOTS()
+pk = lamport.keygen()
+
+message = b"Hello, Lamport signatures!"
+signature = lamport.sign(message)
+
+# Verify
+is_valid = lamport.verify(message, signature, pk)
+print(f"Signature valid: {is_valid}")
+
+# Key sizes
+sk_size = 2 * 256 * 32  # 16,384 bytes
+pk_size = 2 * 256 * 32  # 16,384 bytes
+sig_size = 256 * 32     # 8,192 bytes
+print(f"Secret key: {sk_size} bytes")
+print(f"Public key: {pk_size} bytes")
+print(f"Signature: {sig_size} bytes")
+```
+
+## Winternitz OTS+ (WOTS+)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              WINTERNITZ OTS+ (WOTS+)                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Key Idea: Trade size for computation using hash chains        │
+│                                                                 │
+│   Lamport: 1 bit per secret key element                        │
+│   WOTS+: log₂(w) bits per secret key element                   │
+│                                                                 │
+│   Winternitz Parameter w (typically 16):                        │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   w = 16: Each chain encodes 4 bits (log₂(16) = 4)     │  │
+│   │                                                         │  │
+│   │   For 256-bit message:                                  │  │
+│   │   • Lamport needs: 256 × 2 = 512 key elements          │  │
+│   │   • WOTS+ needs: 256/4 = 64 key elements (+ checksum)  │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Hash Chain:                                                   │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   sk ─H→ h₁ ─H→ h₂ ─H→ ... ─H→ h_{w-1} = pk           │  │
+│   │                                                         │  │
+│   │   Chain of (w-1) hash applications                     │  │
+│   │   Secret key: start of chain                           │  │
+│   │   Public key: end of chain                             │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Signing digit d ∈ {0, 1, ..., w-1}:                         │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   σ = H^d(sk)  (apply hash d times)                    │  │
+│   │                                                         │  │
+│   │   d=0: σ = sk                                          │  │
+│   │   d=1: σ = H(sk)                                       │  │
+│   │   d=2: σ = H(H(sk))                                    │  │
+│   │   ...                                                   │  │
+│   │   d=w-1: σ = pk                                        │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Verification:                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Compute H^{w-1-d}(σ) and check if it equals pk       │  │
+│   │   (Complete the chain from signature to public key)    │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## WOTS+ Checksum
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              WOTS+ CHECKSUM                                     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Problem: Attacker can forge by extending chains               │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   If signature reveals σ = H³(sk) for digit 3          │  │
+│   │   Attacker can compute H(σ) = H⁴(sk) for digit 4       │  │
+│   │                                                         │  │
+│   │   Can increase any digit, potentially forge messages   │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Solution: Checksum prevents arbitrary increases               │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Checksum = Σᵢ (w - 1 - mᵢ)                           │  │
+│   │                                                         │  │
+│   │   Properties:                                           │  │
+│   │   • If any message digit increases, checksum decreases │  │
+│   │   • Attacker cannot decrease checksum digits           │  │
+│   │   • Message + checksum: any change requires decrease   │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Example (w=16, message digits [3, 7, 2]):                    │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Checksum = (15-3) + (15-7) + (15-2) = 12 + 8 + 13   │  │
+│   │            = 33                                         │  │
+│   │                                                         │  │
+│   │   If attacker changes 3→4:                             │  │
+│   │   New checksum = 11 + 8 + 13 = 32                      │  │
+│   │                                                         │  │
+│   │   32 < 33, so checksum digit must decrease             │  │
+│   │   But attacker can't decrease (can only extend chains) │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## WOTS+ Implementation
+
+```python
+import hashlib
+import os
+from typing import List, Tuple
+
+class WOTSPlus:
+    """
+    Winternitz One-Time Signature Plus (WOTS+).
+    Educational implementation with w=16.
+    """
+
+    def __init__(self, n: int = 32, w: int = 16):
+        self.n = n  # Security parameter (hash output bytes)
+        self.w = w  # Winternitz parameter
+        self.log_w = (w - 1).bit_length()  # log₂(w)
+
+        # Number of message digits
+        self.len1 = (8 * n + self.log_w - 1) // self.log_w
+
+        # Number of checksum digits
+        max_checksum = self.len1 * (w - 1)
+        self.len2 = (max_checksum.bit_length() + self.log_w - 1) // self.log_w
+
+        self.total_len = self.len1 + self.len2
+
+        self.sk = None
+        self.pk = None
+
+    def _hash(self, data: bytes, key: bytes = b'') -> bytes:
+        """Keyed hash function"""
+        return hashlib.sha256(key + data).digest()[:self.n]
+
+    def _chain(self, x: bytes, start: int, steps: int, public_seed: bytes) -> bytes:
+        """Compute hash chain: H^steps(x) starting from position start"""
+        result = x
+        for i in range(start, start + steps):
+            # Use position in domain separation
+            result = self._hash(result, public_seed + i.to_bytes(4, 'big'))
+        return result
+
+    def _base_w(self, data: bytes, out_len: int) -> List[int]:
+        """Convert bytes to base-w representation"""
+        bits = []
+        for byte in data:
+            for i in range(8):
+                bits.append((byte >> (7 - i)) & 1)
+
+        result = []
+        for i in range(out_len):
+            digit = 0
+            for j in range(self.log_w):
+                if i * self.log_w + j < len(bits):
+                    digit = digit * 2 + bits[i * self.log_w + j]
+            result.append(digit)
+        return result
+
+    def _compute_checksum(self, msg_digits: List[int]) -> List[int]:
+        """Compute checksum digits"""
+        checksum = sum(self.w - 1 - d for d in msg_digits)
+
+        # Convert checksum to base-w
+        cs_bytes = checksum.to_bytes((checksum.bit_length() + 7) // 8 or 1, 'big')
+        return self._base_w(cs_bytes, self.len2)
+
+    def keygen(self, seed: bytes = None) -> Tuple[bytes, bytes]:
+        """Generate WOTS+ key pair"""
+        if seed is None:
+            seed = os.urandom(self.n)
+
+        public_seed = os.urandom(self.n)
+
+        # Generate secret key elements
+        self.sk = []
+        for i in range(self.total_len):
+            sk_element = self._hash(seed, i.to_bytes(4, 'big'))
+            self.sk.append(sk_element)
+
+        # Compute public key by hashing to end of each chain
+        self.pk = []
+        for i in range(self.total_len):
+            pk_element = self._chain(self.sk[i], 0, self.w - 1, public_seed)
+            self.pk.append(pk_element)
+
+        self.public_seed = public_seed
+        return (b''.join(self.pk), public_seed)
+
+    def sign(self, message: bytes) -> List[bytes]:
+        """Sign a message"""
+        msg_hash = hashlib.sha256(message).digest()
+
+        # Convert message to base-w digits
+        msg_digits = self._base_w(msg_hash, self.len1)
+
+        # Compute and append checksum
+        checksum_digits = self._compute_checksum(msg_digits)
+        all_digits = msg_digits + checksum_digits
+
+        # Generate signature
+        signature = []
+        for i in range(self.total_len):
+            sig_element = self._chain(self.sk[i], 0, all_digits[i], self.public_seed)
+            signature.append(sig_element)
+
+        return signature
+
+    def verify(self, message: bytes, signature: List[bytes],
+               public_key: bytes, public_seed: bytes) -> bool:
+        """Verify a WOTS+ signature"""
+        msg_hash = hashlib.sha256(message).digest()
+
+        # Convert message to base-w digits
+        msg_digits = self._base_w(msg_hash, self.len1)
+
+        # Compute checksum
+        checksum_digits = self._compute_checksum(msg_digits)
+        all_digits = msg_digits + checksum_digits
+
+        # Parse public key
+        pk_elements = [public_key[i*self.n:(i+1)*self.n]
+                       for i in range(self.total_len)]
+
+        # Verify each chain
+        for i in range(self.total_len):
+            # Complete the chain from signature to public key
+            steps = self.w - 1 - all_digits[i]
+            computed = self._chain(signature[i], all_digits[i], steps, public_seed)
+            if computed != pk_elements[i]:
+                return False
+
+        return True
+
+# Demonstration
+wots = WOTSPlus(n=32, w=16)
+pk, public_seed = wots.keygen()
+
+message = b"Hello, WOTS+!"
+signature = wots.sign(message)
+
+is_valid = wots.verify(message, signature, pk, public_seed)
+print(f"WOTS+ Signature valid: {is_valid}")
+
+print(f"\nWOTS+ (w=16) sizes:")
+print(f"  Message digits (len1): {wots.len1}")
+print(f"  Checksum digits (len2): {wots.len2}")
+print(f"  Total chains: {wots.total_len}")
+print(f"  Public key: {len(pk)} bytes")
+print(f"  Signature: {len(signature) * 32} bytes")
+```
+
+## Merkle Trees for Many-Time Signatures
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              MERKLE SIGNATURE SCHEME                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Key Idea: Use tree structure to authenticate many OTS keys   │
+│                                                                 │
+│   Tree Structure (height h=3, 2³=8 leaves):                    │
+│                                                                 │
+│                        [Root]  ← Single public key             │
+│                       /      \                                  │
+│                    [N₁]      [N₂]                               │
+│                   /    \    /    \                              │
+│                 [N₃]  [N₄][N₅]  [N₆]                           │
+│                 / \   / \  / \   / \                            │
+│               [L₀][L₁][L₂][L₃][L₄][L₅][L₆][L₇]  ← OTS public keys
+│                                                                 │
+│   Each leaf = hash of a WOTS+ public key                       │
+│   Internal nodes = H(left_child || right_child)                │
+│   Root = single value that authenticates all leaves            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│              AUTHENTICATION PATH                                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   To prove leaf L₂ is in tree:                                 │
+│                                                                 │
+│                        [Root]                                   │
+│                       /      \                                  │
+│                   *[N₁]*    [N₂]  ← Need N₂                    │
+│                   /    \                                        │
+│                 [N₃] *[N₄]*       ← Need N₃                    │
+│                      / \                                        │
+│                   *[L₂]* [L₃]     ← Need L₃                    │
+│                                                                 │
+│   Authentication Path for L₂: [L₃, N₃, N₂]                     │
+│                                                                 │
+│   Verification:                                                 │
+│   1. Compute N₄ = H(L₂ || L₃)                                  │
+│   2. Compute N₁ = H(N₃ || N₄)                                  │
+│   3. Compute Root = H(N₁ || N₂)                                │
+│   4. Compare with stored public key                            │
+│                                                                 │
+│   Path length: h nodes (logarithmic in number of leaves)       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Merkle Tree Implementation
+
+```python
+import hashlib
+from typing import List, Tuple, Optional
+
+class MerkleTree:
+    """
+    Merkle tree for authenticating multiple values.
+    """
+
+    def __init__(self, leaves: List[bytes]):
+        self.n = len(leaves)
+        # Pad to power of 2
+        self.height = (self.n - 1).bit_length() if self.n > 1 else 1
+        self.padded_n = 2 ** self.height
+
+        # Pad leaves if needed
+        while len(leaves) < self.padded_n:
+            leaves.append(b'\x00' * 32)
+
+        self.leaves = leaves
+        self.tree = self._build_tree()
+        self.root = self.tree[0]
+
+    def _hash(self, left: bytes, right: bytes) -> bytes:
+        """Hash two children to get parent"""
+        return hashlib.sha256(left + right).digest()
+
+    def _build_tree(self) -> List[bytes]:
+        """Build complete Merkle tree"""
+        # Initialize with leaves at bottom
+        tree = [None] * (2 * self.padded_n - 1)
+
+        # Place leaves
+        for i in range(self.padded_n):
+            tree[self.padded_n - 1 + i] = self.leaves[i]
+
+        # Build internal nodes bottom-up
+        for i in range(self.padded_n - 2, -1, -1):
+            left = tree[2 * i + 1]
+            right = tree[2 * i + 2]
+            tree[i] = self._hash(left, right)
+
+        return tree
+
+    def get_auth_path(self, index: int) -> List[bytes]:
+        """Get authentication path for leaf at index"""
+        path = []
+        node_idx = self.padded_n - 1 + index
+
+        while node_idx > 0:
+            # Get sibling
+            if node_idx % 2 == 1:  # Left child
+                sibling_idx = node_idx + 1
+            else:  # Right child
+                sibling_idx = node_idx - 1
+
+            path.append(self.tree[sibling_idx])
+
+            # Move to parent
+            node_idx = (node_idx - 1) // 2
+
+        return path
+
+    @staticmethod
+    def verify_path(leaf: bytes, index: int, path: List[bytes], root: bytes) -> bool:
+        """Verify an authentication path"""
+        current = leaf
+
+        for i, sibling in enumerate(path):
+            if (index >> i) & 1 == 0:  # Current is left child
+                current = hashlib.sha256(current + sibling).digest()
+            else:  # Current is right child
+                current = hashlib.sha256(sibling + current).digest()
+
+        return current == root
+
+# Demonstration
+leaves = [hashlib.sha256(f"Leaf {i}".encode()).digest() for i in range(8)]
+tree = MerkleTree(leaves)
+
+print(f"Merkle tree with {len(leaves)} leaves")
+print(f"Tree height: {tree.height}")
+print(f"Root: {tree.root.hex()[:32]}...")
+
+# Get and verify authentication path for leaf 2
+auth_path = tree.get_auth_path(2)
+print(f"\nAuthentication path for leaf 2: {len(auth_path)} nodes")
+
+is_valid = MerkleTree.verify_path(leaves[2], 2, auth_path, tree.root)
+print(f"Path verification: {is_valid}")
+
+# Try to verify with wrong leaf
+wrong_leaf = hashlib.sha256(b"Wrong").digest()
+is_valid = MerkleTree.verify_path(wrong_leaf, 2, auth_path, tree.root)
+print(f"Wrong leaf verification: {is_valid}")
+```
+
+## From OTS to Many-Time Signatures
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              COMBINING WOTS+ AND MERKLE TREES                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Structure:                                                    │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   1. Generate 2^h WOTS+ key pairs                      │  │
+│   │   2. Build Merkle tree over WOTS+ public keys          │  │
+│   │   3. Merkle root = scheme's public key                 │  │
+│   │                                                         │  │
+│   │                 [Merkle Root] ← PK                     │  │
+│   │                    /    \                               │  │
+│   │                  ...    ...                             │  │
+│   │                 / \      / \                            │  │
+│   │   [WOTS₀][WOTS₁][WOTS₂]...[WOTS_{2^h-1}]              │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Signing (message m with key index i):                        │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   1. Sign m with WOTS+ key pair i                      │  │
+│   │   2. Get authentication path for WOTSᵢ public key      │  │
+│   │   3. Signature = (i, WOTS_sig, WOTS_pk, auth_path)     │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Verification:                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   1. Verify WOTS+ signature against WOTS_pk            │  │
+│   │   2. Verify auth_path proves WOTS_pk in Merkle tree    │  │
+│   │   3. Accept if both checks pass                        │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   This gives 2^h signatures from one public key!              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Security of Hash-Based Signatures
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SECURITY FOUNDATIONS                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Required Hash Function Properties:                           │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   1. Second-Preimage Resistance                        │  │
+│   │      Given x, hard to find x' ≠ x with H(x') = H(x)   │  │
+│   │      - Needed for WOTS+ chain security                │  │
+│   │      - Attacker can't find alternate preimage         │  │
+│   │                                                         │  │
+│   │   2. Collision Resistance                              │  │
+│   │      Hard to find any x, x' with H(x) = H(x')         │  │
+│   │      - Needed for Merkle tree security                │  │
+│   │      - Can't create two leaves with same hash         │  │
+│   │                                                         │  │
+│   │   3. PRF Security                                      │  │
+│   │      H(key, ·) indistinguishable from random          │  │
+│   │      - Needed for key generation                      │  │
+│   │      - Secret keys appear random to attacker          │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Security Reductions:                                         │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   WOTS+ Security:                                      │  │
+│   │   - Forgery → Break second-preimage resistance        │  │
+│   │   - Checksum ensures no "free" forgeries              │  │
+│   │                                                         │  │
+│   │   Merkle Tree Security:                                │  │
+│   │   - Forge leaf membership → Find collision            │  │
+│   │   - Tree structure prevents manipulation              │  │
+│   │                                                         │  │
+│   │   Combined Security:                                   │  │
+│   │   - Either forge WOTS+ OR fake tree membership       │  │
+│   │   - Both are provably hard given hash properties     │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Summary
+
+Hash-based signature building blocks:
+
+**Lamport One-Time Signatures:**
+- Simplest hash-based signature
+- Secret key: 2n random values
+- Public key: hashes of secret key values
+- Signature reveals secret key values based on message bits
+- Can only sign once safely
+
+**WOTS+ (Winternitz OTS+):**
+- Uses hash chains to encode multiple bits per element
+- Winternitz parameter w controls size/computation trade-off
+- Checksum prevents forgery by chain extension
+- Significantly smaller than Lamport
+
+**Merkle Trees:**
+- Authenticate many OTS public keys with single root
+- Authentication path has logarithmic size
+- Enables many-time signatures from OTS
+- Foundation for practical hash-based schemes
+
+**Security:**
+- Relies only on hash function properties
+- Second-preimage resistance for WOTS+
+- Collision resistance for Merkle trees
+- Minimal cryptographic assumptions
+
+These building blocks combine in SLH-DSA's hypertree structure, which we'll explore in the next lesson.

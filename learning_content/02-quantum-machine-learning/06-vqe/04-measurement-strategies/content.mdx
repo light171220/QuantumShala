@@ -1,0 +1,653 @@
+---
+title: "Measurement Strategies"
+description: "Learn efficient measurement techniques for VQE including Pauli grouping, classical shadows, and measurement error mitigation."
+---
+
+# Measurement Strategies
+
+Efficient measurement is critical for practical VQE. The number of measurements needed to estimate energies accurately can be prohibitive without careful strategies.
+
+## The Measurement Challenge
+
+VQE requires estimating the expectation value of many Pauli terms.
+
+<Definition>
+**Measurement Overhead**: For a Hamiltonian with M Pauli terms, each measured to precision ε, the naive shot count scales as:
+
+$$N_{shots} \sim \frac{M \cdot \sum_i |c_i|^2}{\varepsilon^2}$$
+
+This can easily reach millions of shots for molecular systems.
+</Definition>
+
+```python
+import numpy as np
+
+def estimate_shot_count(coefficients, precision=0.001):
+    """
+    Estimate total shots needed for energy precision.
+
+    Args:
+        coefficients: List of Hamiltonian coefficients
+        precision: Desired energy precision
+
+    Returns:
+        Estimated shot count
+    """
+    # Variance contribution from each term
+    variances = [c**2 for c in coefficients]
+    total_variance = sum(variances)
+
+    # Shots needed: N ~ variance / precision^2
+    shots_per_term = total_variance / precision**2
+
+    return {
+        'shots_per_term': int(shots_per_term / len(coefficients)),
+        'total_shots': int(shots_per_term),
+        'n_terms': len(coefficients),
+        'total_variance': total_variance
+    }
+
+# Example: H2 molecule coefficients
+h2_coeffs = [0.17, 0.17, -0.22, 0.17, 0.17, 0.12, 0.12]
+
+result = estimate_shot_count(h2_coeffs, precision=0.001)
+print("H2 Measurement Estimate:")
+for key, val in result.items():
+    print(f"  {key}: {val}")
+```
+
+## Qubit-Wise Commuting Groups
+
+Pauli terms that commute qubit-wise can be measured simultaneously.
+
+<Formula>
+**Qubit-Wise Commutation**: Two Pauli strings P₁ and P₂ qubit-wise commute if for each qubit position i:
+
+$$[P_1^{(i)}, P_2^{(i)}] = 0$$
+
+This allows measuring P₁ and P₂ with a single measurement circuit.
+</Formula>
+
+<Tip>
+Grouping commuting terms reduces the number of distinct measurement circuits needed, significantly cutting measurement overhead.
+</Tip>
+
+```python
+import numpy as np
+from collections import defaultdict
+
+def qubitwise_commute(p1, p2):
+    """
+    Check if two Pauli strings qubit-wise commute.
+
+    Args:
+        p1, p2: Pauli strings (e.g., 'XZIY')
+
+    Returns:
+        True if they qubit-wise commute
+    """
+    for a, b in zip(p1, p2):
+        # Commutation rules for single Paulis
+        # I commutes with everything
+        # Same Pauli commutes with itself
+        # Different non-I Paulis anti-commute
+        if a != 'I' and b != 'I' and a != b:
+            return False
+    return True
+
+def group_paulis(pauli_terms):
+    """
+    Group Pauli terms into qubit-wise commuting sets.
+
+    Args:
+        pauli_terms: List of Pauli strings
+
+    Returns:
+        List of groups (each group is a list of terms)
+    """
+    groups = []
+
+    for term in pauli_terms:
+        placed = False
+        for group in groups:
+            # Check if term commutes with all in group
+            if all(qubitwise_commute(term, other) for other in group):
+                group.append(term)
+                placed = True
+                break
+        if not placed:
+            groups.append([term])
+
+    return groups
+
+# Example: H2 Hamiltonian terms
+h2_terms = ['IIII', 'IIIZ', 'IIZI', 'IZII', 'ZIII',
+            'IIZZ', 'IZIZ', 'ZIIZ', 'IZZI', 'ZIZI', 'ZZII',
+            'XXYY', 'XYYX', 'YXXY', 'YYXX']
+
+groups = group_paulis(h2_terms)
+print(f"H2: {len(h2_terms)} terms → {len(groups)} groups")
+print()
+for i, group in enumerate(groups):
+    print(f"Group {i+1}: {group}")
+```
+
+## Measurement Basis Rotation
+
+To measure a Pauli term, we rotate to the appropriate basis.
+
+```python
+import numpy as np
+
+def get_measurement_circuit(pauli_string):
+    """
+    Determine the measurement basis rotations needed.
+
+    Args:
+        pauli_string: Pauli string (e.g., 'XZIY')
+
+    Returns:
+        Dict mapping qubit indices to basis rotation gates
+    """
+    rotations = {}
+
+    for i, pauli in enumerate(pauli_string):
+        if pauli == 'X':
+            rotations[i] = 'H'  # Hadamard to measure in X basis
+        elif pauli == 'Y':
+            rotations[i] = 'HSdg'  # H @ S† to measure in Y basis
+        elif pauli == 'Z':
+            rotations[i] = None  # No rotation needed
+        elif pauli == 'I':
+            rotations[i] = None  # Identity - no measurement needed
+
+    return rotations
+
+def get_measurement_outcome(bitstring, pauli_string):
+    """
+    Convert measurement outcome to Pauli eigenvalue.
+
+    Args:
+        bitstring: Measurement result (e.g., '0110')
+        pauli_string: Pauli string being measured
+
+    Returns:
+        +1 or -1 eigenvalue
+    """
+    eigenvalue = 1
+
+    for bit, pauli in zip(bitstring, pauli_string):
+        if pauli != 'I':
+            # Each non-I Pauli contributes (-1)^bit
+            if bit == '1':
+                eigenvalue *= -1
+
+    return eigenvalue
+
+# Example
+paulis = ['XZIY', 'ZZII', 'XXXX']
+
+for p in paulis:
+    rotations = get_measurement_circuit(p)
+    print(f"\n{p}:")
+    for qubit, gate in rotations.items():
+        if gate:
+            print(f"  Qubit {qubit}: apply {gate}")
+
+# Test outcome
+bitstring = '0110'
+for p in paulis:
+    ev = get_measurement_outcome(bitstring, p)
+    print(f"  {p} with outcome {bitstring}: eigenvalue = {ev}")
+```
+
+## Shot Allocation
+
+Optimal shot distribution minimizes total variance.
+
+<Warning>
+Naively distributing shots equally is suboptimal. Terms with larger coefficients should receive more shots.
+</Warning>
+
+```python
+import numpy as np
+
+def optimal_shot_allocation(coefficients, total_shots):
+    """
+    Allocate shots optimally based on coefficient magnitudes.
+
+    For minimum variance, shots should scale with |c_i|.
+
+    Args:
+        coefficients: List of (pauli_string, coefficient) tuples
+        total_shots: Total shot budget
+
+    Returns:
+        Dict mapping Pauli strings to shot counts
+    """
+    # Compute weights proportional to |c_i|
+    weights = [abs(c) for _, c in coefficients]
+    total_weight = sum(weights)
+
+    allocation = {}
+    remaining = total_shots
+    n_terms = len(coefficients)
+
+    for i, (pauli, c) in enumerate(coefficients):
+        if i < n_terms - 1:
+            shots = int(total_shots * abs(c) / total_weight)
+            shots = max(shots, 10)  # Minimum shots
+        else:
+            shots = remaining  # Use remaining for last term
+
+        allocation[pauli] = shots
+        remaining -= shots
+
+    return allocation
+
+def compare_allocations(coefficients, total_shots):
+    """Compare uniform vs optimal shot allocation."""
+    n_terms = len(coefficients)
+
+    # Uniform allocation
+    uniform_shots = total_shots // n_terms
+
+    # Optimal allocation
+    optimal = optimal_shot_allocation(coefficients, total_shots)
+
+    # Compute variances
+    def compute_variance(allocation):
+        var = 0
+        for pauli, c in coefficients:
+            shots = allocation.get(pauli, uniform_shots)
+            # Variance contribution: c^2 / shots
+            var += c**2 / shots
+        return var
+
+    uniform_alloc = {p: uniform_shots for p, _ in coefficients}
+    uniform_var = compute_variance(uniform_alloc)
+    optimal_var = compute_variance(optimal)
+
+    return {
+        'uniform_variance': uniform_var,
+        'optimal_variance': optimal_var,
+        'improvement': (uniform_var - optimal_var) / uniform_var * 100
+    }
+
+# Example
+coefficients = [
+    ('IIZZ', 0.5),
+    ('IZIZ', 0.3),
+    ('ZZII', 0.1),
+    ('XXYY', 0.05),
+    ('YYXX', 0.05)
+]
+
+allocation = optimal_shot_allocation(coefficients, total_shots=10000)
+
+print("Shot Allocation (10,000 total):")
+print("-" * 40)
+for pauli, shots in allocation.items():
+    coeff = next(c for p, c in coefficients if p == pauli)
+    print(f"  {pauli}: {shots:5d} shots (|c| = {abs(coeff):.2f})")
+
+comparison = compare_allocations(coefficients, 10000)
+print(f"\nVariance comparison:")
+print(f"  Uniform: {comparison['uniform_variance']:.6f}")
+print(f"  Optimal: {comparison['optimal_variance']:.6f}")
+print(f"  Improvement: {comparison['improvement']:.1f}%")
+```
+
+## Classical Shadows
+
+Classical shadows provide efficient estimation of many observables from few measurements.
+
+<Definition>
+**Classical Shadow**: A classical representation of a quantum state that enables efficient prediction of many observables:
+
+1. Apply random Clifford unitaries
+2. Measure in computational basis
+3. Store classical "shadow" representations
+4. Estimate observables from shadows
+</Definition>
+
+```python
+import numpy as np
+
+class RandomizedMeasurement:
+    """
+    Randomized measurement for classical shadows.
+    """
+
+    def __init__(self, n_qubits):
+        self.n_qubits = n_qubits
+        self.bases = ['X', 'Y', 'Z']
+
+    def random_basis(self):
+        """Generate random Pauli basis for each qubit."""
+        return ''.join(np.random.choice(self.bases) for _ in range(self.n_qubits))
+
+    def simulate_measurement(self, state, basis):
+        """
+        Simulate measurement in given Pauli basis.
+
+        Args:
+            state: Quantum state vector
+            basis: Measurement basis string (e.g., 'XZY')
+
+        Returns:
+            Measurement outcome bitstring
+        """
+        # Simplified simulation - in practice use full rotation
+        dim = len(state)
+        probs = np.abs(state)**2
+
+        outcome = np.random.choice(dim, p=probs)
+        return format(outcome, f'0{self.n_qubits}b')
+
+    def estimate_pauli(self, shadows, pauli_string):
+        """
+        Estimate Pauli expectation from shadows.
+
+        Args:
+            shadows: List of (basis, outcome) tuples
+            pauli_string: Pauli string to estimate
+
+        Returns:
+            Estimated expectation value
+        """
+        estimates = []
+
+        for basis, outcome in shadows:
+            # Check if measurement basis matches Pauli
+            usable = True
+            local_product = 1
+
+            for i, (b, p, o) in enumerate(zip(basis, pauli_string, outcome)):
+                if p == 'I':
+                    continue
+                if p != b:
+                    usable = False
+                    break
+                # Contribution: 3 * (-1)^outcome for matching basis
+                local_product *= 3 * (1 if o == '0' else -1)
+
+            if usable:
+                estimates.append(local_product)
+
+        if estimates:
+            return np.mean(estimates)
+        return 0.0
+
+# Example
+rm = RandomizedMeasurement(n_qubits=2)
+
+# Generate some shadows (simplified)
+shadows = []
+for _ in range(1000):
+    basis = rm.random_basis()
+    # Simulate measurement of |00⟩ + |11⟩ / sqrt(2)
+    state = np.array([1, 0, 0, 1]) / np.sqrt(2)
+    outcome = rm.simulate_measurement(state, basis)
+    shadows.append((basis, outcome))
+
+# Estimate Pauli expectations
+paulis_to_estimate = ['ZZ', 'XI', 'IZ', 'XX']
+print("Classical Shadow Estimates:")
+for p in paulis_to_estimate:
+    est = rm.estimate_pauli(shadows, p)
+    print(f"  ⟨{p}⟩ ≈ {est:.3f}")
+```
+
+## Measurement Error Mitigation
+
+Hardware measurements have errors that can be characterized and mitigated.
+
+```python
+import numpy as np
+
+class MeasurementErrorMitigation:
+    """
+    Mitigate readout errors using calibration matrix.
+    """
+
+    def __init__(self, n_qubits):
+        self.n_qubits = n_qubits
+        self.calibration_matrix = None
+
+    def calibrate(self, error_rates):
+        """
+        Build calibration matrix from error rates.
+
+        Args:
+            error_rates: List of (p_0to1, p_1to0) per qubit
+        """
+        dim = 2 ** self.n_qubits
+
+        # Build tensor product of single-qubit error matrices
+        M = np.array([[1, 0], [0, 1]], dtype=float)
+
+        for p_01, p_10 in error_rates:
+            M_q = np.array([
+                [1 - p_01, p_10],      # P(measure 0 | true state)
+                [p_01, 1 - p_10]       # P(measure 1 | true state)
+            ])
+            M = np.kron(M, M_q)
+
+        self.calibration_matrix = M
+
+    def mitigate(self, measured_probs):
+        """
+        Apply inverse calibration to measured probabilities.
+
+        Args:
+            measured_probs: Measured probability distribution
+
+        Returns:
+            Mitigated probabilities
+        """
+        if self.calibration_matrix is None:
+            raise ValueError("Must calibrate first")
+
+        # Solve M @ true_probs = measured_probs
+        # Use pseudo-inverse for robustness
+        M_inv = np.linalg.pinv(self.calibration_matrix)
+        mitigated = M_inv @ measured_probs
+
+        # Clip to valid probabilities
+        mitigated = np.clip(mitigated, 0, 1)
+        mitigated /= mitigated.sum()
+
+        return mitigated
+
+# Example: 2-qubit system
+mem = MeasurementErrorMitigation(n_qubits=2)
+
+# Calibrate with 5% error rates
+error_rates = [(0.05, 0.03), (0.04, 0.02)]  # (0→1, 1→0) per qubit
+mem.calibrate(error_rates)
+
+print("Calibration Matrix:")
+print(mem.calibration_matrix.round(3))
+
+# Simulate noisy measurement of |00⟩
+true_probs = np.array([1, 0, 0, 0])  # |00⟩
+noisy_probs = mem.calibration_matrix @ true_probs
+
+print(f"\nTrue distribution: {true_probs}")
+print(f"Noisy measured: {noisy_probs.round(4)}")
+
+# Mitigate
+mitigated = mem.mitigate(noisy_probs)
+print(f"Mitigated: {mitigated.round(4)}")
+```
+
+## Complete Measurement Pipeline
+
+Putting it all together for efficient VQE measurement.
+
+```python
+import numpy as np
+
+class VQEMeasurement:
+    """
+    Complete measurement pipeline for VQE.
+    """
+
+    def __init__(self, hamiltonian_terms, n_qubits):
+        """
+        Initialize measurement pipeline.
+
+        Args:
+            hamiltonian_terms: Dict of pauli_string -> coefficient
+            n_qubits: Number of qubits
+        """
+        self.terms = hamiltonian_terms
+        self.n_qubits = n_qubits
+
+        # Group commuting terms
+        self.groups = self._group_terms()
+
+    def _group_terms(self):
+        """Group qubit-wise commuting terms."""
+        groups = []
+        term_list = list(self.terms.keys())
+
+        for term in term_list:
+            placed = False
+            for group in groups:
+                if all(self._qw_commute(term, other) for other in group):
+                    group.append(term)
+                    placed = True
+                    break
+            if not placed:
+                groups.append([term])
+
+        return groups
+
+    def _qw_commute(self, p1, p2):
+        """Check qubit-wise commutation."""
+        for a, b in zip(p1, p2):
+            if a != 'I' and b != 'I' and a != b:
+                return False
+        return True
+
+    def allocate_shots(self, total_shots):
+        """
+        Allocate shots to measurement groups.
+
+        Returns:
+            Dict mapping group index to shot count
+        """
+        # Weight groups by sum of |coefficients|
+        weights = []
+        for group in self.groups:
+            w = sum(abs(self.terms[p]) for p in group)
+            weights.append(w)
+
+        total_weight = sum(weights)
+
+        allocation = {}
+        remaining = total_shots
+        for i, w in enumerate(weights[:-1]):
+            shots = max(10, int(total_shots * w / total_weight))
+            allocation[i] = shots
+            remaining -= shots
+        allocation[len(weights) - 1] = remaining
+
+        return allocation
+
+    def measurement_plan(self, total_shots):
+        """
+        Generate complete measurement plan.
+
+        Returns:
+            List of measurement instructions
+        """
+        allocation = self.allocate_shots(total_shots)
+        plan = []
+
+        for i, group in enumerate(self.groups):
+            shots = allocation[i]
+            # Determine measurement basis from group
+            basis = self._get_group_basis(group)
+
+            plan.append({
+                'group_idx': i,
+                'terms': group,
+                'basis': basis,
+                'shots': shots
+            })
+
+        return plan
+
+    def _get_group_basis(self, group):
+        """Determine measurement basis for a group."""
+        basis = ['I'] * self.n_qubits
+
+        for term in group:
+            for i, p in enumerate(term):
+                if p != 'I':
+                    if basis[i] == 'I':
+                        basis[i] = p
+                    elif basis[i] != p:
+                        raise ValueError(f"Inconsistent basis at qubit {i}")
+
+        return ''.join(b if b != 'I' else 'Z' for b in basis)
+
+    def estimate_energy(self, measurement_results):
+        """
+        Estimate energy from measurement results.
+
+        Args:
+            measurement_results: Dict of group_idx -> expectation values
+
+        Returns:
+            Estimated energy
+        """
+        energy = 0.0
+
+        for i, group in enumerate(self.groups):
+            expectations = measurement_results.get(i, {})
+            for term in group:
+                coeff = self.terms[term]
+                exp_val = expectations.get(term, 0)
+                energy += coeff * exp_val
+
+        return energy
+
+# Example
+h2_terms = {
+    'IIII': -0.81,
+    'IIIZ': 0.17, 'IIZI': 0.17, 'IZII': 0.17, 'ZIII': 0.17,
+    'IIZZ': -0.22, 'ZZII': -0.22,
+    'IZIZ': 0.17, 'ZIIZ': 0.17, 'IZZI': 0.17, 'ZIZI': 0.17,
+    'XXYY': 0.12, 'XYYX': -0.12, 'YXXY': -0.12, 'YYXX': 0.12
+}
+
+pipeline = VQEMeasurement(h2_terms, n_qubits=4)
+
+print("VQE Measurement Pipeline")
+print("=" * 50)
+print(f"Total terms: {len(h2_terms)}")
+print(f"Measurement groups: {len(pipeline.groups)}")
+
+plan = pipeline.measurement_plan(total_shots=10000)
+print(f"\nMeasurement Plan:")
+for p in plan:
+    print(f"\n  Group {p['group_idx']}: {p['shots']} shots")
+    print(f"  Basis: {p['basis']}")
+    print(f"  Terms: {p['terms']}")
+```
+
+## Summary
+
+Efficient VQE measurement involves:
+
+1. **Grouping** commuting Pauli terms to reduce circuits
+2. **Optimal shot allocation** based on coefficient magnitudes
+3. **Classical shadows** for many-observable estimation
+4. **Error mitigation** to correct readout errors
+5. **Pipeline integration** for practical implementations
+
+The next lesson covers error mitigation techniques beyond measurement errors.

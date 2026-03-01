@@ -1,0 +1,611 @@
+---
+title: "Noise in NISQ Devices"
+description: "Understand the sources and characteristics of noise in near-term quantum devices and their impact on quantum machine learning"
+---
+
+# Noise in NISQ Devices
+
+NISQ (Noisy Intermediate-Scale Quantum) devices are characterized by significant noise that affects computation accuracy. Understanding noise sources and their effects is essential for developing effective error mitigation strategies.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Identify major noise sources in NISQ devices
+- Model decoherence and gate errors mathematically
+- Simulate noisy quantum circuits
+- Analyze noise impact on QML algorithms
+- Characterize device noise through benchmarking
+- Understand noise-induced barren plateaus
+
+## 1. Sources of Quantum Noise
+
+NISQ devices suffer from multiple noise sources that corrupt quantum information.
+
+<Definition term="NISQ Noise Sources">
+Major noise sources include:
+- **T₁ relaxation**: Energy decay from |1⟩ to |0⟩
+- **T₂ dephasing**: Loss of phase coherence
+- **Gate errors**: Imperfect implementation of quantum gates
+- **Measurement errors**: Incorrect readout of qubit states
+- **Crosstalk**: Unwanted interactions between qubits
+</Definition>
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+class NISQNoiseModel:
+    """
+    Model common noise sources in NISQ devices.
+    """
+
+    def __init__(self, t1=50e-6, t2=30e-6, gate_error=0.01,
+                 readout_error=0.02):
+        """
+        Initialize noise model.
+
+        Args:
+            t1: T1 relaxation time (seconds)
+            t2: T2 dephasing time (seconds)
+            gate_error: Single-qubit gate error rate
+            readout_error: Measurement error probability
+        """
+        self.t1 = t1
+        self.t2 = t2
+        self.gate_error = gate_error
+        self.readout_error = readout_error
+
+    def relaxation_prob(self, gate_time=50e-9):
+        """Probability of T1 relaxation during gate."""
+        return 1 - np.exp(-gate_time / self.t1)
+
+    def dephasing_prob(self, gate_time=50e-9):
+        """Probability of T2 dephasing during gate."""
+        # T2* includes T1 contribution
+        t2_star = min(self.t2, 2 * self.t1)
+        return 1 - np.exp(-gate_time / t2_star)
+
+    def effective_gate_fidelity(self, gate_time=50e-9):
+        """Combined gate fidelity including all errors."""
+        p_relax = self.relaxation_prob(gate_time)
+        p_dephase = self.dephasing_prob(gate_time)
+
+        # Approximate combined fidelity
+        fidelity = (1 - self.gate_error) * (1 - p_relax) * (1 - p_dephase)
+        return fidelity
+
+# Create typical NISQ noise model
+noise_model = NISQNoiseModel(
+    t1=50e-6,        # 50 microseconds
+    t2=30e-6,        # 30 microseconds
+    gate_error=0.01, # 1% gate error
+    readout_error=0.02  # 2% readout error
+)
+
+print("NISQ Noise Characteristics:")
+print(f"T1 relaxation time: {noise_model.t1*1e6:.1f} μs")
+print(f"T2 dephasing time: {noise_model.t2*1e6:.1f} μs")
+print(f"Gate error rate: {noise_model.gate_error:.1%}")
+print(f"Readout error: {noise_model.readout_error:.1%}")
+print(f"\nEffective gate fidelity: {noise_model.effective_gate_fidelity():.4f}")
+```
+
+## 2. Mathematical Noise Models
+
+Noise is described using quantum channels and Kraus operators.
+
+<Formula>
+Quantum noise channel:
+
+ρ' = Σᵢ Kᵢ ρ Kᵢ†
+
+where Kᵢ are Kraus operators satisfying Σᵢ Kᵢ†Kᵢ = I
+</Formula>
+
+```python
+def create_kraus_operators():
+    """
+    Create Kraus operators for common noise channels.
+    """
+    # Pauli matrices
+    I = np.eye(2, dtype=complex)
+    X = np.array([[0, 1], [1, 0]], dtype=complex)
+    Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+    Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    return {'I': I, 'X': X, 'Y': Y, 'Z': Z}
+
+def amplitude_damping_channel(gamma):
+    """
+    Amplitude damping (T1 relaxation) Kraus operators.
+
+    Args:
+        gamma: Damping probability (0 to 1)
+
+    Returns:
+        List of Kraus operators
+    """
+    K0 = np.array([[1, 0], [0, np.sqrt(1 - gamma)]], dtype=complex)
+    K1 = np.array([[0, np.sqrt(gamma)], [0, 0]], dtype=complex)
+
+    return [K0, K1]
+
+def phase_damping_channel(gamma):
+    """
+    Phase damping (T2 dephasing) Kraus operators.
+
+    Args:
+        gamma: Dephasing probability
+
+    Returns:
+        List of Kraus operators
+    """
+    K0 = np.array([[1, 0], [0, np.sqrt(1 - gamma)]], dtype=complex)
+    K1 = np.array([[0, 0], [0, np.sqrt(gamma)]], dtype=complex)
+
+    return [K0, K1]
+
+def depolarizing_channel(p):
+    """
+    Depolarizing channel Kraus operators.
+
+    ρ → (1-p)ρ + p/3 (XρX + YρY + ZρZ)
+
+    Args:
+        p: Depolarizing probability
+
+    Returns:
+        List of Kraus operators
+    """
+    paulis = create_kraus_operators()
+
+    K0 = np.sqrt(1 - p) * paulis['I']
+    K1 = np.sqrt(p/3) * paulis['X']
+    K2 = np.sqrt(p/3) * paulis['Y']
+    K3 = np.sqrt(p/3) * paulis['Z']
+
+    return [K0, K1, K2, K3]
+
+def apply_channel(rho, kraus_ops):
+    """
+    Apply quantum channel to density matrix.
+
+    Args:
+        rho: Input density matrix
+        kraus_ops: List of Kraus operators
+
+    Returns:
+        Output density matrix
+    """
+    rho_out = np.zeros_like(rho)
+    for K in kraus_ops:
+        rho_out += K @ rho @ K.conj().T
+    return rho_out
+
+# Demonstrate noise channels
+print("Noise Channel Effects on |+⟩ state:")
+print("=" * 50)
+
+# Create |+⟩ state
+plus_state = np.array([[1], [1]], dtype=complex) / np.sqrt(2)
+rho_plus = plus_state @ plus_state.conj().T
+
+print(f"\nOriginal |+⟩ state coherence: {np.abs(rho_plus[0, 1]):.4f}")
+
+# Apply different noise channels
+for noise_level in [0.1, 0.3, 0.5]:
+    # Amplitude damping
+    kraus_ad = amplitude_damping_channel(noise_level)
+    rho_ad = apply_channel(rho_plus, kraus_ad)
+
+    # Phase damping
+    kraus_pd = phase_damping_channel(noise_level)
+    rho_pd = apply_channel(rho_plus, kraus_pd)
+
+    # Depolarizing
+    kraus_dp = depolarizing_channel(noise_level)
+    rho_dp = apply_channel(rho_plus, kraus_dp)
+
+    print(f"\nNoise level p={noise_level}:")
+    print(f"  Amplitude damping coherence: {np.abs(rho_ad[0, 1]):.4f}")
+    print(f"  Phase damping coherence: {np.abs(rho_pd[0, 1]):.4f}")
+    print(f"  Depolarizing coherence: {np.abs(rho_dp[0, 1]):.4f}")
+```
+
+<Tip>
+Phase damping primarily affects off-diagonal elements (coherence), while amplitude damping also changes populations (diagonal elements).
+</Tip>
+
+## 3. Simulating Noisy Quantum Circuits
+
+Simulate the effect of noise on quantum circuits.
+
+```python
+class NoisyCircuitSimulator:
+    """
+    Simulate quantum circuits with noise.
+    """
+
+    def __init__(self, n_qubits, noise_model=None):
+        self.n_qubits = n_qubits
+        self.dim = 2**n_qubits
+        self.noise_model = noise_model
+
+    def initialize_state(self):
+        """Initialize to |0...0⟩ state."""
+        rho = np.zeros((self.dim, self.dim), dtype=complex)
+        rho[0, 0] = 1.0
+        return rho
+
+    def apply_single_qubit_gate(self, rho, gate, qubit):
+        """Apply single-qubit gate to density matrix."""
+        # Build full gate
+        full_gate = np.eye(1, dtype=complex)
+        for q in range(self.n_qubits):
+            if q == qubit:
+                full_gate = np.kron(full_gate, gate)
+            else:
+                full_gate = np.kron(full_gate, np.eye(2))
+
+        return full_gate @ rho @ full_gate.conj().T
+
+    def apply_noise_to_qubit(self, rho, qubit, noise_type='depolarizing', p=0.01):
+        """Apply noise channel to a specific qubit."""
+        if noise_type == 'depolarizing':
+            kraus_ops = depolarizing_channel(p)
+        elif noise_type == 'amplitude_damping':
+            kraus_ops = amplitude_damping_channel(p)
+        elif noise_type == 'phase_damping':
+            kraus_ops = phase_damping_channel(p)
+        else:
+            return rho
+
+        # Apply to specific qubit
+        rho_out = np.zeros_like(rho)
+        for K in kraus_ops:
+            # Build full Kraus operator
+            full_K = np.eye(1, dtype=complex)
+            for q in range(self.n_qubits):
+                if q == qubit:
+                    full_K = np.kron(full_K, K)
+                else:
+                    full_K = np.kron(full_K, np.eye(2))
+            rho_out += full_K @ rho @ full_K.conj().T
+
+        return rho_out
+
+    def run_circuit(self, gates, noise_prob=0.01):
+        """
+        Run circuit with noise after each gate.
+
+        Args:
+            gates: List of (gate_matrix, qubit) tuples
+            noise_prob: Probability of depolarizing error
+
+        Returns:
+            Final density matrix
+        """
+        rho = self.initialize_state()
+
+        for gate, qubit in gates:
+            # Apply ideal gate
+            rho = self.apply_single_qubit_gate(rho, gate, qubit)
+
+            # Apply noise
+            if noise_prob > 0:
+                rho = self.apply_noise_to_qubit(rho, qubit, 'depolarizing', noise_prob)
+
+        return rho
+
+    def expectation(self, rho, observable):
+        """Compute expectation value."""
+        return np.real(np.trace(rho @ observable))
+
+# Standard gates
+H = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+RY = lambda theta: np.array([
+    [np.cos(theta/2), -np.sin(theta/2)],
+    [np.sin(theta/2), np.cos(theta/2)]
+], dtype=complex)
+
+# Simulate circuit with varying noise
+print("\nCircuit Fidelity vs Noise Level:")
+print("=" * 50)
+
+sim = NoisyCircuitSimulator(n_qubits=2)
+
+# Simple circuit: H on both qubits, then RY rotations
+circuit = [
+    (H, 0),
+    (H, 1),
+    (RY(0.5), 0),
+    (RY(0.3), 1)
+]
+
+# Ideal result
+ideal_rho = sim.run_circuit(circuit, noise_prob=0)
+
+for noise_p in [0, 0.01, 0.05, 0.1, 0.2]:
+    noisy_rho = sim.run_circuit(circuit, noise_prob=noise_p)
+
+    # Compute fidelity with ideal state
+    fidelity = np.real(np.trace(ideal_rho @ noisy_rho))
+    print(f"Noise p={noise_p:.2f}: Fidelity = {fidelity:.4f}")
+```
+
+## 4. Impact on QML Algorithms
+
+Noise significantly affects quantum machine learning performance.
+
+```python
+def analyze_vqc_noise_impact(n_layers, noise_prob, n_trials=20):
+    """
+    Analyze how noise impacts VQC optimization.
+    """
+    n_qubits = 2
+    dim = 4
+
+    # Create target Hamiltonian
+    Z = np.array([[1, 0], [0, -1]])
+    H_target = np.kron(Z, np.eye(2)) + np.kron(np.eye(2), Z)
+
+    def create_vqc_state(params, noise_p=0):
+        """Create VQC state with optional noise."""
+        sim = NoisyCircuitSimulator(n_qubits)
+
+        # Build circuit from parameters
+        gates = []
+        param_idx = 0
+        for layer in range(n_layers):
+            for q in range(n_qubits):
+                if param_idx < len(params):
+                    gates.append((RY(params[param_idx]), q))
+                    param_idx += 1
+
+        rho = sim.run_circuit(gates, noise_prob=noise_p)
+        return rho
+
+    def compute_energy(params, noise_p):
+        """Compute energy expectation."""
+        rho = create_vqc_state(params, noise_p)
+        return np.real(np.trace(rho @ H_target))
+
+    # Collect statistics
+    ideal_energies = []
+    noisy_energies = []
+    gradient_ratios = []
+
+    for _ in range(n_trials):
+        params = np.random.randn(n_layers * n_qubits) * 0.5
+
+        # Ideal energy
+        e_ideal = compute_energy(params, 0)
+        ideal_energies.append(e_ideal)
+
+        # Noisy energy
+        e_noisy = compute_energy(params, noise_prob)
+        noisy_energies.append(e_noisy)
+
+        # Compare gradients
+        eps = 1e-5
+        grad_ideal = np.zeros(len(params))
+        grad_noisy = np.zeros(len(params))
+
+        for i in range(len(params)):
+            p_plus = params.copy()
+            p_plus[i] += eps
+            p_minus = params.copy()
+            p_minus[i] -= eps
+
+            grad_ideal[i] = (compute_energy(p_plus, 0) - compute_energy(p_minus, 0)) / (2 * eps)
+            grad_noisy[i] = (compute_energy(p_plus, noise_prob) - compute_energy(p_minus, noise_prob)) / (2 * eps)
+
+        if np.linalg.norm(grad_ideal) > 1e-8:
+            ratio = np.linalg.norm(grad_noisy) / np.linalg.norm(grad_ideal)
+            gradient_ratios.append(ratio)
+
+    return {
+        'energy_bias': np.mean(noisy_energies) - np.mean(ideal_energies),
+        'energy_variance': np.var(noisy_energies),
+        'gradient_ratio': np.mean(gradient_ratios) if gradient_ratios else 0
+    }
+
+# Analyze noise impact
+print("\nNoise Impact on VQC:")
+print("=" * 50)
+
+for noise_p in [0.01, 0.05, 0.1]:
+    for n_layers in [2, 4]:
+        results = analyze_vqc_noise_impact(n_layers, noise_p, n_trials=10)
+        print(f"\nLayers={n_layers}, Noise={noise_p:.0%}:")
+        print(f"  Energy bias: {results['energy_bias']:.4f}")
+        print(f"  Energy variance: {results['energy_variance']:.4f}")
+        print(f"  Gradient ratio: {results['gradient_ratio']:.4f}")
+```
+
+<Warning>
+Noise causes both systematic bias in expectation values and increased variance. Deeper circuits accumulate more errors, potentially leading to noise-induced barren plateaus.
+</Warning>
+
+## 5. Noise Characterization
+
+Characterize device noise through benchmarking protocols.
+
+```python
+def randomized_benchmarking(n_cliffords, noise_prob, n_sequences=20):
+    """
+    Simplified randomized benchmarking.
+
+    Measures decay of survival probability with sequence length.
+    """
+    # Clifford gates (simplified to Paulis + H + S)
+    I = np.eye(2, dtype=complex)
+    X = np.array([[0, 1], [1, 0]], dtype=complex)
+    Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+    Z = np.array([[1, 0], [0, -1]], dtype=complex)
+    H = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+    S = np.array([[1, 0], [0, 1j]], dtype=complex)
+
+    cliffords = [I, X, Y, Z, H, S, H @ S, S @ H]
+
+    survival_probs = []
+
+    for seq_length in n_cliffords:
+        seq_survivals = []
+
+        for _ in range(n_sequences):
+            # Start with |0⟩
+            rho = np.array([[1, 0], [0, 0]], dtype=complex)
+
+            # Apply random Clifford sequence
+            applied_gates = []
+            for _ in range(seq_length):
+                gate = cliffords[np.random.randint(len(cliffords))]
+                applied_gates.append(gate)
+
+                # Apply gate
+                rho = gate @ rho @ gate.conj().T
+
+                # Apply noise
+                kraus = depolarizing_channel(noise_prob)
+                rho = apply_channel(rho, kraus)
+
+            # Apply inverse
+            inverse = np.eye(2, dtype=complex)
+            for g in reversed(applied_gates):
+                inverse = inverse @ g.conj().T
+
+            rho = inverse @ rho @ inverse.conj().T
+
+            # Measure survival probability
+            survival = np.real(rho[0, 0])
+            seq_survivals.append(survival)
+
+        survival_probs.append(np.mean(seq_survivals))
+
+    return n_cliffords, survival_probs
+
+def fit_rb_decay(lengths, survivals):
+    """
+    Fit exponential decay to RB data.
+
+    P(m) = A * p^m + B
+    """
+    # Simple exponential fit
+    log_survivals = np.log(np.maximum(survivals, 1e-10))
+
+    # Linear fit in log space
+    coeffs = np.polyfit(lengths, log_survivals, 1)
+    decay_rate = coeffs[0]
+    p = np.exp(decay_rate)
+
+    # Error per Clifford
+    epc = (1 - p) / 2  # For single qubit
+
+    return p, epc
+
+# Run RB simulation
+print("\nRandomized Benchmarking Simulation:")
+print("=" * 50)
+
+for noise_p in [0.01, 0.05, 0.1]:
+    lengths = [1, 5, 10, 20, 50]
+    lengths, survivals = randomized_benchmarking(lengths, noise_p)
+
+    p, epc = fit_rb_decay(np.array(lengths), np.array(survivals))
+
+    print(f"\nNoise prob = {noise_p:.0%}:")
+    print(f"  Decay parameter p = {p:.4f}")
+    print(f"  Error per Clifford = {epc:.4f}")
+    print(f"  Survival at m=50: {survivals[-1]:.4f}")
+```
+
+## 6. Noise-Induced Barren Plateaus
+
+Deep noisy circuits can exhibit noise-induced barren plateaus.
+
+```python
+def analyze_noise_induced_bp(depths, noise_prob, n_samples=50):
+    """
+    Analyze gradient variance decay with depth due to noise.
+    """
+    n_qubits = 2
+    results = {'depth': [], 'grad_variance': []}
+
+    for depth in depths:
+        gradient_norms = []
+
+        for _ in range(n_samples):
+            params = np.random.randn(depth * n_qubits) * 0.5
+
+            # Compute gradient magnitude
+            sim = NoisyCircuitSimulator(n_qubits)
+
+            def get_rho(p):
+                gates = []
+                for d in range(depth):
+                    for q in range(n_qubits):
+                        idx = d * n_qubits + q
+                        if idx < len(p):
+                            gates.append((RY(p[idx]), q))
+                return sim.run_circuit(gates, noise_prob=noise_prob)
+
+            # Gradient of trace(rho @ Z⊗I)
+            Z = np.array([[1, 0], [0, -1]])
+            obs = np.kron(Z, np.eye(2))
+
+            eps = 1e-5
+            grad = np.zeros(len(params))
+
+            for i in range(len(params)):
+                p_plus = params.copy()
+                p_plus[i] += eps
+                p_minus = params.copy()
+                p_minus[i] -= eps
+
+                rho_plus = get_rho(p_plus)
+                rho_minus = get_rho(p_minus)
+
+                grad[i] = (np.trace(rho_plus @ obs) - np.trace(rho_minus @ obs)).real / (2 * eps)
+
+            gradient_norms.append(np.linalg.norm(grad))
+
+        results['depth'].append(depth)
+        results['grad_variance'].append(np.var(gradient_norms))
+
+    return results
+
+print("\nNoise-Induced Barren Plateau Analysis:")
+print("=" * 50)
+
+depths = [2, 4, 8, 16, 32]
+
+for noise_p in [0.0, 0.01, 0.05]:
+    results = analyze_noise_induced_bp(depths, noise_p, n_samples=30)
+
+    print(f"\nNoise = {noise_p:.0%}:")
+    for d, v in zip(results['depth'], results['grad_variance']):
+        print(f"  Depth {d:2d}: Gradient variance = {v:.6f}")
+```
+
+<Tip>
+Noise-induced barren plateaus occur when noise causes gradient variance to decay exponentially with circuit depth, independent of expressibility. This limits useful circuit depth even for well-designed ansätze.
+</Tip>
+
+## Summary
+
+In this lesson, you learned:
+
+- **NISQ noise sources**: T₁/T₂ decoherence, gate errors, readout errors, crosstalk
+- **Mathematical models**: Kraus operators for amplitude/phase damping, depolarizing channels
+- **Circuit simulation**: Density matrix evolution under noise
+- **QML impact**: Energy bias, increased variance, reduced gradients
+- **Characterization**: Randomized benchmarking to quantify error rates
+- **Noise-induced BP**: Gradient decay from accumulated noise
+
+Understanding these noise effects is the foundation for developing effective error mitigation strategies.
+
+## Next Steps
+
+In the next lesson, we'll explore zero-noise extrapolation, a powerful technique to estimate noise-free expectation values from noisy measurements.

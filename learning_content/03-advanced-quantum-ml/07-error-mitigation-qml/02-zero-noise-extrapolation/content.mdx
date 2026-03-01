@@ -1,0 +1,600 @@
+---
+title: "Zero-Noise Extrapolation"
+description: "Learn zero-noise extrapolation techniques to estimate noise-free expectation values from noisy quantum measurements"
+---
+
+# Zero-Noise Extrapolation
+
+Zero-noise extrapolation (ZNE) is a powerful error mitigation technique that estimates noise-free expectation values by intentionally amplifying noise and extrapolating to the zero-noise limit.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the principle of noise amplification
+- Implement pulse stretching and gate folding
+- Apply Richardson extrapolation to quantum data
+- Use polynomial and exponential extrapolation models
+- Analyze extrapolation accuracy and limitations
+- Combine ZNE with variational algorithms
+
+## 1. The ZNE Principle
+
+ZNE works by measuring at multiple noise levels and extrapolating to zero noise.
+
+<Definition term="Zero-Noise Extrapolation">
+ZNE estimates the ideal expectation value ⟨O⟩₀ by:
+1. Measuring ⟨O⟩ at multiple noise scale factors λ₁, λ₂, ..., λₙ
+2. Fitting a model E(λ) to the measurements
+3. Extrapolating to λ = 0 to obtain ⟨O⟩₀
+</Definition>
+
+```python
+import numpy as np
+from scipy.optimize import curve_fit
+
+def demonstrate_zne_principle():
+    """
+    Demonstrate the ZNE principle with a simple model.
+    """
+    # True (noise-free) expectation value
+    true_value = 0.8
+
+    # Noise model: E(λ) = E₀ * exp(-λ * γ) + (1-exp(-λ * γ)) * E_∞
+    # where γ is decay rate, E_∞ is the fully depolarized value
+    gamma = 0.5
+    E_inf = 0.0  # Fully mixed state expectation
+
+    def noisy_expectation(lam):
+        decay = np.exp(-lam * gamma)
+        return true_value * decay + E_inf * (1 - decay)
+
+    # Measure at multiple noise scale factors
+    noise_factors = [1.0, 1.5, 2.0, 3.0]
+    measurements = [noisy_expectation(lam) for lam in noise_factors]
+
+    print("ZNE Demonstration:")
+    print("=" * 50)
+    print(f"True value: {true_value}")
+    print(f"\nMeasurements at different noise levels:")
+    for lam, E in zip(noise_factors, measurements):
+        print(f"  λ = {lam:.1f}: E = {E:.4f}")
+
+    # Fit exponential model
+    def exp_model(x, a, b):
+        return a * np.exp(-b * x)
+
+    popt, _ = curve_fit(exp_model, noise_factors, measurements, p0=[1, 0.5])
+
+    # Extrapolate to λ = 0
+    zne_estimate = exp_model(0, *popt)
+
+    print(f"\nExponential fit: E(λ) = {popt[0]:.4f} * exp(-{popt[1]:.4f} * λ)")
+    print(f"ZNE estimate (λ→0): {zne_estimate:.4f}")
+    print(f"Error: {abs(zne_estimate - true_value):.4f}")
+
+    return noise_factors, measurements, zne_estimate
+
+noise_factors, measurements, estimate = demonstrate_zne_principle()
+```
+
+## 2. Noise Amplification Methods
+
+Two main methods to amplify noise: pulse stretching and gate folding.
+
+<Formula>
+Gate folding: Replace gate G with G·G†·G
+
+This triples the effective noise while leaving the ideal operation unchanged (since G·G†·G = G).
+</Formula>
+
+```python
+def gate_folding_noise_amplification(circuit_gates, fold_factor):
+    """
+    Amplify noise by gate folding.
+
+    Each gate G is replaced by G·(G†·G)^n where n controls folding.
+
+    Args:
+        circuit_gates: List of unitary gates
+        fold_factor: Integer folding factor (1 = no folding, 3 = one fold, etc.)
+
+    Returns:
+        Folded circuit gates
+    """
+    if fold_factor < 1:
+        raise ValueError("Fold factor must be >= 1")
+
+    if fold_factor == 1:
+        return circuit_gates
+
+    folded_circuit = []
+
+    for gate in circuit_gates:
+        # Add original gate
+        folded_circuit.append(gate)
+
+        # Add folding pairs (G†·G)
+        n_folds = (fold_factor - 1) // 2
+        for _ in range(n_folds):
+            folded_circuit.append(gate.conj().T)  # G†
+            folded_circuit.append(gate)           # G
+
+    return folded_circuit
+
+def local_folding(circuit_gates, target_factor, gate_weights=None):
+    """
+    Local folding to achieve non-integer scale factors.
+
+    Fold individual gates to achieve precise noise scaling.
+
+    Args:
+        circuit_gates: List of gates
+        target_factor: Desired noise scale factor (can be non-integer)
+        gate_weights: Relative noise contribution of each gate
+
+    Returns:
+        Folded circuit
+    """
+    n_gates = len(circuit_gates)
+
+    if gate_weights is None:
+        gate_weights = np.ones(n_gates) / n_gates
+
+    # Normalize weights
+    gate_weights = np.array(gate_weights) / sum(gate_weights)
+
+    # Determine which gates to fold
+    current_factor = 1.0
+    gates_to_fold = []
+
+    for i in range(n_gates):
+        if current_factor >= target_factor:
+            break
+
+        # How much folding this gate would add
+        fold_contribution = 2 * gate_weights[i]
+
+        if current_factor + fold_contribution <= target_factor:
+            gates_to_fold.append(i)
+            current_factor += fold_contribution
+
+    # Build folded circuit
+    folded_circuit = []
+    for i, gate in enumerate(circuit_gates):
+        folded_circuit.append(gate)
+        if i in gates_to_fold:
+            folded_circuit.append(gate.conj().T)
+            folded_circuit.append(gate)
+
+    return folded_circuit
+
+# Demonstrate gate folding
+print("Gate Folding Demonstration:")
+print("=" * 50)
+
+# Simple circuit: H, T, H
+H = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+T = np.array([[1, 0], [0, np.exp(1j * np.pi / 4)]], dtype=complex)
+
+original_circuit = [H, T, H]
+
+for fold_factor in [1, 3, 5]:
+    folded = gate_folding_noise_amplification(original_circuit, fold_factor)
+    print(f"Fold factor {fold_factor}: {len(original_circuit)} → {len(folded)} gates")
+
+    # Verify unitary equivalence (in ideal case)
+    orig_unitary = original_circuit[2] @ original_circuit[1] @ original_circuit[0]
+    folded_unitary = np.eye(2, dtype=complex)
+    for g in folded:
+        folded_unitary = g @ folded_unitary
+
+    equiv = np.allclose(orig_unitary, folded_unitary)
+    print(f"  Unitarily equivalent: {equiv}")
+```
+
+<Tip>
+Gate folding is hardware-agnostic and can achieve any odd-integer scale factor. For fractional scale factors, use local (partial) folding.
+</Tip>
+
+## 3. Richardson Extrapolation
+
+Richardson extrapolation uses polynomial fitting for high-accuracy estimates.
+
+```python
+def richardson_extrapolation(noise_factors, measurements, order=None):
+    """
+    Richardson extrapolation to zero noise.
+
+    Uses polynomial fitting: E(λ) = a₀ + a₁λ + a₂λ² + ...
+
+    Args:
+        noise_factors: List of noise scale factors
+        measurements: Corresponding expectation values
+        order: Polynomial order (default: len(noise_factors) - 1)
+
+    Returns:
+        Extrapolated value at λ = 0
+    """
+    n = len(noise_factors)
+    if order is None:
+        order = n - 1
+
+    order = min(order, n - 1)
+
+    # Fit polynomial
+    coeffs = np.polyfit(noise_factors, measurements, order)
+
+    # Evaluate at λ = 0 (the constant term)
+    zne_value = coeffs[-1]
+
+    return zne_value, coeffs
+
+def linear_extrapolation(noise_factors, measurements):
+    """
+    Simple linear extrapolation (first-order Richardson).
+    """
+    # Fit line: E(λ) = a + b*λ
+    coeffs = np.polyfit(noise_factors, measurements, 1)
+    zne_value = coeffs[1]  # y-intercept
+    return zne_value
+
+class ZNEEstimator:
+    """
+    Zero-Noise Extrapolation estimator.
+    """
+
+    def __init__(self, extrapolation_method='polynomial', order=2):
+        self.method = extrapolation_method
+        self.order = order
+
+    def extrapolate(self, noise_factors, measurements):
+        """
+        Extrapolate to zero noise.
+        """
+        if self.method == 'linear':
+            return linear_extrapolation(noise_factors, measurements)
+
+        elif self.method == 'polynomial':
+            value, _ = richardson_extrapolation(noise_factors, measurements, self.order)
+            return value
+
+        elif self.method == 'exponential':
+            return self._exponential_extrapolation(noise_factors, measurements)
+
+        else:
+            raise ValueError(f"Unknown method: {self.method}")
+
+    def _exponential_extrapolation(self, noise_factors, measurements):
+        """
+        Exponential model: E(λ) = a * exp(-b * λ) + c
+        """
+        def exp_model(x, a, b, c):
+            return a * np.exp(-b * x) + c
+
+        try:
+            popt, _ = curve_fit(exp_model, noise_factors, measurements,
+                               p0=[measurements[0], 0.5, 0],
+                               maxfev=5000)
+            return exp_model(0, *popt)
+        except RuntimeError:
+            # Fall back to polynomial
+            return richardson_extrapolation(noise_factors, measurements)[0]
+
+# Compare extrapolation methods
+def compare_extrapolation_methods():
+    """
+    Compare different extrapolation methods.
+    """
+    # True value and noise model
+    true_value = 0.7
+    gamma = 0.3
+
+    def noisy_exp(lam):
+        return true_value * np.exp(-gamma * lam)
+
+    # Measure at multiple noise levels
+    noise_factors = [1.0, 1.5, 2.0, 3.0, 4.0]
+    measurements = [noisy_exp(lam) for lam in noise_factors]
+
+    # Add some measurement noise
+    np.random.seed(42)
+    measurements = [m + np.random.randn() * 0.02 for m in measurements]
+
+    print("Extrapolation Method Comparison:")
+    print("=" * 50)
+    print(f"True value: {true_value}")
+    print(f"\nNoisy measurements: {[f'{m:.3f}' for m in measurements]}")
+
+    methods = ['linear', 'polynomial', 'exponential']
+
+    for method in methods:
+        if method == 'polynomial':
+            for order in [1, 2, 3]:
+                estimator = ZNEEstimator(method, order=order)
+                estimate = estimator.extrapolate(noise_factors, measurements)
+                error = abs(estimate - true_value)
+                print(f"\n{method.capitalize()} (order {order}):")
+                print(f"  Estimate: {estimate:.4f}, Error: {error:.4f}")
+        else:
+            estimator = ZNEEstimator(method)
+            estimate = estimator.extrapolate(noise_factors, measurements)
+            error = abs(estimate - true_value)
+            print(f"\n{method.capitalize()}:")
+            print(f"  Estimate: {estimate:.4f}, Error: {error:.4f}")
+
+compare_extrapolation_methods()
+```
+
+## 4. ZNE in Practice
+
+Implement ZNE for a variational quantum circuit.
+
+```python
+class ZNECircuitRunner:
+    """
+    Run quantum circuits with ZNE error mitigation.
+    """
+
+    def __init__(self, noise_prob=0.02):
+        self.base_noise = noise_prob
+
+    def run_noisy_circuit(self, gates, noise_scale=1.0):
+        """
+        Run circuit with scaled noise.
+        """
+        # Initialize |0⟩
+        rho = np.array([[1, 0], [0, 0]], dtype=complex)
+
+        scaled_noise = self.base_noise * noise_scale
+
+        for gate in gates:
+            # Apply gate
+            rho = gate @ rho @ gate.conj().T
+
+            # Apply scaled depolarizing noise
+            p = scaled_noise
+            I = np.eye(2, dtype=complex)
+            X = np.array([[0, 1], [1, 0]], dtype=complex)
+            Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+            Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+            rho = (1 - p) * rho + (p/3) * (X @ rho @ X + Y @ rho @ Y + Z @ rho @ Z)
+
+        return rho
+
+    def measure_expectation(self, gates, observable, noise_scale=1.0):
+        """
+        Measure expectation value with scaled noise.
+        """
+        rho = self.run_noisy_circuit(gates, noise_scale)
+        return np.real(np.trace(rho @ observable))
+
+    def zne_expectation(self, gates, observable, noise_factors=[1.0, 2.0, 3.0],
+                        method='polynomial', order=2):
+        """
+        Compute ZNE-mitigated expectation value.
+        """
+        # Measure at each noise level
+        measurements = []
+        for factor in noise_factors:
+            exp_val = self.measure_expectation(gates, observable, factor)
+            measurements.append(exp_val)
+
+        # Extrapolate
+        estimator = ZNEEstimator(method, order)
+        return estimator.extrapolate(noise_factors, measurements)
+
+# Demonstrate ZNE on a VQC
+print("\nZNE for Variational Circuit:")
+print("=" * 50)
+
+# Define gates
+def RY(theta):
+    return np.array([
+        [np.cos(theta/2), -np.sin(theta/2)],
+        [np.sin(theta/2), np.cos(theta/2)]
+    ], dtype=complex)
+
+H = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+# Circuit: H -> RY(0.5) -> RY(0.3)
+circuit = [H, RY(0.5), RY(0.3)]
+
+# Run with different noise levels
+runner = ZNECircuitRunner(noise_prob=0.05)
+
+# Ideal (no noise)
+ideal_runner = ZNECircuitRunner(noise_prob=0)
+ideal_value = ideal_runner.measure_expectation(circuit, Z, noise_scale=1.0)
+
+# Noisy (unmitigated)
+noisy_value = runner.measure_expectation(circuit, Z, noise_scale=1.0)
+
+# ZNE mitigated
+zne_value = runner.zne_expectation(
+    circuit, Z,
+    noise_factors=[1.0, 1.5, 2.0, 3.0],
+    method='polynomial', order=2
+)
+
+print(f"Ideal expectation: {ideal_value:.4f}")
+print(f"Noisy (unmitigated): {noisy_value:.4f}")
+print(f"ZNE (polynomial): {zne_value:.4f}")
+print(f"\nUnmitigated error: {abs(noisy_value - ideal_value):.4f}")
+print(f"ZNE error: {abs(zne_value - ideal_value):.4f}")
+```
+
+<Warning>
+ZNE increases statistical variance because extrapolation amplifies measurement uncertainty. More shots are needed at higher noise levels.
+</Warning>
+
+## 5. Optimal Noise Factors
+
+Choose noise scale factors for best extrapolation accuracy.
+
+```python
+def optimize_noise_factors(n_factors, min_factor=1.0, max_factor=3.0):
+    """
+    Choose optimal noise scale factors.
+
+    For polynomial extrapolation, Chebyshev nodes are often optimal.
+    """
+    # Chebyshev nodes on [min_factor, max_factor]
+    k = np.arange(1, n_factors + 1)
+    chebyshev_nodes = 0.5 * (min_factor + max_factor) + \
+                      0.5 * (max_factor - min_factor) * np.cos((2*k - 1) * np.pi / (2*n_factors))
+
+    # Sort in ascending order
+    return np.sort(chebyshev_nodes)
+
+def compare_noise_factor_choices():
+    """
+    Compare uniform vs optimal noise factor spacing.
+    """
+    true_value = 0.75
+    gamma = 0.4
+
+    def noisy_exp(lam):
+        return true_value * np.exp(-gamma * lam)
+
+    n_factors = 4
+    max_factor = 3.0
+
+    # Uniform spacing
+    uniform_factors = np.linspace(1.0, max_factor, n_factors)
+
+    # Chebyshev-optimal spacing
+    optimal_factors = optimize_noise_factors(n_factors, 1.0, max_factor)
+
+    print("Noise Factor Optimization:")
+    print("=" * 50)
+
+    for name, factors in [("Uniform", uniform_factors), ("Chebyshev", optimal_factors)]:
+        measurements = [noisy_exp(lam) for lam in factors]
+
+        # Add noise
+        np.random.seed(42)
+        noisy_measurements = [m + np.random.randn() * 0.01 for m in measurements]
+
+        estimate, _ = richardson_extrapolation(factors, noisy_measurements, order=3)
+        error = abs(estimate - true_value)
+
+        print(f"\n{name} spacing: {[f'{f:.2f}' for f in factors]}")
+        print(f"  Estimate: {estimate:.4f}")
+        print(f"  Error: {error:.4f}")
+
+compare_noise_factor_choices()
+```
+
+## 6. ZNE with VQE
+
+Combine ZNE with variational quantum eigensolver.
+
+```python
+class ZNEVQE:
+    """
+    VQE optimizer with ZNE error mitigation.
+    """
+
+    def __init__(self, hamiltonian, noise_prob=0.02, use_zne=True):
+        self.H = hamiltonian
+        self.noise_prob = noise_prob
+        self.use_zne = use_zne
+        self.runner = ZNECircuitRunner(noise_prob)
+        self.history = {'energy': [], 'mitigated': []}
+
+    def create_circuit(self, params):
+        """Create parameterized circuit."""
+        return [RY(p) for p in params]
+
+    def compute_energy(self, params):
+        """Compute energy with optional ZNE."""
+        circuit = self.create_circuit(params)
+
+        if self.use_zne:
+            energy = self.runner.zne_expectation(
+                circuit, self.H,
+                noise_factors=[1.0, 1.5, 2.0, 3.0],
+                method='polynomial', order=2
+            )
+        else:
+            energy = self.runner.measure_expectation(circuit, self.H)
+
+        return energy
+
+    def optimize(self, initial_params, n_steps=30, lr=0.1):
+        """Run VQE optimization."""
+        params = initial_params.copy()
+
+        for step in range(n_steps):
+            energy = self.compute_energy(params)
+            self.history['energy'].append(energy)
+
+            # Gradient via finite differences
+            gradient = np.zeros_like(params)
+            eps = 0.01
+
+            for i in range(len(params)):
+                params_plus = params.copy()
+                params_plus[i] += eps
+                params_minus = params.copy()
+                params_minus[i] -= eps
+
+                e_plus = self.compute_energy(params_plus)
+                e_minus = self.compute_energy(params_minus)
+
+                gradient[i] = (e_plus - e_minus) / (2 * eps)
+
+            params = params - lr * gradient
+
+        return params
+
+# Run ZNE-VQE
+print("\nVQE with ZNE Error Mitigation:")
+print("=" * 50)
+
+np.random.seed(42)
+initial_params = np.random.randn(3) * 0.5
+
+# Simple Hamiltonian
+Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+# Without ZNE
+vqe_noisy = ZNEVQE(Z, noise_prob=0.05, use_zne=False)
+final_noisy = vqe_noisy.optimize(initial_params.copy(), n_steps=20)
+
+# With ZNE
+vqe_zne = ZNEVQE(Z, noise_prob=0.05, use_zne=True)
+final_zne = vqe_zne.optimize(initial_params.copy(), n_steps=20)
+
+# Ideal
+ideal_vqe = ZNEVQE(Z, noise_prob=0, use_zne=False)
+final_ideal = ideal_vqe.optimize(initial_params.copy(), n_steps=20)
+
+print(f"Ideal final energy: {ideal_vqe.history['energy'][-1]:.4f}")
+print(f"Noisy final energy: {vqe_noisy.history['energy'][-1]:.4f}")
+print(f"ZNE final energy: {vqe_zne.history['energy'][-1]:.4f}")
+```
+
+<Tip>
+For VQE with ZNE, cache QFI computations across noise levels since the circuit structure is the same—only noise differs.
+</Tip>
+
+## Summary
+
+In this lesson, you learned:
+
+- **ZNE principle**: Measure at multiple noise levels, extrapolate to zero
+- **Noise amplification**: Gate folding (G → G·G†·G) and pulse stretching
+- **Richardson extrapolation**: Polynomial fitting to noise factor
+- **Extrapolation models**: Linear, polynomial, exponential
+- **Practical considerations**: Noise factor selection, variance tradeoffs
+- **VQE integration**: Combining ZNE with optimization
+
+ZNE is a powerful, hardware-agnostic error mitigation technique that significantly improves expectation value estimates.
+
+## Next Steps
+
+In the next lesson, we'll explore probabilistic error cancellation, which can exactly remove the effect of noise at the cost of increased sampling overhead.

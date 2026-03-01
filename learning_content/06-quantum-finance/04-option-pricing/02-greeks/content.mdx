@@ -1,0 +1,554 @@
+---
+title: "Option Greeks and Risk Management"
+description: "Master the option Greeks (Delta, Gamma, Theta, Vega, Rho) for understanding price sensitivities and managing option portfolio risk."
+duration: 55
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Calculate and interpret all major Greeks
+- Understand Greek dynamics across moneyness and time
+- Implement delta hedging strategies
+- Manage portfolio-level Greek exposures
+- Apply Greeks to risk management decisions
+
+## 1. Introduction to Greeks
+
+Greeks measure option price sensitivities to various factors.
+
+<Definition term="Greeks">
+Partial derivatives of option price with respect to underlying parameters. They quantify how much an option's price will change when a specific input changes.
+</Definition>
+
+```python
+import numpy as np
+from scipy.stats import norm
+
+class OptionGreeks:
+    """
+    Calculate all option Greeks using Black-Scholes.
+    """
+
+    def __init__(self, S, K, T, r, sigma, option_type='call'):
+        """
+        Args:
+            S: Stock price
+            K: Strike price
+            T: Time to expiry (years)
+            r: Risk-free rate
+            sigma: Volatility
+            option_type: 'call' or 'put'
+        """
+        self.S = S
+        self.K = K
+        self.T = T
+        self.r = r
+        self.sigma = sigma
+        self.option_type = option_type
+
+        # Calculate d1 and d2
+        self.d1 = (np.log(S/K) + (r + sigma**2/2)*T) / (sigma*np.sqrt(T))
+        self.d2 = self.d1 - sigma*np.sqrt(T)
+
+    def price(self):
+        """Option price."""
+        if self.option_type == 'call':
+            return self.S * norm.cdf(self.d1) - self.K * np.exp(-self.r*self.T) * norm.cdf(self.d2)
+        else:
+            return self.K * np.exp(-self.r*self.T) * norm.cdf(-self.d2) - self.S * norm.cdf(-self.d1)
+
+    def delta(self):
+        """Delta: dV/dS - sensitivity to stock price."""
+        if self.option_type == 'call':
+            return norm.cdf(self.d1)
+        else:
+            return norm.cdf(self.d1) - 1
+
+    def gamma(self):
+        """Gamma: d²V/dS² - sensitivity of delta to stock price."""
+        return norm.pdf(self.d1) / (self.S * self.sigma * np.sqrt(self.T))
+
+    def theta(self):
+        """Theta: dV/dT - time decay (per day)."""
+        term1 = -(self.S * norm.pdf(self.d1) * self.sigma) / (2 * np.sqrt(self.T))
+
+        if self.option_type == 'call':
+            term2 = -self.r * self.K * np.exp(-self.r*self.T) * norm.cdf(self.d2)
+        else:
+            term2 = self.r * self.K * np.exp(-self.r*self.T) * norm.cdf(-self.d2)
+
+        # Convert to daily theta
+        return (term1 + term2) / 365
+
+    def vega(self):
+        """Vega: dV/dσ - sensitivity to volatility (per 1% change)."""
+        return self.S * norm.pdf(self.d1) * np.sqrt(self.T) / 100
+
+    def rho(self):
+        """Rho: dV/dr - sensitivity to interest rate (per 1% change)."""
+        if self.option_type == 'call':
+            return self.K * self.T * np.exp(-self.r*self.T) * norm.cdf(self.d2) / 100
+        else:
+            return -self.K * self.T * np.exp(-self.r*self.T) * norm.cdf(-self.d2) / 100
+
+    def all_greeks(self):
+        """Return all Greeks as a dictionary."""
+        return {
+            'price': self.price(),
+            'delta': self.delta(),
+            'gamma': self.gamma(),
+            'theta': self.theta(),
+            'vega': self.vega(),
+            'rho': self.rho()
+        }
+
+# Example
+call = OptionGreeks(S=100, K=100, T=0.5, r=0.05, sigma=0.20, option_type='call')
+put = OptionGreeks(S=100, K=100, T=0.5, r=0.05, sigma=0.20, option_type='put')
+
+print("ATM Call Greeks:")
+for name, value in call.all_greeks().items():
+    print(f"  {name}: {value:.4f}")
+
+print("\nATM Put Greeks:")
+for name, value in put.all_greeks().items():
+    print(f"  {name}: {value:.4f}")
+```
+
+## 2. Delta - Price Sensitivity
+
+<Formula>
+Delta measures the change in option price for a $1 change in the underlying:
+$$\Delta_{call} = N(d_1) \in [0, 1]$$
+$$\Delta_{put} = N(d_1) - 1 \in [-1, 0]$$
+</Formula>
+
+```python
+def analyze_delta(strikes, S=100, T=0.5, r=0.05, sigma=0.20):
+    """
+    Analyze delta across different strikes.
+    """
+    results = []
+    for K in strikes:
+        call = OptionGreeks(S, K, T, r, sigma, 'call')
+        put = OptionGreeks(S, K, T, r, sigma, 'put')
+        results.append({
+            'strike': K,
+            'moneyness': S/K,
+            'call_delta': call.delta(),
+            'put_delta': put.delta()
+        })
+    return results
+
+strikes = [80, 90, 95, 100, 105, 110, 120]
+delta_analysis = analyze_delta(strikes)
+
+print("Delta Analysis (S=100):")
+print(f"{'Strike':>8} {'Moneyness':>10} {'Call Δ':>10} {'Put Δ':>10}")
+print("-" * 40)
+for r in delta_analysis:
+    print(f"{r['strike']:>8} {r['moneyness']:>10.2f} {r['call_delta']:>10.4f} {r['put_delta']:>10.4f}")
+
+print("\nKey Insights:")
+print("  - Deep ITM call: Δ ≈ 1 (moves like stock)")
+print("  - ATM call: Δ ≈ 0.5 (moves half as much)")
+print("  - Deep OTM call: Δ ≈ 0 (minimal sensitivity)")
+print("  - Put Δ = Call Δ - 1")
+```
+
+<Tip>
+Delta can be interpreted as the approximate probability that the option expires in the money under risk-neutral measure.
+</Tip>
+
+## 3. Gamma - Delta Sensitivity
+
+Gamma measures how quickly delta changes.
+
+```python
+def analyze_gamma(S_range, K=100, T=0.5, r=0.05, sigma=0.20):
+    """
+    Analyze gamma across stock prices.
+    """
+    gammas = []
+    deltas = []
+
+    for S in S_range:
+        call = OptionGreeks(S, K, T, r, sigma, 'call')
+        gammas.append(call.gamma())
+        deltas.append(call.delta())
+
+    return S_range, deltas, gammas
+
+S_range = np.linspace(70, 130, 50)
+stocks, deltas, gammas = analyze_gamma(S_range)
+
+print("Gamma Analysis:")
+print("  Gamma is highest at ATM")
+print("  Gamma decreases as we move away from ATM")
+print("  Gamma increases as expiry approaches")
+
+# Show gamma for different times to expiry
+print("\nGamma by Time to Expiry (ATM):")
+for T in [0.1, 0.25, 0.5, 1.0]:
+    call = OptionGreeks(100, 100, T, 0.05, 0.20)
+    print(f"  T = {T:.2f} years: Gamma = {call.gamma():.4f}")
+```
+
+<Warning>
+High gamma positions are risky because delta changes rapidly. Gamma risk is particularly high for short-dated ATM options.
+</Warning>
+
+## 4. Theta - Time Decay
+
+```python
+def analyze_theta(days_to_expiry, S=100, K=100, r=0.05, sigma=0.20):
+    """
+    Analyze theta as expiration approaches.
+    """
+    results = []
+    for days in days_to_expiry:
+        T = days / 365
+        if T > 0:
+            call = OptionGreeks(S, K, T, r, sigma, 'call')
+            results.append({
+                'days': days,
+                'price': call.price(),
+                'theta': call.theta()
+            })
+    return results
+
+days = [90, 60, 30, 14, 7, 3, 1]
+theta_analysis = analyze_theta(days)
+
+print("Theta Analysis (ATM Call):")
+print(f"{'Days':>6} {'Price':>10} {'Daily Θ':>10} {'Weekly Θ':>10}")
+print("-" * 40)
+for r in theta_analysis:
+    print(f"{r['days']:>6} ${r['price']:>9.2f} ${r['theta']:>9.4f} ${r['theta']*7:>9.4f}")
+
+print("\nKey Insights:")
+print("  - Theta is always negative for long options")
+print("  - Theta decay accelerates near expiry")
+print("  - ATM options have highest theta")
+```
+
+## 5. Vega - Volatility Sensitivity
+
+```python
+def analyze_vega(sigmas, S=100, K=100, T=0.5, r=0.05):
+    """
+    Analyze vega and price across volatilities.
+    """
+    results = []
+    for sigma in sigmas:
+        call = OptionGreeks(S, K, T, r, sigma, 'call')
+        results.append({
+            'sigma': sigma,
+            'price': call.price(),
+            'vega': call.vega()
+        })
+    return results
+
+vols = [0.10, 0.15, 0.20, 0.25, 0.30, 0.40]
+vega_analysis = analyze_vega(vols)
+
+print("Vega Analysis (ATM Call):")
+print(f"{'Vol':>8} {'Price':>10} {'Vega':>10}")
+print("-" * 30)
+for r in vega_analysis:
+    print(f"{r['sigma']:>8.0%} ${r['price']:>9.2f} ${r['vega']:>9.4f}")
+
+print("\nVega interpretation:")
+print("  If vol increases 1%, option price increases by vega")
+print("  Long options are long vega (benefit from vol increase)")
+print("  ATM options have highest vega")
+```
+
+## 6. Delta Hedging
+
+Create a delta-neutral portfolio to hedge directional risk.
+
+```python
+class DeltaHedger:
+    """
+    Implement delta hedging for an option position.
+    """
+
+    def __init__(self, option_position, shares_position=0):
+        """
+        Args:
+            option_position: Number of options (positive=long, negative=short)
+            shares_position: Initial shares held
+        """
+        self.option_pos = option_position
+        self.shares_pos = shares_position
+        self.trades = []
+
+    def calculate_hedge(self, S, K, T, r, sigma, option_type='call'):
+        """
+        Calculate shares needed to delta hedge.
+        """
+        greeks = OptionGreeks(S, K, T, r, sigma, option_type)
+        option_delta = greeks.delta()
+
+        # Portfolio delta
+        portfolio_delta = self.option_pos * option_delta * 100 + self.shares_pos
+
+        # Shares to trade (negative = sell)
+        shares_to_trade = -portfolio_delta
+
+        return {
+            'option_delta': option_delta,
+            'portfolio_delta': portfolio_delta,
+            'shares_to_trade': shares_to_trade,
+            'new_shares_position': self.shares_pos + shares_to_trade
+        }
+
+    def execute_hedge(self, S, K, T, r, sigma, option_type='call'):
+        """
+        Execute delta hedge and update positions.
+        """
+        hedge = self.calculate_hedge(S, K, T, r, sigma, option_type)
+        self.shares_pos = hedge['new_shares_position']
+        self.trades.append({
+            'S': S,
+            'T': T,
+            'shares_traded': hedge['shares_to_trade'],
+            'shares_position': self.shares_pos
+        })
+        return hedge
+
+    def portfolio_value(self, S, K, T, r, sigma, option_type='call'):
+        """
+        Calculate total portfolio value.
+        """
+        greeks = OptionGreeks(S, K, T, r, sigma, option_type)
+        option_value = self.option_pos * greeks.price() * 100
+        stock_value = self.shares_pos * S
+        return option_value + stock_value
+
+# Example: Short 10 ATM calls, delta hedge
+hedger = DeltaHedger(option_position=-10)
+
+print("Delta Hedging Example: Short 10 ATM Calls")
+print("=" * 50)
+
+# Initial hedge
+initial = hedger.execute_hedge(S=100, K=100, T=0.5, r=0.05, sigma=0.20)
+print(f"\nInitial Hedge (S=100):")
+print(f"  Option Delta: {initial['option_delta']:.4f}")
+print(f"  Portfolio Delta: {initial['portfolio_delta']:.1f}")
+print(f"  Shares to Buy: {initial['shares_to_trade']:.0f}")
+
+# Stock moves up
+rehedge_up = hedger.execute_hedge(S=105, K=100, T=0.45, r=0.05, sigma=0.20)
+print(f"\nRehedge (S=105):")
+print(f"  Option Delta: {rehedge_up['option_delta']:.4f}")
+print(f"  Additional Shares: {rehedge_up['shares_to_trade']:.0f}")
+print(f"  Total Shares: {rehedge_up['new_shares_position']:.0f}")
+
+# Stock moves down
+rehedge_down = hedger.execute_hedge(S=95, K=100, T=0.40, r=0.05, sigma=0.20)
+print(f"\nRehedge (S=95):")
+print(f"  Option Delta: {rehedge_down['option_delta']:.4f}")
+print(f"  Additional Shares: {rehedge_down['shares_to_trade']:.0f}")
+print(f"  Total Shares: {rehedge_down['new_shares_position']:.0f}")
+```
+
+## 7. Portfolio Greeks
+
+Aggregate Greeks across multiple positions.
+
+```python
+class GreeksPortfolio:
+    """
+    Manage Greeks for a portfolio of options.
+    """
+
+    def __init__(self):
+        self.positions = []
+
+    def add_position(self, S, K, T, r, sigma, option_type, quantity):
+        """
+        Add an option position.
+
+        Args:
+            quantity: Number of contracts (positive=long, negative=short)
+        """
+        self.positions.append({
+            'S': S, 'K': K, 'T': T, 'r': r, 'sigma': sigma,
+            'type': option_type, 'quantity': quantity
+        })
+
+    def portfolio_greeks(self):
+        """
+        Calculate aggregate portfolio Greeks.
+        """
+        total = {'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0, 'rho': 0}
+
+        for pos in self.positions:
+            greeks = OptionGreeks(
+                pos['S'], pos['K'], pos['T'], pos['r'], pos['sigma'], pos['type']
+            )
+            multiplier = pos['quantity'] * 100  # 100 shares per contract
+
+            total['delta'] += greeks.delta() * multiplier
+            total['gamma'] += greeks.gamma() * multiplier
+            total['theta'] += greeks.theta() * multiplier
+            total['vega'] += greeks.vega() * multiplier
+            total['rho'] += greeks.rho() * multiplier
+
+        return total
+
+    def position_summary(self):
+        """
+        Summarize all positions.
+        """
+        summary = []
+        for pos in self.positions:
+            greeks = OptionGreeks(
+                pos['S'], pos['K'], pos['T'], pos['r'], pos['sigma'], pos['type']
+            )
+            summary.append({
+                'type': pos['type'],
+                'strike': pos['K'],
+                'expiry': pos['T'],
+                'quantity': pos['quantity'],
+                'delta_contrib': greeks.delta() * pos['quantity'] * 100,
+                'gamma_contrib': greeks.gamma() * pos['quantity'] * 100
+            })
+        return summary
+
+# Build a portfolio
+portfolio = GreeksPortfolio()
+
+# Bull call spread: long 95 call, short 105 call
+portfolio.add_position(S=100, K=95, T=0.5, r=0.05, sigma=0.20, option_type='call', quantity=10)
+portfolio.add_position(S=100, K=105, T=0.5, r=0.05, sigma=0.20, option_type='call', quantity=-10)
+
+print("Bull Call Spread Greeks:")
+print("=" * 40)
+greeks = portfolio.portfolio_greeks()
+for name, value in greeks.items():
+    print(f"  {name.capitalize():>8}: {value:>10.2f}")
+
+print("\nPosition Breakdown:")
+for pos in portfolio.position_summary():
+    print(f"  {pos['type'].capitalize()} K={pos['strike']}: "
+          f"Qty={pos['quantity']:+d}, Delta={pos['delta_contrib']:+.1f}")
+```
+
+## 8. Greek Risk Limits
+
+Set and monitor risk limits based on Greeks.
+
+```python
+class GreekRiskManager:
+    """
+    Monitor and manage Greek risk limits.
+    """
+
+    def __init__(self, limits):
+        """
+        Args:
+            limits: Dict of {greek: (min, max)} limits
+        """
+        self.limits = limits
+
+    def check_limits(self, portfolio_greeks):
+        """
+        Check if portfolio Greeks are within limits.
+        """
+        violations = []
+
+        for greek, value in portfolio_greeks.items():
+            if greek in self.limits:
+                min_limit, max_limit = self.limits[greek]
+                if value < min_limit:
+                    violations.append({
+                        'greek': greek,
+                        'value': value,
+                        'limit': min_limit,
+                        'type': 'below_min'
+                    })
+                elif value > max_limit:
+                    violations.append({
+                        'greek': greek,
+                        'value': value,
+                        'limit': max_limit,
+                        'type': 'above_max'
+                    })
+
+        return violations
+
+    def suggest_hedge(self, portfolio_greeks, target_greek, S, K, T, r, sigma):
+        """
+        Suggest trade to hedge a specific Greek.
+        """
+        current = portfolio_greeks.get(target_greek, 0)
+        target_min, target_max = self.limits.get(target_greek, (-np.inf, np.inf))
+
+        # Target the middle of the range
+        target = (target_min + target_max) / 2
+        needed = target - current
+
+        # Calculate hedge using ATM options
+        atm_call = OptionGreeks(S, K, T, r, sigma, 'call')
+
+        if target_greek == 'delta':
+            contracts = needed / (atm_call.delta() * 100)
+        elif target_greek == 'gamma':
+            contracts = needed / (atm_call.gamma() * 100)
+        elif target_greek == 'vega':
+            contracts = needed / (atm_call.vega() * 100)
+        else:
+            contracts = 0
+
+        return {
+            'current': current,
+            'target': target,
+            'contracts_needed': contracts,
+            'instrument': f"ATM Call K={K}"
+        }
+
+# Example risk management
+limits = {
+    'delta': (-500, 500),
+    'gamma': (-100, 100),
+    'vega': (-200, 200),
+    'theta': (-50, 0)
+}
+
+risk_mgr = GreekRiskManager(limits)
+
+# Check limits
+violations = risk_mgr.check_limits(greeks)
+
+print("\nRisk Limit Check:")
+if violations:
+    for v in violations:
+        print(f"  VIOLATION: {v['greek']} = {v['value']:.1f}, limit = {v['limit']:.1f}")
+else:
+    print("  All Greeks within limits")
+```
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Delta**: Measures sensitivity to underlying price (hedge ratio)
+2. **Gamma**: Measures how quickly delta changes
+3. **Theta**: Time decay - options lose value over time
+4. **Vega**: Sensitivity to implied volatility
+5. **Rho**: Sensitivity to interest rates
+6. **Delta hedging**: Create neutral positions to manage directional risk
+7. **Portfolio Greeks**: Aggregate risk across multiple positions
+
+## Further Reading
+
+- Next lesson: Binomial Tree Pricing
+- Related: Volatility Trading Strategies
+- Application: Market Making and Greeks Management

@@ -1,0 +1,415 @@
+---
+title: "ML-DSA: The NIST Digital Signature Standard"
+description: "Deep dive into FIPS 204 ML-DSA (Dilithium-based), the primary post-quantum digital signature algorithm standardized by NIST."
+duration: 70
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+- Understand ML-DSA's Fiat-Shamir with Aborts construction
+- Implement signing and verification operations
+- Choose appropriate parameter sets for different security levels
+- Apply FIPS 204 compliance requirements correctly
+
+## 1. ML-DSA Overview
+
+```python
+def ml_dsa_overview():
+    """Overview of FIPS 204 ML-DSA."""
+    print("FIPS 204: ML-DSA (Module-Lattice Digital Signature Algorithm)")
+    print("=" * 70)
+    
+    print("""
+    WHAT IS ML-DSA?
+    ━━━━━━━━━━━━━━━
+    
+    ML-DSA is the NIST-standardized Digital Signature Algorithm
+    based on CRYSTALS-Dilithium.
+    
+    Purpose: Sign and verify digital messages/documents
+    Replaces: ECDSA, RSA signatures, EdDSA
+    
+    
+    KEY CONSTRUCTION: FIAT-SHAMIR WITH ABORTS
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    The signature scheme uses an interactive protocol made
+    non-interactive via the Fiat-Shamir transform, with a
+    crucial "abort" mechanism:
+    
+    1. Generate random masking vector y
+    2. Compute commitment w = Ay
+    3. Hash to get challenge c = H(message || w)
+    4. Compute response z = y + cs
+    5. CHECK: If z is too large → ABORT and restart!
+    
+    ┌─────────────────────────────────────────────────────────────────┐
+    │ WHY ABORT?                                                      │
+    │                                                                 │
+    │ Without rejection sampling, the response z would leak          │
+    │ information about the secret key s.                            │
+    │                                                                 │
+    │ By aborting when z is too large, we ensure z's distribution    │
+    │ is independent of s → No information leakage!                  │
+    │                                                                 │
+    │ Average attempts per signature: ~4-7 iterations                │
+    └─────────────────────────────────────────────────────────────────┘
+    
+    
+    SECURITY BASIS:
+    ━━━━━━━━━━━━━━━
+    
+    ML-DSA's security relies on two hard problems:
+    
+    • Module-LWE (M-LWE):
+      Finding short s from (A, As + e) is hard
+    
+    • Module-SIS (M-SIS):
+      Finding short z where Az = 0 is hard
+    
+    Both problems are believed to resist quantum attacks.
+    """)
+
+ml_dsa_overview()
+```
+
+## 2. Parameter Sets
+
+```python
+class MLDSAParameters:
+    """FIPS 204 ML-DSA parameter sets."""
+    
+    PARAMS = {
+        'ML-DSA-44': {
+            'k': 4, 'l': 4,
+            'eta': 2, 'gamma1': 131072, 'gamma2': 95232,
+            'tau': 39, 'beta': 78, 'omega': 80,
+            'pk_bytes': 1312, 'sk_bytes': 2560, 'sig_bytes': 2420,
+            'category': 2,
+            'description': 'NIST Category 2 (SHA-256 collision equivalent)',
+            'use_case': 'Standard applications, code signing'
+        },
+        'ML-DSA-65': {
+            'k': 6, 'l': 5,
+            'eta': 4, 'gamma1': 524288, 'gamma2': 261888,
+            'tau': 49, 'beta': 196, 'omega': 55,
+            'pk_bytes': 1952, 'sk_bytes': 4032, 'sig_bytes': 3309,
+            'category': 3,
+            'description': 'NIST Category 3 (AES-192 equivalent)',
+            'use_case': 'RECOMMENDED for most applications'
+        },
+        'ML-DSA-87': {
+            'k': 8, 'l': 7,
+            'eta': 2, 'gamma1': 524288, 'gamma2': 261888,
+            'tau': 60, 'beta': 120, 'omega': 75,
+            'pk_bytes': 2592, 'sk_bytes': 4896, 'sig_bytes': 4627,
+            'category': 5,
+            'description': 'NIST Category 5 (AES-256 equivalent)',
+            'use_case': 'High security, long-term protection'
+        }
+    }
+    
+    @classmethod
+    def display_all(cls):
+        """Display all ML-DSA parameter sets."""
+        print("\nML-DSA PARAMETER SETS (FIPS 204)")
+        print("=" * 70)
+        
+        print(f"\n{'Variant':<12} {'(k,l)':<8} {'PK(B)':<8} {'SK(B)':<8} {'Sig(B)':<8} {'Cat'}")
+        print("-" * 55)
+        
+        for name, p in cls.PARAMS.items():
+            print(f"{name:<12} ({p['k']},{p['l']})   {p['pk_bytes']:<8} "
+                  f"{p['sk_bytes']:<8} {p['sig_bytes']:<8} {p['category']}")
+        
+        print("\n")
+        for name, p in cls.PARAMS.items():
+            print(f"{name}: {p['description']}")
+            print(f"  Use case: {p['use_case']}\n")
+    
+    @classmethod
+    def recommend(cls, security_years: int, size_critical: bool = False) -> str:
+        """Recommend parameter set based on requirements."""
+        if security_years > 25:
+            return 'ML-DSA-87'
+        elif size_critical and security_years <= 10:
+            return 'ML-DSA-44'
+        else:
+            return 'ML-DSA-65'
+
+MLDSAParameters.display_all()
+print(f"Recommendation for 15-year security: {MLDSAParameters.recommend(15)}")
+```
+
+## 3. Signing Algorithm
+
+```python
+import hashlib
+import secrets
+import numpy as np
+from typing import Tuple, Optional
+
+class MLDSADemo:
+    """
+    Simplified ML-DSA demonstration.
+    For education only - use FIPS-validated library in production!
+    """
+    
+    def __init__(self, variant: str = 'ML-DSA-65'):
+        self.variant = variant
+        self.params = MLDSAParameters.PARAMS[variant]
+        self.n = 256
+        self.q = 8380417
+    
+    def keygen(self) -> Tuple[bytes, bytes]:
+        """
+        ML-DSA.KeyGen()
+        
+        Real algorithm:
+        1. Sample random seed ξ
+        2. Expand ξ to get matrix A
+        3. Sample secret vectors s1, s2 with small coefficients
+        4. Compute t = As1 + s2
+        5. pk = (ρ, t1), sk = (ρ, K, tr, s1, s2, t0)
+        """
+        seed = secrets.token_bytes(32)
+        
+        # Simplified key generation
+        rho = hashlib.sha3_256(seed + b"rho").digest()
+        K = hashlib.sha3_256(seed + b"K").digest()
+        
+        pk = rho + secrets.token_bytes(self.params['pk_bytes'] - 32)
+        sk = pk + K + secrets.token_bytes(self.params['sk_bytes'] - len(pk) - 32)
+        
+        return pk, sk
+    
+    def sign(self, sk: bytes, message: bytes) -> bytes:
+        """
+        ML-DSA.Sign(sk, M)
+        
+        Real algorithm (with rejection sampling):
+        
+        while True:
+            1. Sample random y with coefficients in [-γ1, γ1]
+            2. Compute w = Ay
+            3. Compute commitment w1 = HighBits(w)
+            4. Compute challenge c = H(μ || w1)
+            5. Compute z = y + cs1
+            6. Compute hint h
+            
+            # REJECTION SAMPLING
+            if ||z||∞ >= γ1 - β:
+                continue  # ABORT - z too large
+            if ||LowBits(w - cs2)||∞ >= γ2 - β:
+                continue  # ABORT - hint would fail
+            if # of 1s in h > ω:
+                continue  # ABORT - hint too large
+            
+            return (c̃, z, h)
+        """
+        # Demonstrate the rejection sampling concept
+        print("    Signing with rejection sampling...")
+        
+        attempts = 0
+        max_attempts = 10
+        
+        while attempts < max_attempts:
+            attempts += 1
+            
+            # Simulate checking if z is too large
+            z_too_large = secrets.randbelow(10) < 3  # ~30% abort rate
+            
+            if z_too_large:
+                print(f"    Attempt {attempts}: z too large, aborting...")
+                continue
+            else:
+                print(f"    Attempt {attempts}: Success!")
+                break
+        
+        # Generate signature
+        sig_data = hashlib.sha3_512(sk[:64] + message).digest()
+        signature = sig_data + secrets.token_bytes(self.params['sig_bytes'] - len(sig_data))
+        
+        return signature
+    
+    def verify(self, pk: bytes, message: bytes, signature: bytes) -> bool:
+        """
+        ML-DSA.Verify(pk, M, σ)
+        
+        Real algorithm:
+        1. Parse σ = (c̃, z, h)
+        2. Check ||z||∞ < γ1 - β
+        3. Compute μ = H(tr || M)
+        4. Compute w'1 = UseHint(h, Az - ct1·2^d)
+        5. Compute c = H(μ || w'1)
+        6. Return c == SampleInBall(c̃)
+        """
+        # Basic validation
+        if len(signature) != self.params['sig_bytes']:
+            return False
+        
+        # Simplified verification
+        return True
+
+
+def demonstrate_mldsa():
+    """Demonstrate ML-DSA signing and verification."""
+    print("\nML-DSA SIGNATURE DEMONSTRATION")
+    print("-" * 50)
+    
+    dsa = MLDSADemo('ML-DSA-65')
+    
+    # Key generation
+    print("\n1. Key Generation")
+    pk, sk = dsa.keygen()
+    print(f"   Public key:  {len(pk):,} bytes")
+    print(f"   Secret key:  {len(sk):,} bytes")
+    
+    # Signing
+    print("\n2. Signing")
+    message = b"This document is signed with ML-DSA-65"
+    signature = dsa.sign(sk, message)
+    print(f"   Message: {len(message)} bytes")
+    print(f"   Signature: {len(signature):,} bytes")
+    
+    # Verification
+    print("\n3. Verification")
+    valid = dsa.verify(pk, message, signature)
+    print(f"   Valid: {valid}")
+    
+    # Tampered message
+    print("\n4. Tamper Detection")
+    tampered = message + b"!"
+    valid_tampered = dsa.verify(pk, tampered, signature)
+    print(f"   Tampered valid: {valid_tampered}")
+
+demonstrate_mldsa()
+```
+
+## 4. Comparison with Classical Signatures
+
+```python
+def compare_classical():
+    """Compare ML-DSA with classical signature schemes."""
+    print("\nML-DSA vs CLASSICAL SIGNATURES")
+    print("=" * 70)
+    
+    print("""
+    SIZE COMPARISON:
+    ┌────────────────┬──────────┬──────────┬───────────────────────────┐
+    │ Scheme         │ PK (B)   │ Sig (B)  │ Quantum Security          │
+    ├────────────────┼──────────┼──────────┼───────────────────────────┤
+    │ ECDSA P-256    │ 64       │ 64       │ ❌ BROKEN by Shor         │
+    │ Ed25519        │ 32       │ 64       │ ❌ BROKEN by Shor         │
+    │ RSA-2048       │ 256      │ 256      │ ❌ BROKEN by Shor         │
+    │ RSA-4096       │ 512      │ 512      │ ❌ BROKEN by Shor         │
+    ├────────────────┼──────────┼──────────┼───────────────────────────┤
+    │ ML-DSA-44      │ 1,312    │ 2,420    │ ✓ Quantum-resistant       │
+    │ ML-DSA-65      │ 1,952    │ 3,309    │ ✓ Quantum-resistant       │
+    │ ML-DSA-87      │ 2,592    │ 4,627    │ ✓ Quantum-resistant       │
+    └────────────────┴──────────┴──────────┴───────────────────────────┘
+    
+    ML-DSA signatures are ~40-70x larger than ECDSA!
+    But they're the only option for quantum security.
+    
+    
+    SPEED COMPARISON (approximate, varies by platform):
+    ┌────────────────┬──────────┬──────────┬──────────┐
+    │ Scheme         │ KeyGen   │ Sign     │ Verify   │
+    ├────────────────┼──────────┼──────────┼──────────┤
+    │ Ed25519        │ 0.03 ms  │ 0.03 ms  │ 0.08 ms  │
+    │ ECDSA P-256    │ 0.1 ms   │ 0.1 ms   │ 0.2 ms   │
+    │ RSA-2048       │ 100 ms   │ 3 ms     │ 0.1 ms   │
+    ├────────────────┼──────────┼──────────┼──────────┤
+    │ ML-DSA-65      │ 0.1 ms   │ 0.3 ms   │ 0.1 ms   │
+    └────────────────┴──────────┴──────────┴──────────┘
+    
+    ML-DSA is competitive with classical schemes in speed!
+    The main tradeoff is SIZE, not SPEED.
+    """)
+
+compare_classical()
+```
+
+## 5. FIPS 204 Compliance
+
+```python
+def fips_compliance():
+    """FIPS 204 compliance requirements."""
+    print("\nFIPS 204 COMPLIANCE REQUIREMENTS")
+    print("=" * 70)
+    
+    print("""
+    SIGNING MODES:
+    ━━━━━━━━━━━━━━
+    
+    FIPS 204 defines multiple signing modes:
+    
+    1. PURE MODE (ML-DSA.Sign)
+       • Signs message directly
+       • Recommended for new applications
+       • Maximum security
+    
+    2. PREHASH MODE (HashML-DSA.Sign)
+       • Signs H(message) instead of message
+       • Compatible with hash-then-sign workflows
+       • Use when message too large for memory
+    
+    3. CONTEXT STRING
+       • Optional domain separator
+       • Prevents cross-protocol attacks
+       • ctx = application-specific string
+    
+    
+    REQUIRED IMPLEMENTATION FEATURES:
+    ┌─────────────────────────────────────────────────────────────────┐
+    │ Requirement              │ Purpose                             │
+    ├──────────────────────────┼─────────────────────────────────────┤
+    │ Constant-time rejection  │ Prevent timing attacks              │
+    │ Approved DRBG            │ Secure randomness (SP 800-90A)      │
+    │ Hedged signing           │ Protection against RNG failures     │
+    │ Input validation         │ Reject malformed inputs             │
+    │ Memory zeroization       │ Clear secrets after use             │
+    └─────────────────────────────────────────────────────────────────┘
+    
+    
+    HEDGED SIGNING:
+    ━━━━━━━━━━━━━━━━
+    
+    ML-DSA uses "hedged" randomness:
+    
+    ρ' = H(K || rnd || μ)
+    
+    where:
+    • K = secret key component
+    • rnd = random bytes (or zeros for deterministic)
+    • μ = message hash
+    
+    This protects against:
+    • Bad RNG (still secure if K is secret)
+    • Fault attacks (need both K and rnd to predict)
+    """)
+
+fips_compliance()
+```
+
+## Summary
+
+In this lesson, you learned about ML-DSA (FIPS 204):
+
+1. **Construction**: Fiat-Shamir with Aborts, using rejection sampling
+2. **Security**: Based on Module-LWE and Module-SIS problems
+3. **Parameters**: ML-DSA-44/65/87 for Categories 2/3/5
+4. **Sizes**: 1.3-2.6 KB public keys, 2.4-4.6 KB signatures
+5. **Performance**: Comparable to ECDSA in speed
+6. **Recommendation**: Use ML-DSA-65 for most applications
+
+ML-DSA is the primary post-quantum replacement for ECDSA and RSA signatures.
+
+## Further Reading
+
+- FIPS 204 specification: csrc.nist.gov
+- CRYSTALS-Dilithium paper
+- Reference implementations: pq-crystals.org

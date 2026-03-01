@@ -1,0 +1,674 @@
+---
+title: "Ansätze for Chemistry"
+description: "Learn about specialized ansätze for quantum chemistry including UCCSD, hardware-efficient, and symmetry-preserving designs."
+---
+
+# Ansätze for Chemistry
+
+The ansatz determines VQE's ability to find the ground state. Chemistry-inspired and hardware-efficient approaches offer different trade-offs between accuracy and practicality.
+
+## The Ansatz Challenge
+
+A good ansatz must balance several requirements:
+
+<Definition>
+**Ansatz Requirements**:
+1. **Expressibility**: Ability to represent the ground state
+2. **Trainability**: Absence of barren plateaus
+3. **Implementability**: Feasible circuit depth on hardware
+4. **Physical relevance**: Respects symmetries and physics
+</Definition>
+
+```python
+import numpy as np
+
+def analyze_ansatz(ansatz_fn, n_params, n_samples=1000):
+    """
+    Analyze basic properties of an ansatz.
+
+    Args:
+        ansatz_fn: Function(params) -> state vector
+        n_params: Number of parameters
+        n_samples: Random samples for analysis
+
+    Returns:
+        Analysis results
+    """
+    states = []
+    for _ in range(n_samples):
+        params = np.random.uniform(0, 2*np.pi, n_params)
+        state = ansatz_fn(params)
+        states.append(state)
+
+    states = np.array(states)
+
+    # Measure coverage of Hilbert space
+    # Using state overlaps
+    overlaps = []
+    for i in range(min(100, n_samples)):
+        for j in range(i+1, min(100, n_samples)):
+            overlap = np.abs(np.vdot(states[i], states[j]))**2
+            overlaps.append(overlap)
+
+    return {
+        'mean_overlap': np.mean(overlaps),
+        'min_overlap': np.min(overlaps),
+        'max_overlap': np.max(overlaps),
+        'expressibility_indicator': 1 - np.mean(overlaps)
+    }
+
+# Example analysis with simple ansatz
+def simple_ansatz(params):
+    """Single RY rotation."""
+    theta = params[0]
+    return np.array([np.cos(theta/2), np.sin(theta/2)])
+
+result = analyze_ansatz(simple_ansatz, 1, n_samples=100)
+print("Simple Ansatz Analysis:")
+for key, val in result.items():
+    print(f"  {key}: {val:.4f}")
+```
+
+## Unitary Coupled Cluster (UCC)
+
+The UCC ansatz is inspired by coupled cluster theory from quantum chemistry.
+
+<Formula>
+**UCC Ansatz**:
+
+$$|\psi(\theta)\rangle = e^{T(\theta) - T^\dagger(\theta)} |HF\rangle$$
+
+Where T is the cluster operator containing single and double excitations:
+
+$$T = T_1 + T_2 = \sum_{ia} \theta_i^a a_a^\dagger a_i + \sum_{ijab} \theta_{ij}^{ab} a_a^\dagger a_b^\dagger a_j a_i$$
+</Formula>
+
+<Tip>
+Classical coupled cluster uses non-unitary operators which cannot be efficiently simulated classically. The unitary version (UCC) trades some accuracy for quantum computability.
+</Tip>
+
+```python
+import numpy as np
+from itertools import combinations
+
+class UCCOperator:
+    """
+    Unitary Coupled Cluster operator generator.
+    """
+
+    def __init__(self, n_electrons, n_orbitals):
+        """
+        Initialize UCC operator.
+
+        Args:
+            n_electrons: Number of electrons
+            n_orbitals: Number of spatial orbitals
+        """
+        self.n_electrons = n_electrons
+        self.n_orbitals = n_orbitals
+        self.n_spin_orbitals = 2 * n_orbitals
+
+    def get_single_excitations(self):
+        """
+        Generate single excitation indices.
+
+        Returns:
+            List of (i, a) tuples (occupied -> virtual)
+        """
+        # Occupied orbitals (assuming aufbau)
+        occupied = list(range(self.n_electrons))
+        # Virtual orbitals
+        virtual = list(range(self.n_electrons, self.n_spin_orbitals))
+
+        excitations = []
+        for i in occupied:
+            for a in virtual:
+                excitations.append((i, a))
+
+        return excitations
+
+    def get_double_excitations(self):
+        """
+        Generate double excitation indices.
+
+        Returns:
+            List of (i, j, a, b) tuples
+        """
+        occupied = list(range(self.n_electrons))
+        virtual = list(range(self.n_electrons, self.n_spin_orbitals))
+
+        excitations = []
+        for i, j in combinations(occupied, 2):
+            for a, b in combinations(virtual, 2):
+                excitations.append((i, j, a, b))
+
+        return excitations
+
+    def count_parameters(self):
+        """Count total UCCSD parameters."""
+        singles = len(self.get_single_excitations())
+        doubles = len(self.get_double_excitations())
+        return {'singles': singles, 'doubles': doubles, 'total': singles + doubles}
+
+# Example: H2 in minimal basis
+ucc = UCCOperator(n_electrons=2, n_orbitals=2)
+
+print("UCCSD for H2 (minimal basis):")
+print(f"  Spin orbitals: {ucc.n_spin_orbitals}")
+print(f"  Single excitations: {ucc.get_single_excitations()}")
+print(f"  Double excitations: {ucc.get_double_excitations()}")
+print(f"  Parameter count: {ucc.count_parameters()}")
+```
+
+## UCCSD Implementation
+
+The UCCSD (Unitary Coupled Cluster Singles and Doubles) ansatz is a workhorse for quantum chemistry.
+
+```python
+import numpy as np
+
+def uccsd_circuit_depth(n_electrons, n_orbitals, mapping='jordan-wigner'):
+    """
+    Estimate UCCSD circuit depth.
+
+    Args:
+        n_electrons: Number of electrons
+        n_orbitals: Number of spatial orbitals
+        mapping: Fermion-to-qubit mapping
+
+    Returns:
+        Depth estimates
+    """
+    n_so = 2 * n_orbitals
+
+    # Count excitations
+    n_occ = n_electrons
+    n_virt = n_so - n_electrons
+
+    n_singles = n_occ * n_virt
+    n_doubles = (n_occ * (n_occ - 1) // 2) * (n_virt * (n_virt - 1) // 2)
+
+    # Each single excitation: ~O(n) gates in JW
+    # Each double excitation: ~O(n) gates in JW
+    if mapping == 'jordan-wigner':
+        gates_per_single = 4 * n_so  # CNOT ladder + rotations
+        gates_per_double = 16 * n_so  # More complex
+
+    total_gates = n_singles * gates_per_single + n_doubles * gates_per_double
+
+    return {
+        'n_singles': n_singles,
+        'n_doubles': n_doubles,
+        'n_parameters': n_singles + n_doubles,
+        'estimated_cnots': total_gates // 2,
+        'estimated_depth': total_gates // n_so
+    }
+
+# Estimates for various molecules
+molecules = [
+    ('H2', 2, 2),
+    ('LiH', 4, 6),
+    ('H2O', 10, 7),
+    ('N2', 14, 10)
+]
+
+print("UCCSD Circuit Complexity:")
+print("=" * 60)
+print(f"{'Molecule':<10} {'Electrons':<12} {'Orbitals':<10} {'Params':<10} {'CNOTs':<10}")
+print("-" * 60)
+
+for name, n_e, n_o in molecules:
+    info = uccsd_circuit_depth(n_e, n_o)
+    print(f"{name:<10} {n_e:<12} {n_o:<10} {info['n_parameters']:<10} {info['estimated_cnots']:<10}")
+```
+
+## Hardware-Efficient Ansätze
+
+Hardware-efficient ansätze prioritize gate efficiency over physical motivation.
+
+<Definition>
+**Hardware-Efficient Ansatz**: A layered circuit structure with:
+1. Single-qubit rotation layers
+2. Entangling gate layers (matching hardware connectivity)
+3. Repeated L times for depth
+
+These ansätze may not respect physical symmetries but are easier to implement.
+</Definition>
+
+<Warning>
+Hardware-efficient ansätze can suffer from barren plateaus as depth increases. Balance expressibility with trainability.
+</Warning>
+
+```python
+import numpy as np
+
+class HardwareEfficientAnsatz:
+    """
+    Hardware-efficient ansatz for VQE.
+    """
+
+    def __init__(self, n_qubits, n_layers, rotation_gates='RY', entangling='CNOT'):
+        """
+        Initialize hardware-efficient ansatz.
+
+        Args:
+            n_qubits: Number of qubits
+            n_layers: Number of circuit layers
+            rotation_gates: 'RY' or 'RYZ'
+            entangling: 'CNOT' or 'CZ'
+        """
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.rotation_gates = rotation_gates
+        self.entangling = entangling
+
+        # Count parameters
+        if rotation_gates == 'RY':
+            self.params_per_layer = n_qubits
+        elif rotation_gates == 'RYZ':
+            self.params_per_layer = 2 * n_qubits
+        else:
+            raise ValueError(f"Unknown rotation: {rotation_gates}")
+
+        self.n_params = self.params_per_layer * n_layers + n_qubits
+
+    def get_state(self, params):
+        """
+        Compute state vector for given parameters.
+
+        Simulates the circuit classically.
+        """
+        # Start from |0...0⟩
+        dim = 2 ** self.n_qubits
+        state = np.zeros(dim, dtype=complex)
+        state[0] = 1.0
+
+        param_idx = 0
+
+        for layer in range(self.n_layers):
+            # Rotation layer
+            for q in range(self.n_qubits):
+                theta = params[param_idx]
+                param_idx += 1
+                state = self._apply_ry(state, q, theta)
+
+            # Entangling layer (linear connectivity)
+            for q in range(self.n_qubits - 1):
+                state = self._apply_cnot(state, q, q + 1)
+
+        # Final rotation layer
+        for q in range(self.n_qubits):
+            theta = params[param_idx]
+            param_idx += 1
+            state = self._apply_ry(state, q, theta)
+
+        return state
+
+    def _apply_ry(self, state, qubit, theta):
+        """Apply RY gate to qubit."""
+        c, s = np.cos(theta/2), np.sin(theta/2)
+
+        new_state = np.zeros_like(state)
+        n = self.n_qubits
+
+        for i in range(len(state)):
+            # Bit at position qubit
+            bit = (i >> (n - 1 - qubit)) & 1
+
+            if bit == 0:
+                j = i | (1 << (n - 1 - qubit))
+                new_state[i] += c * state[i] - s * state[j]
+                new_state[j] += s * state[i] + c * state[j]
+            # Already handled in bit == 0 case
+
+        return new_state
+
+    def _apply_cnot(self, state, control, target):
+        """Apply CNOT gate."""
+        new_state = state.copy()
+        n = self.n_qubits
+
+        for i in range(len(state)):
+            ctrl_bit = (i >> (n - 1 - control)) & 1
+            if ctrl_bit == 1:
+                # Flip target
+                j = i ^ (1 << (n - 1 - target))
+                new_state[i], new_state[j] = state[j], state[i]
+
+        return new_state
+
+# Example
+ansatz = HardwareEfficientAnsatz(n_qubits=4, n_layers=2)
+params = np.random.uniform(0, 2*np.pi, ansatz.n_params)
+
+print("Hardware-Efficient Ansatz:")
+print(f"  Qubits: {ansatz.n_qubits}")
+print(f"  Layers: {ansatz.n_layers}")
+print(f"  Parameters: {ansatz.n_params}")
+
+state = ansatz.get_state(params)
+print(f"  Output state norm: {np.linalg.norm(state):.6f}")
+```
+
+## Symmetry-Preserving Ansätze
+
+Incorporating physical symmetries reduces the parameter space and improves convergence.
+
+```python
+import numpy as np
+
+class SymmetryPreservingAnsatz:
+    """
+    Ansatz that preserves particle number and spin.
+    """
+
+    def __init__(self, n_qubits, n_electrons, n_layers=2):
+        """
+        Initialize symmetry-preserving ansatz.
+
+        Args:
+            n_qubits: Number of qubits
+            n_electrons: Target electron number
+            n_layers: Number of layers
+        """
+        self.n_qubits = n_qubits
+        self.n_electrons = n_electrons
+        self.n_layers = n_layers
+
+        # Particle-conserving gates: iSWAP-like
+        # Parameters: one per pair per layer
+        n_pairs = n_qubits - 1
+        self.n_params = n_pairs * n_layers
+
+    def particle_conserving_gate(self, theta):
+        """
+        Build 2-qubit particle-conserving gate.
+
+        |00⟩ → |00⟩
+        |01⟩ → cos(θ)|01⟩ + sin(θ)|10⟩
+        |10⟩ → -sin(θ)|01⟩ + cos(θ)|10⟩
+        |11⟩ → |11⟩
+        """
+        c, s = np.cos(theta), np.sin(theta)
+        return np.array([
+            [1, 0, 0, 0],
+            [0, c, s, 0],
+            [0, -s, c, 0],
+            [0, 0, 0, 1]
+        ], dtype=complex)
+
+    def get_state(self, params, initial_state=None):
+        """
+        Compute state for given parameters.
+
+        Args:
+            params: Variational parameters
+            initial_state: Starting state (default: HF state)
+        """
+        dim = 2 ** self.n_qubits
+
+        # Default: Hartree-Fock state (first n_electrons orbitals occupied)
+        if initial_state is None:
+            hf_config = (1 << self.n_qubits) - (1 << (self.n_qubits - self.n_electrons))
+            state = np.zeros(dim, dtype=complex)
+            state[hf_config] = 1.0
+        else:
+            state = initial_state.copy()
+
+        param_idx = 0
+
+        for layer in range(self.n_layers):
+            # Apply particle-conserving gates to all pairs
+            for pair in range(self.n_qubits - 1):
+                theta = params[param_idx]
+                param_idx += 1
+                state = self._apply_pair_gate(state, pair, pair + 1, theta)
+
+        return state
+
+    def _apply_pair_gate(self, state, q1, q2, theta):
+        """Apply particle-conserving gate to qubit pair."""
+        gate = self.particle_conserving_gate(theta)
+        new_state = state.copy()
+        n = self.n_qubits
+
+        # Iterate over computational basis
+        for i in range(len(state)):
+            b1 = (i >> (n - 1 - q1)) & 1
+            b2 = (i >> (n - 1 - q2)) & 1
+            local_idx = 2 * b1 + b2
+
+            if local_idx == 1 or local_idx == 2:  # Only |01⟩ and |10⟩ mix
+                # Find partner state
+                j = i ^ (1 << (n - 1 - q1)) ^ (1 << (n - 1 - q2))
+
+                # Apply rotation in 01-10 subspace
+                c, s = np.cos(theta), np.sin(theta)
+                if local_idx == 1:  # |01⟩
+                    new_state[i] = c * state[i] + s * state[j]
+                else:  # |10⟩
+                    new_state[i] = -s * state[j] + c * state[i]
+
+        return new_state
+
+    def verify_symmetry(self, params):
+        """Verify that the ansatz preserves particle number."""
+        state = self.get_state(params)
+
+        # Check particle number of each component
+        particle_numbers = set()
+        for i, amp in enumerate(state):
+            if np.abs(amp) > 1e-10:
+                n_particles = bin(i).count('1')
+                particle_numbers.add(n_particles)
+
+        return {
+            'particle_numbers': particle_numbers,
+            'symmetry_preserved': len(particle_numbers) == 1
+        }
+
+# Example
+sp_ansatz = SymmetryPreservingAnsatz(n_qubits=4, n_electrons=2, n_layers=2)
+params = np.random.uniform(0, 2*np.pi, sp_ansatz.n_params)
+
+print("Symmetry-Preserving Ansatz:")
+print(f"  Parameters: {sp_ansatz.n_params}")
+
+verification = sp_ansatz.verify_symmetry(params)
+print(f"  Particle numbers in state: {verification['particle_numbers']}")
+print(f"  Symmetry preserved: {verification['symmetry_preserved']}")
+```
+
+## Adaptive Ansätze
+
+Adaptive methods grow the ansatz based on gradient information.
+
+<Tip>
+ADAPT-VQE selectively adds operators that maximally reduce energy, building a problem-tailored ansatz that avoids unnecessary parameters.
+</Tip>
+
+```python
+import numpy as np
+
+class ADAPTVQEOperatorPool:
+    """
+    Operator pool for ADAPT-VQE.
+    """
+
+    def __init__(self, n_qubits, n_electrons):
+        self.n_qubits = n_qubits
+        self.n_electrons = n_electrons
+        self.operators = self._build_pool()
+
+    def _build_pool(self):
+        """Build pool of fermionic operators."""
+        operators = []
+
+        # Single excitations
+        occupied = list(range(self.n_electrons))
+        virtual = list(range(self.n_electrons, self.n_qubits))
+
+        for i in occupied:
+            for a in virtual:
+                operators.append({
+                    'type': 'single',
+                    'indices': (i, a),
+                    'description': f'T_{i}^{a}'
+                })
+
+        # Double excitations (simplified)
+        from itertools import combinations
+        for i, j in combinations(occupied, 2):
+            for a, b in combinations(virtual, 2):
+                operators.append({
+                    'type': 'double',
+                    'indices': (i, j, a, b),
+                    'description': f'T_{i}{j}^{a}{b}'
+                })
+
+        return operators
+
+    def compute_gradients(self, state, hamiltonian):
+        """
+        Compute gradient for each operator in pool.
+
+        Returns indices of operator with largest gradient.
+        """
+        gradients = []
+
+        for op in self.operators:
+            # Simplified gradient computation
+            # In practice, use parameter-shift or commutator
+            grad = np.random.randn()  # Placeholder
+            gradients.append(abs(grad))
+
+        return gradients
+
+# Example
+pool = ADAPTVQEOperatorPool(n_qubits=4, n_electrons=2)
+
+print("ADAPT-VQE Operator Pool:")
+print(f"  Total operators: {len(pool.operators)}")
+print("\n  Singles:")
+for op in pool.operators:
+    if op['type'] == 'single':
+        print(f"    {op['description']}")
+print("\n  Doubles:")
+for op in pool.operators:
+    if op['type'] == 'double':
+        print(f"    {op['description']}")
+```
+
+## Comparing Ansätze
+
+Different ansätze suit different situations.
+
+```python
+import numpy as np
+
+def compare_ansatze():
+    """Compare different ansatz strategies."""
+
+    comparison = {
+        'UCCSD': {
+            'physical_motivation': 'High',
+            'expressibility': 'Exact for ground state (in principle)',
+            'circuit_depth': 'Deep (O(N^4) gates)',
+            'trainability': 'Good (physics-informed)',
+            'use_case': 'Chemistry calculations'
+        },
+        'Hardware-Efficient': {
+            'physical_motivation': 'Low',
+            'expressibility': 'High (can represent any state)',
+            'circuit_depth': 'Controllable',
+            'trainability': 'Risk of barren plateaus',
+            'use_case': 'NISQ experiments'
+        },
+        'Symmetry-Preserving': {
+            'physical_motivation': 'Medium',
+            'expressibility': 'Restricted to symmetry sector',
+            'circuit_depth': 'Medium',
+            'trainability': 'Good (smaller space)',
+            'use_case': 'When symmetries are known'
+        },
+        'ADAPT-VQE': {
+            'physical_motivation': 'Adaptive',
+            'expressibility': 'Grows as needed',
+            'circuit_depth': 'Grows iteratively',
+            'trainability': 'Excellent',
+            'use_case': 'Optimal circuits'
+        }
+    }
+
+    print("Ansatz Comparison:")
+    print("=" * 70)
+
+    for name, props in comparison.items():
+        print(f"\n{name}:")
+        for key, value in props.items():
+            print(f"  {key}: {value}")
+
+compare_ansatze()
+```
+
+## Choosing the Right Ansatz
+
+Guidelines for ansatz selection:
+
+```python
+def ansatz_selection_guide(n_qubits, n_electrons, hardware_depth_limit, symmetries_known):
+    """
+    Suggest appropriate ansatz based on constraints.
+    """
+    recommendations = []
+
+    # Check UCCSD feasibility
+    n_doubles = (n_electrons * (n_electrons - 1) // 2) * \
+                ((n_qubits - n_electrons) * (n_qubits - n_electrons - 1) // 2)
+    uccsd_depth = 16 * n_doubles
+
+    if uccsd_depth <= hardware_depth_limit:
+        recommendations.append("UCCSD - physically motivated, fits hardware")
+    else:
+        recommendations.append("UCCSD too deep for hardware")
+
+    # Hardware-efficient
+    if symmetries_known:
+        recommendations.append("Symmetry-preserving - leverages known symmetries")
+    else:
+        n_layers = hardware_depth_limit // (2 * n_qubits)
+        if n_layers >= 2:
+            recommendations.append(f"Hardware-efficient ({n_layers} layers) - practical depth")
+
+    # ADAPT-VQE
+    if hardware_depth_limit > 50:
+        recommendations.append("ADAPT-VQE - can grow circuit adaptively")
+
+    print("Ansatz Recommendations:")
+    print(f"  Qubits: {n_qubits}, Electrons: {n_electrons}")
+    print(f"  Depth limit: {hardware_depth_limit}")
+    print(f"  Symmetries known: {symmetries_known}")
+    print("\nRecommendations:")
+    for rec in recommendations:
+        print(f"  - {rec}")
+
+# Example
+ansatz_selection_guide(
+    n_qubits=8,
+    n_electrons=4,
+    hardware_depth_limit=100,
+    symmetries_known=True
+)
+```
+
+## Summary
+
+Ansatz design for quantum chemistry involves:
+
+1. **UCCSD** provides physically motivated states but deep circuits
+2. **Hardware-efficient** ansätze fit device constraints
+3. **Symmetry-preserving** designs reduce search space
+4. **Adaptive methods** grow circuits as needed
+5. **Trade-offs** between expressibility, trainability, and depth
+
+The next lesson covers measurement strategies to efficiently estimate molecular energies.

@@ -1,0 +1,475 @@
+---
+title: "Learning Rate Schedules"
+description: "Master learning rate selection and scheduling strategies for variational quantum algorithms."
+---
+
+# Learning Rate Schedules
+
+The learning rate is arguably the most important hyperparameter in optimization. This lesson covers strategies for VQAs.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Choose appropriate initial learning rates
+- Implement learning rate schedules
+- Apply warmup and decay strategies
+- Handle shot noise with adaptive rates
+- Tune learning rates for VQAs
+
+## 1. Learning Rate Fundamentals
+
+Understanding the role and impact of learning rate.
+
+```python
+import numpy as np
+
+def learning_rate_fundamentals():
+    """
+    Explore the impact of learning rate on optimization.
+    """
+    print("Learning Rate Fundamentals:")
+    print("=" * 50)
+
+    def cost(params):
+        return np.sum(params**2)
+
+    def gradient(params):
+        return 2 * params
+
+    print("\n1. Effect of Learning Rate:")
+    print("-" * 40)
+
+    initial = np.array([5.0, 5.0])
+    n_steps = 50
+
+    for lr in [0.01, 0.1, 0.5, 1.0, 1.5]:
+        params = initial.copy()
+        diverged = False
+
+        for step in range(n_steps):
+            if np.any(np.abs(params) > 1e6):
+                diverged = True
+                break
+            params = params - lr * gradient(params)
+
+        if diverged:
+            print(f"  lr = {lr}: DIVERGED at step {step}")
+        else:
+            print(f"  lr = {lr}: final cost = {cost(params):.6f}")
+
+    print("\n\n2. The Goldilocks Principle:")
+    print("-" * 40)
+    print("  Too small: Slow convergence, may get stuck")
+    print("  Too large: Oscillation or divergence")
+    print("  Just right: Fast, stable convergence")
+
+    print("\n\n3. Maximum Stable Learning Rate:")
+    print("-" * 40)
+    print("  For quadratic: lr_max < 2/L")
+    print("  where L is the largest eigenvalue of Hessian")
+    print()
+    print("  Example: f(x) = 0.5*L*x²")
+    print("  Hessian = L, so lr_max = 2/L")
+
+learning_rate_fundamentals()
+```
+
+<Definition term="Learning Rate">
+The step size multiplier for gradient updates: θ_{t+1} = θ_t - η∇f(θ_t). Too small slows convergence; too large causes divergence.
+</Definition>
+
+## 2. Common Scheduling Strategies
+
+Different ways to vary learning rate during training.
+
+```python
+import numpy as np
+
+def scheduling_strategies():
+    """
+    Implement common learning rate schedules.
+    """
+    print("Learning Rate Schedules:")
+    print("=" * 50)
+
+    class ConstantLR:
+        def __init__(self, lr):
+            self.lr = lr
+        def get_lr(self, step):
+            return self.lr
+
+    class StepDecay:
+        """Reduce LR by factor every n steps."""
+        def __init__(self, initial_lr, decay_factor=0.5, decay_steps=50):
+            self.initial = initial_lr
+            self.factor = decay_factor
+            self.steps = decay_steps
+        def get_lr(self, step):
+            return self.initial * (self.factor ** (step // self.steps))
+
+    class ExponentialDecay:
+        """Continuous exponential decay."""
+        def __init__(self, initial_lr, decay_rate=0.01):
+            self.initial = initial_lr
+            self.decay = decay_rate
+        def get_lr(self, step):
+            return self.initial * np.exp(-self.decay * step)
+
+    class CosineAnnealing:
+        """Cosine annealing to min LR."""
+        def __init__(self, initial_lr, min_lr=0.0, total_steps=100):
+            self.initial = initial_lr
+            self.min_lr = min_lr
+            self.total = total_steps
+        def get_lr(self, step):
+            return self.min_lr + 0.5 * (self.initial - self.min_lr) * (
+                1 + np.cos(np.pi * step / self.total))
+
+    class WarmupDecay:
+        """Linear warmup then decay."""
+        def __init__(self, max_lr, warmup_steps=10, total_steps=100):
+            self.max_lr = max_lr
+            self.warmup = warmup_steps
+            self.total = total_steps
+        def get_lr(self, step):
+            if step < self.warmup:
+                return self.max_lr * step / self.warmup
+            else:
+                decay = (self.total - step) / (self.total - self.warmup)
+                return self.max_lr * max(decay, 0.01)
+
+    # Visualize
+    print("\n  Learning rate at different steps:")
+    print("-" * 60)
+
+    schedules = {
+        'Constant': ConstantLR(0.1),
+        'Step Decay': StepDecay(0.1, 0.5, 25),
+        'Exponential': ExponentialDecay(0.1, 0.03),
+        'Cosine': CosineAnnealing(0.1, 0.001, 100),
+        'Warmup+Decay': WarmupDecay(0.1, 10, 100)
+    }
+
+    print(f"\n  {'Schedule':<15} {'Step 0':<10} {'Step 25':<10} {'Step 50':<10} {'Step 75':<10}")
+    print("  " + "-" * 55)
+
+    for name, schedule in schedules.items():
+        lrs = [schedule.get_lr(s) for s in [0, 25, 50, 75]]
+        print(f"  {name:<15} {lrs[0]:<10.4f} {lrs[1]:<10.4f} {lrs[2]:<10.4f} {lrs[3]:<10.4f}")
+
+scheduling_strategies()
+```
+
+<Tip>
+Cosine annealing works well for VQAs because it allows exploration early (high LR) and refinement later (low LR), while avoiding sudden jumps.
+</Tip>
+
+## 3. Warmup Strategies
+
+Gradually increasing learning rate at the start.
+
+```python
+import numpy as np
+
+def warmup_strategies():
+    """
+    Explore warmup strategies for stable training.
+    """
+    print("Learning Rate Warmup:")
+    print("=" * 50)
+
+    print("\n1. Why Warmup?")
+    print("-" * 40)
+    print("  • Initial gradients may be unreliable")
+    print("  • Adaptive optimizers need time to calibrate")
+    print("  • Prevents early divergence")
+    print("  • Especially important for noisy quantum gradients")
+
+    class LinearWarmup:
+        def __init__(self, max_lr, warmup_steps):
+            self.max_lr = max_lr
+            self.warmup = warmup_steps
+
+        def get_lr(self, step):
+            if step < self.warmup:
+                return self.max_lr * (step + 1) / self.warmup
+            return self.max_lr
+
+    class GradualWarmup:
+        """Gradual warmup with smooth transition."""
+        def __init__(self, max_lr, warmup_steps):
+            self.max_lr = max_lr
+            self.warmup = warmup_steps
+
+        def get_lr(self, step):
+            if step < self.warmup:
+                # Smooth warmup using cosine
+                return self.max_lr * 0.5 * (1 - np.cos(np.pi * step / self.warmup))
+            return self.max_lr
+
+    print("\n\n2. Warmup Comparison:")
+    print("-" * 40)
+
+    linear = LinearWarmup(0.1, 10)
+    gradual = GradualWarmup(0.1, 10)
+
+    print(f"\n  {'Step':<8} {'Linear':<12} {'Gradual':<12}")
+    print("  " + "-" * 30)
+    for s in range(15):
+        print(f"  {s:<8} {linear.get_lr(s):<12.4f} {gradual.get_lr(s):<12.4f}")
+
+    print("\n\n3. Warmup Duration Guidelines:")
+    print("-" * 40)
+
+    guidelines = [
+        ("Few parameters (<10)", "5-10 steps"),
+        ("Medium (10-50)", "10-25 steps"),
+        ("Many (>50)", "25-50 steps"),
+        ("Very noisy gradients", "Longer warmup"),
+    ]
+
+    for situation, recommendation in guidelines:
+        print(f"  {situation}: {recommendation}")
+
+warmup_strategies()
+```
+
+## 4. Adaptive Rate Adjustment
+
+Learning rate adjustment based on training dynamics.
+
+```python
+import numpy as np
+
+def adaptive_learning_rate():
+    """
+    Adaptive learning rate strategies.
+    """
+    print("Adaptive Learning Rate Adjustment:")
+    print("=" * 50)
+
+    class ReduceOnPlateau:
+        """Reduce LR when improvement stalls."""
+        def __init__(self, initial_lr, factor=0.5, patience=10, min_lr=1e-6):
+            self.lr = initial_lr
+            self.factor = factor
+            self.patience = patience
+            self.min_lr = min_lr
+            self.best_loss = float('inf')
+            self.wait = 0
+
+        def step(self, current_loss):
+            if current_loss < self.best_loss:
+                self.best_loss = current_loss
+                self.wait = 0
+            else:
+                self.wait += 1
+                if self.wait >= self.patience:
+                    self.lr = max(self.lr * self.factor, self.min_lr)
+                    self.wait = 0
+                    return True  # LR was reduced
+            return False
+
+    class GradientBasedLR:
+        """Adjust LR based on gradient magnitude."""
+        def __init__(self, target_step=0.1, min_lr=1e-4, max_lr=1.0):
+            self.target = target_step
+            self.min_lr = min_lr
+            self.max_lr = max_lr
+
+        def get_lr(self, gradient):
+            grad_norm = np.linalg.norm(gradient)
+            if grad_norm < 1e-10:
+                return self.max_lr
+            lr = self.target / grad_norm
+            return np.clip(lr, self.min_lr, self.max_lr)
+
+    # Demonstration
+    print("\n1. Reduce on Plateau:")
+    print("-" * 40)
+
+    scheduler = ReduceOnPlateau(0.1, patience=5)
+    losses = [1.0, 0.9, 0.85, 0.84, 0.84, 0.84, 0.84, 0.84, 0.83]
+
+    print(f"  Initial LR: {scheduler.lr}")
+    for i, loss in enumerate(losses):
+        reduced = scheduler.step(loss)
+        if reduced:
+            print(f"  Step {i}: loss={loss:.2f} → LR reduced to {scheduler.lr:.4f}")
+
+    print("\n\n2. Gradient-Based LR:")
+    print("-" * 40)
+
+    grad_lr = GradientBasedLR(target_step=0.05)
+
+    gradients = [
+        np.array([1.0, 1.0]),     # Large gradient
+        np.array([0.1, 0.1]),     # Medium
+        np.array([0.01, 0.01]),   # Small
+    ]
+
+    for grad in gradients:
+        lr = grad_lr.get_lr(grad)
+        print(f"  |∇f| = {np.linalg.norm(grad):.3f} → lr = {lr:.4f}")
+
+adaptive_learning_rate()
+```
+
+<Warning>
+Be careful with gradient-based learning rate adjustment in VQAs—shot noise can make gradient magnitudes misleading.
+</Warning>
+
+## 5. VQA-Specific Considerations
+
+Special learning rate strategies for quantum optimization.
+
+```python
+import numpy as np
+
+def vqa_learning_rate_considerations():
+    """
+    VQA-specific learning rate strategies.
+    """
+    print("VQA Learning Rate Considerations:")
+    print("=" * 50)
+
+    print("\n1. Shot Noise Impact:")
+    print("-" * 40)
+    print("  Gradient estimate: g_est = g_true + ε")
+    print("  where ε ~ N(0, σ/√shots)")
+    print()
+    print("  Implications:")
+    print("  • Lower LR reduces noise amplification")
+    print("  • But slower convergence")
+    print("  • Balance: lr ~ O(√shots)")
+
+    print("\n\n2. Suggested Initial Learning Rates:")
+    print("-" * 40)
+
+    suggestions = [
+        ("Ideal simulation", "0.1 - 0.5"),
+        ("1000 shots", "0.05 - 0.1"),
+        ("100 shots", "0.01 - 0.05"),
+        ("Hardware (noisy)", "0.01 - 0.03"),
+    ]
+
+    print(f"  {'Scenario':<20} {'Suggested LR':<15}")
+    print("  " + "-" * 35)
+    for scenario, lr in suggestions:
+        print(f"  {scenario:<20} {lr:<15}")
+
+    print("\n\n3. Layer-wise Learning Rates:")
+    print("-" * 40)
+    print("  Different rates for different circuit layers:")
+    print("  • Early layers: smaller LR (affect entire circuit)")
+    print("  • Later layers: larger LR (local effect)")
+
+    class LayerWiseLR:
+        def __init__(self, layer_sizes, base_lr=0.1, scale_factor=1.5):
+            self.layer_sizes = layer_sizes
+            self.base_lr = base_lr
+            self.scale = scale_factor
+            self._compute_lrs()
+
+        def _compute_lrs(self):
+            n_layers = len(self.layer_sizes)
+            self.lrs = []
+            idx = 0
+            for i, size in enumerate(self.layer_sizes):
+                # Later layers get higher LR
+                layer_lr = self.base_lr * (self.scale ** i)
+                for _ in range(size):
+                    self.lrs.append(layer_lr)
+
+        def get_lr(self, param_idx):
+            return self.lrs[param_idx]
+
+    layer_lr = LayerWiseLR([3, 3, 3], base_lr=0.05)
+    print(f"\n  Per-parameter LRs: {[round(lr, 3) for lr in layer_lr.lrs]}")
+
+vqa_learning_rate_considerations()
+```
+
+## 6. Practical Tuning Guide
+
+Step-by-step guide to tuning learning rates.
+
+```python
+def learning_rate_tuning_guide():
+    """
+    Practical guide to learning rate tuning.
+    """
+    print("Learning Rate Tuning Guide:")
+    print("=" * 50)
+
+    print("\n1. Finding Initial LR (LR Range Test):")
+    print("-" * 40)
+    print("  1. Start with very small LR (e.g., 1e-6)")
+    print("  2. Gradually increase LR each step")
+    print("  3. Track loss vs LR")
+    print("  4. Choose LR where loss decreases fastest")
+    print("     (before it starts increasing)")
+
+    print("\n\n2. Common Mistakes:")
+    print("-" * 40)
+
+    mistakes = [
+        ("LR too high", "Loss increases or NaN", "Reduce by 10x"),
+        ("LR too low", "Loss barely changes", "Increase by 10x"),
+        ("No schedule", "Stuck at suboptimal", "Add decay"),
+        ("Decay too fast", "Premature convergence", "Slower decay"),
+    ]
+
+    for mistake, symptom, fix in mistakes:
+        print(f"  {mistake}:")
+        print(f"    Symptom: {symptom}")
+        print(f"    Fix: {fix}")
+
+    print("\n\n3. Recommended Setup for VQAs:")
+    print("-" * 40)
+
+    setup = """
+    # Start with this template:
+
+    initial_lr = 0.05  # Conservative start
+    warmup_steps = 10
+    total_steps = 200
+    min_lr = 1e-4
+
+    # Schedule: warmup + cosine annealing
+    def get_lr(step):
+        if step < warmup_steps:
+            return initial_lr * step / warmup_steps
+        progress = (step - warmup_steps) / (total_steps - warmup_steps)
+        return min_lr + 0.5 * (initial_lr - min_lr) * (1 + np.cos(np.pi * progress))
+    """
+    print(setup)
+
+    print("\n4. Quick Diagnostic:")
+    print("-" * 40)
+    print("  After 10 steps, check:")
+    print("  • Loss decreasing: LR okay")
+    print("  • Loss oscillating: LR too high")
+    print("  • Loss flat: LR too low or stuck")
+    print("  • Loss exploding: LR way too high")
+
+learning_rate_tuning_guide()
+```
+
+## Summary
+
+Learning rate management is crucial for VQA success:
+
+1. **Fundamentals**: Balance between speed and stability
+2. **Schedules**: Step decay, exponential, cosine annealing
+3. **Warmup**: Gradual increase at start for stability
+4. **Adaptive**: Reduce on plateau, gradient-based
+5. **VQA-Specific**: Account for shot noise, layer-wise rates
+6. **Tuning**: LR range test, diagnostics, common fixes
+
+Start conservative and adjust based on training dynamics.
+
+## Next Steps
+
+In the final lesson, we'll explore convergence analysis and stopping criteria for VQAs.

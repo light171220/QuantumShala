@@ -1,0 +1,638 @@
+---
+title: "Reinforcement Learning Fundamentals"
+description: "Master the core concepts of reinforcement learning including MDPs, policies, value functions, and the foundations needed for quantum extensions."
+estimatedMinutes: 55
+difficulty: "intermediate"
+tags: ["reinforcement-learning", "mdp", "policy-gradient", "value-function", "temporal-difference", "q-learning"]
+---
+
+# Reinforcement Learning Fundamentals
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand Markov Decision Processes (MDPs)
+- Implement policy and value function representations
+- Apply temporal difference learning
+- Implement policy gradient methods
+- Understand exploration-exploitation tradeoffs
+- Connect RL concepts to quantum computing potential
+
+## 1. Markov Decision Processes
+
+<Definition term="Markov Decision Process">
+A mathematical framework for sequential decision-making defined by the tuple (S, A, P, R, γ) where S is the state space, A is the action space, P is the transition probability, R is the reward function, and γ is the discount factor.
+</Definition>
+
+<Formula>
+\text{MDP Components:}
+\\[8pt]
+P(s'|s, a): \text{ Transition probability from } s \text{ to } s' \text{ taking action } a
+\\[4pt]
+R(s, a, s'): \text{ Reward received for transition}
+\\[4pt]
+\gamma \in [0, 1]: \text{ Discount factor for future rewards}
+\\[8pt]
+\text{Objective: Maximize } \mathbb{E}\left[\sum_{t=0}^{\infty} \gamma^t R_t\right]
+</Formula>
+
+```python
+import numpy as np
+from typing import Tuple, Dict, List, Callable
+
+class MarkovDecisionProcess:
+    """Framework for Markov Decision Processes."""
+
+    def __init__(self, n_states: int, n_actions: int, gamma: float = 0.99):
+        self.n_states = n_states
+        self.n_actions = n_actions
+        self.gamma = gamma
+
+        # Transition probabilities: P[s, a, s'] = P(s'|s, a)
+        self.P = np.zeros((n_states, n_actions, n_states))
+
+        # Reward function: R[s, a]
+        self.R = np.zeros((n_states, n_actions))
+
+        # Initialize random valid MDP
+        self._initialize_random_mdp()
+
+    def _initialize_random_mdp(self):
+        """Initialize a random valid MDP."""
+        for s in range(self.n_states):
+            for a in range(self.n_actions):
+                # Random transition probabilities
+                probs = np.random.random(self.n_states)
+                self.P[s, a] = probs / probs.sum()
+
+                # Random rewards
+                self.R[s, a] = np.random.randn() * 0.5
+
+    def step(self, state: int, action: int) -> Tuple[int, float]:
+        """Take action in state, return next state and reward."""
+        next_state = np.random.choice(self.n_states, p=self.P[state, action])
+        reward = self.R[state, action]
+        return next_state, reward
+
+    def get_transition_prob(self, state: int, action: int,
+                            next_state: int) -> float:
+        """Get P(s'|s, a)."""
+        return self.P[state, action, next_state]
+
+
+class GridWorld:
+    """Simple grid world environment for RL."""
+
+    def __init__(self, size: int = 5, goal_reward: float = 1.0):
+        self.size = size
+        self.n_states = size * size
+        self.n_actions = 4  # up, down, left, right
+        self.goal_reward = goal_reward
+        self.goal_state = self.n_states - 1  # Bottom-right corner
+
+        self.state = 0  # Start top-left
+        self.action_effects = {
+            0: -size,  # up
+            1: size,   # down
+            2: -1,     # left
+            3: 1       # right
+        }
+
+    def reset(self) -> int:
+        """Reset to initial state."""
+        self.state = 0
+        return self.state
+
+    def step(self, action: int) -> Tuple[int, float, bool]:
+        """Take action, return (next_state, reward, done)."""
+        row = self.state // self.size
+        col = self.state % self.size
+
+        # Check valid moves
+        if action == 0 and row > 0:  # up
+            self.state -= self.size
+        elif action == 1 and row < self.size - 1:  # down
+            self.state += self.size
+        elif action == 2 and col > 0:  # left
+            self.state -= 1
+        elif action == 3 and col < self.size - 1:  # right
+            self.state += 1
+
+        done = self.state == self.goal_state
+        reward = self.goal_reward if done else -0.01
+
+        return self.state, reward, done
+
+    def state_to_coords(self, state: int) -> Tuple[int, int]:
+        """Convert state index to (row, col)."""
+        return state // self.size, state % self.size
+```
+
+## 2. Policy Representations
+
+<Definition term="Policy">
+A mapping from states to actions (deterministic) or to probability distributions over actions (stochastic). The goal of RL is to find the optimal policy that maximizes expected cumulative reward.
+</Definition>
+
+```python
+class Policy:
+    """Base class for RL policies."""
+
+    def __init__(self, n_states: int, n_actions: int):
+        self.n_states = n_states
+        self.n_actions = n_actions
+
+    def get_action(self, state: int) -> int:
+        """Sample action given state."""
+        raise NotImplementedError
+
+    def get_probabilities(self, state: int) -> np.ndarray:
+        """Get action probabilities for state."""
+        raise NotImplementedError
+
+
+class TabularPolicy(Policy):
+    """Tabular (table-lookup) policy."""
+
+    def __init__(self, n_states: int, n_actions: int):
+        super().__init__(n_states, n_actions)
+        # Initialize uniform distribution over actions
+        self.probs = np.ones((n_states, n_actions)) / n_actions
+
+    def get_action(self, state: int) -> int:
+        return np.random.choice(self.n_actions, p=self.probs[state])
+
+    def get_probabilities(self, state: int) -> np.ndarray:
+        return self.probs[state]
+
+    def update(self, state: int, action_probs: np.ndarray):
+        """Update policy for state."""
+        self.probs[state] = action_probs / action_probs.sum()
+
+
+class EpsilonGreedyPolicy(Policy):
+    """Epsilon-greedy policy based on Q-values."""
+
+    def __init__(self, n_states: int, n_actions: int,
+                 epsilon: float = 0.1):
+        super().__init__(n_states, n_actions)
+        self.epsilon = epsilon
+        self.Q = np.zeros((n_states, n_actions))
+
+    def get_action(self, state: int) -> int:
+        if np.random.random() < self.epsilon:
+            return np.random.randint(self.n_actions)
+        return np.argmax(self.Q[state])
+
+    def get_probabilities(self, state: int) -> np.ndarray:
+        probs = np.ones(self.n_actions) * self.epsilon / self.n_actions
+        best_action = np.argmax(self.Q[state])
+        probs[best_action] += 1 - self.epsilon
+        return probs
+
+    def update_q(self, state: int, action: int, value: float):
+        """Update Q-value."""
+        self.Q[state, action] = value
+
+
+class SoftmaxPolicy(Policy):
+    """Softmax (Boltzmann) policy based on preferences."""
+
+    def __init__(self, n_states: int, n_actions: int,
+                 temperature: float = 1.0):
+        super().__init__(n_states, n_actions)
+        self.temperature = temperature
+        self.preferences = np.zeros((n_states, n_actions))
+
+    def get_probabilities(self, state: int) -> np.ndarray:
+        exp_prefs = np.exp(self.preferences[state] / self.temperature)
+        return exp_prefs / exp_prefs.sum()
+
+    def get_action(self, state: int) -> int:
+        return np.random.choice(self.n_actions, p=self.get_probabilities(state))
+
+    def update_preferences(self, state: int, gradient: np.ndarray,
+                           learning_rate: float = 0.01):
+        """Update preferences using gradient."""
+        self.preferences[state] += learning_rate * gradient
+```
+
+## 3. Value Functions
+
+<Tip>
+Value functions estimate the expected cumulative reward from a state (V) or state-action pair (Q). They are fundamental to most RL algorithms.
+</Tip>
+
+<Formula>
+\text{State Value Function:}
+\\[4pt]
+V^\pi(s) = \mathbb{E}_\pi\left[\sum_{t=0}^{\infty} \gamma^t R_t | S_0 = s\right]
+\\[12pt]
+\text{Action-Value Function:}
+\\[4pt]
+Q^\pi(s, a) = \mathbb{E}_\pi\left[\sum_{t=0}^{\infty} \gamma^t R_t | S_0 = s, A_0 = a\right]
+\\[12pt]
+\text{Bellman Equation:}
+\\[4pt]
+V^\pi(s) = \sum_a \pi(a|s) \sum_{s'} P(s'|s,a)[R(s,a,s') + \gamma V^\pi(s')]
+</Formula>
+
+```python
+class ValueFunction:
+    """Value function representations for RL."""
+
+    def __init__(self, n_states: int):
+        self.n_states = n_states
+        self.V = np.zeros(n_states)
+
+    def evaluate(self, state: int) -> float:
+        """Get value of state."""
+        return self.V[state]
+
+    def update(self, state: int, target: float, alpha: float = 0.1):
+        """Update value toward target."""
+        self.V[state] += alpha * (target - self.V[state])
+
+
+class QFunction:
+    """Action-value (Q) function."""
+
+    def __init__(self, n_states: int, n_actions: int):
+        self.n_states = n_states
+        self.n_actions = n_actions
+        self.Q = np.zeros((n_states, n_actions))
+
+    def evaluate(self, state: int, action: int) -> float:
+        """Get Q-value."""
+        return self.Q[state, action]
+
+    def get_values(self, state: int) -> np.ndarray:
+        """Get all Q-values for state."""
+        return self.Q[state]
+
+    def get_max_value(self, state: int) -> float:
+        """Get max Q-value for state."""
+        return np.max(self.Q[state])
+
+    def get_best_action(self, state: int) -> int:
+        """Get action with highest Q-value."""
+        return np.argmax(self.Q[state])
+
+    def update(self, state: int, action: int, target: float,
+               alpha: float = 0.1):
+        """TD update for Q-value."""
+        self.Q[state, action] += alpha * (target - self.Q[state, action])
+
+
+class PolicyEvaluator:
+    """Evaluate a policy's value function."""
+
+    def __init__(self, mdp: MarkovDecisionProcess):
+        self.mdp = mdp
+
+    def evaluate(self, policy: Policy, n_iterations: int = 100,
+                 threshold: float = 1e-6) -> np.ndarray:
+        """Iterative policy evaluation."""
+        V = np.zeros(self.mdp.n_states)
+
+        for _ in range(n_iterations):
+            V_new = np.zeros(self.mdp.n_states)
+
+            for s in range(self.mdp.n_states):
+                pi_s = policy.get_probabilities(s)
+
+                for a in range(self.mdp.n_actions):
+                    for s_next in range(self.mdp.n_states):
+                        p = self.mdp.P[s, a, s_next]
+                        r = self.mdp.R[s, a]
+                        V_new[s] += pi_s[a] * p * (r + self.mdp.gamma * V[s_next])
+
+            if np.max(np.abs(V_new - V)) < threshold:
+                break
+            V = V_new
+
+        return V
+```
+
+## 4. Temporal Difference Learning
+
+<Definition term="TD Learning">
+A method for learning value functions by bootstrapping: updating estimates based on other estimates without waiting for the final outcome. TD combines ideas from Monte Carlo and dynamic programming.
+</Definition>
+
+```python
+class TDLearner:
+    """Temporal Difference learning algorithms."""
+
+    def __init__(self, n_states: int, n_actions: int,
+                 alpha: float = 0.1, gamma: float = 0.99):
+        self.n_states = n_states
+        self.n_actions = n_actions
+        self.alpha = alpha
+        self.gamma = gamma
+
+        self.V = np.zeros(n_states)
+        self.Q = np.zeros((n_states, n_actions))
+
+    def td0_update(self, state: int, reward: float, next_state: int):
+        """TD(0) update for state values."""
+        td_target = reward + self.gamma * self.V[next_state]
+        td_error = td_target - self.V[state]
+        self.V[state] += self.alpha * td_error
+
+    def q_learning_update(self, state: int, action: int, reward: float,
+                          next_state: int):
+        """Q-learning (off-policy TD control)."""
+        # Use max Q-value of next state (off-policy)
+        td_target = reward + self.gamma * np.max(self.Q[next_state])
+        td_error = td_target - self.Q[state, action]
+        self.Q[state, action] += self.alpha * td_error
+
+    def sarsa_update(self, state: int, action: int, reward: float,
+                     next_state: int, next_action: int):
+        """SARSA (on-policy TD control)."""
+        # Use actual next action (on-policy)
+        td_target = reward + self.gamma * self.Q[next_state, next_action]
+        td_error = td_target - self.Q[state, action]
+        self.Q[state, action] += self.alpha * td_error
+
+    def expected_sarsa_update(self, state: int, action: int, reward: float,
+                              next_state: int, policy: Policy):
+        """Expected SARSA."""
+        # Use expected Q-value under policy
+        next_probs = policy.get_probabilities(next_state)
+        expected_q = np.sum(next_probs * self.Q[next_state])
+
+        td_target = reward + self.gamma * expected_q
+        td_error = td_target - self.Q[state, action]
+        self.Q[state, action] += self.alpha * td_error
+
+
+class QLearningAgent:
+    """Complete Q-learning agent."""
+
+    def __init__(self, n_states: int, n_actions: int,
+                 alpha: float = 0.1, gamma: float = 0.99,
+                 epsilon: float = 0.1):
+        self.learner = TDLearner(n_states, n_actions, alpha, gamma)
+        self.policy = EpsilonGreedyPolicy(n_states, n_actions, epsilon)
+        self.n_actions = n_actions
+
+    def select_action(self, state: int) -> int:
+        """Select action using epsilon-greedy."""
+        return self.policy.get_action(state)
+
+    def update(self, state: int, action: int, reward: float,
+               next_state: int, done: bool):
+        """Update Q-values from experience."""
+        if done:
+            target = reward
+        else:
+            target = reward + self.learner.gamma * np.max(self.learner.Q[next_state])
+
+        self.learner.Q[state, action] += self.learner.alpha * (
+            target - self.learner.Q[state, action])
+
+        # Update policy's Q-values
+        self.policy.Q = self.learner.Q
+
+    def train_episode(self, env, max_steps: int = 100) -> float:
+        """Train for one episode, return total reward."""
+        state = env.reset()
+        total_reward = 0
+
+        for _ in range(max_steps):
+            action = self.select_action(state)
+            next_state, reward, done = env.step(action)
+
+            self.update(state, action, reward, next_state, done)
+
+            total_reward += reward
+            state = next_state
+
+            if done:
+                break
+
+        return total_reward
+```
+
+## 5. Policy Gradient Methods
+
+<Warning>
+Policy gradients optimize the policy directly, making them suitable for continuous action spaces and stochastic policies. Understanding these is crucial for quantum policy circuits.
+</Warning>
+
+<Formula>
+\text{Policy Gradient Theorem:}
+\\[8pt]
+\nabla_\theta J(\theta) = \mathbb{E}_{\pi_\theta}\left[\nabla_\theta \log \pi_\theta(a|s) \cdot Q^{\pi_\theta}(s, a)\right]
+\\[12pt]
+\text{REINFORCE Update:}
+\\[4pt]
+\theta \leftarrow \theta + \alpha \sum_t \gamma^t G_t \nabla_\theta \log \pi_\theta(a_t|s_t)
+</Formula>
+
+```python
+class PolicyGradientAgent:
+    """Policy gradient (REINFORCE) agent."""
+
+    def __init__(self, n_states: int, n_actions: int,
+                 alpha: float = 0.01, gamma: float = 0.99):
+        self.n_states = n_states
+        self.n_actions = n_actions
+        self.alpha = alpha
+        self.gamma = gamma
+
+        # Softmax policy parameters
+        self.theta = np.zeros((n_states, n_actions))
+
+    def get_policy(self, state: int) -> np.ndarray:
+        """Get action probabilities."""
+        exp_theta = np.exp(self.theta[state] - np.max(self.theta[state]))
+        return exp_theta / exp_theta.sum()
+
+    def select_action(self, state: int) -> int:
+        """Sample action from policy."""
+        probs = self.get_policy(state)
+        return np.random.choice(self.n_actions, p=probs)
+
+    def compute_returns(self, rewards: List[float]) -> List[float]:
+        """Compute discounted returns G_t."""
+        returns = []
+        G = 0
+        for r in reversed(rewards):
+            G = r + self.gamma * G
+            returns.insert(0, G)
+        return returns
+
+    def update(self, states: List[int], actions: List[int],
+               rewards: List[float]):
+        """REINFORCE update."""
+        returns = self.compute_returns(rewards)
+
+        for t, (s, a, G) in enumerate(zip(states, actions, returns)):
+            probs = self.get_policy(s)
+
+            # Gradient of log π(a|s) for softmax policy
+            grad = -probs.copy()
+            grad[a] += 1
+
+            # Policy gradient update
+            self.theta[s] += self.alpha * (self.gamma**t) * G * grad
+
+    def train_episode(self, env, max_steps: int = 100) -> float:
+        """Train for one episode."""
+        states, actions, rewards = [], [], []
+
+        state = env.reset()
+        for _ in range(max_steps):
+            action = self.select_action(state)
+            next_state, reward, done = env.step(action)
+
+            states.append(state)
+            actions.append(action)
+            rewards.append(reward)
+
+            state = next_state
+            if done:
+                break
+
+        # Update after episode
+        self.update(states, actions, rewards)
+
+        return sum(rewards)
+
+
+class ActorCritic:
+    """Actor-Critic algorithm combining policy and value learning."""
+
+    def __init__(self, n_states: int, n_actions: int,
+                 actor_lr: float = 0.01, critic_lr: float = 0.1,
+                 gamma: float = 0.99):
+        self.n_states = n_states
+        self.n_actions = n_actions
+        self.actor_lr = actor_lr
+        self.critic_lr = critic_lr
+        self.gamma = gamma
+
+        # Actor (policy) parameters
+        self.theta = np.zeros((n_states, n_actions))
+
+        # Critic (value function)
+        self.V = np.zeros(n_states)
+
+    def get_policy(self, state: int) -> np.ndarray:
+        exp_theta = np.exp(self.theta[state] - np.max(self.theta[state]))
+        return exp_theta / exp_theta.sum()
+
+    def select_action(self, state: int) -> int:
+        return np.random.choice(self.n_actions, p=self.get_policy(state))
+
+    def update(self, state: int, action: int, reward: float,
+               next_state: int, done: bool):
+        """Update actor and critic."""
+        # TD error (advantage estimate)
+        if done:
+            td_target = reward
+        else:
+            td_target = reward + self.gamma * self.V[next_state]
+        td_error = td_target - self.V[state]
+
+        # Critic update
+        self.V[state] += self.critic_lr * td_error
+
+        # Actor update
+        probs = self.get_policy(state)
+        grad = -probs.copy()
+        grad[action] += 1
+        self.theta[state] += self.actor_lr * td_error * grad
+```
+
+## 6. Connection to Quantum RL
+
+<Tip>
+Quantum computing offers potential advantages for RL through quantum policy representations, quantum value function approximation, and quantum exploration strategies.
+</Tip>
+
+```python
+class QuantumRLPotential:
+    """Overview of quantum RL opportunities."""
+
+    @staticmethod
+    def quantum_policy_advantages() -> Dict[str, str]:
+        """Potential advantages of quantum policies."""
+        return {
+            'expressiveness': 'Parameterized quantum circuits can represent '
+                             'complex policy distributions',
+            'entanglement': 'Quantum correlations may capture action '
+                           'dependencies classical policies miss',
+            'superposition': 'Explore multiple actions simultaneously '
+                            'during learning'
+        }
+
+    @staticmethod
+    def quantum_value_function_advantages() -> Dict[str, str]:
+        """Potential advantages for quantum value functions."""
+        return {
+            'function_approximation': 'Quantum kernels for rich '
+                                      'state-action embeddings',
+            'amplitude_encoding': 'Encode exponentially many values '
+                                  'in quantum amplitudes',
+            'quantum_speedup': 'Potential speedups for planning and '
+                              'dynamic programming'
+        }
+
+    @staticmethod
+    def challenges() -> Dict[str, str]:
+        """Challenges for quantum RL."""
+        return {
+            'measurement': 'Extracting classical actions from quantum states',
+            'gradient_estimation': 'Parameter-shift gradients add overhead',
+            'environment_interface': 'Classical environments require '
+                                    'quantum-classical interface',
+            'noise': 'NISQ device noise affects policy learning'
+        }
+
+
+class HybridRLConcept:
+    """Conceptual framework for hybrid quantum-classical RL."""
+
+    def __init__(self, n_states: int, n_actions: int, n_qubits: int):
+        self.n_states = n_states
+        self.n_actions = n_actions
+        self.n_qubits = n_qubits
+
+    def describe_quantum_policy(self) -> str:
+        """Describe quantum policy circuit."""
+        return f"""
+        Quantum Policy Circuit:
+        1. Encode state into {self.n_qubits} qubits
+        2. Apply parameterized variational circuit
+        3. Measure to obtain action probabilities
+        4. Sample action from distribution
+        """
+
+    def describe_quantum_value_function(self) -> str:
+        """Describe quantum value function."""
+        return f"""
+        Quantum Value Function:
+        1. Encode (state, action) into quantum circuit
+        2. Apply variational layers
+        3. Measure expectation value as Q(s,a)
+        4. Use for TD updates with parameter-shift gradients
+        """
+```
+
+## Summary
+
+In this lesson, you learned:
+
+- **MDPs**: The formal framework (S, A, P, R, γ) for sequential decision-making
+- **Policies**: Mappings from states to actions (deterministic or stochastic)
+- **Value functions**: V(s) and Q(s,a) estimate expected cumulative rewards
+- **TD learning**: Q-learning, SARSA, and bootstrapping methods
+- **Policy gradients**: Direct policy optimization using REINFORCE and Actor-Critic
+- **Quantum potential**: How quantum computing might enhance RL through expressiveness, entanglement, and superposition
+
+These fundamentals provide the foundation for understanding quantum reinforcement learning approaches.

@@ -1,0 +1,1117 @@
+---
+title: "Sampling and Inference in QBMs"
+description: "Learn techniques for efficient sampling from quantum Boltzmann machines and performing probabilistic inference using quantum computational advantages."
+estimatedMinutes: 65
+---
+
+# Sampling and Inference in QBMs
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Implement quantum sampling from QBM Gibbs states
+- Use quantum annealing for QBM sampling
+- Perform conditional inference in QBMs
+- Compare quantum and classical sampling efficiency
+- Implement quantum-enhanced MCMC methods
+- Apply QBM inference to practical problems
+
+---
+
+## 1. Quantum Sampling Fundamentals
+
+Sampling from quantum Boltzmann machines differs fundamentally from classical sampling due to quantum superposition and coherence.
+
+<Definition term="Quantum Gibbs Sampling">
+Sampling from the quantum Gibbs state ρ = exp(-βH)/Z involves:
+1. Preparing the thermal state ρ
+2. Measuring in an appropriate basis
+3. Post-processing measurement outcomes
+
+The challenge is that ρ is generally a mixed state with quantum coherence.
+</Definition>
+
+<Formula expression="P(z) = ⟨z|ρ|z⟩ = (1/Z) ⟨z|e^{-βH}|z⟩" description="Probability of measuring computational basis state |z⟩" />
+
+```python
+import numpy as np
+from scipy.linalg import expm
+from typing import List, Tuple, Dict
+
+class QuantumGibbsSampler:
+    """
+    Sampling from quantum Boltzmann machine Gibbs states.
+    """
+
+    def __init__(self, n_qubits: int, beta: float = 1.0):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+        self.beta = beta
+
+        # Pauli matrices
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    def prepare_gibbs_state(self, H: np.ndarray) -> np.ndarray:
+        """
+        Compute the Gibbs state density matrix.
+
+        Args:
+            H: Hamiltonian matrix
+
+        Returns:
+            Density matrix ρ = exp(-βH)/Z
+        """
+        exp_H = expm(-self.beta * H)
+        Z = np.trace(exp_H)
+        return exp_H / Z
+
+    def computational_basis_probabilities(
+        self,
+        rho: np.ndarray
+    ) -> np.ndarray:
+        """
+        Get probabilities for all computational basis states.
+        """
+        return np.real(np.diag(rho))
+
+    def sample_computational_basis(
+        self,
+        rho: np.ndarray,
+        n_samples: int
+    ) -> np.ndarray:
+        """
+        Sample from the Gibbs state in computational basis.
+
+        Args:
+            rho: Density matrix
+            n_samples: Number of samples
+
+        Returns:
+            Array of sampled bit strings (n_samples, n_qubits)
+        """
+        probs = self.computational_basis_probabilities(rho)
+
+        # Sample indices according to probabilities
+        indices = np.random.choice(self.dim, size=n_samples, p=probs)
+
+        # Convert to bit strings
+        samples = np.array([
+            [(idx >> i) & 1 for i in range(self.n_qubits)]
+            for idx in indices
+        ])
+
+        return samples
+
+    def sample_with_coherence(
+        self,
+        rho: np.ndarray,
+        n_samples: int,
+        measurement_basis: str = 'Z'
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Sample in different measurement bases to capture coherence.
+
+        Args:
+            rho: Density matrix
+            n_samples: Number of samples
+            measurement_basis: 'Z', 'X', or 'Y'
+
+        Returns:
+            (samples, measurement_results)
+        """
+        if measurement_basis == 'Z':
+            U = np.eye(self.dim)
+        elif measurement_basis == 'X':
+            # Hadamard on all qubits
+            H_single = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+            U = np.array([[1]], dtype=complex)
+            for _ in range(self.n_qubits):
+                U = np.kron(U, H_single)
+        elif measurement_basis == 'Y':
+            # S†H on all qubits
+            S_dag = np.array([[1, 0], [0, -1j]], dtype=complex)
+            H_single = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+            Y_basis = S_dag @ H_single
+            U = np.array([[1]], dtype=complex)
+            for _ in range(self.n_qubits):
+                U = np.kron(U, Y_basis)
+        else:
+            raise ValueError(f"Unknown basis: {measurement_basis}")
+
+        # Rotate density matrix
+        rho_rotated = U @ rho @ U.conj().T
+
+        # Sample in computational basis of rotated state
+        samples = self.sample_computational_basis(rho_rotated, n_samples)
+
+        # Compute measurement results (+1 or -1 for each qubit)
+        results = 1 - 2 * samples
+
+        return samples, results
+```
+
+---
+
+## 2. Quantum Annealing for Sampling
+
+Quantum annealing provides a natural method for sampling from QBM distributions.
+
+<Definition term="Quantum Annealing Sampling">
+Quantum annealing interpolates from a simple Hamiltonian to the target QBM Hamiltonian:
+
+H(s) = (1-s)H_0 + s·H_QBM
+
+Starting from the ground state of H_0 and slowly increasing s, the system evolves toward the Gibbs state of H_QBM.
+</Definition>
+
+<Tip>
+For sampling (not optimization), we run annealing at finite temperature to sample from thermal distributions rather than finding ground states.
+</Tip>
+
+```python
+class QuantumAnnealingSampler:
+    """
+    Quantum annealing-based sampling for QBMs.
+    """
+
+    def __init__(
+        self,
+        n_qubits: int,
+        beta: float = 1.0,
+        annealing_time: float = 10.0,
+        n_steps: int = 100
+    ):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+        self.beta = beta
+        self.annealing_time = annealing_time
+        self.n_steps = n_steps
+
+        # Pauli matrices
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    def build_driver_hamiltonian(self) -> np.ndarray:
+        """
+        Build the driver (transverse field) Hamiltonian.
+        H_0 = -Σ_i X_i
+        """
+        H0 = np.zeros((self.dim, self.dim), dtype=complex)
+        for i in range(self.n_qubits):
+            H0 -= self._single_op(self.X, i)
+        return H0
+
+    def _single_op(self, op: np.ndarray, qubit: int) -> np.ndarray:
+        """Create single-qubit operator."""
+        result = np.array([[1]], dtype=complex)
+        for i in range(self.n_qubits):
+            result = np.kron(result, op if i == qubit else self.I)
+        return result
+
+    def annealing_schedule(self, t: float) -> float:
+        """
+        Annealing schedule s(t) ∈ [0, 1].
+        Linear by default.
+        """
+        return t / self.annealing_time
+
+    def simulate_annealing(
+        self,
+        H_target: np.ndarray,
+        include_temperature: bool = True
+    ) -> np.ndarray:
+        """
+        Simulate quantum annealing to prepare approximate Gibbs state.
+
+        Args:
+            H_target: Target QBM Hamiltonian
+            include_temperature: Whether to include thermal effects
+
+        Returns:
+            Final density matrix
+        """
+        H0 = self.build_driver_hamiltonian()
+        dt = self.annealing_time / self.n_steps
+
+        # Start in ground state of driver (all |+⟩)
+        psi = np.ones(self.dim, dtype=complex) / np.sqrt(self.dim)
+        rho = np.outer(psi, psi.conj())
+
+        for step in range(self.n_steps):
+            t = step * dt
+            s = self.annealing_schedule(t)
+
+            # Time-dependent Hamiltonian
+            H = (1 - s) * H0 + s * H_target
+
+            # Unitary evolution
+            U = expm(-1j * dt * H)
+            rho = U @ rho @ U.conj().T
+
+            # Add thermal noise if requested
+            if include_temperature and s > 0.1:
+                rho = self._add_thermal_noise(rho, H, dt)
+
+        return rho
+
+    def _add_thermal_noise(
+        self,
+        rho: np.ndarray,
+        H: np.ndarray,
+        dt: float,
+        coupling: float = 0.1
+    ) -> np.ndarray:
+        """
+        Add thermal noise to simulate finite temperature.
+        Simple depolarizing approximation.
+        """
+        # Target Gibbs state
+        rho_gibbs = expm(-self.beta * H)
+        rho_gibbs /= np.trace(rho_gibbs)
+
+        # Interpolate toward Gibbs state
+        rate = coupling * dt
+        return (1 - rate) * rho + rate * rho_gibbs
+
+    def sample(
+        self,
+        H_target: np.ndarray,
+        n_samples: int
+    ) -> np.ndarray:
+        """
+        Generate samples using quantum annealing.
+        """
+        rho = self.simulate_annealing(H_target)
+
+        # Sample from final state
+        probs = np.real(np.diag(rho))
+        probs = probs / np.sum(probs)  # Normalize
+
+        indices = np.random.choice(self.dim, size=n_samples, p=probs)
+        samples = np.array([
+            [(idx >> i) & 1 for i in range(self.n_qubits)]
+            for idx in indices
+        ])
+
+        return samples
+
+    def reverse_annealing(
+        self,
+        H_target: np.ndarray,
+        initial_state: np.ndarray,
+        pause_fraction: float = 0.5
+    ) -> np.ndarray:
+        """
+        Reverse annealing: start from classical state, add quantum fluctuations.
+        Useful for refining samples.
+
+        Args:
+            H_target: Target Hamiltonian
+            initial_state: Initial computational basis state
+            pause_fraction: Fraction to anneal back to before reversing
+
+        Returns:
+            Final density matrix
+        """
+        H0 = self.build_driver_hamiltonian()
+        dt = self.annealing_time / self.n_steps
+
+        # Start from classical state
+        idx = int(sum(initial_state[i] * 2**i for i in range(self.n_qubits)))
+        psi = np.zeros(self.dim, dtype=complex)
+        psi[idx] = 1.0
+        rho = np.outer(psi, psi.conj())
+
+        # Forward schedule: s goes 1 -> pause_fraction -> 1
+        schedule = []
+        half_steps = self.n_steps // 2
+
+        # Decrease s (add quantum fluctuations)
+        for step in range(half_steps):
+            s = 1.0 - (1.0 - pause_fraction) * step / half_steps
+            schedule.append(s)
+
+        # Increase s back (remove fluctuations)
+        for step in range(half_steps):
+            s = pause_fraction + (1.0 - pause_fraction) * step / half_steps
+            schedule.append(s)
+
+        for s in schedule:
+            H = (1 - s) * H0 + s * H_target
+            U = expm(-1j * dt * H)
+            rho = U @ rho @ U.conj().T
+
+        return rho
+```
+
+---
+
+## 3. Conditional Inference
+
+QBMs can perform probabilistic inference by conditioning on observed variables.
+
+<Definition term="Conditional Distribution">
+Given observed visible variables v_obs, the conditional distribution over hidden and unobserved visible variables is:
+
+P(h, v_unobs | v_obs) ∝ Tr_{v_unobs, h}[Π_{v_obs} ρ Π_{v_obs}]
+
+where Π_{v_obs} is the projector onto the observed configuration.
+</Definition>
+
+```python
+class QBMInference:
+    """
+    Probabilistic inference in quantum Boltzmann machines.
+    """
+
+    def __init__(
+        self,
+        n_visible: int,
+        n_hidden: int,
+        beta: float = 1.0
+    ):
+        self.n_visible = n_visible
+        self.n_hidden = n_hidden
+        self.n_total = n_visible + n_hidden
+        self.dim = 2 ** self.n_total
+        self.beta = beta
+
+        self.I = np.eye(2, dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    def compute_gibbs_state(self, H: np.ndarray) -> np.ndarray:
+        """Compute Gibbs state."""
+        exp_H = expm(-self.beta * H)
+        return exp_H / np.trace(exp_H)
+
+    def create_projector(
+        self,
+        observed_values: Dict[int, int]
+    ) -> np.ndarray:
+        """
+        Create projector onto observed qubit values.
+
+        Args:
+            observed_values: Dict mapping qubit index to value (0 or 1)
+
+        Returns:
+            Projector matrix
+        """
+        proj = np.eye(self.dim, dtype=complex)
+
+        for qubit, value in observed_values.items():
+            # Projector onto |value⟩ for this qubit
+            P_single = np.zeros((2, 2), dtype=complex)
+            P_single[value, value] = 1.0
+
+            # Expand to full space
+            P_full = np.array([[1]], dtype=complex)
+            for i in range(self.n_total):
+                if i == qubit:
+                    P_full = np.kron(P_full, P_single)
+                else:
+                    P_full = np.kron(P_full, self.I)
+
+            proj = proj @ P_full
+
+        return proj
+
+    def conditional_state(
+        self,
+        rho: np.ndarray,
+        observed_values: Dict[int, int]
+    ) -> np.ndarray:
+        """
+        Compute conditional state given observations.
+
+        Args:
+            rho: Full Gibbs state
+            observed_values: Dict mapping qubit index to observed value
+
+        Returns:
+            Conditional density matrix (normalized)
+        """
+        proj = self.create_projector(observed_values)
+
+        # Apply projection
+        rho_cond = proj @ rho @ proj
+
+        # Normalize
+        trace = np.trace(rho_cond)
+        if trace > 1e-10:
+            rho_cond = rho_cond / trace
+
+        return rho_cond
+
+    def infer_hidden(
+        self,
+        H: np.ndarray,
+        visible_values: np.ndarray
+    ) -> np.ndarray:
+        """
+        Infer distribution over hidden units given visible values.
+
+        Args:
+            H: QBM Hamiltonian
+            visible_values: Observed visible unit values
+
+        Returns:
+            Probability distribution over hidden configurations
+        """
+        rho = self.compute_gibbs_state(H)
+
+        # Create observation dict for visible qubits
+        observed = {i: int(visible_values[i]) for i in range(self.n_visible)}
+
+        # Get conditional state
+        rho_cond = self.conditional_state(rho, observed)
+
+        # Trace out visible qubits to get hidden marginal
+        dim_v = 2 ** self.n_visible
+        dim_h = 2 ** self.n_hidden
+
+        rho_reshaped = rho_cond.reshape(dim_v, dim_h, dim_v, dim_h)
+        rho_h = np.einsum('ijik->jk', rho_reshaped)
+
+        # Return diagonal (probabilities)
+        return np.real(np.diag(rho_h))
+
+    def infer_visible(
+        self,
+        H: np.ndarray,
+        observed_indices: List[int],
+        observed_values: List[int]
+    ) -> np.ndarray:
+        """
+        Infer distribution over unobserved visible units.
+
+        Args:
+            H: QBM Hamiltonian
+            observed_indices: Indices of observed visible units
+            observed_values: Values of observed visible units
+
+        Returns:
+            Probabilities for each unobserved visible configuration
+        """
+        rho = self.compute_gibbs_state(H)
+
+        # Create observation dict
+        observed = {i: v for i, v in zip(observed_indices, observed_values)}
+        rho_cond = self.conditional_state(rho, observed)
+
+        # Trace out hidden qubits
+        dim_v = 2 ** self.n_visible
+        dim_h = 2 ** self.n_hidden
+
+        rho_reshaped = rho_cond.reshape(dim_v, dim_h, dim_v, dim_h)
+        rho_v = np.einsum('ijik->jk', rho_reshaped)
+
+        return np.real(np.diag(rho_v))
+
+    def compute_marginal(
+        self,
+        H: np.ndarray,
+        qubit_indices: List[int]
+    ) -> np.ndarray:
+        """
+        Compute marginal distribution over specified qubits.
+
+        Args:
+            H: QBM Hamiltonian
+            qubit_indices: Qubits to compute marginal over
+
+        Returns:
+            Marginal probability distribution
+        """
+        rho = self.compute_gibbs_state(H)
+
+        # Qubits to trace out
+        trace_out = [i for i in range(self.n_total) if i not in qubit_indices]
+
+        # Iteratively trace out qubits
+        rho_marginal = rho
+        for q in sorted(trace_out, reverse=True):
+            rho_marginal = self._partial_trace_single(rho_marginal, q)
+
+        return np.real(np.diag(rho_marginal))
+
+    def _partial_trace_single(
+        self,
+        rho: np.ndarray,
+        qubit: int
+    ) -> np.ndarray:
+        """Trace out a single qubit."""
+        n = int(np.log2(rho.shape[0]))
+        dim_before = 2 ** qubit
+        dim_after = 2 ** (n - qubit - 1)
+
+        rho_reshaped = rho.reshape(dim_before, 2, dim_after, dim_before, 2, dim_after)
+        return np.einsum('ijkilk->ijk', rho_reshaped).reshape(
+            dim_before * dim_after, dim_before * dim_after
+        )
+```
+
+---
+
+## 4. Quantum-Enhanced MCMC
+
+Quantum effects can enhance classical Markov Chain Monte Carlo sampling.
+
+<Definition term="Quantum-Enhanced MCMC">
+Quantum MCMC uses quantum dynamics to propose transitions in the Markov chain:
+
+1. Classical state z → quantum superposition
+2. Quantum evolution mixes states
+3. Measurement collapses to new classical state
+4. Accept/reject based on detailed balance
+</Definition>
+
+```python
+class QuantumEnhancedMCMC:
+    """
+    Quantum-enhanced Markov Chain Monte Carlo sampling.
+    """
+
+    def __init__(
+        self,
+        n_qubits: int,
+        beta: float = 1.0,
+        quantum_strength: float = 0.5
+    ):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+        self.beta = beta
+        self.quantum_strength = quantum_strength
+
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    def classical_energy(
+        self,
+        state: np.ndarray,
+        H: np.ndarray
+    ) -> float:
+        """Compute classical energy of a configuration."""
+        idx = int(sum(state[i] * 2**i for i in range(self.n_qubits)))
+        return np.real(H[idx, idx])
+
+    def quantum_proposal(
+        self,
+        current_state: np.ndarray,
+        H: np.ndarray,
+        evolution_time: float = 0.5
+    ) -> Tuple[np.ndarray, float]:
+        """
+        Generate proposal using quantum evolution.
+
+        Args:
+            current_state: Current classical configuration
+            H: Hamiltonian
+            evolution_time: Time for quantum evolution
+
+        Returns:
+            (proposed_state, proposal_probability_ratio)
+        """
+        # Create quantum state from classical
+        idx = int(sum(current_state[i] * 2**i for i in range(self.n_qubits)))
+        psi = np.zeros(self.dim, dtype=complex)
+        psi[idx] = 1.0
+
+        # Add transverse field for quantum fluctuations
+        H_driver = np.zeros((self.dim, self.dim), dtype=complex)
+        for i in range(self.n_qubits):
+            H_driver -= self._single_op(self.X, i)
+
+        H_full = H + self.quantum_strength * H_driver
+
+        # Evolve
+        U = expm(-1j * evolution_time * H_full)
+        psi_evolved = U @ psi
+
+        # Measure to get proposal
+        probs = np.abs(psi_evolved) ** 2
+        proposed_idx = np.random.choice(self.dim, p=probs)
+        proposed_state = np.array([
+            (proposed_idx >> i) & 1 for i in range(self.n_qubits)
+        ])
+
+        # Compute reverse probability for detailed balance
+        psi_reverse = np.zeros(self.dim, dtype=complex)
+        psi_reverse[proposed_idx] = 1.0
+        psi_reverse_evolved = U @ psi_reverse
+        reverse_probs = np.abs(psi_reverse_evolved) ** 2
+
+        # Proposal ratio: P(current|proposed) / P(proposed|current)
+        forward_prob = probs[proposed_idx]
+        backward_prob = reverse_probs[idx]
+
+        proposal_ratio = backward_prob / (forward_prob + 1e-10)
+
+        return proposed_state, proposal_ratio
+
+    def _single_op(self, op: np.ndarray, qubit: int) -> np.ndarray:
+        """Create single-qubit operator."""
+        result = np.array([[1]], dtype=complex)
+        for i in range(self.n_qubits):
+            result = np.kron(result, op if i == qubit else self.I)
+        return result
+
+    def metropolis_hastings_step(
+        self,
+        current_state: np.ndarray,
+        H: np.ndarray
+    ) -> Tuple[np.ndarray, bool]:
+        """
+        Perform one Metropolis-Hastings step with quantum proposal.
+
+        Returns:
+            (new_state, accepted)
+        """
+        # Get proposal
+        proposed_state, proposal_ratio = self.quantum_proposal(current_state, H)
+
+        # Compute energies
+        E_current = self.classical_energy(current_state, H)
+        E_proposed = self.classical_energy(proposed_state, H)
+
+        # Acceptance probability
+        energy_ratio = np.exp(-self.beta * (E_proposed - E_current))
+        acceptance_prob = min(1.0, energy_ratio * proposal_ratio)
+
+        # Accept or reject
+        if np.random.random() < acceptance_prob:
+            return proposed_state, True
+        else:
+            return current_state, False
+
+    def sample(
+        self,
+        H: np.ndarray,
+        n_samples: int,
+        n_burnin: int = 100,
+        thin: int = 5
+    ) -> np.ndarray:
+        """
+        Generate samples using quantum-enhanced MCMC.
+
+        Args:
+            H: Hamiltonian (diagonal in computational basis)
+            n_samples: Number of samples
+            n_burnin: Burn-in period
+            thin: Thinning factor
+
+        Returns:
+            Array of samples
+        """
+        # Initialize randomly
+        current_state = np.random.randint(0, 2, size=self.n_qubits)
+
+        # Burn-in
+        for _ in range(n_burnin):
+            current_state, _ = self.metropolis_hastings_step(current_state, H)
+
+        # Collect samples
+        samples = []
+        accepted = 0
+        total = 0
+
+        while len(samples) < n_samples:
+            for _ in range(thin):
+                current_state, acc = self.metropolis_hastings_step(current_state, H)
+                if acc:
+                    accepted += 1
+                total += 1
+
+            samples.append(current_state.copy())
+
+        acceptance_rate = accepted / total
+        print(f"Acceptance rate: {acceptance_rate:.3f}")
+
+        return np.array(samples)
+```
+
+---
+
+## 5. Comparing Quantum and Classical Sampling
+
+Understanding when quantum sampling provides advantages is crucial for practical applications.
+
+<Definition term="Mixing Time">
+The mixing time τ_mix measures how quickly a Markov chain converges to the stationary distribution:
+
+τ_mix = min{t : ||P^t(x,·) - π||_TV ≤ 1/4 for all x}
+
+Quantum effects can potentially reduce mixing time for certain distributions.
+</Definition>
+
+```python
+class SamplingComparison:
+    """
+    Compare quantum and classical sampling methods.
+    """
+
+    def __init__(self, n_qubits: int, beta: float = 1.0):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+        self.beta = beta
+
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    def build_random_hamiltonian(
+        self,
+        coupling_strength: float = 1.0,
+        field_strength: float = 0.5
+    ) -> np.ndarray:
+        """Build a random Ising Hamiltonian."""
+        H = np.zeros((self.dim, self.dim), dtype=complex)
+
+        # Random couplings
+        for i in range(self.n_qubits):
+            for j in range(i + 1, self.n_qubits):
+                J = np.random.randn() * coupling_strength
+                Zi = self._single_op(self.Z, i)
+                Zj = self._single_op(self.Z, j)
+                H -= J * Zi @ Zj
+
+        # Random fields
+        for i in range(self.n_qubits):
+            h = np.random.randn() * field_strength
+            H -= h * self._single_op(self.Z, i)
+
+        return H
+
+    def _single_op(self, op: np.ndarray, qubit: int) -> np.ndarray:
+        result = np.array([[1]], dtype=complex)
+        for i in range(self.n_qubits):
+            result = np.kron(result, op if i == qubit else self.I)
+        return result
+
+    def exact_distribution(self, H: np.ndarray) -> np.ndarray:
+        """Compute exact Gibbs distribution."""
+        energies = np.real(np.diag(H))
+        probs = np.exp(-self.beta * energies)
+        return probs / np.sum(probs)
+
+    def classical_gibbs_sampling(
+        self,
+        H: np.ndarray,
+        n_samples: int,
+        n_burnin: int = 500
+    ) -> np.ndarray:
+        """Classical Gibbs sampling."""
+        energies = np.real(np.diag(H))
+        current_idx = np.random.randint(self.dim)
+        samples = []
+
+        total_steps = n_burnin + n_samples
+
+        for step in range(total_steps):
+            # Flip a random bit
+            bit = np.random.randint(self.n_qubits)
+            proposed_idx = current_idx ^ (1 << bit)
+
+            # Metropolis acceptance
+            dE = energies[proposed_idx] - energies[current_idx]
+            if dE < 0 or np.random.random() < np.exp(-self.beta * dE):
+                current_idx = proposed_idx
+
+            if step >= n_burnin:
+                samples.append(current_idx)
+
+        return np.array(samples)
+
+    def quantum_sampling(
+        self,
+        H: np.ndarray,
+        n_samples: int,
+        gamma: float = 0.5
+    ) -> np.ndarray:
+        """Quantum sampling from Gibbs state."""
+        # Add transverse field
+        H_quantum = H.copy()
+        for i in range(self.n_qubits):
+            H_quantum -= gamma * self._single_op(self.X, i)
+
+        # Compute quantum Gibbs state
+        exp_H = expm(-self.beta * H_quantum)
+        rho = exp_H / np.trace(exp_H)
+
+        # Sample
+        probs = np.real(np.diag(rho))
+        probs = probs / np.sum(probs)
+        return np.random.choice(self.dim, size=n_samples, p=probs)
+
+    def compute_kl_divergence(
+        self,
+        samples: np.ndarray,
+        true_dist: np.ndarray
+    ) -> float:
+        """Compute KL divergence between empirical and true distributions."""
+        # Empirical distribution
+        counts = np.bincount(samples, minlength=self.dim)
+        empirical = counts / len(samples)
+
+        # KL divergence
+        eps = 1e-10
+        kl = np.sum(true_dist * np.log((true_dist + eps) / (empirical + eps)))
+
+        return kl
+
+    def estimate_mixing_time(
+        self,
+        H: np.ndarray,
+        method: str = 'classical',
+        threshold: float = 0.1
+    ) -> int:
+        """
+        Estimate mixing time by monitoring KL divergence.
+        """
+        true_dist = self.exact_distribution(H)
+
+        if method == 'classical':
+            samples = []
+            current_idx = np.random.randint(self.dim)
+            energies = np.real(np.diag(H))
+
+            for step in range(10000):
+                # Single Gibbs update
+                bit = np.random.randint(self.n_qubits)
+                proposed_idx = current_idx ^ (1 << bit)
+                dE = energies[proposed_idx] - energies[current_idx]
+                if dE < 0 or np.random.random() < np.exp(-self.beta * dE):
+                    current_idx = proposed_idx
+
+                samples.append(current_idx)
+
+                # Check every 100 steps
+                if step % 100 == 99:
+                    kl = self.compute_kl_divergence(np.array(samples), true_dist)
+                    if kl < threshold:
+                        return step + 1
+
+            return 10000  # Max steps
+
+        else:  # quantum
+            # Quantum reaches equilibrium immediately (by construction)
+            return 1  # Idealized
+
+    def compare_methods(
+        self,
+        n_trials: int = 10,
+        n_samples: int = 1000
+    ) -> Dict[str, float]:
+        """
+        Compare classical and quantum sampling across random instances.
+        """
+        results = {
+            'classical_kl': [],
+            'quantum_kl': [],
+            'classical_mixing': [],
+            'quantum_mixing': []
+        }
+
+        for _ in range(n_trials):
+            H = self.build_random_hamiltonian()
+            true_dist = self.exact_distribution(H)
+
+            # Classical sampling
+            classical_samples = self.classical_gibbs_sampling(H, n_samples)
+            results['classical_kl'].append(
+                self.compute_kl_divergence(classical_samples, true_dist)
+            )
+
+            # Quantum sampling
+            quantum_samples = self.quantum_sampling(H, n_samples)
+            results['quantum_kl'].append(
+                self.compute_kl_divergence(quantum_samples, true_dist)
+            )
+
+            # Mixing times
+            results['classical_mixing'].append(
+                self.estimate_mixing_time(H, 'classical')
+            )
+            results['quantum_mixing'].append(1)  # Idealized
+
+        return {
+            'classical_kl_mean': np.mean(results['classical_kl']),
+            'quantum_kl_mean': np.mean(results['quantum_kl']),
+            'classical_mixing_mean': np.mean(results['classical_mixing']),
+            'quantum_mixing_mean': np.mean(results['quantum_mixing'])
+        }
+```
+
+---
+
+## 6. Practical Inference Applications
+
+QBM inference can be applied to various practical problems.
+
+```python
+class QBMInferenceApplications:
+    """
+    Practical applications of QBM inference.
+    """
+
+    def __init__(self, n_visible: int, n_hidden: int):
+        self.n_visible = n_visible
+        self.n_hidden = n_hidden
+        self.inference = QBMInference(n_visible, n_hidden)
+
+    def image_completion(
+        self,
+        H: np.ndarray,
+        partial_image: np.ndarray,
+        mask: np.ndarray
+    ) -> np.ndarray:
+        """
+        Complete a partially observed image using QBM inference.
+
+        Args:
+            H: Trained QBM Hamiltonian
+            partial_image: Image with missing pixels
+            mask: Binary mask (1 = observed, 0 = missing)
+
+        Returns:
+            Completed image
+        """
+        # Observed pixels
+        observed = {}
+        for i in range(self.n_visible):
+            if mask[i] == 1:
+                observed[i] = int(partial_image[i])
+
+        # Get conditional distribution
+        rho = self.inference.compute_gibbs_state(H)
+        rho_cond = self.inference.conditional_state(rho, observed)
+
+        # Get marginal over visible
+        dim_v = 2 ** self.n_visible
+        dim_h = 2 ** self.n_hidden
+
+        rho_reshaped = rho_cond.reshape(dim_v, dim_h, dim_v, dim_h)
+        rho_v = np.einsum('ijik->jk', rho_reshaped)
+        probs = np.real(np.diag(rho_v))
+        probs = probs / np.sum(probs)
+
+        # Sample completed image
+        idx = np.random.choice(len(probs), p=probs)
+        completed = np.array([(idx >> i) & 1 for i in range(self.n_visible)])
+
+        # Keep observed pixels fixed
+        for i in range(self.n_visible):
+            if mask[i] == 1:
+                completed[i] = partial_image[i]
+
+        return completed
+
+    def anomaly_detection(
+        self,
+        H: np.ndarray,
+        data_point: np.ndarray,
+        threshold: float = 0.01
+    ) -> Tuple[bool, float]:
+        """
+        Detect if a data point is anomalous based on its probability.
+
+        Args:
+            H: Trained QBM Hamiltonian
+            data_point: Data point to evaluate
+            threshold: Probability threshold for anomaly
+
+        Returns:
+            (is_anomaly, probability)
+        """
+        rho = self.inference.compute_gibbs_state(H)
+
+        # Get visible marginal
+        dim_v = 2 ** self.n_visible
+        dim_h = 2 ** self.n_hidden
+
+        rho_reshaped = rho.reshape(dim_v, dim_h, dim_v, dim_h)
+        rho_v = np.einsum('ijik->jk', rho_reshaped)
+        probs = np.real(np.diag(rho_v))
+
+        # Find probability of data point
+        idx = int(sum(data_point[i] * 2**i for i in range(self.n_visible)))
+        prob = probs[idx]
+
+        is_anomaly = prob < threshold
+
+        return is_anomaly, prob
+
+    def feature_extraction(
+        self,
+        H: np.ndarray,
+        visible_data: np.ndarray
+    ) -> np.ndarray:
+        """
+        Extract hidden unit activations as features.
+
+        Args:
+            H: Trained QBM Hamiltonian
+            visible_data: Visible layer data (batch_size, n_visible)
+
+        Returns:
+            Hidden unit probabilities (batch_size, n_hidden)
+        """
+        features = []
+
+        for v in visible_data:
+            # Infer hidden distribution
+            h_probs = self.inference.infer_hidden(H, v)
+            features.append(h_probs)
+
+        return np.array(features)
+
+    def compute_log_likelihood(
+        self,
+        H: np.ndarray,
+        data: np.ndarray
+    ) -> float:
+        """
+        Compute log-likelihood of data under the model.
+        """
+        rho = self.inference.compute_gibbs_state(H)
+
+        # Get visible marginal
+        dim_v = 2 ** self.n_visible
+        dim_h = 2 ** self.n_hidden
+
+        rho_reshaped = rho.reshape(dim_v, dim_h, dim_v, dim_h)
+        rho_v = np.einsum('ijik->jk', rho_reshaped)
+        probs = np.real(np.diag(rho_v))
+
+        log_lik = 0.0
+        for v in data:
+            idx = int(sum(v[i] * 2**i for i in range(self.n_visible)))
+            log_lik += np.log(max(probs[idx], 1e-10))
+
+        return log_lik / len(data)
+```
+
+---
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Quantum Gibbs Sampling**: Sampling from QBM states requires measuring the quantum Gibbs state in appropriate bases
+
+2. **Quantum Annealing**: Provides a natural method for preparing approximate Gibbs states through controlled quantum evolution
+
+3. **Conditional Inference**: QBMs can perform probabilistic inference by conditioning on observed variables using projective measurements
+
+4. **Quantum-Enhanced MCMC**: Quantum dynamics can generate proposals for Markov chain sampling with potentially improved mixing
+
+5. **Sampling Comparison**: Quantum sampling can offer advantages in mixing time for certain distribution types
+
+6. **Practical Applications**: QBM inference enables tasks like image completion, anomaly detection, and feature extraction
+
+The next lesson will explore applications of quantum Boltzmann machines in real-world scenarios.

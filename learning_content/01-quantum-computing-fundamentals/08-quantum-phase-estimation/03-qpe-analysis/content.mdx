@@ -1,0 +1,236 @@
+---
+title: "QPE Analysis: Understanding the Output"
+description: "Deep mathematical analysis of QPE output states, success probability, and precision bounds."
+duration: 45
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Analyze the output state of the QPE circuit mathematically
+- Calculate success probability for exact and approximate phases
+- Understand the relationship between precision and qubit count
+- Derive the probability distribution over measurement outcomes
+
+## 1. The QPE Output State
+
+Recall that QPE estimates the phase φ in U|ψ⟩ = e^(2πiφ)|ψ⟩. After the controlled operations and before the inverse QFT, the counting register is in state:
+
+<Formula>
+$$\frac{1}{\sqrt{2^t}}\sum_{k=0}^{2^t-1} e^{2\pi i k \phi}|k\rangle$$
+</Formula>
+
+where t is the number of counting qubits.
+
+After the inverse QFT, if φ = j/2^t for some integer j (an "exact" phase), we get |j⟩ with certainty.
+
+```python
+import numpy as np
+
+def qpe_state_before_iqft(phi, t):
+    """
+    Compute the counting register state before inverse QFT.
+    phi: phase to estimate (0 to 1)
+    t: number of counting qubits
+    """
+    N = 2**t
+    state = np.zeros(N, dtype=complex)
+    
+    for k in range(N):
+        state[k] = np.exp(2j * np.pi * k * phi) / np.sqrt(N)
+    
+    return state
+
+# Example: exact phase φ = 3/8
+t = 3
+phi = 3/8  # = 3/2^3, so should give |011⟩ = |3⟩
+state = qpe_state_before_iqft(phi, t)
+
+print(f"Phase φ = {phi} = {int(phi * 2**t)}/{2**t}")
+print(f"State before iQFT: {np.round(state, 3)}")
+```
+
+## 2. Exact vs Approximate Phases
+
+<Definition term="Exact Phase">
+A phase φ is "exact" with t qubits if φ = j/2^t for some integer j ∈ {0, 1, ..., 2^t - 1}. QPE returns j with probability 1.
+</Definition>
+
+For non-exact phases, the measurement outcome is probabilistic:
+
+<Formula>
+$$P(m) = \frac{1}{2^{2t}} \left| \frac{1 - e^{2\pi i (2^t \phi - m)}}{1 - e^{2\pi i (\phi - m/2^t)}} \right|^2$$
+</Formula>
+
+```python
+import numpy as np
+
+def qpe_probability(phi, m, t):
+    """
+    Probability of measuring outcome m when true phase is phi.
+    """
+    N = 2**t
+    delta = phi - m/N  # Distance from exact grid point
+    
+    if abs(delta) < 1e-10:
+        return 1.0  # Exact case
+    
+    # Use the formula for probability
+    numerator = np.sin(np.pi * N * delta)**2
+    denominator = N**2 * np.sin(np.pi * delta)**2
+    
+    return numerator / denominator
+
+# Example: phase between grid points
+t = 4
+phi = 0.3  # Not exactly representable with 4 bits
+
+print(f"Phase φ = {phi}, t = {t} qubits")
+print(f"Closest grid points: {int(phi * 2**t)}/16 = {int(phi * 2**t)/16:.4f}")
+print()
+print(f"{'Outcome m':<12} {'m/2^t':<10} {'P(m)':<10}")
+print("-" * 35)
+
+total_prob = 0
+for m in range(2**t):
+    p = qpe_probability(phi, m, t)
+    if p > 0.01:  # Only show significant probabilities
+        print(f"{m:<12} {m/2**t:<10.4f} {p:<10.4f}")
+        total_prob += p
+
+print(f"\nTotal probability shown: {total_prob:.4f}")
+```
+
+## 3. Success Probability Bounds
+
+The key result: with t counting qubits, the probability of getting a result within ±1 of the best t-bit approximation is at least:
+
+<Formula>
+$$P(\text{success}) \geq \frac{4}{\pi^2} \approx 0.405$$
+</Formula>
+
+To achieve success probability ≥ 1 - ε, we need:
+
+<Formula>
+$$t = n + \lceil \log_2(2 + \frac{1}{2\varepsilon}) \rceil$$
+</Formula>
+
+where n is the desired precision in bits.
+
+```python
+import numpy as np
+
+def qubits_needed(n_precision_bits, epsilon):
+    """
+    Calculate counting qubits needed for n-bit precision
+    with success probability at least 1 - epsilon.
+    """
+    extra = int(np.ceil(np.log2(2 + 1/(2*epsilon))))
+    return n_precision_bits + extra
+
+# Examples
+print("Qubits needed for various precision/confidence levels:")
+print(f"{'Precision':<12} {'ε=0.1':<10} {'ε=0.01':<10} {'ε=0.001':<10}")
+print("-" * 42)
+
+for n in [4, 8, 12, 16]:
+    q1 = qubits_needed(n, 0.1)
+    q2 = qubits_needed(n, 0.01)
+    q3 = qubits_needed(n, 0.001)
+    print(f"{n} bits       {q1:<10} {q2:<10} {q3:<10}")
+```
+
+## 4. Probability Distribution Visualization
+
+```python
+import numpy as np
+
+def full_qpe_distribution(phi, t):
+    """Compute full probability distribution for QPE."""
+    N = 2**t
+    probs = np.zeros(N)
+    
+    for m in range(N):
+        probs[m] = qpe_probability(phi, m, t)
+    
+    return probs
+
+# Compare distributions for different t
+phi = 1/3  # Cannot be exactly represented in binary
+
+print(f"Probability distribution for φ = 1/3")
+print("=" * 50)
+
+for t in [3, 5, 7]:
+    probs = full_qpe_distribution(phi, t)
+    best_m = np.argmax(probs)
+    
+    print(f"\nt = {t} qubits:")
+    print(f"  Best estimate: {best_m}/{2**t} = {best_m/2**t:.6f}")
+    print(f"  True φ:        {phi:.6f}")
+    print(f"  Error:         {abs(best_m/2**t - phi):.6f}")
+    print(f"  P(best):       {probs[best_m]:.4f}")
+    print(f"  P(within ±1):  {sum(probs[max(0,best_m-1):best_m+2]):.4f}")
+```
+
+## 5. Connection to Shor's Algorithm
+
+In Shor's algorithm, QPE estimates the phase φ = s/r where r is the period we seek. The analysis shows:
+
+- We need roughly 2n qubits to factor an n-bit number
+- The continued fractions algorithm extracts r from the measurement
+- Success probability can be boosted by repetition
+
+```python
+import numpy as np
+from math import gcd
+
+def continued_fraction(x, max_denom):
+    """
+    Extract fraction from decimal using continued fractions.
+    Returns (numerator, denominator).
+    """
+    h1, h2 = 1, 0
+    k1, k2 = 0, 1
+    
+    remaining = x
+    for _ in range(50):  # Max iterations
+        a = int(remaining)
+        h1, h2 = a * h1 + h2, h1
+        k1, k2 = a * k1 + k2, k1
+        
+        if k1 > max_denom:
+            return h2, k2
+        
+        if abs(remaining - a) < 1e-10:
+            break
+            
+        remaining = 1 / (remaining - a)
+    
+    return h1, k1
+
+# Example: Shor's algorithm scenario
+# Suppose QPE returned 85 out of 256 (8 qubits)
+measured = 85
+N_qpe = 256
+estimated_phase = measured / N_qpe
+
+print(f"QPE output: {measured}/{N_qpe} = {estimated_phase}")
+num, denom = continued_fraction(estimated_phase, 100)
+print(f"Continued fraction: {num}/{denom}")
+print(f"Likely period r = {denom}")
+```
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Exact phases** (j/2^t) are measured with certainty
+2. **Approximate phases** give probability distributions peaked near the best approximation
+3. **Success probability** ≥ 4/π² ≈ 40.5% for being within ±1 of optimal
+4. **Extra qubits** boost success: t = n + ⌈log₂(2 + 1/2ε)⌉ for 1-ε confidence
+5. **Continued fractions** extract clean fractions from QPE output (crucial for Shor's)
+
+The precision-resource tradeoff is fundamental: more qubits give better precision, but the relationship is logarithmic in the desired confidence level.

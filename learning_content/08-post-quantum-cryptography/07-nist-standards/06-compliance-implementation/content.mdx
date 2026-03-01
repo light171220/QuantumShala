@@ -1,0 +1,414 @@
+---
+title: "FIPS Compliance and Implementation Best Practices"
+description: "How to correctly implement NIST PQC standards with FIPS compliance, constant-time code, testing requirements, and common pitfall avoidance."
+duration: 70
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+- Understand FIPS 140-3 requirements for PQC implementations
+- Implement constant-time cryptographic operations
+- Apply proper testing and validation procedures
+- Avoid common implementation security pitfalls
+
+## 1. FIPS 140-3 Overview
+
+```python
+def fips_overview():
+    """Overview of FIPS 140-3 requirements."""
+    print("FIPS 140-3 REQUIREMENTS FOR PQC")
+    print("=" * 70)
+    
+    print("""
+    WHAT IS FIPS 140-3?
+    ━━━━━━━━━━━━━━━━━━━
+    
+    FIPS 140-3 is the US government standard for cryptographic modules.
+    Required for federal systems and many regulated industries.
+    
+    
+    SECURITY LEVELS:
+    ━━━━━━━━━━━━━━━━━
+    
+    ┌─────────┬────────────────────────────────────────────────────────┐
+    │ Level   │ Requirements                                          │
+    ├─────────┼────────────────────────────────────────────────────────┤
+    │ Level 1 │ Basic security, software OK                           │
+    │         │ Approved algorithms, no physical security             │
+    │         │ Most PQC software implementations target this         │
+    ├─────────┼────────────────────────────────────────────────────────┤
+    │ Level 2 │ Role-based authentication                             │
+    │         │ Tamper-evident seals                                  │
+    │         │ Operator vs User roles                                │
+    ├─────────┼────────────────────────────────────────────────────────┤
+    │ Level 3 │ Tamper resistance                                     │
+    │         │ Identity-based authentication                         │
+    │         │ Physical security mechanisms                          │
+    ├─────────┼────────────────────────────────────────────────────────┤
+    │ Level 4 │ Environmental protection                              │
+    │         │ Zeroization on tamper                                 │
+    │         │ Complete physical security envelope                   │
+    └─────────┴────────────────────────────────────────────────────────┘
+    
+    
+    PQC-SPECIFIC REQUIREMENTS:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    ┌─────────────────────────────────────────────────────────────────┐
+    │ Requirement              │ Details                             │
+    ├──────────────────────────┼─────────────────────────────────────┤
+    │ Approved RNG             │ SP 800-90A DRBG (CTR_DRBG, etc.)    │
+    │ Entropy Source           │ SP 800-90B compliant                │
+    │ Algorithm Implementation │ Match FIPS 203/204/205 exactly      │
+    │ Self-Tests               │ Known Answer Tests (KAT) on startup │
+    │ Key Zeroization          │ Securely clear keys when done       │
+    │ Error Handling           │ No information leakage via errors   │
+    │ Approved Mode            │ Only use approved parameter sets    │
+    └─────────────────────────────────────────────────────────────────┘
+    """)
+
+fips_overview()
+```
+
+## 2. Constant-Time Implementation
+
+```python
+def constant_time_requirements():
+    """Constant-time implementation requirements."""
+    print("\nCONSTANT-TIME IMPLEMENTATION")
+    print("=" * 70)
+    
+    print("""
+    WHY CONSTANT-TIME MATTERS:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Timing attacks can recover secret keys by measuring:
+    • Execution time differences
+    • Cache access patterns
+    • Branch prediction behavior
+    • Memory access patterns
+    
+    ALL operations on secret data must take the same time
+    regardless of the secret's value!
+    
+    
+    COMMON TIMING LEAKS:
+    ━━━━━━━━━━━━━━━━━━━━━
+    """)
+    
+    # Bad examples
+    print("""
+    ❌ BAD: Secret-dependent branching
+    ```python
+    if secret_bit == 1:
+        result = expensive_operation()
+    else:
+        result = cheap_operation()
+    ```
+    
+    ❌ BAD: Secret-dependent array access
+    ```python
+    lookup_table[secret_index]  # Cache timing leak!
+    ```
+    
+    ❌ BAD: Early exit on mismatch
+    ```python
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            return False  # Leaks position of first difference!
+    return True
+    ```
+    """)
+    
+    # Good examples
+    print("""
+    ✓ GOOD: Constant-time comparison
+    ```python
+    def ct_compare(a: bytes, b: bytes) -> bool:
+        if len(a) != len(b):
+            return False
+        
+        result = 0
+        for x, y in zip(a, b):
+            result |= x ^ y  # Accumulate ALL differences
+        
+        return result == 0  # Check after processing ALL bytes
+    ```
+    
+    ✓ GOOD: Constant-time selection
+    ```python
+    def ct_select(a: int, b: int, choice: int) -> int:
+        '''Return a if choice==0, else b. Constant time.'''
+        mask = -choice  # 0x0000... or 0xFFFF...
+        return (a & ~mask) | (b & mask)
+    ```
+    
+    ✓ GOOD: Constant-time conditional move
+    ```python
+    def ct_cmov(dest: bytearray, src: bytes, condition: int):
+        '''Copy src to dest if condition==1, constant time.'''
+        mask = -condition
+        for i in range(len(dest)):
+            dest[i] = (dest[i] & ~mask) | (src[i] & mask)
+    ```
+    """)
+
+constant_time_requirements()
+```
+
+## 3. ML-KEM Specific Requirements
+
+```python
+def mlkem_requirements():
+    """ML-KEM specific implementation requirements."""
+    print("\nML-KEM (FIPS 203) SPECIFIC REQUIREMENTS")
+    print("=" * 70)
+    
+    print("""
+    IMPLICIT REJECTION:
+    ━━━━━━━━━━━━━━━━━━━
+    
+    This is CRITICAL for ML-KEM security!
+    
+    ❌ WRONG (reveals decapsulation failure):
+    ```python
+    def decaps(dk, ciphertext):
+        plaintext = decrypt(dk, ciphertext)
+        if not verify(plaintext, ciphertext):
+            raise DecapsulationError()  # LEAKS INFORMATION!
+        return derive_key(plaintext)
+    ```
+    
+    ✓ CORRECT (implicit rejection):
+    ```python
+    def decaps(dk, ciphertext):
+        plaintext = decrypt(dk, ciphertext)
+        ciphertext_check = re_encrypt(dk.public, plaintext)
+        
+        # Constant-time comparison
+        valid = ct_compare(ciphertext, ciphertext_check)
+        
+        # Always return a key (real or pseudorandom)
+        if valid:
+            return KDF(K_bar || H(ciphertext))
+        else:
+            return KDF(z || H(ciphertext))  # Looks like valid key!
+    ```
+    
+    The returned value on failure must be:
+    • Deterministic (same ciphertext → same fake key)
+    • Indistinguishable from success
+    • Computed in constant time
+    
+    
+    NTT REQUIREMENTS:
+    ━━━━━━━━━━━━━━━━━
+    
+    • Use correct NTT parameters (n=256, q=3329)
+    • Implement constant-time butterfly operations
+    • Verify Montgomery reduction is constant-time
+    """)
+
+mlkem_requirements()
+```
+
+## 4. Testing and Validation
+
+```python
+def testing_requirements():
+    """Testing and validation requirements."""
+    print("\nTESTING AND VALIDATION")
+    print("=" * 70)
+    
+    print("""
+    KNOWN ANSWER TESTS (KAT):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    NIST provides official test vectors. You MUST:
+    
+    1. Pass ALL KAT vectors exactly
+    2. Run KATs on every startup (self-test)
+    3. Fail closed if KATs fail
+    
+    KAT sources:
+    • NIST CAVP (Cryptographic Algorithm Validation Program)
+    • Reference implementation test vectors
+    • ACVP (Automated Cryptographic Validation Protocol)
+    
+    
+    ADDITIONAL TESTING:
+    ━━━━━━━━━━━━━━━━━━━
+    
+    ┌─────────────────────────────────────────────────────────────────┐
+    │ Test Type            │ Purpose                                 │
+    ├──────────────────────┼─────────────────────────────────────────┤
+    │ Positive tests       │ Valid inputs produce correct outputs   │
+    │ Negative tests       │ Invalid inputs handled correctly       │
+    │ Boundary tests       │ Edge cases (empty, max size, etc.)     │
+    │ Randomized tests     │ Many random inputs work correctly      │
+    │ Interoperability     │ Works with other implementations       │
+    │ Performance tests    │ Meets latency/throughput requirements  │
+    └─────────────────────────────────────────────────────────────────┘
+    
+    
+    SIDE-CHANNEL TESTING:
+    ━━━━━━━━━━━━━━━━━━━━━━
+    
+    For high-assurance implementations:
+    
+    • Timing analysis: Measure execution time variation
+    • Power analysis: Measure power consumption patterns
+    • Cache analysis: Monitor cache access patterns
+    • EM analysis: Measure electromagnetic emissions
+    
+    Tools:
+    • dudect: Timing leakage detection
+    • ctgrind: Valgrind-based constant-time checking
+    • timecop: Python timing analysis
+    """)
+
+testing_requirements()
+```
+
+## 5. Common Pitfalls
+
+```python
+def common_pitfalls():
+    """Common implementation pitfalls to avoid."""
+    print("\nCOMMON IMPLEMENTATION PITFALLS")
+    print("=" * 70)
+    
+    print("""
+    ❌ PITFALL 1: Using System Random Incorrectly
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    WRONG:
+        import random
+        key = random.randbytes(32)  # NOT CRYPTOGRAPHIC!
+    
+    RIGHT:
+        import secrets
+        key = secrets.token_bytes(32)  # Cryptographically secure
+    
+    BEST (FIPS):
+        Use SP 800-90A DRBG with proper seeding
+    
+    
+    ❌ PITFALL 2: Rolling Your Own Crypto
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    WRONG:
+        Implementing ML-KEM from the paper yourself
+    
+    RIGHT:
+        Using validated, audited libraries:
+        • liboqs (Open Quantum Safe)
+        • AWS-LC
+        • BoringSSL/OpenSSL with PQC
+        • Microsoft SymCrypt
+    
+    
+    ❌ PITFALL 3: Not Clearing Sensitive Memory
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    WRONG:
+        def sign(key, message):
+            sig = compute_signature(key, message)
+            return sig  # key still in memory!
+    
+    RIGHT:
+        def sign(key, message):
+            sig = compute_signature(key, message)
+            secure_zero(key)  # Explicitly clear
+            return sig
+    
+    Note: Python makes this hard! Use C/Rust for production.
+    
+    
+    ❌ PITFALL 4: Incorrect Error Handling
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    WRONG:
+        if decapsulation_failed:
+            raise ValueError("Decapsulation failed!")
+    
+    RIGHT:
+        # Always return a value (implicit rejection)
+        return fake_key_derived_from_ciphertext
+    
+    
+    ❌ PITFALL 5: Ignoring Input Validation
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    WRONG:
+        def decaps(dk, ciphertext):
+            return process(dk, ciphertext)  # No checks!
+    
+    RIGHT:
+        def decaps(dk, ciphertext):
+            if len(ciphertext) != EXPECTED_CT_LENGTH:
+                return None  # or implicit rejection
+            if len(dk) != EXPECTED_DK_LENGTH:
+                return None
+            # Validate format before processing
+            return process(dk, ciphertext)
+    """)
+
+common_pitfalls()
+```
+
+## 6. Validated Libraries
+
+```python
+def validated_libraries():
+    """Recommended validated libraries."""
+    print("\nRECOMMENDED VALIDATED LIBRARIES")
+    print("=" * 70)
+    
+    print("""
+    USE THESE INSTEAD OF IMPLEMENTING YOURSELF:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    ┌─────────────────┬─────────────────────────────────────────────────┐
+    │ Library         │ Notes                                           │
+    ├─────────────────┼─────────────────────────────────────────────────┤
+    │ liboqs          │ Open Quantum Safe, reference implementations    │
+    │                 │ C library with Python/Rust bindings             │
+    │                 │ https://github.com/open-quantum-safe/liboqs     │
+    ├─────────────────┼─────────────────────────────────────────────────┤
+    │ AWS-LC          │ Amazon's crypto library with PQC                │
+    │                 │ FIPS 140-3 validation in progress               │
+    │                 │ https://github.com/aws/aws-lc                   │
+    ├─────────────────┼─────────────────────────────────────────────────┤
+    │ BoringSSL       │ Google's fork of OpenSSL                        │
+    │                 │ Kyber support already deployed                  │
+    ├─────────────────┼─────────────────────────────────────────────────┤
+    │ OpenSSL 3.x     │ Adding PQC support via providers                │
+    │                 │ oqs-provider for liboqs integration             │
+    ├─────────────────┼─────────────────────────────────────────────────┤
+    │ SymCrypt        │ Microsoft's crypto library                      │
+    │                 │ Windows CNG integration                         │
+    └─────────────────┴─────────────────────────────────────────────────┘
+    
+    
+    CHECK NIST CMVP FOR VALIDATION STATUS:
+    https://csrc.nist.gov/projects/cryptographic-module-validation-program
+    """)
+
+validated_libraries()
+```
+
+## Summary
+
+FIPS compliance for PQC requires:
+
+1. **Approved RNG**: SP 800-90A DRBG, proper entropy
+2. **Constant-time code**: No secret-dependent timing
+3. **Implicit rejection**: ML-KEM must not reveal failures
+4. **Self-tests**: KAT on startup, fail closed
+5. **Memory handling**: Zeroize secrets after use
+6. **Use validated libraries**: Don't implement yourself!
+
+The safest approach is to use a FIPS-validated cryptographic module that includes PQC support.

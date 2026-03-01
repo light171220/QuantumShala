@@ -1,0 +1,456 @@
+# Second-Generation Repeaters
+
+## Introduction
+
+Second-generation quantum repeaters address the limitations of first-generation systems by using quantum error correction codes for entanglement distribution. Instead of probabilistic purification, they encode qubits in error-correcting codes, enabling deterministic operations and improved rate scaling.
+
+## Second-Generation Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              SECOND-GENERATION ARCHITECTURE                         │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Key Difference from 1st Gen:                                       │
+│  • Encoded qubits instead of physical qubits                       │
+│  • Deterministic Bell measurement possible                          │
+│  • Error correction replaces purification                          │
+│                                                                     │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │                    ENCODED REPEATER                          │   │
+│  │                                                              │   │
+│  │  Alice         Rep 1          Rep 2          Bob            │   │
+│  │  ┌───┐        ┌─────┐        ┌─────┐        ┌───┐          │   │
+│  │  │ L │════════│ L L │════════│ L L │════════│ L │          │   │
+│  │  └───┘        └─────┘        └─────┘        └───┘          │   │
+│  │                                                              │   │
+│  │  L = Logical qubit (encoded in n physical qubits)           │   │
+│  │                                                              │   │
+│  │  Encoding: [[n, 1, d]] code                                 │   │
+│  │  • n physical qubits encode 1 logical qubit                 │   │
+│  │  • d = distance (can correct (d-1)/2 errors)                │   │
+│  │                                                              │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│  Examples: [[7,1,3]] Steane code, [[9,1,3]] Shor code              │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Encoded Bell Pairs
+
+```python
+import numpy as np
+from dataclasses import dataclass
+from typing import Tuple, List, Dict, Optional
+
+@dataclass
+class QuantumCode:
+    """Represents a quantum error-correcting code."""
+    n: int  # Physical qubits per logical qubit
+    k: int  # Logical qubits (usually 1)
+    d: int  # Code distance
+    name: str
+
+    def error_threshold(self) -> float:
+        """Physical error rate code can tolerate."""
+        # Rough estimate: can correct (d-1)/2 errors
+        t = (self.d - 1) // 2
+        # Threshold depends on decoder, typically ~1-10%
+        return 0.01 * t
+
+class EncodedBellPair:
+    """
+    Logical Bell pair encoded in quantum error-correcting code.
+    """
+
+    def __init__(
+        self,
+        code: QuantumCode,
+        physical_error_rate: float = 0.01
+    ):
+        self.code = code
+        self.physical_error_rate = physical_error_rate
+        self.logical_error_rate = self._calculate_logical_error()
+
+    def _calculate_logical_error(self) -> float:
+        """
+        Estimate logical error rate from physical error rate.
+
+        For distance-d code: p_L ∝ (p/p_th)^((d+1)/2)
+        """
+        p = self.physical_error_rate
+        d = self.code.d
+        p_th = self.code.error_threshold()
+
+        if p >= p_th:
+            return 0.5  # Above threshold - no error suppression
+
+        # Error rate scaling
+        t = (d - 1) // 2  # Number of errors correctable
+        # Combinatorial factor for t+1 simultaneous errors
+        p_L = np.math.comb(self.code.n, t + 1) * (p ** (t + 1))
+
+        return min(p_L, 0.5)
+
+    def fidelity(self) -> float:
+        """Logical Bell pair fidelity."""
+        # Two logical qubits, each with p_L error rate
+        return (1 - self.logical_error_rate) ** 2
+
+class SecondGenRepeater:
+    """
+    Second-generation repeater with encoded operations.
+    """
+
+    def __init__(
+        self,
+        n_segments: int = 4,
+        total_distance: float = 500,
+        code: QuantumCode = None,
+        physical_error_rate: float = 0.01
+    ):
+        self.n_segments = n_segments
+        self.total_distance = total_distance
+        self.segment_length = total_distance / n_segments
+
+        self.code = code or QuantumCode(n=7, k=1, d=3, name="Steane")
+        self.physical_error_rate = physical_error_rate
+
+        # Fiber parameters
+        self.fiber_loss_db_km = 0.2
+        self.source_rate = 1e6  # Hz
+
+    def segment_transmission(self) -> float:
+        """Transmission probability per segment."""
+        return 10**(-self.fiber_loss_db_km * self.segment_length / 10)
+
+    def encoded_bell_generation(self) -> Tuple[float, float]:
+        """
+        Generate encoded Bell pair over segment.
+
+        Returns (success_probability, fidelity).
+        """
+        # Need to transmit n physical qubits for encoding
+        eta = self.segment_transmission()
+
+        # For encoded transmission, we might use different strategies:
+        # 1. Send all n photons (requires n× bandwidth)
+        # 2. Generate locally and send classical syndrome (uses repeater)
+
+        # Strategy 1: Direct encoded transmission
+        # Need all n photons to arrive
+        p_all_arrive = eta ** self.code.n
+
+        # Or use loss-tolerant encoding
+        # Strategy 2: Quantum parity code allows some loss
+        p_loss_tolerant = eta ** (self.code.n // 2 + 1)
+
+        p_success = p_loss_tolerant
+
+        # Fidelity from encoded pair
+        encoded_pair = EncodedBellPair(self.code, self.physical_error_rate)
+        fidelity = encoded_pair.fidelity()
+
+        return p_success, fidelity
+
+    def encoded_swapping(self, F1: float, F2: float) -> Tuple[float, float]:
+        """
+        Encoded Bell measurement and swapping.
+
+        Deterministic (100% success) when using encoded qubits.
+        """
+        # With encoded qubits, BSM can be deterministic
+        # using encoded CNOT + measurement
+        p_success = 1.0  # Deterministic!
+
+        # Fidelity: errors from imperfect gates
+        gate_error = self.physical_error_rate
+        logical_gate_error = self._logical_gate_error(gate_error)
+
+        F_out = F1 * F2 * (1 - logical_gate_error)
+
+        return p_success, F_out
+
+    def _logical_gate_error(self, physical_error: float) -> float:
+        """Logical gate error from physical error rate."""
+        # Transversal gate error scales like logical qubit error
+        d = self.code.d
+        t = (d - 1) // 2
+        return np.math.comb(self.code.n, t + 1) * (physical_error ** (t + 1))
+
+    def calculate_rate(self) -> float:
+        """Calculate end-to-end entanglement rate."""
+        p_seg, _ = self.encoded_bell_generation()
+
+        # With deterministic swapping, rate limited by segment generation
+        # Can generate segments in parallel
+        segment_rate = self.source_rate * p_seg
+
+        # No probabilistic swapping penalty!
+        # (Unlike 1st gen: p_swap^(N-1))
+
+        # Rate limited by slowest segment generation
+        end_to_end_rate = segment_rate / self.n_segments
+
+        return end_to_end_rate
+
+    def calculate_fidelity(self) -> float:
+        """Calculate end-to-end fidelity."""
+        _, F_seg = self.encoded_bell_generation()
+
+        # Fidelity after N-1 swaps
+        n_swaps = self.n_segments - 1
+        gate_error = self._logical_gate_error(self.physical_error_rate)
+
+        F_final = F_seg ** self.n_segments * (1 - gate_error) ** n_swaps
+
+        return F_final
+
+    def analyze(self) -> Dict:
+        """Complete repeater analysis."""
+        return {
+            "n_segments": self.n_segments,
+            "total_distance": self.total_distance,
+            "code": self.code.name,
+            "physical_qubits_per_segment": self.code.n * 2,  # Both ends
+            "rate": self.calculate_rate(),
+            "fidelity": self.calculate_fidelity(),
+            "deterministic_swapping": True
+        }
+
+# Demonstrate second-generation repeater
+print("Second-Generation Repeater Analysis")
+print("=" * 60)
+
+# Different codes
+steane = QuantumCode(n=7, k=1, d=3, name="Steane [[7,1,3]]")
+surface3 = QuantumCode(n=9, k=1, d=3, name="Surface d=3")
+surface5 = QuantumCode(n=25, k=1, d=5, name="Surface d=5")
+
+for code in [steane, surface3, surface5]:
+    repeater = SecondGenRepeater(
+        n_segments=8,
+        total_distance=500,
+        code=code,
+        physical_error_rate=0.001
+    )
+
+    analysis = repeater.analyze()
+
+    print(f"\n{code.name}:")
+    print(f"  Physical qubits/segment: {analysis['physical_qubits_per_segment']}")
+    print(f"  Rate: {analysis['rate']:.2e} Hz")
+    print(f"  Fidelity: {analysis['fidelity']:.4f}")
+```
+
+## One-Way Quantum Repeaters
+
+A variant of second-generation repeaters uses one-way quantum computation:
+
+```python
+class OneWayRepeater:
+    """
+    One-way (measurement-based) quantum repeater.
+
+    Uses cluster states and adaptive measurements
+    for deterministic entanglement distribution.
+    """
+
+    def __init__(
+        self,
+        n_segments: int = 4,
+        total_distance: float = 500,
+        cluster_size: int = 100,  # Qubits per cluster
+        physical_error_rate: float = 0.001
+    ):
+        self.n_segments = n_segments
+        self.total_distance = total_distance
+        self.segment_length = total_distance / n_segments
+        self.cluster_size = cluster_size
+        self.physical_error_rate = physical_error_rate
+
+        self.fiber_loss_db_km = 0.2
+        self.photon_rate = 1e9  # GHz photon source
+
+    def cluster_transmission_probability(self) -> float:
+        """Probability of transmitting enough cluster photons."""
+        eta = 10**(-self.fiber_loss_db_km * self.segment_length / 10)
+
+        # Need fraction of cluster to survive
+        # Loss-tolerant: can lose some qubits
+        min_surviving = self.cluster_size // 2
+
+        # Binomial probability of at least min_surviving
+        from scipy.stats import binom
+        p_enough = 1 - binom.cdf(min_surviving - 1, self.cluster_size, eta)
+
+        return p_enough
+
+    def error_corrected_transmission(self) -> Tuple[float, float]:
+        """
+        Transmit error-corrected state.
+
+        Uses photon-loss code embedded in cluster.
+        """
+        p_trans = self.cluster_transmission_probability()
+
+        # Fidelity from error correction
+        # Cluster state allows correction of photon loss
+        effective_loss_rate = 1 - 10**(-self.fiber_loss_db_km * self.segment_length / 10)
+        corrected_fidelity = 1 - (effective_loss_rate ** 3)  # Third-order correction
+
+        return p_trans, corrected_fidelity
+
+    def calculate_rate(self) -> float:
+        """Calculate rate with one-way repeater."""
+        p_seg, _ = self.error_corrected_transmission()
+
+        # Time to create cluster state
+        cluster_prep_time = self.cluster_size / self.photon_rate
+
+        # Transmission + measurement time
+        prop_time = self.segment_length / 2e5  # Light in fiber
+
+        segment_time = cluster_prep_time + prop_time
+
+        # Rate per segment (probabilistic transmission)
+        seg_rate = p_seg / segment_time
+
+        # End-to-end rate (segments in parallel)
+        return seg_rate / self.n_segments
+
+    def analyze(self) -> Dict:
+        """Analysis of one-way repeater."""
+        p_seg, F_seg = self.error_corrected_transmission()
+
+        return {
+            "n_segments": self.n_segments,
+            "cluster_size": self.cluster_size,
+            "segment_transmission": p_seg,
+            "segment_fidelity": F_seg,
+            "rate": self.calculate_rate(),
+            "type": "one-way"
+        }
+
+# Demonstrate one-way repeater
+print("\nOne-Way Quantum Repeater")
+print("=" * 60)
+
+for cluster_size in [50, 100, 200]:
+    repeater = OneWayRepeater(
+        n_segments=8,
+        total_distance=500,
+        cluster_size=cluster_size
+    )
+
+    analysis = repeater.analyze()
+    print(f"\nCluster size: {cluster_size} qubits")
+    print(f"  Segment transmission: {analysis['segment_transmission']:.3f}")
+    print(f"  Segment fidelity: {analysis['segment_fidelity']:.4f}")
+    print(f"  Rate: {analysis['rate']:.2e} Hz")
+```
+
+## Comparison with First-Generation
+
+```python
+class GenerationComparison:
+    """Compare first and second generation repeaters."""
+
+    def __init__(self, total_distance: float = 500):
+        self.total_distance = total_distance
+
+    def first_gen_rate(
+        self,
+        n_segments: int,
+        memory_time: float = 0.1
+    ) -> float:
+        """First-generation rate estimate."""
+        L_seg = self.total_distance / n_segments
+        eta = 10**(-0.2 * L_seg / 10)
+
+        p_seg = 0.01 * eta  # DLCZ-like
+        seg_rate = 1e6 * p_seg
+
+        # Memory constraint
+        T_gen = n_segments / seg_rate
+        if T_gen > memory_time * 5:
+            return 0.0
+
+        # Swapping success (50%^(N-1))
+        p_swap = 0.5 ** (n_segments - 1)
+
+        return seg_rate * p_swap / n_segments
+
+    def second_gen_rate(
+        self,
+        n_segments: int,
+        code_n: int = 7
+    ) -> float:
+        """Second-generation rate estimate."""
+        L_seg = self.total_distance / n_segments
+        eta = 10**(-0.2 * L_seg / 10)
+
+        # Encoded transmission (loss tolerant)
+        p_seg = eta ** (code_n // 2 + 1)
+        seg_rate = 1e6 * p_seg
+
+        # No swapping penalty (deterministic)
+        return seg_rate / n_segments
+
+    def compare(self, segment_range: List[int]) -> Dict:
+        """Compare rates across segment counts."""
+        return {
+            "n_segments": segment_range,
+            "first_gen": [self.first_gen_rate(n) for n in segment_range],
+            "second_gen": [self.second_gen_rate(n) for n in segment_range]
+        }
+
+# Compare generations
+compare = GenerationComparison(total_distance=500)
+
+print("\nFirst vs Second Generation Comparison")
+print("=" * 60)
+
+segments = [4, 8, 16, 32]
+comparison = compare.compare(segments)
+
+print("\nN Segments | 1st Gen Rate | 2nd Gen Rate | 2nd/1st Ratio")
+print("-" * 60)
+
+for i, n in enumerate(segments):
+    r1 = comparison["first_gen"][i]
+    r2 = comparison["second_gen"][i]
+    ratio = r2 / r1 if r1 > 0 else float('inf')
+    print(f"    {n:2d}     | {r1:.2e} Hz  | {r2:.2e} Hz  | {ratio:.0f}×")
+```
+
+## Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              SECOND-GENERATION SUMMARY                              │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Key Advances:                                                      │
+│  • Encoded qubits using QEC codes                                  │
+│  • Deterministic BSM (100% success vs 50%)                         │
+│  • No purification needed (errors corrected by code)               │
+│  • Better rate scaling with distance                               │
+│                                                                     │
+│  Approaches:                                                        │
+│  • Encoded two-way: Logical Bell pairs + logical gates             │
+│  • One-way: Cluster states + adaptive measurements                 │
+│  • Hybrid: Combine elements of both                                │
+│                                                                     │
+│  Requirements:                                                      │
+│  • High-fidelity encoded state preparation                         │
+│  • Fault-tolerant logical operations                               │
+│  • Loss-tolerant encoding for transmission                         │
+│  • More physical qubits per repeater node                          │
+│                                                                     │
+│  Status: Theoretical framework established, experimental           │
+│          demonstrations beginning                                   │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```

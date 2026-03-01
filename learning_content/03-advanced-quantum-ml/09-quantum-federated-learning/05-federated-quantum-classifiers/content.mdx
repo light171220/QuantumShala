@@ -1,0 +1,703 @@
+---
+title: "Federated Quantum Classifiers"
+description: "Train quantum classification models across distributed devices while preserving data privacy."
+---
+
+# Federated Quantum Classifiers
+
+Quantum classifiers can be trained in a federated manner, enabling collaborative learning across organizations while keeping sensitive data private. This lesson explores federated training of variational quantum classifiers.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Design federated quantum classifier architectures
+- Handle non-IID data in quantum classification
+- Implement federated training for VQC classifiers
+- Balance local and global model performance
+- Apply personalization techniques
+- Evaluate federated classifier quality
+
+## 1. Quantum Classifiers Review
+
+Variational quantum classifiers use parameterized circuits to classify data encoded into quantum states.
+
+<Definition term="Variational Quantum Classifier">
+A quantum machine learning model that uses a parameterized quantum circuit to transform encoded data and produce classification outputs through measurement.
+</Definition>
+
+```python
+import numpy as np
+
+class QuantumClassifier:
+    """
+    Simulated variational quantum classifier.
+    """
+
+    def __init__(self, n_qubits, n_layers):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.n_params = n_qubits * n_layers * 3  # Rx, Ry, Rz per qubit per layer
+        self.params = np.random.randn(self.n_params) * 0.1
+
+    def encode(self, x):
+        """
+        Encode classical data into quantum state.
+        Returns encoded angles.
+        """
+        # Angle encoding
+        n_features = len(x)
+        encoding = np.zeros(self.n_qubits)
+        for i in range(min(n_features, self.n_qubits)):
+            encoding[i] = x[i] * np.pi
+        return encoding
+
+    def forward(self, x):
+        """
+        Run circuit and return classification probability.
+        """
+        encoding = self.encode(x)
+
+        # Simulate variational circuit effect
+        # Combines encoding with parameterized rotations
+        result = 0.5  # Start at 50%
+
+        param_idx = 0
+        for layer in range(self.n_layers):
+            for qubit in range(self.n_qubits):
+                # Apply rotations
+                rx = self.params[param_idx]
+                ry = self.params[param_idx + 1]
+                rz = self.params[param_idx + 2]
+                param_idx += 3
+
+                # Simplified: rotation effect on output
+                enc = encoding[qubit] if qubit < len(encoding) else 0
+                result += 0.1 * np.sin(rx + enc) * np.cos(ry) * np.sin(rz)
+
+        # Sigmoid to get probability
+        prob = 1 / (1 + np.exp(-result))
+        return prob
+
+    def predict(self, x, threshold=0.5):
+        """Predict class label."""
+        prob = self.forward(x)
+        return 1 if prob >= threshold else 0
+
+    def compute_loss(self, X, y):
+        """Binary cross-entropy loss."""
+        loss = 0.0
+        for xi, yi in zip(X, y):
+            prob = self.forward(xi)
+            prob = np.clip(prob, 1e-7, 1 - 1e-7)
+            loss -= yi * np.log(prob) + (1 - yi) * np.log(1 - prob)
+        return loss / len(y)
+
+    def accuracy(self, X, y):
+        """Compute accuracy."""
+        correct = sum(self.predict(xi) == yi for xi, yi in zip(X, y))
+        return correct / len(y)
+
+# Demonstration
+print("Quantum Classifier Basics:")
+print("=" * 50)
+
+np.random.seed(42)
+
+# Create classifier
+qc = QuantumClassifier(n_qubits=4, n_layers=2)
+print(f"\nArchitecture: {qc.n_qubits} qubits, {qc.n_layers} layers")
+print(f"Parameters: {qc.n_params}")
+
+# Generate sample data
+n_samples = 50
+X = np.random.randn(n_samples, 4)
+y = (X[:, 0] + X[:, 1] > 0).astype(int)  # Simple linear boundary
+
+print(f"\nData: {n_samples} samples, {len(X[0])} features")
+print(f"Class distribution: {sum(y)} positive, {len(y) - sum(y)} negative")
+
+# Initial performance
+loss = qc.compute_loss(X, y)
+acc = qc.accuracy(X, y)
+print(f"\nInitial: Loss = {loss:.4f}, Accuracy = {acc:.2%}")
+```
+
+## 2. Federated Classifier Architecture
+
+In federated learning, each client trains on local data and shares only model updates.
+
+<Formula>
+Federated classification objective:
+$$\min_{\theta} \sum_{k=1}^{K} \frac{n_k}{n} \mathcal{L}_k(\theta)$$
+where $\mathcal{L}_k$ is the local loss on client $k$ with $n_k$ samples.
+</Formula>
+
+```python
+import numpy as np
+
+class FederatedQuantumClassifier:
+    """
+    Federated learning for quantum classifiers.
+    """
+
+    def __init__(self, n_qubits, n_layers, n_clients):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.n_clients = n_clients
+
+        # Global model
+        self.n_params = n_qubits * n_layers * 3
+        self.global_params = np.random.randn(self.n_params) * 0.1
+
+        # Client models (local copies)
+        self.client_params = [self.global_params.copy()
+                             for _ in range(n_clients)]
+
+    def distribute_model(self):
+        """Send global model to all clients."""
+        for i in range(self.n_clients):
+            self.client_params[i] = self.global_params.copy()
+
+    def local_forward(self, client_id, x):
+        """Run forward pass with client's parameters."""
+        params = self.client_params[client_id]
+        encoding = x * np.pi
+
+        result = 0.5
+        param_idx = 0
+        for layer in range(self.n_layers):
+            for qubit in range(self.n_qubits):
+                rx, ry, rz = params[param_idx:param_idx+3]
+                param_idx += 3
+                enc = encoding[qubit] if qubit < len(encoding) else 0
+                result += 0.1 * np.sin(rx + enc) * np.cos(ry) * np.sin(rz)
+
+        return 1 / (1 + np.exp(-result))
+
+    def local_gradient(self, client_id, X, y, eps=0.01):
+        """Compute gradient on local data."""
+        params = self.client_params[client_id]
+        grad = np.zeros_like(params)
+
+        for i in range(len(params)):
+            # Numerical gradient
+            params[i] += eps
+            self.client_params[client_id] = params
+            loss_plus = self._local_loss(client_id, X, y)
+
+            params[i] -= 2 * eps
+            self.client_params[client_id] = params
+            loss_minus = self._local_loss(client_id, X, y)
+
+            params[i] += eps
+            self.client_params[client_id] = params
+
+            grad[i] = (loss_plus - loss_minus) / (2 * eps)
+
+        return grad
+
+    def _local_loss(self, client_id, X, y):
+        """Compute loss on local data."""
+        loss = 0.0
+        for xi, yi in zip(X, y):
+            prob = self.local_forward(client_id, xi)
+            prob = np.clip(prob, 1e-7, 1 - 1e-7)
+            loss -= yi * np.log(prob) + (1 - yi) * np.log(1 - prob)
+        return loss / len(y)
+
+    def local_train(self, client_id, X, y, epochs=3, lr=0.1):
+        """Train on local data."""
+        for _ in range(epochs):
+            grad = self.local_gradient(client_id, X, y)
+            self.client_params[client_id] -= lr * grad
+
+        return self.client_params[client_id]
+
+    def aggregate(self, data_sizes):
+        """FedAvg aggregation."""
+        total = sum(data_sizes)
+        weights = [n / total for n in data_sizes]
+
+        new_params = np.zeros_like(self.global_params)
+        for params, weight in zip(self.client_params, weights):
+            new_params += weight * params
+
+        self.global_params = new_params
+        return new_params
+
+# Demonstration
+print("Federated Quantum Classifier:")
+print("=" * 50)
+
+np.random.seed(42)
+
+fqc = FederatedQuantumClassifier(n_qubits=4, n_layers=2, n_clients=3)
+print(f"\nGlobal model: {fqc.n_params} parameters")
+print(f"Clients: {fqc.n_clients}")
+
+# Generate client data (non-IID)
+client_data = []
+for i in range(3):
+    n_samples = 20 + i * 10
+    X = np.random.randn(n_samples, 4) + i * 0.5  # Shifted distributions
+    y = (X[:, 0] + X[:, 1] > i * 0.3).astype(int)
+    client_data.append((X, y))
+    print(f"\nClient {i}: {n_samples} samples")
+    print(f"  Class balance: {sum(y)}/{len(y)} positive")
+```
+
+<Tip>
+Non-IID data is common in federated learning. Different clients may have different class distributions or feature distributions based on their local context.
+</Tip>
+
+## 3. Handling Non-IID Data
+
+Non-IID data can cause client drift where local models diverge from the global optimum.
+
+```python
+import numpy as np
+
+class NonIIDHandler:
+    """
+    Techniques for handling non-IID data in federated QML.
+    """
+
+    def __init__(self, base_model):
+        self.base_model = base_model
+
+    def fedprox_regularizer(self, local_params, global_params, mu=0.1):
+        """
+        FedProx: penalize deviation from global model.
+
+        Adds μ/2 ||θ_local - θ_global||² to loss
+        """
+        diff = local_params - global_params
+        return mu / 2 * np.sum(diff ** 2)
+
+    def scaffold_correction(self, client_control, server_control):
+        """
+        SCAFFOLD: use control variates to correct drift.
+
+        Returns correction term for gradient.
+        """
+        return server_control - client_control
+
+    def measure_heterogeneity(self, client_params_list):
+        """
+        Measure parameter heterogeneity across clients.
+        """
+        mean_params = np.mean(client_params_list, axis=0)
+        variances = np.var(client_params_list, axis=0)
+
+        return {
+            'mean_variance': np.mean(variances),
+            'max_variance': np.max(variances),
+            'divergence': np.mean([np.linalg.norm(p - mean_params)
+                                  for p in client_params_list])
+        }
+
+def demonstrate_noniid_effects():
+    """
+    Show how non-IID data affects training.
+    """
+    print("Non-IID Data Effects:")
+    print("=" * 50)
+
+    np.random.seed(42)
+
+    # IID scenario: all clients have same distribution
+    print("\n1. IID Data:")
+    iid_means = []
+    for i in range(5):
+        X = np.random.randn(50, 4)
+        y = (X[:, 0] > 0).astype(int)
+        iid_means.append(np.mean(y))
+    print(f"   Class ratios: {[f'{m:.2f}' for m in iid_means]}")
+    print(f"   Variance: {np.var(iid_means):.4f}")
+
+    # Non-IID: different class distributions
+    print("\n2. Non-IID Data (Label Skew):")
+    noniid_means = []
+    for i in range(5):
+        X = np.random.randn(50, 4)
+        # Each client has different class balance
+        y = (X[:, 0] > -1 + i * 0.5).astype(int)
+        noniid_means.append(np.mean(y))
+    print(f"   Class ratios: {[f'{m:.2f}' for m in noniid_means]}")
+    print(f"   Variance: {np.var(noniid_means):.4f}")
+
+    # Non-IID: different feature distributions
+    print("\n3. Non-IID Data (Feature Shift):")
+    feature_means = []
+    for i in range(5):
+        # Each client has shifted features
+        X = np.random.randn(50, 4) + i * 0.5
+        feature_means.append(np.mean(X))
+    print(f"   Feature means: {[f'{m:.2f}' for m in feature_means]}")
+
+demonstrate_noniid_effects()
+
+# FedProx example
+print("\n\nFedProx Regularization:")
+print("-" * 40)
+
+np.random.seed(42)
+global_params = np.array([0.1, 0.2, 0.3])
+local_params = np.array([0.5, 0.6, 0.7])
+
+handler = NonIIDHandler(None)
+
+for mu in [0.0, 0.1, 1.0]:
+    reg = handler.fedprox_regularizer(local_params, global_params, mu)
+    print(f"μ = {mu}: regularizer = {reg:.4f}")
+```
+
+<Warning>
+High client heterogeneity can slow convergence or prevent it entirely. Use techniques like FedProx or SCAFFOLD when data is significantly non-IID.
+</Warning>
+
+## 4. Federated Training Loop
+
+A complete federated training round involves distribution, local training, and aggregation.
+
+```python
+import numpy as np
+
+def federated_training_round(fqc, client_data, local_epochs=3, lr=0.1,
+                            fedprox_mu=0.0):
+    """
+    Execute one federated training round.
+    """
+    # Step 1: Distribute global model
+    fqc.distribute_model()
+    global_params_copy = fqc.global_params.copy()
+
+    # Step 2: Local training on each client
+    data_sizes = []
+    for client_id, (X, y) in enumerate(client_data):
+        data_sizes.append(len(X))
+
+        for epoch in range(local_epochs):
+            grad = fqc.local_gradient(client_id, X, y)
+
+            # FedProx regularization
+            if fedprox_mu > 0:
+                diff = fqc.client_params[client_id] - global_params_copy
+                grad += fedprox_mu * diff
+
+            fqc.client_params[client_id] -= lr * grad
+
+    # Step 3: Aggregate
+    fqc.aggregate(data_sizes)
+
+    return fqc.global_params
+
+def run_federated_training(n_rounds=10, local_epochs=3, fedprox_mu=0.0):
+    """
+    Run full federated training.
+    """
+    print(f"\nFederated Training (FedProx μ={fedprox_mu}):")
+    print("-" * 40)
+
+    np.random.seed(42)
+
+    fqc = FederatedQuantumClassifier(n_qubits=4, n_layers=2, n_clients=3)
+
+    # Generate non-IID client data
+    client_data = []
+    for i in range(3):
+        n = 30 + i * 10
+        X = np.random.randn(n, 4) + i * 0.3
+        y = (X[:, 0] + X[:, 1] > i * 0.2).astype(int)
+        client_data.append((X, y))
+
+    # Combine for global evaluation
+    X_all = np.vstack([d[0] for d in client_data])
+    y_all = np.hstack([d[1] for d in client_data])
+
+    # Training loop
+    for round_num in range(n_rounds):
+        federated_training_round(fqc, client_data, local_epochs,
+                                fedprox_mu=fedprox_mu)
+
+        # Evaluate
+        correct = sum(
+            1 if 1/(1+np.exp(-sum(fqc.global_params[:4] * xi))) > 0.5 and yi == 1
+            or 1/(1+np.exp(-sum(fqc.global_params[:4] * xi))) <= 0.5 and yi == 0
+            else 0
+            for xi, yi in zip(X_all, y_all)
+        )
+        acc = correct / len(y_all)
+
+        if round_num % 3 == 0:
+            print(f"  Round {round_num+1}: Accuracy = {acc:.2%}")
+
+    return fqc
+
+# Run experiments
+print("Federated Training Experiments:")
+print("=" * 50)
+
+# Standard FedAvg
+fqc1 = run_federated_training(n_rounds=10, fedprox_mu=0.0)
+
+# FedProx
+fqc2 = run_federated_training(n_rounds=10, fedprox_mu=0.1)
+```
+
+## 5. Personalization Strategies
+
+Sometimes a single global model isn't optimal. Personalization adapts models to each client.
+
+```python
+import numpy as np
+
+class PersonalizedFederatedQC:
+    """
+    Personalized federated quantum classifier.
+    """
+
+    def __init__(self, n_qubits, n_layers, n_clients):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.n_clients = n_clients
+        self.n_params = n_qubits * n_layers * 3
+
+        # Shared base layers
+        self.n_shared = self.n_params // 2
+        self.n_personal = self.n_params - self.n_shared
+
+        # Global shared parameters
+        self.shared_params = np.random.randn(self.n_shared) * 0.1
+
+        # Personal parameters for each client
+        self.personal_params = [np.random.randn(self.n_personal) * 0.1
+                               for _ in range(n_clients)]
+
+    def get_client_params(self, client_id):
+        """Get full parameters for a client."""
+        return np.concatenate([self.shared_params,
+                              self.personal_params[client_id]])
+
+    def local_train(self, client_id, X, y, epochs=3, lr=0.1,
+                   train_personal_only=False):
+        """
+        Train client model.
+
+        If train_personal_only=True, only update personal layers.
+        """
+        params = self.get_client_params(client_id)
+
+        for _ in range(epochs):
+            # Compute gradient (simplified)
+            grad = np.random.randn(len(params)) * 0.1  # Placeholder
+
+            if train_personal_only:
+                # Only update personal parameters
+                self.personal_params[client_id] -= lr * grad[self.n_shared:]
+            else:
+                # Update both
+                temp_shared = self.shared_params - lr * grad[:self.n_shared]
+                self.personal_params[client_id] -= lr * grad[self.n_shared:]
+                return temp_shared  # Return shared update
+
+        return None
+
+    def aggregate_shared(self, shared_updates, weights):
+        """Aggregate only shared parameters."""
+        if not shared_updates:
+            return
+
+        new_shared = np.zeros(self.n_shared)
+        total_weight = sum(weights)
+
+        for update, weight in zip(shared_updates, weights):
+            if update is not None:
+                new_shared += (weight / total_weight) * update
+
+        self.shared_params = new_shared
+
+def personalization_experiment():
+    """
+    Compare global vs personalized models.
+    """
+    print("Personalization Experiment:")
+    print("=" * 50)
+
+    np.random.seed(42)
+
+    n_clients = 4
+    pfqc = PersonalizedFederatedQC(n_qubits=4, n_layers=2, n_clients=n_clients)
+
+    print(f"\nArchitecture:")
+    print(f"  Total parameters: {pfqc.n_params}")
+    print(f"  Shared parameters: {pfqc.n_shared}")
+    print(f"  Personal parameters: {pfqc.n_personal}")
+
+    # Simulate non-IID client data
+    print("\n\nTraining phases:")
+
+    # Phase 1: Train shared layers together
+    print("\n1. Collaborative training (shared layers):")
+    for round_num in range(5):
+        shared_updates = []
+        weights = []
+        for client in range(n_clients):
+            X = np.random.randn(20, 4)
+            y = np.random.randint(0, 2, 20)
+            update = pfqc.local_train(client, X, y, epochs=1,
+                                     train_personal_only=False)
+            shared_updates.append(update)
+            weights.append(20)
+
+        pfqc.aggregate_shared(shared_updates, weights)
+        print(f"   Round {round_num+1}: Aggregated shared parameters")
+
+    # Phase 2: Fine-tune personal layers
+    print("\n2. Personal fine-tuning (personal layers only):")
+    for client in range(n_clients):
+        X = np.random.randn(20, 4) + client * 0.5  # Client-specific data
+        y = np.random.randint(0, 2, 20)
+        pfqc.local_train(client, X, y, epochs=3, train_personal_only=True)
+        print(f"   Client {client}: Fine-tuned personal layers")
+
+    print("\n\nBenefits of personalization:")
+    print("  • Shared layers capture common patterns")
+    print("  • Personal layers adapt to local data distribution")
+    print("  • Better performance on heterogeneous data")
+
+personalization_experiment()
+```
+
+<Tip>
+Personalization is particularly useful when clients have fundamentally different data distributions or tasks. The shared layers learn transferable features while personal layers adapt to local needs.
+</Tip>
+
+## 6. Evaluation Metrics
+
+Proper evaluation requires considering both global and local performance.
+
+```python
+import numpy as np
+
+def federated_evaluation_metrics():
+    """
+    Metrics for evaluating federated classifiers.
+    """
+    print("Federated Classifier Evaluation:")
+    print("=" * 50)
+
+    np.random.seed(42)
+
+    # Simulated predictions
+    n_clients = 4
+    n_samples_per_client = 25
+
+    client_results = []
+    for client in range(n_clients):
+        y_true = np.random.randint(0, 2, n_samples_per_client)
+        y_pred = np.random.randint(0, 2, n_samples_per_client)
+
+        # Make some clients more accurate
+        if client < 2:
+            y_pred = y_true.copy()
+            y_pred[np.random.choice(n_samples_per_client, 3)] = 1 - y_pred[np.random.choice(n_samples_per_client, 3)]
+
+        acc = np.mean(y_pred == y_true)
+        client_results.append({
+            'client': client,
+            'samples': n_samples_per_client,
+            'accuracy': acc,
+            'y_true': y_true,
+            'y_pred': y_pred
+        })
+
+    # Metric 1: Average local accuracy
+    local_accs = [r['accuracy'] for r in client_results]
+    avg_local = np.mean(local_accs)
+    print(f"\n1. Average Local Accuracy: {avg_local:.2%}")
+    for r in client_results:
+        print(f"   Client {r['client']}: {r['accuracy']:.2%}")
+
+    # Metric 2: Weighted average (by sample count)
+    total_samples = sum(r['samples'] for r in client_results)
+    weighted_acc = sum(r['accuracy'] * r['samples'] / total_samples
+                      for r in client_results)
+    print(f"\n2. Weighted Average Accuracy: {weighted_acc:.2%}")
+
+    # Metric 3: Global accuracy (all data together)
+    all_true = np.concatenate([r['y_true'] for r in client_results])
+    all_pred = np.concatenate([r['y_pred'] for r in client_results])
+    global_acc = np.mean(all_pred == all_true)
+    print(f"\n3. Global Accuracy: {global_acc:.2%}")
+
+    # Metric 4: Fairness (variance across clients)
+    acc_variance = np.var(local_accs)
+    acc_range = max(local_accs) - min(local_accs)
+    print(f"\n4. Fairness Metrics:")
+    print(f"   Accuracy variance: {acc_variance:.4f}")
+    print(f"   Accuracy range: {acc_range:.2%}")
+
+    # Metric 5: Worst-client accuracy
+    worst_acc = min(local_accs)
+    print(f"\n5. Worst-Client Accuracy: {worst_acc:.2%}")
+
+    return client_results
+
+def compute_communication_cost(n_clients, n_params, n_rounds,
+                               compression_ratio=1.0):
+    """
+    Estimate communication cost.
+    """
+    print(f"\n\nCommunication Cost Estimation:")
+    print("-" * 40)
+
+    # Bytes per float (32-bit)
+    bytes_per_param = 4
+
+    # Per round: clients send gradients/params, server sends global model
+    upload_per_round = n_clients * n_params * bytes_per_param
+    download_per_round = n_clients * n_params * bytes_per_param
+
+    total_upload = upload_per_round * n_rounds / compression_ratio
+    total_download = download_per_round * n_rounds
+
+    print(f"Configuration:")
+    print(f"  Clients: {n_clients}")
+    print(f"  Parameters: {n_params}")
+    print(f"  Rounds: {n_rounds}")
+    print(f"  Compression: {compression_ratio}x")
+
+    print(f"\nCommunication:")
+    print(f"  Upload per round: {upload_per_round / 1024:.2f} KB")
+    print(f"  Total upload: {total_upload / 1024:.2f} KB")
+    print(f"  Total download: {total_download / 1024:.2f} KB")
+
+    return total_upload + total_download
+
+# Run evaluation
+federated_evaluation_metrics()
+compute_communication_cost(n_clients=10, n_params=1000, n_rounds=100,
+                          compression_ratio=10)
+```
+
+<Warning>
+Don't optimize only for average accuracy. Consider worst-client performance and fairness metrics to ensure the model works well for all participants.
+</Warning>
+
+## Summary
+
+Federated quantum classifiers enable collaborative training while preserving data privacy:
+
+1. **Architecture**: Distribute model to clients, aggregate updates
+2. **Non-IID Handling**: Use FedProx, SCAFFOLD, or other techniques
+3. **Training Loop**: Distribute → Local Train → Aggregate
+4. **Personalization**: Split shared and personal layers
+5. **Evaluation**: Consider local, global, and fairness metrics
+
+This approach enables quantum ML across organizations without sharing sensitive data.
+
+## Next Steps
+
+In the next lesson, we'll explore communication efficiency techniques to reduce the bandwidth requirements of federated quantum learning.

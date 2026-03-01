@@ -1,0 +1,478 @@
+---
+title: "PQC Performance Optimization"
+description: "Techniques for optimizing post-quantum cryptography performance including algorithm selection, hardware acceleration, and benchmarking."
+---
+
+# PQC Performance Optimization
+
+While PQC algorithms are generally slower than classical cryptography, careful optimization can achieve acceptable performance for most applications. This lesson covers practical optimization techniques.
+
+## Performance Landscape
+
+### Algorithm Performance Comparison
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    PQC Performance Overview                                   │
+├─────────────────────┬───────────┬───────────┬───────────┬──────────────────┤
+│ Algorithm           │ KeyGen    │ Sign/Enc  │ Verify/Dec│ Notes            │
+├─────────────────────┼───────────┼───────────┼───────────┼──────────────────┤
+│ ECDSA P-256         │ ~40 μs    │ ~60 μs    │ ~120 μs   │ Classical ref    │
+├─────────────────────┼───────────┼───────────┼───────────┼──────────────────┤
+│ ML-KEM-768          │ ~15 μs    │ ~20 μs    │ ~20 μs    │ Fastest PQC KEM  │
+│ ML-KEM-1024         │ ~25 μs    │ ~30 μs    │ ~30 μs    │ Still very fast  │
+├─────────────────────┼───────────┼───────────┼───────────┼──────────────────┤
+│ ML-DSA-65           │ ~70 μs    │ ~200 μs   │ ~80 μs    │ Balanced choice  │
+│ ML-DSA-87           │ ~110 μs   │ ~300 μs   │ ~120 μs   │ Higher security  │
+├─────────────────────┼───────────┼───────────┼───────────┼──────────────────┤
+│ SLH-DSA-128f        │ ~1 ms     │ ~40 ms    │ ~2 ms     │ Fast variant     │
+│ SLH-DSA-128s        │ ~3 ms     │ ~500 ms   │ ~3 ms     │ Small signatures │
+├─────────────────────┼───────────┼───────────┼───────────┼──────────────────┤
+│ FN-DSA-512          │ ~8 ms     │ ~300 μs   │ ~50 μs    │ Slow keygen!     │
+│ FN-DSA-1024         │ ~30 ms    │ ~600 μs   │ ~100 μs   │ Slowest keygen   │
+└─────────────────────┴───────────┴───────────┴───────────┴──────────────────┘
+
+Note: Times are approximate, vary by hardware and implementation.
+All times assume AVX2-optimized implementations on modern x86.
+```
+
+### Performance Trade-offs
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Algorithm Selection Trade-offs                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ML-DSA (Best Overall Performance)                              │
+│  ├─ Pros: Fast keygen, balanced sign/verify                    │
+│  ├─ Cons: Larger signatures than FN-DSA                        │
+│  └─ Best for: General purpose, high-volume signing             │
+│                                                                  │
+│  FN-DSA (Smallest Signatures)                                   │
+│  ├─ Pros: Very fast verify, smallest signatures                │
+│  ├─ Cons: Very slow keygen, complex implementation             │
+│  └─ Best for: Certificate chains, bandwidth-limited            │
+│                                                                  │
+│  SLH-DSA (Conservative Security)                                │
+│  ├─ Pros: Hash-only security, simple to implement              │
+│  ├─ Cons: Large signatures, slow signing                       │
+│  └─ Best for: Highest security needs, infrequent signing       │
+│                                                                  │
+│  ML-KEM (Key Exchange)                                          │
+│  ├─ Pros: Fastest PQC KEM, moderate sizes                      │
+│  ├─ Cons: Larger than ECDH                                     │
+│  └─ Best for: TLS, key establishment                           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Optimization Techniques
+
+### Number Theoretic Transform (NTT)
+
+```python
+"""
+NTT Optimization for Lattice Cryptography
+
+The NTT is the core operation in ML-KEM and ML-DSA.
+Optimizing NTT directly improves overall performance.
+"""
+
+import numpy as np
+from typing import List
+
+# Reference NTT (educational, not optimized)
+def ntt_naive(a: List[int], q: int, psi: int, n: int) -> List[int]:
+    """
+    Naive NTT: O(n²) complexity.
+    """
+    result = [0] * n
+    for i in range(n):
+        for j in range(n):
+            result[i] += a[j] * pow(psi, i * j, q)
+        result[i] %= q
+    return result
+
+# Cooley-Tukey NTT (O(n log n))
+def ntt_cooley_tukey(a: List[int], q: int,
+                      psi_table: List[int], n: int) -> List[int]:
+    """
+    Cooley-Tukey NTT: O(n log n) complexity.
+
+    Optimization points:
+    1. Pre-computed twiddle factors (psi_table)
+    2. In-place computation
+    3. Bit-reversal permutation
+    """
+    result = a.copy()
+
+    # Iterative CT NTT
+    m = 1
+    while m < n:
+        for i in range(0, n, 2 * m):
+            for j in range(m):
+                t = (psi_table[m + j] * result[i + j + m]) % q
+                result[i + j + m] = (result[i + j] - t) % q
+                result[i + j] = (result[i + j] + t) % q
+        m *= 2
+
+    return result
+
+# Performance comparison
+def benchmark_ntt():
+    """Compare NTT implementations."""
+    import time
+
+    n = 256  # Typical dimension
+    q = 12289  # Typical modulus
+
+    # Generate test data
+    a = [i % q for i in range(n)]
+
+    # Pre-compute twiddle factors
+    psi = 3  # Primitive root (example)
+    psi_table = [pow(psi, i, q) for i in range(n)]
+
+    # Benchmark naive (only for small n)
+    if n <= 256:
+        start = time.perf_counter()
+        for _ in range(10):
+            ntt_naive(a, q, psi, n)
+        naive_time = (time.perf_counter() - start) / 10
+        print(f"Naive NTT: {naive_time*1000:.3f} ms")
+
+    # Benchmark Cooley-Tukey
+    start = time.perf_counter()
+    for _ in range(1000):
+        ntt_cooley_tukey(a, q, psi_table, n)
+    ct_time = (time.perf_counter() - start) / 1000
+    print(f"Cooley-Tukey NTT: {ct_time*1000:.3f} ms")
+
+    if n <= 256:
+        print(f"Speedup: {naive_time/ct_time:.1f}x")
+
+benchmark_ntt()
+```
+
+### SIMD Optimization with AVX2
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SIMD Optimization Techniques                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  AVX2 (256-bit vectors)                                         │
+│  ├─ Process 8 × 32-bit or 16 × 16-bit operations at once       │
+│  ├─ Critical for NTT butterfly operations                       │
+│  ├─ Typical speedup: 2-4x over scalar code                     │
+│  └─ Available on most x86 CPUs from 2013+                      │
+│                                                                  │
+│  Key Operations to Vectorize:                                   │
+│  1. NTT butterfly                                               │
+│     ┌────────────────────────────────────────────────────┐     │
+│     │  // Vectorized modular multiply-add                │     │
+│     │  vmovdqu  ymm0, [a_ptr]     // Load 8 coefficients│     │
+│     │  vmovdqu  ymm1, [b_ptr]     // Load 8 coefficients│     │
+│     │  vpmulld  ymm2, ymm0, ymm1  // Parallel multiply  │     │
+│     │  ... Barrett reduction ...                          │     │
+│     └────────────────────────────────────────────────────┘     │
+│                                                                  │
+│  2. Polynomial arithmetic                                       │
+│     - Addition: vpaddw (16-bit) or vpaddd (32-bit)             │
+│     - Subtraction: vpsubw or vpsubd                            │
+│     - Coefficient-wise reduction                                │
+│                                                                  │
+│  3. Sampling operations                                         │
+│     - Rejection sampling with vectorized comparisons           │
+│     - CBD (centered binomial distribution)                      │
+│                                                                  │
+│  ARM NEON (128-bit vectors)                                     │
+│  ├─ Process 4 × 32-bit or 8 × 16-bit at once                  │
+│  ├─ Important for mobile/embedded                               │
+│  └─ Typical speedup: 1.5-2x                                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Memory Optimization
+
+```python
+"""
+Memory Optimization Techniques for PQC
+"""
+
+import sys
+from dataclasses import dataclass
+from typing import List
+
+# Example: Lazy polynomial representation
+class LazyPolynomial:
+    """
+    Memory-efficient polynomial with lazy evaluation.
+
+    Instead of storing all coefficients, stores:
+    - Seed (32 bytes) for deterministic expansion
+    - Only materialized when needed
+    """
+
+    def __init__(self, seed: bytes = None, coefficients: List[int] = None):
+        self.seed = seed
+        self._coefficients = coefficients
+        self._expanded = coefficients is not None
+
+    @property
+    def coefficients(self) -> List[int]:
+        """Expand coefficients on demand."""
+        if not self._expanded:
+            self._expand()
+        return self._coefficients
+
+    def _expand(self):
+        """Expand seed to coefficients using XOF."""
+        # In real implementation, use SHAKE-128/256
+        import hashlib
+        xof = hashlib.shake_256(self.seed)
+        n = 256  # Example dimension
+        self._coefficients = []
+        for i in range(n):
+            b = xof.digest(2 * (i + 1))[2*i:2*(i+1)]
+            self._coefficients.append(int.from_bytes(b, 'little') % 3329)
+        self._expanded = True
+
+    def memory_usage(self) -> int:
+        """Report memory usage."""
+        if self._expanded:
+            return sys.getsizeof(self._coefficients) + len(self._coefficients) * 4
+        return 32  # Just the seed
+
+# Demonstration
+print("Memory Optimization Example")
+print("=" * 50)
+
+# Full polynomial
+full_poly = LazyPolynomial(coefficients=[i for i in range(256)])
+print(f"Full polynomial memory: {full_poly.memory_usage()} bytes")
+
+# Lazy polynomial (seed only)
+lazy_poly = LazyPolynomial(seed=b"x" * 32)
+print(f"Lazy polynomial memory (unexpanded): {lazy_poly.memory_usage()} bytes")
+
+# After expansion
+_ = lazy_poly.coefficients
+print(f"Lazy polynomial memory (expanded): {lazy_poly.memory_usage()} bytes")
+```
+
+## Benchmarking
+
+### Proper Benchmarking Methodology
+
+```python
+"""
+Proper benchmarking methodology for cryptographic operations
+"""
+
+import time
+import statistics
+from typing import Callable, List
+import gc
+
+def benchmark_crypto(func: Callable,
+                     warmup_rounds: int = 10,
+                     measure_rounds: int = 100,
+                     name: str = "Operation") -> dict:
+    """
+    Proper cryptographic benchmarking.
+
+    Key practices:
+    1. Warmup rounds (CPU cache, JIT compilation)
+    2. Multiple measurements for statistics
+    3. Garbage collection control
+    4. Report median (resistant to outliers)
+    """
+
+    # Disable GC during measurements
+    gc.disable()
+
+    try:
+        # Warmup
+        for _ in range(warmup_rounds):
+            func()
+
+        # Measure
+        times = []
+        for _ in range(measure_rounds):
+            start = time.perf_counter_ns()
+            func()
+            elapsed = time.perf_counter_ns() - start
+            times.append(elapsed)
+
+    finally:
+        gc.enable()
+
+    return {
+        "name": name,
+        "rounds": measure_rounds,
+        "min_ns": min(times),
+        "max_ns": max(times),
+        "mean_ns": statistics.mean(times),
+        "median_ns": statistics.median(times),
+        "stdev_ns": statistics.stdev(times),
+        "ops_per_sec": 1e9 / statistics.median(times)
+    }
+
+def print_benchmark(result: dict):
+    """Pretty print benchmark results."""
+    print(f"\n{result['name']}")
+    print(f"  Rounds: {result['rounds']}")
+    print(f"  Median: {result['median_ns']/1000:.2f} μs")
+    print(f"  Mean:   {result['mean_ns']/1000:.2f} μs")
+    print(f"  Stdev:  {result['stdev_ns']/1000:.2f} μs")
+    print(f"  Min:    {result['min_ns']/1000:.2f} μs")
+    print(f"  Max:    {result['max_ns']/1000:.2f} μs")
+    print(f"  Ops/sec: {result['ops_per_sec']:.0f}")
+
+# Example benchmarks
+import hashlib
+import os
+
+# SHA-256 benchmark
+result = benchmark_crypto(
+    lambda: hashlib.sha256(b"x" * 1024).digest(),
+    name="SHA-256 (1KB)"
+)
+print_benchmark(result)
+
+# Simulate ML-DSA verify (placeholder)
+def mock_ml_dsa_verify():
+    # Placeholder for actual verify
+    for _ in range(10):
+        hashlib.sha256(os.urandom(32)).digest()
+
+result = benchmark_crypto(mock_ml_dsa_verify, name="Mock ML-DSA Verify")
+print_benchmark(result)
+```
+
+### Performance Testing Framework
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Benchmarking Best Practices                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  TEST ENVIRONMENT                                               │
+│  □ Use dedicated hardware (no background processes)            │
+│  □ Fix CPU frequency (disable turbo boost for consistency)     │
+│  □ Control temperature (avoid thermal throttling)              │
+│  □ Pin processes to specific cores                              │
+│  □ Disable hyperthreading if measuring single-threaded         │
+│                                                                  │
+│  MEASUREMENT METHODOLOGY                                        │
+│  □ Warmup phase (10-100 iterations)                            │
+│  □ Multiple rounds (100-10000 depending on operation)          │
+│  □ Report median (not mean) for robustness                     │
+│  □ Report variance/stdev for reliability assessment            │
+│  □ Use high-resolution timer (perf_counter_ns)                 │
+│                                                                  │
+│  REPORTING                                                      │
+│  □ Document CPU model and clock speed                          │
+│  □ Note compiler and optimization flags                        │
+│  □ Include memory configuration                                 │
+│  □ Report both time and operations/second                      │
+│  □ Compare against reference implementations                   │
+│                                                                  │
+│  COMMON PITFALLS                                                │
+│  ✗ Measuring too few iterations                                │
+│  ✗ Including setup time in measurements                        │
+│  ✗ Not accounting for cache effects                            │
+│  ✗ Ignoring variance in results                                │
+│  ✗ Comparing different platforms without normalization         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Platform-Specific Optimization
+
+### Hardware Detection and Selection
+
+```python
+"""
+Runtime hardware detection for optimization selection
+"""
+
+import platform
+import subprocess
+import os
+
+def detect_cpu_features() -> dict:
+    """
+    Detect CPU features relevant to crypto optimization.
+    """
+    features = {
+        "platform": platform.system(),
+        "processor": platform.processor(),
+        "avx2": False,
+        "avx512": False,
+        "aes_ni": False,
+        "neon": False,
+    }
+
+    if platform.system() == "Linux":
+        try:
+            with open("/proc/cpuinfo", "r") as f:
+                cpuinfo = f.read()
+                features["avx2"] = "avx2" in cpuinfo
+                features["avx512"] = "avx512f" in cpuinfo
+                features["aes_ni"] = "aes" in cpuinfo
+        except:
+            pass
+
+    elif platform.system() == "Darwin":  # macOS
+        try:
+            result = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.features"],
+                capture_output=True, text=True
+            )
+            cpu_features = result.stdout.upper()
+            features["avx2"] = "AVX2" in cpu_features
+            features["aes_ni"] = "AES" in cpu_features
+
+            # Check for ARM (Apple Silicon)
+            if "arm" in platform.processor().lower():
+                features["neon"] = True
+        except:
+            pass
+
+    return features
+
+def select_implementation(features: dict) -> str:
+    """
+    Select best implementation based on available features.
+    """
+    if features.get("avx512"):
+        return "avx512"
+    elif features.get("avx2"):
+        return "avx2"
+    elif features.get("neon"):
+        return "neon"
+    else:
+        return "generic"
+
+# Detect and report
+features = detect_cpu_features()
+print("CPU Feature Detection")
+print("=" * 50)
+for feature, value in features.items():
+    print(f"  {feature}: {value}")
+
+impl = select_implementation(features)
+print(f"\nRecommended implementation: {impl}")
+```
+
+## Summary
+
+PQC performance optimization involves:
+
+1. **Algorithm Selection**: Choose based on your use case (keygen frequency, size constraints)
+2. **Core Optimizations**: NTT, polynomial arithmetic, modular reduction
+3. **SIMD Acceleration**: AVX2/AVX512 on x86, NEON on ARM
+4. **Memory Efficiency**: Lazy expansion, streaming where possible
+5. **Proper Benchmarking**: Warmup, multiple rounds, median reporting
+
+With proper optimization, PQC can achieve performance suitable for most applications.

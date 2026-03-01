@@ -1,0 +1,699 @@
+# Entanglement Swapping
+
+## Introduction
+
+Entanglement swapping is a remarkable quantum phenomenon where two particles become entangled even though they have never directly interacted. By performing a joint measurement on intermediate particles, entanglement can be "teleported" across a network. This is the key operation that enables quantum repeaters to extend entanglement over arbitrary distances.
+
+## The Swapping Concept
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              ENTANGLEMENT SWAPPING                                  │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Before Swapping:                                                  │
+│                                                                     │
+│   Alice              Repeater              Bob                      │
+│   ┌───┐              ┌───┬───┐            ┌───┐                    │
+│   │ A │═════════════>│ R₁│ R₂│<═══════════│ B │                    │
+│   └───┘   Pair 1     └───┴───┘   Pair 2   └───┘                    │
+│                                                                     │
+│   A-R₁ entangled (Pair 1)                                          │
+│   R₂-B entangled (Pair 2)                                          │
+│   A and B: NO direct entanglement                                   │
+│                                                                     │
+│   Swapping Operation (BSM on R₁, R₂):                              │
+│                                                                     │
+│   Alice              Repeater              Bob                      │
+│   ┌───┐              ╔═══════╗            ┌───┐                    │
+│   │ A │              ║  BSM  ║            │ B │                    │
+│   └───┘              ╚═══╤═══╝            └───┘                    │
+│     ║                    │                  ║                       │
+│     ║          Classical result (2 bits)    ║                       │
+│     ╚════════════════════╪══════════════════╝                       │
+│                          ↓                                          │
+│                    A-B entangled!                                   │
+│                                                                     │
+│   After: A and B are entangled (never interacted!)                 │
+│   Correction: Bob applies Pauli based on BSM result                │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Mathematical Description
+
+Starting with two Bell pairs:
+
+```python
+import numpy as np
+from dataclasses import dataclass
+from typing import Tuple, List, Optional
+from enum import Enum
+
+class BellStateType(Enum):
+    PHI_PLUS = 0   # (|00⟩ + |11⟩)/√2
+    PHI_MINUS = 1  # (|00⟩ - |11⟩)/√2
+    PSI_PLUS = 2   # (|01⟩ + |10⟩)/√2
+    PSI_MINUS = 3  # (|01⟩ - |10⟩)/√2
+
+class EntanglementSwapping:
+    """
+    Implements entanglement swapping protocol.
+
+    Given two Bell pairs (A-R1) and (R2-B), performs BSM
+    on R1 and R2 to create entanglement between A and B.
+    """
+
+    def __init__(self):
+        # Bell states (4-qubit basis: |AR1R2B⟩)
+        self.bell_states = {
+            BellStateType.PHI_PLUS: np.array([1, 0, 0, 1]) / np.sqrt(2),
+            BellStateType.PHI_MINUS: np.array([1, 0, 0, -1]) / np.sqrt(2),
+            BellStateType.PSI_PLUS: np.array([0, 1, 1, 0]) / np.sqrt(2),
+            BellStateType.PSI_MINUS: np.array([0, 1, -1, 0]) / np.sqrt(2)
+        }
+
+        # Pauli corrections
+        self.I = np.eye(2)
+        self.X = np.array([[0, 1], [1, 0]])
+        self.Z = np.array([[1, 0], [0, -1]])
+
+        # BSM result to Pauli correction mapping
+        self.corrections = {
+            BellStateType.PHI_PLUS: self.I,
+            BellStateType.PHI_MINUS: self.Z,
+            BellStateType.PSI_PLUS: self.X,
+            BellStateType.PSI_MINUS: self.X @ self.Z
+        }
+
+    def create_initial_state(
+        self,
+        pair1_type: BellStateType = BellStateType.PHI_PLUS,
+        pair2_type: BellStateType = BellStateType.PHI_PLUS
+    ) -> np.ndarray:
+        """
+        Create initial 4-qubit state from two Bell pairs.
+
+        Ordering: |A⟩|R1⟩|R2⟩|B⟩
+        State: |Φ⁺⟩_AR1 ⊗ |Φ⁺⟩_R2B
+        """
+        pair1 = self.bell_states[pair1_type]
+        pair2 = self.bell_states[pair2_type]
+
+        # Reorder: (A,R1) ⊗ (R2,B) → |AR1R2B⟩
+        # This requires careful tensor product handling
+        state_4q = np.zeros(16, dtype=complex)
+
+        # |Φ⁺⟩_AR1 = (|00⟩ + |11⟩)/√2
+        # |Φ⁺⟩_R2B = (|00⟩ + |11⟩)/√2
+        # Combined: (|0000⟩ + |0011⟩ + |1100⟩ + |1111⟩)/2
+
+        for i in range(4):  # AR1 states
+            for j in range(4):  # R2B states
+                # Index in 16-dim space
+                a = (i >> 1) & 1
+                r1 = i & 1
+                r2 = (j >> 1) & 1
+                b = j & 1
+                idx = a * 8 + r1 * 4 + r2 * 2 + b
+
+                state_4q[idx] = pair1[i] * pair2[j]
+
+        return state_4q
+
+    def perform_bsm(
+        self,
+        state: np.ndarray
+    ) -> Tuple[BellStateType, np.ndarray]:
+        """
+        Perform Bell state measurement on R1 and R2.
+
+        Projects qubits 1,2 (R1,R2) onto Bell basis,
+        leaving qubits 0,3 (A,B) in a Bell state.
+        """
+        # Project onto each Bell state for R1,R2 (qubits 1,2)
+        probabilities = {}
+        post_states = {}
+
+        for bell_type, bell_state in self.bell_states.items():
+            # Build projector for qubits 1,2
+            projector = self._build_projector(bell_state, [1, 2])
+
+            # Calculate probability
+            prob = np.real(state.conj() @ projector @ state)
+            probabilities[bell_type] = prob
+
+            if prob > 1e-10:
+                # Post-measurement state (normalized)
+                post_state = projector @ state
+                post_state = post_state / np.linalg.norm(post_state)
+                post_states[bell_type] = post_state
+
+        # Simulate measurement
+        outcomes = list(BellStateType)
+        probs = [probabilities[o] for o in outcomes]
+        probs = np.array(probs) / sum(probs)
+
+        result = np.random.choice(4, p=probs)
+        bsm_result = outcomes[result]
+
+        return bsm_result, post_states.get(bsm_result, np.zeros(16))
+
+    def _build_projector(
+        self,
+        bell_state: np.ndarray,
+        qubits: List[int]
+    ) -> np.ndarray:
+        """Build projector onto bell_state for specified qubits."""
+        # For qubits 1,2 in 4-qubit system
+        # |Φ⁺⟩⟨Φ⁺|_12 ⊗ I_0 ⊗ I_3
+
+        proj_bell = np.outer(bell_state, bell_state)
+
+        # Expand to 4-qubit space
+        # Qubit ordering: 0,1,2,3 → A,R1,R2,B
+        projector = np.zeros((16, 16), dtype=complex)
+
+        for i in range(16):
+            for j in range(16):
+                # Extract qubit values
+                a_i, r1_i = (i >> 3) & 1, (i >> 2) & 1
+                r2_i, b_i = (i >> 1) & 1, i & 1
+                a_j, r1_j = (j >> 3) & 1, (j >> 2) & 1
+                r2_j, b_j = (j >> 1) & 1, j & 1
+
+                # Must have same A and B
+                if a_i == a_j and b_i == b_j:
+                    # Index in R1R2 space
+                    r_i = r1_i * 2 + r2_i
+                    r_j = r1_j * 2 + r2_j
+                    projector[i, j] = proj_bell[r_i, r_j]
+
+        return projector
+
+    def extract_ab_state(self, state: np.ndarray) -> np.ndarray:
+        """Extract A-B state by tracing out R1,R2."""
+        # Trace over R1,R2 (qubits 1,2)
+        rho_4 = np.outer(state, state.conj())
+
+        # Reshape and trace
+        rho_ab = np.zeros((4, 4), dtype=complex)
+
+        for a_out in range(2):
+            for b_out in range(2):
+                for a_in in range(2):
+                    for b_in in range(2):
+                        for r1 in range(2):
+                            for r2 in range(2):
+                                i = a_out * 8 + r1 * 4 + r2 * 2 + b_out
+                                j = a_in * 8 + r1 * 4 + r2 * 2 + b_in
+                                i_ab = a_out * 2 + b_out
+                                j_ab = a_in * 2 + b_in
+                                rho_ab[i_ab, j_ab] += rho_4[i, j]
+
+        return rho_ab
+
+    def apply_correction(
+        self,
+        rho_ab: np.ndarray,
+        bsm_result: BellStateType
+    ) -> np.ndarray:
+        """Apply Pauli correction to Bob's qubit."""
+        correction = self.corrections[bsm_result]
+        # Apply to second qubit: I ⊗ U
+        full_correction = np.kron(self.I, correction)
+        return full_correction @ rho_ab @ full_correction.T.conj()
+
+    def swap(
+        self,
+        pair1_type: BellStateType = BellStateType.PHI_PLUS,
+        pair2_type: BellStateType = BellStateType.PHI_PLUS
+    ) -> Tuple[BellStateType, float]:
+        """
+        Perform complete swapping protocol.
+
+        Returns BSM result and fidelity of A-B state to |Φ⁺⟩.
+        """
+        # Create initial state
+        initial = self.create_initial_state(pair1_type, pair2_type)
+
+        # Perform BSM
+        bsm_result, post_state = self.perform_bsm(initial)
+
+        # Calculate fidelity to Φ⁺ after correction
+        # For ideal case with Φ⁺ inputs, output is always Φ⁺
+        # (up to Pauli correction)
+        fidelity = 1.0  # Ideal swapping
+
+        return bsm_result, fidelity
+
+# Demonstrate swapping
+swapper = EntanglementSwapping()
+
+print("Entanglement Swapping Demonstration")
+print("=" * 60)
+
+# Multiple swapping trials
+results = {bt: 0 for bt in BellStateType}
+for _ in range(1000):
+    bsm_result, fidelity = swapper.swap()
+    results[bsm_result] += 1
+
+print("\nBSM outcome distribution (should be uniform):")
+for bt, count in results.items():
+    print(f"  {bt.name}: {count/10:.1f}%")
+
+print("\nAll outcomes give |Φ⁺⟩_AB after correction!")
+```
+
+## Swapping with Imperfect Pairs
+
+When input pairs are noisy, the output is also noisy:
+
+```python
+class NoisySwapping:
+    """
+    Entanglement swapping with noisy input pairs.
+
+    Models Werner state inputs and calculates output fidelity.
+    """
+
+    def __init__(self):
+        self.swapper = EntanglementSwapping()
+
+    def fidelity_after_swap(self, F1: float, F2: float) -> float:
+        """
+        Calculate output fidelity from noisy inputs.
+
+        For Werner states with fidelities F1 and F2:
+        F_out = F1 × F2 + (1-F1)(1-F2)/9
+        """
+        # Probability both pairs in Φ⁺
+        p_both_phi_plus = F1 * F2
+
+        # Probability one Φ⁺, one other (doesn't give Φ⁺)
+        p_mixed = F1 * (1-F2) + (1-F1) * F2
+
+        # Probability both other (some give Φ⁺)
+        p_both_other = (1-F1) * (1-F2)
+
+        # When both in same non-Φ⁺ state → Φ⁺ output
+        p_same_other = p_both_other / 9 * 3
+
+        return p_both_phi_plus + p_same_other
+
+    def simulate_noisy_swap(
+        self,
+        F1: float,
+        F2: float,
+        n_trials: int = 1000
+    ) -> dict:
+        """Simulate swapping with Werner state inputs."""
+        successful_swaps = 0
+        output_fidelities = []
+
+        for _ in range(n_trials):
+            # Sample input pair types from Werner distribution
+            def sample_bell(F):
+                if np.random.random() < F:
+                    return BellStateType.PHI_PLUS
+                else:
+                    return np.random.choice([
+                        BellStateType.PHI_MINUS,
+                        BellStateType.PSI_PLUS,
+                        BellStateType.PSI_MINUS
+                    ])
+
+            type1 = sample_bell(F1)
+            type2 = sample_bell(F2)
+
+            # Perform swapping
+            bsm_result, _ = self.swapper.swap(type1, type2)
+
+            # Determine output Bell state (depends on inputs)
+            output_is_phi_plus = self._output_type(type1, type2, bsm_result)
+            output_fidelities.append(1.0 if output_is_phi_plus else 0.0)
+
+        return {
+            "input_F1": F1,
+            "input_F2": F2,
+            "theoretical_output": self.fidelity_after_swap(F1, F2),
+            "simulated_output": np.mean(output_fidelities),
+            "n_trials": n_trials
+        }
+
+    def _output_type(
+        self,
+        type1: BellStateType,
+        type2: BellStateType,
+        bsm: BellStateType
+    ) -> bool:
+        """Determine if output is Φ⁺ given inputs and BSM result."""
+        # XOR of parity and phase bits
+        parity = [0, 0, 1, 1]  # Φ states have even parity
+        phase = [0, 1, 0, 1]   # +/- phase
+
+        p1 = parity[type1.value] ^ parity[type2.value] ^ parity[bsm.value]
+        ph1 = phase[type1.value] ^ phase[type2.value] ^ phase[bsm.value]
+
+        # Φ⁺ has parity=0, phase=0
+        return (p1 == 0) and (ph1 == 0)
+
+# Analyze noisy swapping
+noisy = NoisySwapping()
+
+print("\nNoisy Entanglement Swapping")
+print("=" * 60)
+
+print("\nOutput fidelity vs input fidelities:")
+print("  F₁    F₂   | Theoretical | Simulated")
+print("-" * 50)
+
+for F1, F2 in [(0.9, 0.9), (0.8, 0.8), (0.7, 0.7), (0.9, 0.7), (0.95, 0.95)]:
+    result = noisy.simulate_noisy_swap(F1, F2, n_trials=2000)
+    print(f"  {F1:.2f}  {F2:.2f} |   {result['theoretical_output']:.4f}    |"
+          f"   {result['simulated_output']:.4f}")
+```
+
+## Nested Swapping for Long Distances
+
+Multiple levels of swapping extend entanglement across many segments:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              NESTED ENTANGLEMENT SWAPPING                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Level 0: Elementary pairs (4 segments)                             │
+│                                                                     │
+│  A ══╦══ R₁ ══╦══ R₂ ══╦══ R₃ ══╦══ B                              │
+│      ║       ║        ║        ║                                    │
+│    Pair 0  Pair 1  Pair 2   Pair 3                                 │
+│                                                                     │
+│  Level 1: First round of swapping                                   │
+│                                                                     │
+│  A ════════╦════════ R₂ ════════╦════════ B                        │
+│           BSM                   BSM                                 │
+│         (R₁)                   (R₃)                                │
+│            ║                     ║                                  │
+│          Pair 0-1             Pair 2-3                             │
+│                                                                     │
+│  Level 2: Final swapping                                            │
+│                                                                     │
+│  A ════════════════╦════════════════════ B                          │
+│                   BSM                                               │
+│                  (R₂)                                               │
+│                    ║                                                │
+│            Final A-B pair!                                          │
+│                                                                     │
+│  N segments → log₂(N) levels of swapping                           │
+│  Fidelity: F_out ≈ F^N for identical F                             │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Nested Swapping Implementation
+
+```python
+class NestedSwapping:
+    """
+    Implements nested entanglement swapping for quantum repeaters.
+    """
+
+    def __init__(self, n_segments: int = 4):
+        if n_segments & (n_segments - 1) != 0:
+            raise ValueError("n_segments must be power of 2")
+        self.n_segments = n_segments
+        self.n_levels = int(np.log2(n_segments))
+        self.swapper = NoisySwapping()
+
+    def calculate_output_fidelity(self, F_elementary: float) -> float:
+        """
+        Calculate final fidelity after all swapping levels.
+
+        Each swap: F_out ≈ F1 × F2 (for high fidelity)
+        After log2(N) levels: F_final ≈ F^N
+        """
+        F = F_elementary
+        for level in range(self.n_levels):
+            # Number of swaps at this level
+            n_swaps = self.n_segments // (2 ** (level + 1))
+            # Each swap combines two pairs
+            F = self.swapper.fidelity_after_swap(F, F)
+        return F
+
+    def calculate_success_probability(
+        self,
+        p_elementary: float,
+        bsm_efficiency: float = 0.5
+    ) -> float:
+        """
+        Calculate probability all swapping succeeds.
+
+        Total swaps = N - 1 for N segments
+        P_success = (p_elementary)^N × (bsm_efficiency)^(N-1)
+        """
+        n_swaps = self.n_segments - 1
+        return (p_elementary ** self.n_segments) * \
+               (bsm_efficiency ** n_swaps)
+
+    def simulate_nested_protocol(
+        self,
+        F_elementary: float,
+        p_elementary: float = 0.01,
+        n_trials: int = 1000
+    ) -> dict:
+        """Simulate complete nested swapping protocol."""
+        successes = 0
+        final_fidelities = []
+
+        for _ in range(n_trials):
+            # Attempt to create all elementary pairs
+            pairs = []
+            all_created = True
+
+            for _ in range(self.n_segments):
+                if np.random.random() < p_elementary:
+                    pairs.append(F_elementary)
+                else:
+                    all_created = False
+                    break
+
+            if not all_created:
+                continue
+
+            # Perform nested swapping
+            current_pairs = pairs
+            for level in range(self.n_levels):
+                new_pairs = []
+                for i in range(0, len(current_pairs), 2):
+                    # BSM success (50% for linear optics)
+                    if np.random.random() < 0.5:
+                        F_out = self.swapper.fidelity_after_swap(
+                            current_pairs[i], current_pairs[i+1]
+                        )
+                        new_pairs.append(F_out)
+                    else:
+                        break
+                if len(new_pairs) != len(current_pairs) // 2:
+                    break
+                current_pairs = new_pairs
+
+            if len(current_pairs) == 1:
+                successes += 1
+                final_fidelities.append(current_pairs[0])
+
+        return {
+            "n_segments": self.n_segments,
+            "n_levels": self.n_levels,
+            "success_rate": successes / n_trials,
+            "mean_fidelity": np.mean(final_fidelities) if final_fidelities else 0,
+            "theoretical_fidelity": self.calculate_output_fidelity(F_elementary)
+        }
+
+# Demonstrate nested swapping
+print("\nNested Entanglement Swapping")
+print("=" * 60)
+
+for n_segments in [2, 4, 8, 16]:
+    nested = NestedSwapping(n_segments)
+    F_elem = 0.95
+
+    print(f"\n{n_segments} segments ({nested.n_levels} swapping levels):")
+    print(f"  Elementary fidelity: {F_elem}")
+    print(f"  Theoretical output: {nested.calculate_output_fidelity(F_elem):.4f}")
+
+    result = nested.simulate_nested_protocol(F_elem, p_elementary=0.1)
+    print(f"  Simulated fidelity: {result['mean_fidelity']:.4f}")
+    print(f"  Success rate: {result['success_rate']*100:.2f}%")
+```
+
+## Swapping with Quantum Memories
+
+Quantum memories enable asynchronous swapping:
+
+```python
+@dataclass
+class QuantumMemory:
+    """Model of quantum memory for entanglement storage."""
+    coherence_time: float = 1.0      # seconds
+    write_efficiency: float = 0.9
+    read_efficiency: float = 0.9
+    stored_fidelity: float = 0.0
+    storage_time: float = 0.0
+
+    def store(self, fidelity: float) -> bool:
+        """Attempt to store entanglement."""
+        if np.random.random() < self.write_efficiency:
+            self.stored_fidelity = fidelity
+            self.storage_time = 0.0
+            return True
+        return False
+
+    def retrieve(self, elapsed_time: float) -> Tuple[bool, float]:
+        """Retrieve stored entanglement after elapsed time."""
+        if np.random.random() > self.read_efficiency:
+            return False, 0.0
+
+        # Fidelity decay
+        decay = np.exp(-elapsed_time / self.coherence_time)
+        # Mix with maximally mixed state
+        F_out = self.stored_fidelity * decay + 0.25 * (1 - decay)
+
+        return True, F_out
+
+class MemoryAssistedSwapping:
+    """
+    Swapping with quantum memory storage.
+
+    Memories allow waiting for both pairs before swapping.
+    """
+
+    def __init__(
+        self,
+        memory_coherence: float = 0.1,  # seconds
+        generation_rate: float = 1000,   # attempts/second
+        generation_prob: float = 0.01
+    ):
+        self.memory_coherence = memory_coherence
+        self.generation_rate = generation_rate
+        self.generation_prob = generation_prob
+
+    def simulate_segment(
+        self,
+        F_target: float = 0.95
+    ) -> Tuple[bool, float, float]:
+        """
+        Simulate creating entanglement for one segment.
+
+        Returns (success, fidelity, time_taken).
+        """
+        time = 0.0
+        dt = 1.0 / self.generation_rate
+
+        while time < 10 * self.memory_coherence:  # Timeout
+            if np.random.random() < self.generation_prob:
+                return True, F_target, time
+            time += dt
+
+        return False, 0.0, time
+
+    def simulate_swapping_with_memory(
+        self,
+        F_elementary: float = 0.95
+    ) -> Tuple[bool, float]:
+        """
+        Simulate swapping with memory assistance.
+
+        Wait for both segments, accounting for memory decay.
+        """
+        memory_left = QuantumMemory(coherence_time=self.memory_coherence)
+        memory_right = QuantumMemory(coherence_time=self.memory_coherence)
+
+        # Try to generate both segments
+        left_success, left_F, left_time = self.simulate_segment(F_elementary)
+        if not left_success:
+            return False, 0.0
+
+        # Store left pair
+        if not memory_left.store(left_F):
+            return False, 0.0
+
+        # Generate right pair
+        right_success, right_F, right_time = self.simulate_segment(F_elementary)
+        if not right_success:
+            return False, 0.0
+
+        # Retrieve left pair (decayed)
+        left_retrieved, left_F_decayed = memory_left.retrieve(right_time)
+        if not left_retrieved:
+            return False, 0.0
+
+        # Perform swapping
+        swapper = NoisySwapping()
+        F_out = swapper.fidelity_after_swap(left_F_decayed, right_F)
+
+        return True, F_out
+
+# Memory-assisted swapping analysis
+print("\nMemory-Assisted Swapping")
+print("=" * 60)
+
+for coherence in [0.01, 0.1, 1.0]:
+    mas = MemoryAssistedSwapping(
+        memory_coherence=coherence,
+        generation_rate=1000,
+        generation_prob=0.01
+    )
+
+    successes = 0
+    fidelities = []
+
+    for _ in range(1000):
+        success, F = mas.simulate_swapping_with_memory(0.95)
+        if success:
+            successes += 1
+            fidelities.append(F)
+
+    print(f"\nMemory coherence: {coherence*1000:.0f} ms")
+    print(f"  Success rate: {successes/10:.1f}%")
+    print(f"  Mean output fidelity: {np.mean(fidelities):.4f}" if fidelities else "  No successes")
+```
+
+## Summary
+
+Entanglement swapping is the cornerstone of long-distance quantum networking:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              ENTANGLEMENT SWAPPING SUMMARY                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Core Concept:                                                      │
+│  • BSM on intermediate qubits creates entanglement between ends    │
+│  • Particles that never interacted become entangled                │
+│  • Classical communication carries BSM result for correction       │
+│                                                                     │
+│  Fidelity Impact:                                                   │
+│  • F_out ≈ F₁ × F₂ for high-fidelity inputs                        │
+│  • Fidelity decreases with each swap level                         │
+│  • N segments: F_final ≈ F^N (need purification!)                  │
+│                                                                     │
+│  Nested Swapping:                                                   │
+│  • log₂(N) levels for N segments                                   │
+│  • Enables polynomial scaling (vs exponential for direct)          │
+│  • Combined with purification in repeater protocols                │
+│                                                                     │
+│  Practical Requirements:                                            │
+│  • Quantum memories for synchronization                            │
+│  • High-fidelity BSM (linear optics: 50% max)                      │
+│  • Low-loss fiber or free-space links                              │
+│  • Fast classical communication for corrections                    │
+│                                                                     │
+│  Role in Quantum Repeaters:                                         │
+│  • Swapping extends range, purification restores quality           │
+│  • First-generation: swap then purify                              │
+│  • Third-generation: quantum error correction throughout           │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```

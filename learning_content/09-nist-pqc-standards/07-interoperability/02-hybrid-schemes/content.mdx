@@ -1,0 +1,399 @@
+---
+title: "Hybrid Cryptographic Schemes"
+description: "Deep dive into hybrid cryptographic constructions combining classical and post-quantum algorithms for defense in depth."
+---
+
+# Hybrid Cryptographic Schemes
+
+Hybrid cryptography provides security even if one component algorithm is broken. This lesson covers the design and implementation of hybrid key exchange and signature schemes.
+
+## Hybrid Key Exchange
+
+### Key Exchange Combiners
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Hybrid Key Exchange Patterns                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  CONCATENATE-AND-KDF (Standard Approach)                        │
+│  ┌────────────────────────────────────────────────────────────┐│
+│  │  shared_secret = KDF(ss_classical || ss_pqc || context)    ││
+│  └────────────────────────────────────────────────────────────┘│
+│  ✓ Secure if either component is secure                        │
+│  ✓ Simple to implement                                          │
+│  ✓ Recommended by most standards                               │
+│                                                                  │
+│  XOR COMBINER (Not Recommended)                                 │
+│  ┌────────────────────────────────────────────────────────────┐│
+│  │  shared_secret = ss_classical XOR ss_pqc                   ││
+│  └────────────────────────────────────────────────────────────┘│
+│  ⚠ May lose entropy if components correlated                  │
+│  ⚠ Not robust to all attack models                            │
+│                                                                  │
+│  DUAL-PRF COMBINER                                              │
+│  ┌────────────────────────────────────────────────────────────┐│
+│  │  shared_secret = PRF(ss_classical, ss_pqc) ||              ││
+│  │                  PRF(ss_pqc, ss_classical)                 ││
+│  └────────────────────────────────────────────────────────────┘│
+│  ✓ Stronger guarantees in some models                          │
+│  ⚠ More complex, potentially overkill                          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### X25519 + ML-KEM Hybrid
+
+```python
+"""
+X25519 + ML-KEM-768 Hybrid Key Exchange
+"""
+
+import hashlib
+import hmac
+from dataclasses import dataclass
+from typing import Tuple, Optional
+
+@dataclass
+class HybridKEXResult:
+    """Result of hybrid key exchange."""
+    shared_secret: bytes
+    classical_ct: bytes
+    pqc_ct: bytes
+
+class HybridKEX:
+    """
+    Hybrid Key Exchange: X25519 + ML-KEM-768
+
+    Following IETF draft-ietf-tls-hybrid-design pattern.
+    """
+
+    def __init__(self, x25519, mlkem):
+        self.x25519 = x25519
+        self.mlkem = mlkem
+
+    def generate_keys(self) -> dict:
+        """Generate both key pairs."""
+        x_pk, x_sk = self.x25519.keygen()
+        m_pk, m_sk = self.mlkem.keygen()
+
+        return {
+            "classical": {"pk": x_pk, "sk": x_sk},
+            "pqc": {"pk": m_pk, "sk": m_sk}
+        }
+
+    def encapsulate(self, recipient_keys: dict,
+                    context: bytes = b"") -> HybridKEXResult:
+        """
+        Initiator encapsulates to recipient's public keys.
+
+        Args:
+            recipient_keys: Dict with classical and pqc public keys
+            context: Domain separation context
+
+        Returns:
+            HybridKEXResult with combined shared secret and ciphertexts
+        """
+        # Classical key exchange
+        c_ct, c_ss = self.x25519.encapsulate(recipient_keys["classical"]["pk"])
+
+        # PQC key exchange
+        p_ct, p_ss = self.mlkem.encapsulate(recipient_keys["pqc"]["pk"])
+
+        # Combine shared secrets
+        combined_ss = self._combine_secrets(c_ss, p_ss, c_ct, p_ct, context)
+
+        return HybridKEXResult(
+            shared_secret=combined_ss,
+            classical_ct=c_ct,
+            pqc_ct=p_ct
+        )
+
+    def decapsulate(self, my_keys: dict,
+                    classical_ct: bytes,
+                    pqc_ct: bytes,
+                    context: bytes = b"") -> bytes:
+        """
+        Recipient decapsulates to recover shared secret.
+        """
+        # Classical decapsulation
+        c_ss = self.x25519.decapsulate(my_keys["classical"]["sk"], classical_ct)
+
+        # PQC decapsulation
+        p_ss = self.mlkem.decapsulate(my_keys["pqc"]["sk"], pqc_ct)
+
+        # Combine shared secrets (same order as encapsulate!)
+        return self._combine_secrets(c_ss, p_ss, classical_ct, pqc_ct, context)
+
+    def _combine_secrets(self, c_ss: bytes, p_ss: bytes,
+                         c_ct: bytes, p_ct: bytes,
+                         context: bytes) -> bytes:
+        """
+        Combine shared secrets using HKDF.
+
+        Includes ciphertexts in derivation for binding.
+        """
+        # Input key material
+        ikm = c_ss + p_ss
+
+        # Salt includes ciphertexts for binding
+        salt = hashlib.sha256(c_ct + p_ct).digest()
+
+        # Info includes context
+        info = b"hybrid_kex_v1" + context
+
+        # HKDF-Extract
+        prk = hmac.new(salt, ikm, hashlib.sha256).digest()
+
+        # HKDF-Expand (simplified - single block)
+        okm = hmac.new(prk, info + b"\x01", hashlib.sha256).digest()
+
+        return okm
+
+# Example usage structure
+print("Hybrid KEX: X25519 + ML-KEM-768")
+print("=" * 50)
+print("""
+Initiator:
+  1. Generate ephemeral X25519 keypair
+  2. Receive ML-KEM public key from server
+  3. Encapsulate to both public keys
+  4. Send both ciphertexts
+  5. Derive shared secret from both
+
+Responder:
+  1. Send ML-KEM public key
+  2. Receive both ciphertexts
+  3. Decapsulate both
+  4. Derive same shared secret
+""")
+```
+
+## Hybrid Signatures
+
+### Composite Signature Approaches
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Hybrid Signature Patterns                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  CONCATENATED SIGNATURES                                        │
+│  ┌────────────────────────────────────────────────────────────┐│
+│  │  sig = sig_classical || sig_pqc                            ││
+│  │  verify = verify_classical(sig1) AND verify_pqc(sig2)      ││
+│  └────────────────────────────────────────────────────────────┘│
+│  ✓ Simple construction                                         │
+│  ✓ Both signatures must verify                                 │
+│  ⚠ Larger signature size                                       │
+│                                                                  │
+│  NESTED SIGNATURES                                              │
+│  ┌────────────────────────────────────────────────────────────┐│
+│  │  sig_inner = sign_pqc(message)                             ││
+│  │  sig_outer = sign_classical(message || sig_inner)          ││
+│  │  sig = sig_outer || sig_inner                              ││
+│  └────────────────────────────────────────────────────────────┘│
+│  ✓ Binds signatures together                                   │
+│  ⚠ Sequential signing                                          │
+│                                                                  │
+│  COMPOSITE KEYS (X.509)                                        │
+│  ┌────────────────────────────────────────────────────────────┐│
+│  │  pk = composite_pk { pk_classical, pk_pqc }                ││
+│  │  sig = composite_sig { sig_classical, sig_pqc }            ││
+│  └────────────────────────────────────────────────────────────┘│
+│  ✓ Single OID for hybrid algorithm                             │
+│  ✓ Standard X.509 representation                               │
+│  ⚠ Requires updated parsers                                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Hybrid Signature Implementation
+
+```python
+"""
+Hybrid Signature: ECDSA + ML-DSA
+"""
+
+from dataclasses import dataclass
+from typing import Tuple
+import hashlib
+
+@dataclass
+class HybridSignature:
+    """Combined classical + PQC signature."""
+    classical_sig: bytes
+    pqc_sig: bytes
+
+@dataclass
+class HybridSigningKey:
+    """Combined signing key."""
+    classical_sk: bytes
+    pqc_sk: bytes
+    classical_pk: bytes
+    pqc_pk: bytes
+
+class HybridSigner:
+    """
+    Hybrid Signature: ECDSA P-256 + ML-DSA-65
+
+    Both signatures must verify for the combined signature to be valid.
+    """
+
+    def __init__(self, ecdsa, mldsa):
+        self.ecdsa = ecdsa
+        self.mldsa = mldsa
+
+    def generate_keys(self) -> HybridSigningKey:
+        """Generate hybrid signing key pair."""
+        e_pk, e_sk = self.ecdsa.keygen()
+        m_pk, m_sk = self.mldsa.keygen()
+
+        return HybridSigningKey(
+            classical_sk=e_sk,
+            pqc_sk=m_sk,
+            classical_pk=e_pk,
+            pqc_pk=m_pk
+        )
+
+    def sign(self, key: HybridSigningKey, message: bytes) -> HybridSignature:
+        """
+        Create hybrid signature.
+
+        Signs the message with both algorithms.
+        """
+        # Hash message for ECDSA (typically required)
+        msg_hash = hashlib.sha256(message).digest()
+
+        # Sign with both
+        classical_sig = self.ecdsa.sign(key.classical_sk, msg_hash)
+        pqc_sig = self.mldsa.sign(key.pqc_sk, message)
+
+        return HybridSignature(
+            classical_sig=classical_sig,
+            pqc_sig=pqc_sig
+        )
+
+    def verify(self, classical_pk: bytes, pqc_pk: bytes,
+               message: bytes, signature: HybridSignature) -> bool:
+        """
+        Verify hybrid signature.
+
+        BOTH signatures must verify for success.
+        """
+        msg_hash = hashlib.sha256(message).digest()
+
+        # Verify classical
+        classical_valid = self.ecdsa.verify(
+            classical_pk, msg_hash, signature.classical_sig
+        )
+
+        if not classical_valid:
+            return False
+
+        # Verify PQC
+        pqc_valid = self.mldsa.verify(
+            pqc_pk, message, signature.pqc_sig
+        )
+
+        return pqc_valid
+
+    def serialize_signature(self, sig: HybridSignature) -> bytes:
+        """
+        Serialize hybrid signature for transmission.
+
+        Format: [2-byte classical len][classical sig][pqc sig]
+        """
+        c_len = len(sig.classical_sig).to_bytes(2, 'big')
+        return c_len + sig.classical_sig + sig.pqc_sig
+
+    def deserialize_signature(self, data: bytes) -> HybridSignature:
+        """Deserialize hybrid signature."""
+        c_len = int.from_bytes(data[:2], 'big')
+        return HybridSignature(
+            classical_sig=data[2:2+c_len],
+            pqc_sig=data[2+c_len:]
+        )
+
+# Size comparison
+print("Hybrid Signature Sizes")
+print("=" * 50)
+print(f"ECDSA P-256 signature:    64 bytes")
+print(f"ML-DSA-65 signature:      3,293 bytes")
+print(f"Hybrid signature:         ~3,357 bytes")
+print(f"")
+print(f"ECDSA P-256 public key:   64 bytes")
+print(f"ML-DSA-65 public key:     1,952 bytes")
+print(f"Hybrid public key:        ~2,016 bytes")
+```
+
+## Security Analysis
+
+### Hybrid Security Properties
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Hybrid Security Properties                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  IND-CCA SECURITY (KEMs)                                        │
+│  ├─ If X25519 is IND-CCA → Hybrid is IND-CCA                   │
+│  ├─ If ML-KEM is IND-CCA → Hybrid is IND-CCA                   │
+│  └─ Attacker must break BOTH to compromise hybrid              │
+│                                                                  │
+│  EUF-CMA SECURITY (Signatures)                                  │
+│  ├─ If ECDSA is EUF-CMA → Hybrid is EUF-CMA                    │
+│  ├─ If ML-DSA is EUF-CMA → Hybrid is EUF-CMA                   │
+│  └─ Valid forgery requires forging BOTH signatures             │
+│                                                                  │
+│  ADDITIONAL PROPERTIES                                          │
+│  ├─ Forward secrecy: Maintained if either provides it          │
+│  ├─ Binding: Ciphertext included in KDF binds components       │
+│  └─ Non-separability: Can't reuse one component with different │
+│                       partner                                   │
+│                                                                  │
+│  KNOWN LIMITATIONS                                              │
+│  ├─ Size: Sum of both components                               │
+│  ├─ Performance: Slowest of both                               │
+│  └─ Complexity: More code to implement and audit               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Practical Considerations
+
+### When to Use Hybrid
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Hybrid vs Pure PQC Decision                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  USE HYBRID WHEN:                                               │
+│  ✓ Data needs protection for 10+ years                         │
+│  ✓ Backward compatibility required                              │
+│  ✓ Regulatory compliance unclear on PQC-only                   │
+│  ✓ Defense in depth is valued                                  │
+│  ✓ Size/performance overhead is acceptable                     │
+│                                                                  │
+│  CONSIDER PURE PQC WHEN:                                        │
+│  ✓ Size constraints are critical                               │
+│  ✓ All peers support PQC                                       │
+│  ✓ Standards require PQC-only                                  │
+│  ✓ Classical algorithms explicitly deprecated                  │
+│  ✓ Simplified implementation desired (future)                  │
+│                                                                  │
+│  RECOMMENDATION (2024-2030):                                    │
+│  Default to hybrid for production systems.                      │
+│  Pure PQC appropriate for new, isolated systems.               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Summary
+
+Hybrid cryptographic schemes:
+
+1. **Combine classical and PQC** for defense in depth
+2. **Use proper combiners**: Concatenate + KDF, not simple XOR
+3. **Both must verify** for signatures
+4. **Include binding**: Add ciphertexts to KDF for KEMs
+5. **Accept overhead**: Larger sizes and slower performance
+
+Hybrid is the recommended approach for the transition period.

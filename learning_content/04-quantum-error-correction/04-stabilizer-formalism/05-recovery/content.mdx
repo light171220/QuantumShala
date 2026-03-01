@@ -1,0 +1,431 @@
+# Error Recovery Operations
+
+## Introduction
+
+After measuring the syndrome, we must apply the correct recovery operation to restore the encoded state. This lesson covers the theory and practice of error recovery, including decoder design and handling of degenerate codes.
+
+## The Recovery Map
+
+```
+The Error Correction Cycle
+══════════════════════════
+
+1. ENCODE: |ψ⟩ → |ψ̄⟩ (logical state in code space)
+
+2. ERROR: |ψ̄⟩ → E|ψ̄⟩ (environment causes error E)
+
+3. SYNDROME: Measure stabilizers, obtain syndrome s
+
+4. DECODE: Map syndrome to correction R_s
+
+5. RECOVER: Apply R_s to get R_s E|ψ̄⟩ ≈ |ψ̄⟩
+
+┌──────────────────────────────────────────────────────────────────┐
+│  Recovery succeeds if R_s E ∈ S (stabilizer group)              │
+│  This means R_s E acts as identity on code space                │
+│                                                                  │
+│  R_s E|ψ̄⟩ = |ψ̄⟩  ✓ Success!                                    │
+│                                                                  │
+│  If R_s E ∈ N(S) \ S (logical operator): Logical error!         │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+## Implementing Recovery
+
+```python
+import numpy as np
+from typing import Dict, Tuple, Optional, List
+
+class ErrorRecovery:
+    """
+    Implements error recovery for stabilizer codes.
+    """
+
+    def __init__(self, generators: List[str]):
+        self.generators = generators
+        self.n = len(generators[0])
+        self.lookup_table = self._build_recovery_table()
+
+        # Pauli matrices
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+        self.paulis = {'I': self.I, 'X': self.X, 'Y': self.Y, 'Z': self.Z}
+
+    def _build_recovery_table(self) -> Dict[Tuple, str]:
+        """Build syndrome → recovery operation mapping."""
+        table = {}
+        r = len(self.generators)
+
+        # Zero syndrome = no recovery needed
+        table[tuple([0] * r)] = 'I' * self.n
+
+        # Single-qubit errors
+        for i in range(self.n):
+            for pauli in ['X', 'Y', 'Z']:
+                error = 'I' * i + pauli + 'I' * (self.n - i - 1)
+                syndrome = self._get_syndrome(error)
+                if syndrome not in table:
+                    # Recovery = same as error (since P² = I)
+                    table[syndrome] = error
+
+        return table
+
+    def _get_syndrome(self, error: str) -> Tuple[int, ...]:
+        """Compute syndrome from error."""
+        syndrome = []
+        for g in self.generators:
+            anticommuting = 0
+            for e, gen in zip(error, g):
+                if e != 'I' and gen != 'I' and e != gen:
+                    anticommuting += 1
+            syndrome.append(anticommuting % 2)
+        return tuple(syndrome)
+
+    def get_recovery(self, syndrome: Tuple[int, ...]) -> str:
+        """Get recovery operation for given syndrome."""
+        return self.lookup_table.get(syndrome, None)
+
+    def apply_recovery(self, state: np.ndarray,
+                       recovery: str) -> np.ndarray:
+        """Apply recovery operation to state."""
+        recovery_op = self.paulis[recovery[0]]
+        for p in recovery[1:]:
+            recovery_op = np.kron(recovery_op, self.paulis[p])
+        return recovery_op @ state
+
+    def demonstrate_recovery(self):
+        """Demonstrate the recovery process."""
+        print("Error Recovery Demonstration")
+        print("=" * 55)
+
+        print(f"\nCode: {len(self.generators)} generators on {self.n} qubits")
+        print("\nRecovery table (syndrome → correction):")
+
+        for syndrome, recovery in sorted(self.lookup_table.items()):
+            syn_str = ''.join(map(str, syndrome))
+            if recovery == 'I' * self.n:
+                print(f"  {syn_str} → No correction")
+            else:
+                # Find the non-I position
+                for i, p in enumerate(recovery):
+                    if p != 'I':
+                        print(f"  {syn_str} → Apply {p} to qubit {i}")
+
+
+# Example with Steane code generators
+steane_gens = [
+    "XIXIXIX", "IXXIIXX", "IIIXXXX",
+    "ZIZIZIZ", "IZZIIZZ", "IIIZZZZ"
+]
+recovery = ErrorRecovery(steane_gens)
+recovery.demonstrate_recovery()
+```
+
+## Decoder Design Choices
+
+```python
+class DecoderDesign:
+    """
+    Different approaches to designing decoders.
+    """
+
+    def show_decoder_types(self):
+        """Explain different decoder approaches."""
+        print("""
+Decoder Design Strategies
+═════════════════════════
+
+1. LOOKUP TABLE DECODER
+   ┌─────────────────────────────────────────────────────────────┐
+   │ Pre-compute syndrome → correction for all correctable errors│
+   │ Pros: Fast O(1) lookup, simple implementation               │
+   │ Cons: Exponential memory for large codes                    │
+   │ Best for: Small codes (Steane, 5-qubit, small surface)      │
+   └─────────────────────────────────────────────────────────────┘
+
+2. MINIMUM WEIGHT DECODER
+   ┌─────────────────────────────────────────────────────────────┐
+   │ Find lowest-weight error consistent with syndrome           │
+   │ Based on: Fewer errors more likely than many               │
+   │ Implementation: Search or algebraic methods                 │
+   │ Optimal for: Independent depolarizing errors                │
+   └─────────────────────────────────────────────────────────────┘
+
+3. MAXIMUM LIKELIHOOD DECODER
+   ┌─────────────────────────────────────────────────────────────┐
+   │ Find most likely error given noise model                    │
+   │ Consider: Correlations, non-uniform error rates             │
+   │ Computation: Often NP-hard, approximations used             │
+   │ Optimal for: Any noise model (if computable)                │
+   └─────────────────────────────────────────────────────────────┘
+
+4. MWPM (Minimum Weight Perfect Matching)
+   ┌─────────────────────────────────────────────────────────────┐
+   │ Used for: Surface codes and related topological codes       │
+   │ Method: Match syndrome defects with minimum total distance  │
+   │ Complexity: O(n³) for n defects                            │
+   │ Near-optimal for: Surface codes with uniform errors         │
+   └─────────────────────────────────────────────────────────────┘
+
+5. NEURAL NETWORK DECODER
+   ┌─────────────────────────────────────────────────────────────┐
+   │ Train NN to map syndrome → correction                      │
+   │ Pros: Can learn complex noise models, fast inference        │
+   │ Cons: Training required, may not generalize                 │
+   │ Active research area for large-scale QEC                    │
+   └─────────────────────────────────────────────────────────────┘
+        """)
+
+
+design = DecoderDesign()
+design.show_decoder_types()
+```
+
+## Degenerate Codes
+
+```python
+class DegenerateCodes:
+    """
+    Handle codes where multiple errors have the same syndrome.
+    """
+
+    def explain_degeneracy(self):
+        """Explain code degeneracy."""
+        print("""
+Degeneracy in Quantum Codes
+═══════════════════════════
+
+A code is DEGENERATE if different errors can have the same syndrome
+AND the same effect on the code space.
+
+Non-degenerate:
+    Different errors → Different syndromes (mostly)
+    Unique correction for each syndrome
+
+Degenerate:
+    E₁ and E₂ may have same syndrome
+    If E₁†E₂ ∈ S (stabilizer), they have same effect
+    → Same correction works for both!
+
+Example: 9-qubit Shor code
+
+    Z₀ and Z₁Z₂ both have syndrome (1,0,0,0,0,0,0,0) for X-errors
+    But Z₁Z₂ = Z₀ × (Z₀Z₁Z₂) = Z₀ × (stabilizer)
+    So both have the SAME effect on code space!
+
+    Correcting with Z₀ works for both errors.
+
+Why degeneracy matters:
+┌──────────────────────────────────────────────────────────────────┐
+│ 1. Decoder need not identify exact error, only equivalence class│
+│ 2. Multiple errors may be "correctable" with same correction    │
+│ 3. Effective distance can be higher than naive counting         │
+│ 4. Topological codes are highly degenerate                      │
+└──────────────────────────────────────────────────────────────────┘
+
+For recovery:
+    If E₁†E₂ ∈ S: Either correction R₁ or R₂ works
+    If E₁†E₂ ∈ N(S) \ S: Must distinguish (different logical effect)
+        """)
+
+    def demonstrate_degeneracy(self):
+        """Show degeneracy in the Shor code."""
+        print("\nDegeneracy Example: Shor [[9,1,3]] Code")
+        print("─" * 50)
+
+        print("""
+Consider errors within block A (qubits 0,1,2):
+
+    Z₀: Phase error on qubit 0
+    Z₁: Phase error on qubit 1
+    Z₀Z₁: Phase errors on qubits 0 and 1
+
+All three give the same X-syndrome!
+(They affect the same block's sign relative to other blocks)
+
+But: Z₀Z₁ = Z₀ × Z₁ = Z₀ × (Z₁/Z₀) = Z₀ × Z₀Z₁
+     And Z₀Z₁ is part of the stabilizer structure.
+
+Actually, within a block:
+    Z₀, Z₁, Z₂, Z₀Z₁, Z₀Z₂, Z₁Z₂, Z₀Z₁Z₂
+    All are equivalent up to stabilizers!
+
+This is why Shor code distance is 3, not 1 for Z errors:
+    - Single Z is correctable (detectable, degenerate)
+    - Need error spanning TWO blocks for logical error
+        """)
+
+
+degeneracy = DegenerateCodes()
+degeneracy.explain_degeneracy()
+degeneracy.demonstrate_degeneracy()
+```
+
+## Complete QEC Cycle
+
+```python
+class CompleteQECCycle:
+    """
+    Demonstrate the complete quantum error correction cycle.
+    """
+
+    def __init__(self, generators: List[str]):
+        self.generators = generators
+        self.n = len(generators[0])
+        self.recovery = ErrorRecovery(generators)
+
+    def run_cycle(self, initial_state: str,
+                  error_position: int, error_type: str) -> dict:
+        """
+        Run complete QEC cycle and report results.
+
+        Args:
+            initial_state: 'plus' or 'zero' (logical state)
+            error_position: Qubit to apply error (-1 for none)
+            error_type: 'X', 'Y', or 'Z'
+        """
+        results = {
+            'initial': initial_state,
+            'error': f"{error_type} on qubit {error_position}" if error_position >= 0 else "None",
+        }
+
+        # Step 1: Encoding (conceptual - would use actual encoder)
+        results['step1'] = f"Encode |{initial_state}⟩ → |{initial_state}⟩_L"
+
+        # Step 2: Apply error
+        if error_position >= 0:
+            error = 'I' * error_position + error_type + 'I' * (self.n - error_position - 1)
+            results['step2'] = f"Error: {error}"
+        else:
+            error = 'I' * self.n
+            results['step2'] = "No error"
+
+        # Step 3: Measure syndrome
+        syndrome = self.recovery._get_syndrome(error)
+        results['step3'] = f"Syndrome: {syndrome}"
+
+        # Step 4: Decode
+        correction = self.recovery.get_recovery(syndrome)
+        if correction:
+            results['step4'] = f"Correction: {correction}"
+        else:
+            results['step4'] = "Unknown syndrome - uncorrectable"
+
+        # Step 5: Apply recovery and verify
+        if correction:
+            # Check if correction cancels error
+            combined = self._multiply_paulis(error, correction)
+            if combined == 'I' * self.n:
+                results['step5'] = "Perfect recovery: error fully corrected"
+            elif self._is_stabilizer(combined):
+                results['step5'] = f"Recovery OK: residual {combined} is stabilizer"
+            else:
+                results['step5'] = f"Logical error: residual {combined}"
+        else:
+            results['step5'] = "Cannot recover"
+
+        return results
+
+    def _multiply_paulis(self, p1: str, p2: str) -> str:
+        """Multiply two Pauli strings (ignoring phase)."""
+        result = []
+        for a, b in zip(p1, p2):
+            if a == 'I':
+                result.append(b)
+            elif b == 'I':
+                result.append(a)
+            elif a == b:
+                result.append('I')
+            else:
+                # X*Y=Z, Y*Z=X, Z*X=Y (up to phase)
+                remaining = {'X', 'Y', 'Z'} - {a, b}
+                result.append(remaining.pop())
+        return ''.join(result)
+
+    def _is_stabilizer(self, pauli: str) -> bool:
+        """Check if Pauli is in stabilizer group (simplified)."""
+        if pauli == 'I' * self.n:
+            return True
+        # Check if it's a generator or product of generators
+        # (simplified check)
+        return pauli in self.generators
+
+    def demonstrate_cycle(self):
+        """Show the complete cycle for several cases."""
+        print("\nComplete QEC Cycle Demonstration")
+        print("=" * 60)
+
+        test_cases = [
+            ('plus', -1, 'X'),   # No error
+            ('plus', 2, 'X'),    # X error on qubit 2
+            ('zero', 4, 'Z'),    # Z error on qubit 4
+            ('plus', 1, 'Y'),    # Y error on qubit 1
+        ]
+
+        for state, pos, err_type in test_cases:
+            results = self.run_cycle(state, pos, err_type)
+            print(f"\n{'─' * 60}")
+            print(f"Initial: |{state}⟩_L, Error: {results['error']}")
+            print(f"  1. Encode: {results['step1']}")
+            print(f"  2. Error:  {results['step2']}")
+            print(f"  3. Syndrome: {results['step3']}")
+            print(f"  4. Decode: {results['step4']}")
+            print(f"  5. Result: {results['step5']}")
+
+
+# Demonstrate with Steane code
+cycle = CompleteQECCycle([
+    "XIXIXIX", "IXXIIXX", "IIIXXXX",
+    "ZIZIZIZ", "IZZIIZZ", "IIIZZZZ"
+])
+cycle.demonstrate_cycle()
+```
+
+## Performance Metrics
+
+```
+Error Correction Performance Metrics
+════════════════════════════════════
+
+1. LOGICAL ERROR RATE (p_L)
+   Probability of logical error per QEC cycle
+   Target: p_L < p_physical (code provides benefit)
+
+2. THRESHOLD (p_th)
+   Physical error rate below which larger codes help
+   p < p_th → increasing n reduces p_L
+   Typical values: ~1% for surface codes, ~0.1% for concatenated
+
+3. PSEUDO-THRESHOLD
+   Threshold for specific finite code
+   At what p does code help vs no encoding?
+
+4. OVERHEAD
+   n/k = physical qubits per logical qubit
+   Lower is better
+
+5. CYCLE TIME
+   Time for one syndrome measurement + correction
+   Must be faster than decoherence
+
+┌─────────────────────────────────────────────────────────────────┐
+│ Key relationship:                                               │
+│                                                                 │
+│ For distance d code with physical error rate p:                │
+│     p_L ≈ (p/p_th)^((d+1)/2)  for p < p_th                    │
+│                                                                 │
+│ This is exponential suppression of logical errors!             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Summary
+
+Error recovery completes the quantum error correction cycle:
+
+1. **Recovery table**: Maps syndromes to correction operations
+2. **Decoder choice**: Trade-off between speed, accuracy, and generality
+3. **Degeneracy**: Multiple errors may have same syndrome and effect
+4. **Complete cycle**: Encode → Error → Syndrome → Decode → Correct
+5. **Performance**: Logical error rate determines if code provides benefit

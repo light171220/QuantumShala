@@ -1,0 +1,448 @@
+---
+title: "Correlation Analysis for Risk"
+description: "Master correlation analysis for portfolio risk management. Learn to estimate, analyze, and model correlations between financial assets, including how correlations change during market stress."
+duration: 50
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Calculate and interpret correlation and covariance matrices
+- Understand correlation breakdown during market stress
+- Apply shrinkage estimators for robust correlation estimation
+- Implement dynamic correlation models
+- Analyze portfolio risk through correlation decomposition
+
+## 1. Correlation Fundamentals
+
+Correlation measures the linear relationship between asset returns.
+
+<Definition term="Correlation Coefficient">
+Pearson correlation between assets i and j:
+$$\rho_{ij} = \frac{Cov(r_i, r_j)}{\sigma_i \sigma_j} = \frac{E[(r_i - \mu_i)(r_j - \mu_j)]}{\sigma_i \sigma_j}$$
+where $\rho \in [-1, 1]$.
+</Definition>
+
+```python
+import numpy as np
+import pandas as pd
+
+def calculate_correlation_matrix(returns):
+    """
+    Calculate correlation matrix from returns.
+
+    Args:
+        returns: DataFrame or array of returns (rows=time, cols=assets)
+
+    Returns:
+        Correlation matrix
+    """
+    returns = np.array(returns)
+    return np.corrcoef(returns, rowvar=False)
+
+def calculate_covariance_matrix(returns, annualize=True):
+    """
+    Calculate covariance matrix.
+    """
+    returns = np.array(returns)
+    cov = np.cov(returns, rowvar=False)
+
+    if annualize:
+        cov = cov * 252
+
+    return cov
+
+# Example with simulated correlated returns
+np.random.seed(42)
+n_days = 252
+n_assets = 4
+
+# Create correlated returns
+true_corr = np.array([
+    [1.0, 0.6, 0.3, 0.1],
+    [0.6, 1.0, 0.5, 0.2],
+    [0.3, 0.5, 1.0, 0.4],
+    [0.1, 0.2, 0.4, 1.0]
+])
+
+# Cholesky decomposition for correlated samples
+L = np.linalg.cholesky(true_corr)
+vols = np.array([0.20, 0.25, 0.15, 0.30])
+uncorrelated = np.random.normal(0, 1, (n_days, n_assets))
+returns = uncorrelated @ L.T * vols / np.sqrt(252)
+
+# Estimate correlation
+estimated_corr = calculate_correlation_matrix(returns)
+
+print("True Correlation Matrix:")
+print(true_corr.round(2))
+print("\nEstimated Correlation Matrix:")
+print(estimated_corr.round(2))
+```
+
+## 2. Correlation During Crises
+
+Correlations tend to increase during market stress, reducing diversification benefits.
+
+<Warning>
+"Correlations go to 1 in a crisis" - When markets fall sharply, previously uncorrelated assets often move together, causing diversified portfolios to lose more than expected.
+</Warning>
+
+```python
+def analyze_conditional_correlation(returns, market_return_column=0,
+                                    percentile_threshold=10):
+    """
+    Analyze correlation in different market conditions.
+
+    Args:
+        returns: Array of returns
+        market_return_column: Index of market return
+        percentile_threshold: Percentile for defining stress
+
+    Returns:
+        Dict with correlations in different regimes
+    """
+    returns = np.array(returns)
+    market_returns = returns[:, market_return_column]
+
+    # Define stress vs normal periods
+    stress_threshold = np.percentile(market_returns, percentile_threshold)
+    normal_threshold = np.percentile(market_returns, 100 - percentile_threshold)
+
+    stress_mask = market_returns < stress_threshold
+    normal_mask = (market_returns >= stress_threshold) & (market_returns <= normal_threshold)
+    rally_mask = market_returns > normal_threshold
+
+    results = {}
+
+    for name, mask in [('stress', stress_mask), ('normal', normal_mask), ('rally', rally_mask)]:
+        if mask.sum() > 10:
+            regime_returns = returns[mask]
+            corr = np.corrcoef(regime_returns, rowvar=False)
+            results[name] = {
+                'correlation': corr,
+                'n_days': mask.sum(),
+                'avg_correlation': (np.sum(corr) - len(corr)) / (len(corr)**2 - len(corr))
+            }
+
+    return results
+
+# Simulate crisis behavior
+np.random.seed(42)
+n_days = 1000
+
+# Normal period: moderate correlation
+normal_corr = np.array([[1.0, 0.3], [0.3, 1.0]])
+# Crisis period: high correlation
+crisis_corr = np.array([[1.0, 0.8], [0.8, 1.0]])
+
+# Create regime-switching returns
+returns_list = []
+for day in range(n_days):
+    if np.random.random() < 0.1:  # 10% crisis days
+        L = np.linalg.cholesky(crisis_corr)
+        r = np.random.normal(-0.02, 0.03, 2)  # Negative, high vol
+    else:
+        L = np.linalg.cholesky(normal_corr)
+        r = np.random.normal(0.0003, 0.01, 2)
+    returns_list.append(L @ r)
+
+returns_regime = np.array(returns_list)
+
+analysis = analyze_conditional_correlation(returns_regime)
+
+print("Conditional Correlation Analysis:")
+for regime, data in analysis.items():
+    print(f"\n{regime.upper()} regime ({data['n_days']} days):")
+    print(f"  Avg correlation: {data['avg_correlation']:.3f}")
+    print(f"  Correlation matrix:\n{data['correlation'].round(3)}")
+```
+
+## 3. Shrinkage Estimation
+
+Sample correlation matrices can be noisy. Shrinkage improves estimates.
+
+<Formula>
+Ledoit-Wolf shrinkage:
+$$\hat{\Sigma}_{shrunk} = \alpha \cdot F + (1-\alpha) \cdot S$$
+where $S$ is sample covariance, $F$ is a structured target, and $\alpha$ is the shrinkage intensity.
+</Formula>
+
+```python
+from sklearn.covariance import LedoitWolf
+
+def shrunk_correlation(returns, method='ledoit-wolf'):
+    """
+    Calculate shrinkage-improved correlation matrix.
+
+    Args:
+        returns: Return matrix
+        method: 'ledoit-wolf' or 'constant-correlation'
+
+    Returns:
+        Shrunk correlation matrix, shrinkage intensity
+    """
+    returns = np.array(returns)
+
+    if method == 'ledoit-wolf':
+        lw = LedoitWolf().fit(returns)
+        cov_shrunk = lw.covariance_
+        shrinkage = lw.shrinkage_
+
+        # Convert to correlation
+        std = np.sqrt(np.diag(cov_shrunk))
+        corr_shrunk = cov_shrunk / np.outer(std, std)
+
+        return corr_shrunk, shrinkage
+
+    elif method == 'constant-correlation':
+        # Shrink toward constant correlation matrix
+        sample_corr = np.corrcoef(returns, rowvar=False)
+        n = sample_corr.shape[0]
+
+        # Average off-diagonal correlation
+        avg_corr = (np.sum(sample_corr) - n) / (n**2 - n)
+
+        # Target: constant correlation matrix
+        target = np.ones((n, n)) * avg_corr
+        np.fill_diagonal(target, 1.0)
+
+        # Simple shrinkage intensity (could be optimized)
+        shrinkage = 0.3
+
+        shrunk = (1 - shrinkage) * sample_corr + shrinkage * target
+        return shrunk, shrinkage
+
+# Compare sample vs shrunk
+sample_corr = calculate_correlation_matrix(returns)
+shrunk_corr, intensity = shrunk_correlation(returns)
+
+print(f"Shrinkage intensity: {intensity:.3f}")
+print("\nSample Correlation:")
+print(sample_corr.round(3))
+print("\nShrunk Correlation:")
+print(shrunk_corr.round(3))
+print("\nTrue Correlation:")
+print(true_corr.round(3))
+
+# Error comparison
+sample_error = np.mean((sample_corr - true_corr)**2)
+shrunk_error = np.mean((shrunk_corr - true_corr)**2)
+print(f"\nMSE - Sample: {sample_error:.6f}, Shrunk: {shrunk_error:.6f}")
+```
+
+## 4. Dynamic Correlation Models
+
+Correlations change over time. DCC-GARCH captures this.
+
+```python
+def estimate_ewma_correlation(returns, lambda_decay=0.94):
+    """
+    Exponentially Weighted Moving Average (EWMA) correlation.
+
+    RiskMetrics approach: simple dynamic correlation.
+    """
+    returns = np.array(returns)
+    n_days, n_assets = returns.shape
+
+    # Initialize with sample covariance
+    cov_t = np.cov(returns[:30], rowvar=False)
+
+    correlations = []
+
+    for t in range(30, n_days):
+        r_t = returns[t:t+1].T  # Column vector
+
+        # EWMA update
+        cov_t = lambda_decay * cov_t + (1 - lambda_decay) * (r_t @ r_t.T)
+
+        # Convert to correlation
+        std_t = np.sqrt(np.diag(cov_t))
+        corr_t = cov_t / np.outer(std_t, std_t)
+
+        correlations.append(corr_t[0, 1] if n_assets == 2 else corr_t)
+
+    return np.array(correlations)
+
+def plot_rolling_correlation(returns, window=21):
+    """
+    Calculate rolling correlation.
+    """
+    returns = pd.DataFrame(returns)
+    rolling_corr = returns.iloc[:, 0].rolling(window).corr(returns.iloc[:, 1])
+    return rolling_corr.values
+
+# Estimate dynamic correlations
+ewma_corr = estimate_ewma_correlation(returns_regime)
+rolling_corr = plot_rolling_correlation(returns_regime)
+
+print("Dynamic Correlation Analysis:")
+print(f"EWMA correlation range: [{ewma_corr.min():.3f}, {ewma_corr.max():.3f}]")
+print(f"Rolling correlation range: [{np.nanmin(rolling_corr):.3f}, {np.nanmax(rolling_corr):.3f}]")
+```
+
+<Tip>
+EWMA with λ=0.94 (RiskMetrics) gives more weight to recent observations. Lower λ makes correlations more responsive but noisier.
+</Tip>
+
+## 5. Portfolio Risk Decomposition
+
+Understanding how correlation affects portfolio risk.
+
+```python
+def decompose_portfolio_risk(weights, volatilities, correlation):
+    """
+    Decompose portfolio variance into components.
+
+    σ²_p = Σᵢ wᵢ²σᵢ² + Σᵢ Σⱼ≠ᵢ wᵢwⱼσᵢσⱼρᵢⱼ
+
+    Returns:
+        Individual variance contribution, covariance contribution
+    """
+    weights = np.array(weights)
+    volatilities = np.array(volatilities)
+    n = len(weights)
+
+    # Individual variance contribution
+    individual_var = np.sum((weights * volatilities)**2)
+
+    # Covariance contribution
+    cov_contribution = 0
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                cov_contribution += (weights[i] * weights[j] *
+                                   volatilities[i] * volatilities[j] *
+                                   correlation[i, j])
+
+    total_var = individual_var + cov_contribution
+    portfolio_vol = np.sqrt(total_var)
+
+    # Diversification ratio
+    undiversified_vol = np.sum(weights * volatilities)
+    diversification_ratio = undiversified_vol / portfolio_vol
+
+    return {
+        'portfolio_vol': portfolio_vol,
+        'individual_contribution': individual_var,
+        'covariance_contribution': cov_contribution,
+        'diversification_ratio': diversification_ratio,
+        'diversification_benefit': 1 - (portfolio_vol / undiversified_vol)
+    }
+
+# Example
+weights = np.array([0.25, 0.25, 0.25, 0.25])
+vols = np.array([0.20, 0.25, 0.15, 0.30])
+
+# Low correlation scenario
+low_corr = np.array([
+    [1.0, 0.2, 0.1, 0.0],
+    [0.2, 1.0, 0.15, 0.1],
+    [0.1, 0.15, 1.0, 0.05],
+    [0.0, 0.1, 0.05, 1.0]
+])
+
+# High correlation scenario (crisis)
+high_corr = np.array([
+    [1.0, 0.8, 0.7, 0.6],
+    [0.8, 1.0, 0.75, 0.7],
+    [0.7, 0.75, 1.0, 0.65],
+    [0.6, 0.7, 0.65, 1.0]
+])
+
+print("Portfolio Risk Decomposition:")
+print("\nLow Correlation (Normal):")
+decomp_low = decompose_portfolio_risk(weights, vols, low_corr)
+for k, v in decomp_low.items():
+    print(f"  {k}: {v:.4f}")
+
+print("\nHigh Correlation (Crisis):")
+decomp_high = decompose_portfolio_risk(weights, vols, high_corr)
+for k, v in decomp_high.items():
+    print(f"  {k}: {v:.4f}")
+
+print(f"\nVolatility increase in crisis: {(decomp_high['portfolio_vol']/decomp_low['portfolio_vol']-1):.1%}")
+```
+
+## 6. Correlation Risk Management
+
+Strategies for managing correlation risk.
+
+```python
+class CorrelationRiskManager:
+    """
+    Tools for managing correlation risk in portfolios.
+    """
+
+    def __init__(self, returns_history):
+        self.returns = np.array(returns_history)
+        self.n_assets = self.returns.shape[1]
+
+    def stress_test_correlation(self, weights, stress_correlation_increase=0.3):
+        """
+        Stress test portfolio assuming correlations increase.
+        """
+        weights = np.array(weights)
+        vols = np.std(self.returns, axis=0) * np.sqrt(252)
+        base_corr = np.corrcoef(self.returns, rowvar=False)
+
+        # Stress correlation
+        stressed_corr = base_corr + stress_correlation_increase * (1 - base_corr)
+        np.fill_diagonal(stressed_corr, 1.0)
+
+        # Ensure positive semi-definite
+        eigenvalues, eigenvectors = np.linalg.eigh(stressed_corr)
+        eigenvalues = np.maximum(eigenvalues, 0.01)
+        stressed_corr = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.T
+
+        base_decomp = decompose_portfolio_risk(weights, vols, base_corr)
+        stress_decomp = decompose_portfolio_risk(weights, vols, stressed_corr)
+
+        return {
+            'base_vol': base_decomp['portfolio_vol'],
+            'stressed_vol': stress_decomp['portfolio_vol'],
+            'vol_increase': stress_decomp['portfolio_vol'] / base_decomp['portfolio_vol'] - 1
+        }
+
+    def find_diversifying_assets(self, existing_weights, candidate_returns):
+        """
+        Find assets that improve diversification.
+        """
+        combined = np.column_stack([self.returns, candidate_returns])
+        corr = np.corrcoef(combined, rowvar=False)
+
+        # Average correlation with existing portfolio
+        n_existing = self.returns.shape[1]
+        avg_corr_with_existing = corr[:n_existing, n_existing:].mean(axis=0)
+
+        return avg_corr_with_existing
+
+# Example
+manager = CorrelationRiskManager(returns)
+weights = np.array([0.4, 0.3, 0.2, 0.1])
+
+stress_result = manager.stress_test_correlation(weights)
+print("Correlation Stress Test:")
+print(f"  Base volatility: {stress_result['base_vol']:.2%}")
+print(f"  Stressed volatility: {stress_result['stressed_vol']:.2%}")
+print(f"  Volatility increase: {stress_result['vol_increase']:.1%}")
+```
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Correlation matrices** quantify linear relationships between assets
+2. **Crisis correlations** increase, reducing diversification benefits
+3. **Shrinkage estimators** improve correlation estimation accuracy
+4. **Dynamic models** like EWMA capture time-varying correlations
+5. **Risk decomposition** shows how correlation affects portfolio risk
+6. **Stress testing** correlations helps prepare for crisis scenarios
+
+## Further Reading
+
+- Next lesson: Real-World Risk Applications
+- Related: Factor Models and Systematic Risk
+- Application: Correlation Trading Strategies

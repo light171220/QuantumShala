@@ -1,0 +1,527 @@
+# Decoding Algorithms
+
+## Introduction
+
+Decoding is the process of recovering the original message from a received (possibly corrupted) codeword. This lesson covers the main decoding strategies and their implementations.
+
+## Decoding Strategies
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    DECODING STRATEGIES                              │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  1. NEAREST NEIGHBOR (Maximum Likelihood):                         │
+│     Find codeword closest to received word                         │
+│     Optimal for symmetric channels                                 │
+│     Complexity: O(2^k) - exponential in message bits              │
+│                                                                     │
+│  2. SYNDROME DECODING:                                             │
+│     Compute syndrome → lookup error → correct                      │
+│     Precompute lookup table                                        │
+│     Complexity: O(n) for decoding, O(2^(n-k)) for table           │
+│                                                                     │
+│  3. ALGEBRAIC DECODING:                                            │
+│     Use code structure for efficient algorithms                    │
+│     Examples: BCH, Reed-Solomon decoders                          │
+│     Complexity: O(n²) to O(n³) typically                          │
+│                                                                     │
+│  TRADE-OFF:                                                         │
+│  • Nearest neighbor: optimal but slow                              │
+│  • Syndrome: fast but requires storage                             │
+│  • Algebraic: balance, but code-specific                          │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Syndrome Decoding
+
+```python
+import numpy as np
+from typing import Dict, Tuple, List
+
+class SyndromeDecoder:
+    """
+    Syndrome-based decoder for linear codes.
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                  SYNDROME DECODING                              │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                                                                 │
+    │  PRINCIPLE:                                                     │
+    │  received = codeword ⊕ error                                   │
+    │  syndrome(received) = syndrome(error)  [syndrome(codeword)=0]  │
+    │                                                                 │
+    │  ALGORITHM:                                                     │
+    │  1. Compute syndrome s = H × r^T                               │
+    │  2. Lookup error pattern e from syndrome table                 │
+    │  3. Correct: c = r ⊕ e                                         │
+    │                                                                 │
+    │  SYNDROME TABLE:                                                │
+    │  • 2^(n-k) syndromes, each maps to one error pattern          │
+    │  • Each syndrome → minimum weight error (coset leader)        │
+    │  • Precompute once, use many times                            │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+    """
+
+    def __init__(self, H: np.ndarray, max_errors: int = None):
+        """
+        Initialize decoder with parity check matrix.
+
+        Args:
+            H: Parity check matrix (r × n)
+            max_errors: Maximum errors to include in table
+        """
+        self.H = H
+        self.r, self.n = H.shape
+        self.max_errors = max_errors if max_errors else (self.n - self.r) // 2
+
+        self.syndrome_table = self._build_syndrome_table()
+
+    def _build_syndrome_table(self) -> Dict[Tuple, np.ndarray]:
+        """
+        Build syndrome → error pattern lookup table.
+
+        Uses coset leaders (minimum weight error for each syndrome).
+        """
+        table = {}
+
+        # Start with no error
+        table[tuple([0] * self.r)] = np.zeros(self.n, dtype=int)
+
+        # Add single bit errors
+        for i in range(self.n):
+            error = np.zeros(self.n, dtype=int)
+            error[i] = 1
+            syndrome = tuple((self.H @ error) % 2)
+
+            if syndrome not in table:
+                table[syndrome] = error
+
+        # Add multi-bit errors up to max_errors
+        for num_errors in range(2, self.max_errors + 1):
+            for positions in self._combinations(self.n, num_errors):
+                error = np.zeros(self.n, dtype=int)
+                for pos in positions:
+                    error[pos] = 1
+
+                syndrome = tuple((self.H @ error) % 2)
+
+                # Only add if not already in table (prefer lower weight)
+                if syndrome not in table:
+                    table[syndrome] = error
+
+        return table
+
+    def _combinations(self, n: int, r: int):
+        """Generate all r-combinations of range(n)."""
+        from itertools import combinations
+        return combinations(range(n), r)
+
+    def decode(self, received: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Decode received word using syndrome table.
+
+        Returns:
+            (corrected_codeword, detected_error)
+        """
+        syndrome = tuple((self.H @ received) % 2)
+
+        if syndrome in self.syndrome_table:
+            error = self.syndrome_table[syndrome]
+            corrected = (received + error) % 2
+            return corrected, error
+        else:
+            # Error not in table (too many errors)
+            return received, None
+
+    def syndrome(self, word: np.ndarray) -> np.ndarray:
+        """Calculate syndrome."""
+        return (self.H @ word) % 2
+
+# Example: Hamming [7, 4, 3] decoder
+H_hamming = np.array([
+    [0, 0, 0, 1, 1, 1, 1],
+    [0, 1, 1, 0, 0, 1, 1],
+    [1, 0, 1, 0, 1, 0, 1]
+])
+
+decoder = SyndromeDecoder(H_hamming, max_errors=1)
+
+print("Syndrome Decoding for Hamming [7, 4, 3]")
+print("=" * 60)
+
+print("\nSyndrome Table:")
+print(f"{'Syndrome':<15} {'Error Pattern':<20} {'Weight':<10}")
+print("-" * 45)
+
+for synd, error in sorted(decoder.syndrome_table.items()):
+    synd_str = ''.join(map(str, synd))
+    error_str = ''.join(map(str, error))
+    weight = np.sum(error)
+    print(f"{synd_str:<15} {error_str:<20} {weight:<10}")
+
+# Test decoding
+print("\nDecoding Examples:")
+codeword = np.array([1, 0, 1, 1, 0, 0, 1])  # Valid codeword
+
+for error_pos in [None, 2, 5]:
+    received = codeword.copy()
+    if error_pos is not None:
+        received[error_pos] ^= 1
+
+    corrected, error = decoder.decode(received)
+    success = np.array_equal(corrected, codeword)
+
+    print(f"Received: {''.join(map(str, received))} → "
+          f"Corrected: {''.join(map(str, corrected))} "
+          f"[{'✓' if success else '✗'}]")
+```
+
+## Maximum Likelihood Decoding
+
+```python
+import numpy as np
+from typing import List, Tuple
+
+class MaximumLikelihoodDecoder:
+    """
+    Maximum Likelihood (ML) decoder - finds nearest codeword.
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │              MAXIMUM LIKELIHOOD DECODING                        │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                                                                 │
+    │  PRINCIPLE:                                                     │
+    │  Given received word r, find codeword c that maximizes         │
+    │  P(r | c was sent)                                             │
+    │                                                                 │
+    │  FOR BSC (Binary Symmetric Channel):                           │
+    │  P(r | c) = p^d(r,c) × (1-p)^(n-d(r,c))                        │
+    │                                                                 │
+    │  Since p < 0.5, this is maximized when d(r,c) is minimized.    │
+    │  → ML decoding = finding nearest codeword                      │
+    │                                                                 │
+    │  ALGORITHM:                                                     │
+    │  1. Compute distance to each codeword                          │
+    │  2. Return codeword with minimum distance                      │
+    │                                                                 │
+    │  COMPLEXITY: O(2^k × n) - must check all codewords            │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+    """
+
+    def __init__(self, G: np.ndarray):
+        """
+        Initialize ML decoder with generator matrix.
+        """
+        self.G = G
+        self.k, self.n = G.shape
+        self.codewords = self._generate_all_codewords()
+
+    def _generate_all_codewords(self) -> List[np.ndarray]:
+        """Generate all 2^k codewords."""
+        codewords = []
+        for i in range(2**self.k):
+            message = np.array([int(b) for b in format(i, f'0{self.k}b')])
+            codeword = (message @ self.G) % 2
+            codewords.append(codeword)
+        return codewords
+
+    def decode(self, received: np.ndarray) -> Tuple[np.ndarray, int, int]:
+        """
+        Find nearest codeword to received word.
+
+        Returns:
+            (nearest_codeword, min_distance, num_ties)
+        """
+        min_dist = self.n + 1
+        nearest = None
+        num_ties = 0
+
+        for codeword in self.codewords:
+            dist = np.sum((received + codeword) % 2)
+
+            if dist < min_dist:
+                min_dist = dist
+                nearest = codeword
+                num_ties = 1
+            elif dist == min_dist:
+                num_ties += 1
+
+        return nearest, min_dist, num_ties
+
+    def decode_probability(self, received: np.ndarray,
+                           p: float) -> List[Tuple[np.ndarray, float]]:
+        """
+        Compute probability of each codeword given received word.
+
+        P(c | r) ∝ p^d × (1-p)^(n-d)
+        """
+        probs = []
+        total = 0
+
+        for codeword in self.codewords:
+            dist = np.sum((received + codeword) % 2)
+            prob = (p ** dist) * ((1 - p) ** (self.n - dist))
+            probs.append((codeword, prob))
+            total += prob
+
+        # Normalize
+        probs = [(c, p / total) for c, p in probs]
+        return sorted(probs, key=lambda x: -x[1])  # Sort by probability
+
+# Example: Small code
+G_small = np.array([
+    [1, 0, 1, 1],
+    [0, 1, 1, 0]
+])
+
+ml_decoder = MaximumLikelihoodDecoder(G_small)
+
+print("\nMaximum Likelihood Decoding")
+print("=" * 60)
+
+print("\nAll codewords of [4, 2] code:")
+for i, cw in enumerate(ml_decoder.codewords):
+    print(f"  {i}: {''.join(map(str, cw))}")
+
+# Decode example
+received = np.array([1, 1, 0, 1])
+nearest, dist, ties = ml_decoder.decode(received)
+
+print(f"\nReceived: {''.join(map(str, received))}")
+print(f"Nearest codeword: {''.join(map(str, nearest))}")
+print(f"Distance: {dist}")
+print(f"Number of equally close codewords: {ties}")
+
+# Probability analysis
+print(f"\nProbabilities (assuming p=0.1 error rate):")
+probs = ml_decoder.decode_probability(received, 0.1)
+for cw, prob in probs[:4]:
+    print(f"  {''.join(map(str, cw))}: {prob:.4f}")
+```
+
+## Coset Decomposition
+
+```python
+import numpy as np
+from typing import Dict, List
+
+class CosetAnalyzer:
+    """
+    Analyze coset structure for syndrome decoding.
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                    COSET STRUCTURE                              │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                                                                 │
+    │  COSET: Set of all words with the same syndrome                │
+    │                                                                 │
+    │  F₂ⁿ = C ∪ (e₁ + C) ∪ (e₂ + C) ∪ ... ∪ (e_{2^r-1} + C)        │
+    │        └─ code   └────── 2^(n-k) - 1 cosets ─────────┘        │
+    │                                                                 │
+    │  COSET LEADER: Minimum weight element in coset                 │
+    │  • Represents most likely error pattern                        │
+    │  • Used for syndrome decoding                                  │
+    │                                                                 │
+    │  COVERING RADIUS: Maximum weight of any coset leader           │
+    │  • Worst-case number of errors decoder can handle              │
+    │  • For perfect codes: equals correction capability t           │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+    """
+
+    def __init__(self, G: np.ndarray, H: np.ndarray):
+        self.G = G
+        self.H = H
+        self.k, self.n = G.shape
+        self.r = self.n - self.k
+
+    def all_words(self) -> List[np.ndarray]:
+        """Generate all 2^n binary words of length n."""
+        words = []
+        for i in range(2**self.n):
+            word = np.array([int(b) for b in format(i, f'0{self.n}b')])
+            words.append(word)
+        return words
+
+    def syndrome(self, word: np.ndarray) -> Tuple:
+        """Calculate syndrome as tuple."""
+        return tuple((self.H @ word) % 2)
+
+    def find_cosets(self) -> Dict[Tuple, List[np.ndarray]]:
+        """Group all words by their syndrome (coset)."""
+        cosets = {}
+
+        for word in self.all_words():
+            synd = self.syndrome(word)
+            if synd not in cosets:
+                cosets[synd] = []
+            cosets[synd].append(word)
+
+        return cosets
+
+    def find_coset_leaders(self) -> Dict[Tuple, np.ndarray]:
+        """Find minimum weight element (coset leader) for each coset."""
+        cosets = self.find_cosets()
+        leaders = {}
+
+        for synd, words in cosets.items():
+            # Find word with minimum Hamming weight
+            min_weight = self.n + 1
+            leader = None
+
+            for word in words:
+                weight = np.sum(word)
+                if weight < min_weight:
+                    min_weight = weight
+                    leader = word
+
+            leaders[synd] = leader
+
+        return leaders
+
+    def covering_radius(self) -> int:
+        """Calculate covering radius (max weight of coset leaders)."""
+        leaders = self.find_coset_leaders()
+        return max(np.sum(leader) for leader in leaders.values())
+
+    def print_coset_table(self):
+        """Display coset structure."""
+        cosets = self.find_cosets()
+        leaders = self.find_coset_leaders()
+
+        print(f"\nCoset Table for [{self.n}, {self.k}] code")
+        print(f"Number of cosets: {len(cosets)}")
+        print("-" * 60)
+
+        for synd in sorted(cosets.keys()):
+            leader = leaders[synd]
+            coset = cosets[synd]
+            weight = np.sum(leader)
+
+            leader_str = ''.join(map(str, leader))
+            coset_size = len(coset)
+
+            print(f"Syndrome {synd}: Leader = {leader_str} (weight {weight}), "
+                  f"Coset size = {coset_size}")
+
+# Example with small code
+G_small = np.array([
+    [1, 0, 1, 1],
+    [0, 1, 1, 0]
+])
+H_small = np.array([
+    [1, 1, 1, 0],
+    [1, 0, 0, 1]
+])
+
+analyzer = CosetAnalyzer(G_small, H_small)
+analyzer.print_coset_table()
+
+print(f"\nCovering radius: {analyzer.covering_radius()}")
+```
+
+## Decoding Complexity
+
+```python
+class ComplexityAnalysis:
+    """
+    Analyze computational complexity of decoding methods.
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                DECODING COMPLEXITY                              │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                                                                 │
+    │  METHOD              DECODE TIME    PRECOMPUTE     STORAGE     │
+    │  ─────────────────   ───────────    ──────────     ───────     │
+    │  ML (brute force)    O(2^k × n)     None           O(2^k × n)  │
+    │  Syndrome table      O(n²)          O(2^(n-k))     O(2^(n-k))  │
+    │  Hamming special     O(n)           O(1)           O(1)        │
+    │  BCH/RS algebraic    O(n²)          O(n)           O(n)        │
+    │                                                                 │
+    │  QUANTUM IMPLICATIONS:                                          │
+    │  • Syndrome decoding maps naturally to quantum                 │
+    │  • Measure syndrome → classical lookup → apply correction     │
+    │  • Real-time requirements for fault tolerance                 │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+    """
+
+    @staticmethod
+    def ml_complexity(n: int, k: int) -> dict:
+        """Complexity of ML decoding."""
+        return {
+            'decode_time': f"O({2**k} × {n}) = O({2**k * n})",
+            'storage': f"O({2**k} × {n})",
+            'precompute': "None"
+        }
+
+    @staticmethod
+    def syndrome_complexity(n: int, k: int) -> dict:
+        """Complexity of syndrome decoding."""
+        r = n - k
+        return {
+            'decode_time': f"O({n}²)",
+            'storage': f"O({2**r} × {n})",
+            'precompute': f"O({2**r})"
+        }
+
+    @staticmethod
+    def hamming_complexity(n: int) -> dict:
+        """Complexity for Hamming codes (special case)."""
+        return {
+            'decode_time': "O(n)",
+            'storage': "O(1)",
+            'precompute': "O(1)"
+        }
+
+# Compare complexities
+print("\nDecoding Complexity Comparison")
+print("=" * 60)
+
+for name, n, k in [("Hamming [7,4,3]", 7, 4),
+                    ("Hamming [15,11,3]", 15, 11),
+                    ("Golay [23,12,7]", 23, 12)]:
+    print(f"\n{name}:")
+    ml = ComplexityAnalysis.ml_complexity(n, k)
+    synd = ComplexityAnalysis.syndrome_complexity(n, k)
+
+    print(f"  ML decoding:       {ml['decode_time']}")
+    print(f"  Syndrome decoding: {synd['decode_time']}")
+    print(f"  Syndrome storage:  {synd['storage']}")
+```
+
+## Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                 DECODING ALGORITHMS SUMMARY                         │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  MAIN APPROACHES:                                                   │
+│  • Maximum Likelihood: Optimal but exponential                     │
+│  • Syndrome Decoding: Fast lookup with precomputation             │
+│  • Algebraic: Efficient for structured codes                       │
+│                                                                     │
+│  SYNDROME DECODING:                                                 │
+│  • syndrome(r) = syndrome(error)                                   │
+│  • Build table mapping syndromes to coset leaders                  │
+│  • O(n) decoding after table construction                          │
+│                                                                     │
+│  COSET STRUCTURE:                                                   │
+│  • Words partition into 2^(n-k) cosets                            │
+│  • Each coset has same syndrome                                    │
+│  • Coset leader = most likely error                               │
+│                                                                     │
+│  QUANTUM CONNECTION:                                                │
+│  • Syndrome measurement is non-destructive                         │
+│  • Classical decoder determines correction                         │
+│  • Real-time decoding critical for fault tolerance                │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Efficient decoding algorithms are essential for practical error correction, both classical and quantum.

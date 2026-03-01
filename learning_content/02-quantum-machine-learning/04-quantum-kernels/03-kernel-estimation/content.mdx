@@ -1,0 +1,469 @@
+---
+title: "Kernel Estimation"
+description: "Learn techniques for estimating quantum kernels from measurements. Understand swap tests, compute-uncompute methods, and shot budget optimization."
+duration: 40
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Implement the swap test for kernel estimation
+- Apply the compute-uncompute method efficiently
+- Analyze shot requirements for accurate kernel estimation
+- Handle statistical errors in kernel matrices
+- Optimize measurement strategies for kernel computation
+
+## 1. Kernel Estimation Challenge
+
+Why estimating quantum kernels requires special techniques.
+
+<Definition term="Kernel Estimation">
+The process of measuring k(x, x') = |⟨φ(x)|φ(x')⟩|² from quantum circuits, requiring either the swap test or compute-uncompute method since direct state overlap measurement is not possible.
+</Definition>
+
+```python
+import numpy as np
+
+def kernel_estimation_overview():
+    """Overview of kernel estimation methods."""
+
+    print("Kernel Estimation Methods")
+    print("=" * 60)
+
+    methods = {
+        "Swap Test": {
+            "circuit": "Prepare |φ(x)⟩|φ(x')⟩, apply SWAP test",
+            "measurement": "P(ancilla=0) = (1 + |⟨φ(x)|φ(x')⟩|²)/2",
+            "qubits": "2n + 1 (two copies + ancilla)",
+            "depth": "O(n) for controlled-SWAP"
+        },
+        "Compute-Uncompute": {
+            "circuit": "U(x)|0⟩ then U†(x')",
+            "measurement": "P(|0⟩) = |⟨0|U†(x')U(x)|0⟩|²",
+            "qubits": "n (single register)",
+            "depth": "O(depth(U))"
+        },
+        "Hadamard Test": {
+            "circuit": "Controlled-U for phase estimation",
+            "measurement": "Real and imaginary parts separately",
+            "qubits": "n + 1",
+            "depth": "O(depth(U))"
+        }
+    }
+
+    for name, details in methods.items():
+        print(f"\n{name}:")
+        for key, value in details.items():
+            print(f"  {key}: {value}")
+
+kernel_estimation_overview()
+```
+
+## 2. The Swap Test
+
+Classical method for measuring state overlap.
+
+```python
+import numpy as np
+
+def swap_test_simulation(state1, state2, n_shots=1000):
+    """
+    Simulate the swap test for measuring |⟨ψ₁|ψ₂⟩|².
+
+    Circuit:
+    |0⟩ ─── H ─── ● ─── H ─── Measure
+                  │
+    |ψ₁⟩ ───────SWAP──────────
+                  │
+    |ψ₂⟩ ─────────────────────
+
+    P(0) = (1 + |⟨ψ₁|ψ₂⟩|²) / 2
+    """
+    # True overlap
+    overlap_sq = np.abs(np.vdot(state1, state2)) ** 2
+
+    # Probability of measuring |0⟩ on ancilla
+    p_zero = (1 + overlap_sq) / 2
+
+    # Simulate measurements
+    outcomes = np.random.binomial(1, 1 - p_zero, n_shots)  # 1 = |1⟩, 0 = |0⟩
+    n_zeros = n_shots - np.sum(outcomes)
+
+    # Estimate overlap
+    p_zero_est = n_zeros / n_shots
+    overlap_est = 2 * p_zero_est - 1
+
+    return {
+        'true_overlap': overlap_sq,
+        'estimated_overlap': overlap_est,
+        'p_zero_true': p_zero,
+        'p_zero_estimated': p_zero_est,
+        'error': abs(overlap_est - overlap_sq)
+    }
+
+# Example
+print("Swap Test Simulation")
+print("=" * 50)
+
+# Two similar states
+theta1, theta2 = 0.3, 0.4
+state1 = np.array([np.cos(theta1), np.sin(theta1)])
+state2 = np.array([np.cos(theta2), np.sin(theta2)])
+
+for n_shots in [100, 1000, 10000]:
+    result = swap_test_simulation(state1, state2, n_shots)
+    print(f"\nShots: {n_shots}")
+    print(f"  True |⟨ψ₁|ψ₂⟩|²: {result['true_overlap']:.6f}")
+    print(f"  Estimated: {result['estimated_overlap']:.6f}")
+    print(f"  Error: {result['error']:.6f}")
+```
+
+## 3. Compute-Uncompute Method
+
+More qubit-efficient kernel estimation.
+
+```python
+import numpy as np
+
+class ComputeUncompute:
+    """Kernel estimation via compute-uncompute."""
+
+    def __init__(self, feature_map_func):
+        self.feature_map = feature_map_func
+
+    def estimate_kernel(self, x1, x2, n_shots=1000):
+        """
+        Estimate k(x1, x2) = |⟨φ(x1)|φ(x2)⟩|².
+
+        Circuit: |0⟩ → U(x1) → U†(x2) → Measure
+        P(|0...0⟩) = |⟨0|U†(x2)U(x1)|0⟩|² = k(x1, x2)
+        """
+        # Get states
+        state1 = self.feature_map(x1)
+        state2 = self.feature_map(x2)
+
+        # True kernel
+        true_kernel = np.abs(np.vdot(state1, state2)) ** 2
+
+        # Compute U†(x2)U(x1)|0⟩
+        # This equals state1 rotated by the inverse of state2's preparation
+        # For simulation, we compute the overlap directly
+        dim = len(state1)
+
+        # Probability of measuring |0...0⟩
+        # P(0) = |⟨0|U†(x2)U(x1)|0⟩|² = |⟨φ(x2)|φ(x1)⟩|² = k(x1, x2)
+        p_zero = true_kernel
+
+        # Simulate measurements
+        outcomes = np.random.choice(dim, size=n_shots,
+                                   p=[p_zero] + [(1-p_zero)/(dim-1)]*(dim-1))
+        n_zeros = np.sum(outcomes == 0)
+
+        estimated_kernel = n_zeros / n_shots
+
+        return {
+            'true': true_kernel,
+            'estimated': estimated_kernel,
+            'error': abs(estimated_kernel - true_kernel),
+            'std_error': np.sqrt(p_zero * (1 - p_zero) / n_shots)
+        }
+
+def simple_feature_map(x):
+    """Simple angle encoding feature map."""
+    theta = np.pi * x[0] if len(x) > 0 else 0
+    return np.array([np.cos(theta/2), np.sin(theta/2)])
+
+# Example
+print("Compute-Uncompute Method")
+print("=" * 50)
+
+cu = ComputeUncompute(simple_feature_map)
+
+x1 = [0.3]
+x2 = [0.5]
+
+for n_shots in [100, 1000, 10000]:
+    result = cu.estimate_kernel(x1, x2, n_shots)
+    print(f"\nShots: {n_shots}")
+    print(f"  True kernel: {result['true']:.6f}")
+    print(f"  Estimated: {result['estimated']:.6f}")
+    print(f"  Error: {result['error']:.6f}")
+    print(f"  Expected std: {result['std_error']:.6f}")
+```
+
+## 4. Shot Budget Analysis
+
+How many measurements do we need?
+
+```python
+import numpy as np
+
+def shot_budget_analysis():
+    """Analyze shot requirements for kernel estimation."""
+
+    print("Shot Budget Analysis")
+    print("=" * 60)
+
+    def estimate_required_shots(target_error, kernel_value):
+        """
+        Estimate shots needed for target error.
+
+        For binomial sampling:
+        std_error ≈ sqrt(p(1-p)/n)
+
+        To achieve error ε: n ≈ p(1-p)/ε²
+        """
+        p = kernel_value
+        variance = p * (1 - p)
+        return int(np.ceil(variance / target_error**2))
+
+    print("\nShots needed for different kernel values and target errors:")
+    print(f"{'Kernel':<12} {'Error=0.1':<15} {'Error=0.01':<15} {'Error=0.001':<15}")
+    print("-" * 60)
+
+    for k in [0.1, 0.5, 0.9, 0.99]:
+        shots_01 = estimate_required_shots(0.1, k)
+        shots_001 = estimate_required_shots(0.01, k)
+        shots_0001 = estimate_required_shots(0.001, k)
+        print(f"{k:<12.2f} {shots_01:<15,} {shots_001:<15,} {shots_0001:<15,}")
+
+    print("\n→ More shots needed when kernel ≈ 0.5 (maximum variance)")
+    print("→ Fewer shots when kernel ≈ 0 or ≈ 1")
+
+shot_budget_analysis()
+
+def total_shots_for_kernel_matrix(n_samples, shots_per_entry):
+    """Calculate total shots for full kernel matrix."""
+
+    print("\n" + "=" * 60)
+    print("Total Shots for Kernel Matrix:")
+
+    # Only need upper triangle (symmetric matrix)
+    n_entries = n_samples * (n_samples + 1) // 2
+    total = n_entries * shots_per_entry
+
+    print(f"\nSamples: {n_samples}")
+    print(f"Unique entries: {n_entries}")
+    print(f"Shots per entry: {shots_per_entry:,}")
+    print(f"Total shots: {total:,}")
+
+    # Time estimate (assuming 1000 shots/second)
+    time_seconds = total / 1000
+    print(f"Estimated time @ 1000 shots/s: {time_seconds:.1f} seconds")
+
+    return total
+
+total_shots_for_kernel_matrix(n_samples=100, shots_per_entry=1000)
+```
+
+## 5. Statistical Error Handling
+
+Dealing with noisy kernel estimates.
+
+```python
+import numpy as np
+
+def statistical_error_handling():
+    """Handle statistical errors in kernel matrices."""
+
+    print("Statistical Error Handling")
+    print("=" * 60)
+
+    def estimate_kernel_with_confidence(p_zero, n_shots, confidence=0.95):
+        """Estimate kernel with confidence interval."""
+        from scipy import stats
+
+        # Point estimate
+        kernel_est = p_zero
+
+        # Standard error
+        std_err = np.sqrt(p_zero * (1 - p_zero) / n_shots)
+
+        # Confidence interval
+        z = stats.norm.ppf((1 + confidence) / 2)
+        ci_low = max(0, kernel_est - z * std_err)
+        ci_high = min(1, kernel_est + z * std_err)
+
+        return kernel_est, std_err, (ci_low, ci_high)
+
+    # Example
+    print("\nKernel estimate with 95% confidence interval:")
+    for p in [0.2, 0.5, 0.8]:
+        for n in [100, 1000]:
+            est, err, ci = estimate_kernel_with_confidence(p, n)
+            print(f"  p={p}, n={n}: {est:.3f} ± {err:.3f}, CI=[{ci[0]:.3f}, {ci[1]:.3f}]")
+
+statistical_error_handling()
+
+def ensure_psd_kernel_matrix(K, method='clip'):
+    """Ensure kernel matrix is positive semi-definite."""
+
+    print("\n" + "=" * 60)
+    print("Ensuring PSD Kernel Matrix:")
+
+    # Check if already PSD
+    eigvals = np.linalg.eigvalsh(K)
+    print(f"\nOriginal eigenvalues: {np.round(eigvals, 4)}")
+    print(f"Already PSD: {np.all(eigvals >= -1e-10)}")
+
+    if method == 'clip':
+        # Project to nearest PSD matrix
+        eigvals_clipped = np.maximum(eigvals, 0)
+        eigvecs = np.linalg.eigh(K)[1]
+        K_psd = eigvecs @ np.diag(eigvals_clipped) @ eigvecs.T
+
+    elif method == 'shift':
+        # Shift eigenvalues
+        min_eig = np.min(eigvals)
+        if min_eig < 0:
+            K_psd = K - min_eig * np.eye(len(K)) + 1e-6 * np.eye(len(K))
+        else:
+            K_psd = K
+
+    new_eigvals = np.linalg.eigvalsh(K_psd)
+    print(f"Corrected eigenvalues: {np.round(new_eigvals, 4)}")
+
+    return K_psd
+
+# Example with noisy kernel matrix
+np.random.seed(42)
+K_true = np.array([[1, 0.8, 0.3], [0.8, 1, 0.5], [0.3, 0.5, 1]])
+noise = np.random.randn(3, 3) * 0.1
+K_noisy = K_true + noise
+K_noisy = (K_noisy + K_noisy.T) / 2  # Symmetrize
+
+K_fixed = ensure_psd_kernel_matrix(K_noisy, method='clip')
+```
+
+## 6. Efficient Kernel Matrix Construction
+
+Strategies for building large kernel matrices.
+
+```python
+import numpy as np
+
+def efficient_kernel_construction():
+    """Strategies for efficient kernel matrix construction."""
+
+    print("Efficient Kernel Matrix Construction")
+    print("=" * 60)
+
+    strategies = {
+        "Parallel Estimation": {
+            "idea": "Estimate multiple kernel entries simultaneously",
+            "implementation": "Batch quantum circuits",
+            "benefit": "Better hardware utilization"
+        },
+        "Adaptive Shots": {
+            "idea": "More shots for important entries",
+            "implementation": "Estimate variance, reallocate budget",
+            "benefit": "Better accuracy where it matters"
+        },
+        "Low-Rank Approximation": {
+            "idea": "Approximate K ≈ VV^T for small V",
+            "implementation": "Nyström method or random features",
+            "benefit": "O(nk) instead of O(n²)"
+        },
+        "Caching": {
+            "idea": "Reuse quantum state preparations",
+            "implementation": "Prepare each state once, measure overlaps",
+            "benefit": "Fewer circuit executions"
+        }
+    }
+
+    for name, details in strategies.items():
+        print(f"\n{name}:")
+        for key, value in details.items():
+            print(f"  {key}: {value}")
+
+efficient_kernel_construction()
+
+class EfficientKernelEstimator:
+    """Efficient kernel matrix estimation."""
+
+    def __init__(self, feature_map_func, base_shots=100):
+        self.feature_map = feature_map_func
+        self.base_shots = base_shots
+        self.state_cache = {}
+
+    def _get_state(self, x):
+        """Get or compute state for data point."""
+        key = tuple(x)
+        if key not in self.state_cache:
+            self.state_cache[key] = self.feature_map(x)
+        return self.state_cache[key]
+
+    def estimate_entry(self, x1, x2, n_shots=None):
+        """Estimate single kernel entry."""
+        if n_shots is None:
+            n_shots = self.base_shots
+
+        state1 = self._get_state(x1)
+        state2 = self._get_state(x2)
+
+        # True kernel (for simulation)
+        true_k = np.abs(np.vdot(state1, state2)) ** 2
+
+        # Simulate measurement
+        n_zeros = np.random.binomial(n_shots, true_k)
+        return n_zeros / n_shots
+
+    def build_matrix(self, X, adaptive=False):
+        """Build full kernel matrix."""
+        n = len(X)
+        K = np.zeros((n, n))
+
+        for i in range(n):
+            for j in range(i, n):
+                if adaptive and i != j:
+                    # More shots for off-diagonal
+                    shots = self.base_shots * 2
+                else:
+                    shots = self.base_shots
+
+                K[i, j] = self.estimate_entry(X[i], X[j], shots)
+                K[j, i] = K[i, j]
+
+        return K
+
+# Demo
+def simple_fm(x):
+    return np.array([np.cos(np.pi*x[0]/2), np.sin(np.pi*x[0]/2)])
+
+estimator = EfficientKernelEstimator(simple_fm, base_shots=500)
+
+X = np.array([[0.1], [0.3], [0.5], [0.7], [0.9]])
+K = estimator.build_matrix(X)
+
+print("\n" + "=" * 60)
+print("Estimated Kernel Matrix:")
+print(np.round(K, 3))
+print(f"\nCache hits: {len(estimator.state_cache)} states cached")
+```
+
+<Tip>
+The compute-uncompute method is generally preferred over the swap test as it requires half the qubits. However, ensure your feature map circuit can be efficiently inverted (U†) for this approach.
+</Tip>
+
+## Summary
+
+In this lesson, you learned about kernel estimation:
+
+1. **Methods**: Swap test vs compute-uncompute
+2. **Swap Test**: Uses ancilla qubit, P(0) = (1+k)/2
+3. **Compute-Uncompute**: More efficient, P(0) = k
+4. **Shot Budget**: O(1/ε²) shots for error ε
+5. **Error Handling**: Confidence intervals, PSD correction
+6. **Efficiency**: Caching, adaptive shots, parallelization
+
+<Warning>
+Statistical noise in kernel estimates can cause the kernel matrix to lose positive semi-definiteness. Always check and correct this before using the matrix for SVM or other methods that require PSD matrices.
+</Warning>
+
+## Further Reading
+
+- Next: Kernel Alignment
+- Advanced: Randomized Kernel Estimation
+- Application: Large-Scale Quantum Kernels

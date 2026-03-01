@@ -1,0 +1,712 @@
+# Distribution Protocols
+
+## Introduction
+
+Distributing entanglement between remote nodes is a fundamental operation in quantum networks. Unlike classical information that can be amplified, quantum states cannot be copied or amplified without degradation. This lesson explores protocols for reliably distributing entangled states across quantum networks.
+
+## Direct Entanglement Distribution
+
+The simplest approach sends one photon from an entangled pair directly through a channel:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              DIRECT DISTRIBUTION                                    │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Alice                                              Bob            │
+│   ┌─────┐                                           ┌─────┐        │
+│   │     │   Keep one photon                         │     │        │
+│   │  S  │ ←─────────┐                               │     │        │
+│   │     │           │                               │     │        │
+│   └──┬──┘      ┌────┴────┐                          └──┬──┘        │
+│      │         │  SPDC   │════════════════════════════>│           │
+│      │         │ Source  │     Send other photon       │           │
+│      ↓         └─────────┘         (fiber)             ↓           │
+│   Memory                                            Memory         │
+│                                                                     │
+│   Channel Loss: η = 10^(-αL/10)                                    │
+│   α ≈ 0.2 dB/km for telecom fiber                                  │
+│                                                                     │
+│   Success probability: P = η × η_detect                             │
+│                                                                     │
+│   L = 50 km:  η ≈ 0.1  → 90% photon loss!                          │
+│   L = 100 km: η ≈ 0.01 → 99% photon loss!                          │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Direct Distribution Implementation
+
+```python
+import numpy as np
+from dataclasses import dataclass, field
+from typing import Tuple, List, Optional, Dict
+from enum import Enum
+
+@dataclass
+class ChannelParameters:
+    """Physical parameters of quantum channel."""
+    length: float = 10.0          # km
+    loss_db_per_km: float = 0.2   # dB/km (telecom fiber)
+    coupling_efficiency: float = 0.9
+    detector_efficiency: float = 0.9
+    dark_count_rate: float = 100   # Hz
+    gate_time: float = 1e-9        # Detection window (s)
+
+    def transmission(self) -> float:
+        """Calculate total transmission probability."""
+        fiber_loss = 10**(-self.loss_db_per_km * self.length / 10)
+        return fiber_loss * self.coupling_efficiency * self.detector_efficiency
+
+    def dark_count_prob(self) -> float:
+        """Probability of dark count in detection window."""
+        return 1 - np.exp(-self.dark_count_rate * self.gate_time)
+
+class DirectDistribution:
+    """
+    Direct entanglement distribution via fiber.
+
+    Source at Alice generates entangled pairs;
+    one photon sent to Bob through lossy channel.
+    """
+
+    def __init__(
+        self,
+        source_rate: float = 1e6,  # pairs/s
+        source_fidelity: float = 0.98,
+        channel: ChannelParameters = None
+    ):
+        self.source_rate = source_rate
+        self.source_fidelity = source_fidelity
+        self.channel = channel or ChannelParameters()
+
+    def attempt_distribution(self) -> Tuple[bool, Optional[dict]]:
+        """
+        Attempt to distribute one entangled pair.
+
+        Returns (success, info) tuple.
+        """
+        # Photon transmission
+        transmitted = np.random.random() < self.channel.transmission()
+
+        if not transmitted:
+            return False, {"reason": "photon_lost"}
+
+        # Dark count check (false positive)
+        dark_count = np.random.random() < self.channel.dark_count_prob()
+
+        if dark_count:
+            # Might detect wrong photon
+            return False, {"reason": "dark_count_interference"}
+
+        # Successful distribution
+        # Fidelity degradation from channel
+        fidelity = self.source_fidelity * (1 - 0.01 * self.channel.length / 100)
+
+        return True, {
+            "reason": "success",
+            "fidelity": fidelity,
+            "distance": self.channel.length
+        }
+
+    def distribution_rate(self) -> float:
+        """Calculate expected pair distribution rate."""
+        success_prob = self.channel.transmission()
+        return self.source_rate * success_prob
+
+    def simulate_session(
+        self,
+        duration: float = 1.0,  # seconds
+        max_pairs: int = 10000
+    ) -> dict:
+        """Simulate distribution session."""
+        n_attempts = min(int(self.source_rate * duration), max_pairs)
+
+        successes = 0
+        fidelities = []
+
+        for _ in range(n_attempts):
+            success, info = self.attempt_distribution()
+            if success:
+                successes += 1
+                fidelities.append(info["fidelity"])
+
+        return {
+            "attempts": n_attempts,
+            "successes": successes,
+            "success_rate": successes / n_attempts if n_attempts > 0 else 0,
+            "distribution_rate": successes / duration,
+            "mean_fidelity": np.mean(fidelities) if fidelities else 0,
+            "distance": self.channel.length
+        }
+
+# Analyze direct distribution vs distance
+print("Direct Entanglement Distribution Analysis")
+print("=" * 60)
+
+distances = [10, 25, 50, 75, 100, 150, 200]
+for d in distances:
+    channel = ChannelParameters(length=d)
+    dist = DirectDistribution(source_rate=1e6, channel=channel)
+
+    eta = channel.transmission()
+    rate = dist.distribution_rate()
+
+    print(f"  {d:3d} km: η = {eta:.2e}, Rate = {rate:.0f} pairs/s")
+```
+
+## Heralded Entanglement Distribution
+
+Heralding provides confirmation that entanglement was successfully established, enabling more efficient protocols:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              HERALDED DISTRIBUTION (MIDPOINT)                       │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Alice                  Midpoint                        Bob        │
+│   ┌─────┐               ┌───────┐                      ┌─────┐     │
+│   │     │               │  BSM  │                      │     │     │
+│   │  S  │══════════════>│ ┌───┐ │<═════════════════════│  S  │     │
+│   │     │    L/2        │ │D D│ │         L/2          │     │     │
+│   └─────┘               └─┴───┴─┘                      └─────┘     │
+│                              │                                      │
+│                         Herald signal                               │
+│                        (classical)                                  │
+│                         ╔═══════╗                                   │
+│                     ┌───║ YES!  ║───┐                               │
+│                     ↓   ╚═══════╝   ↓                               │
+│                   Alice           Bob                               │
+│                  (knows)        (knows)                             │
+│                                                                     │
+│   Advantage: Both parties KNOW when they share entanglement        │
+│   Loss: scales as η^(L/2) × η^(L/2) = η^L (same as direct)        │
+│   But: Failed attempts detected, not mixed with successes          │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Heralded Protocol Implementation
+
+```python
+class HeraldedDistribution:
+    """
+    Heralded entanglement distribution with midpoint BSM.
+
+    Both Alice and Bob have sources; photons meet at midpoint
+    beam splitter. Detection heralds successful entanglement.
+    """
+
+    def __init__(
+        self,
+        source_rate_alice: float = 1e6,
+        source_rate_bob: float = 1e6,
+        total_distance: float = 100.0,  # km
+        loss_db_per_km: float = 0.2,
+        bsm_efficiency: float = 0.5,    # Linear optics limit
+        detector_efficiency: float = 0.9
+    ):
+        self.source_rate_alice = source_rate_alice
+        self.source_rate_bob = source_rate_bob
+        self.total_distance = total_distance
+        self.loss_db_per_km = loss_db_per_km
+        self.bsm_efficiency = bsm_efficiency
+        self.detector_efficiency = detector_efficiency
+
+        # Calculate segment transmissions
+        half_distance = total_distance / 2
+        self.eta_alice = 10**(-loss_db_per_km * half_distance / 10)
+        self.eta_bob = 10**(-loss_db_per_km * half_distance / 10)
+
+    def attempt_heralded_distribution(self) -> Tuple[bool, str, Optional[float]]:
+        """
+        Attempt heralded entanglement generation.
+
+        Returns (success, herald_result, fidelity).
+        """
+        # Both sources emit (probabilistic)
+        alice_emits = np.random.random() < 0.1  # Low to avoid multi-photon
+        bob_emits = np.random.random() < 0.1
+
+        if not alice_emits or not bob_emits:
+            return False, "no_emission", None
+
+        # Transmission to midpoint
+        alice_arrives = np.random.random() < self.eta_alice
+        bob_arrives = np.random.random() < self.eta_bob
+
+        if not alice_arrives or not bob_arrives:
+            return False, "photon_lost", None
+
+        # BSM at midpoint (50% for linear optics)
+        bsm_success = np.random.random() < self.bsm_efficiency
+
+        if not bsm_success:
+            return False, "bsm_failed", None
+
+        # Detection
+        detected = np.random.random() < self.detector_efficiency**2
+
+        if not detected:
+            return False, "detection_failed", None
+
+        # Success! Alice and Bob are now entangled
+        # Fidelity depends on source quality and path matching
+        fidelity = 0.95 - 0.001 * self.total_distance
+
+        return True, "success", fidelity
+
+    def calculate_rate(self) -> dict:
+        """Calculate theoretical distribution rate."""
+        # Probability both photons reach midpoint
+        p_both_arrive = self.eta_alice * self.eta_bob
+
+        # Combined success probability
+        emission_prob = 0.1 * 0.1  # Both sources emit
+        p_success = (emission_prob * p_both_arrive *
+                    self.bsm_efficiency * self.detector_efficiency**2)
+
+        # Rate limited by slower source
+        attempt_rate = min(self.source_rate_alice, self.source_rate_bob)
+        distribution_rate = attempt_rate * p_success
+
+        return {
+            "transmission_product": p_both_arrive,
+            "success_probability": p_success,
+            "attempt_rate": attempt_rate,
+            "distribution_rate": distribution_rate,
+            "pairs_per_second": distribution_rate
+        }
+
+    def simulate(self, n_attempts: int = 10000) -> dict:
+        """Simulate heralded distribution."""
+        results = {
+            "success": 0,
+            "no_emission": 0,
+            "photon_lost": 0,
+            "bsm_failed": 0,
+            "detection_failed": 0
+        }
+        fidelities = []
+
+        for _ in range(n_attempts):
+            success, reason, fidelity = self.attempt_heralded_distribution()
+            results[reason if not success else "success"] += 1
+            if fidelity is not None:
+                fidelities.append(fidelity)
+
+        results["success_rate"] = results["success"] / n_attempts
+        results["mean_fidelity"] = np.mean(fidelities) if fidelities else 0
+
+        return results
+
+# Compare heralded distribution at different distances
+print("\nHeralded Distribution Analysis")
+print("=" * 60)
+
+for distance in [50, 100, 150, 200]:
+    heralded = HeraldedDistribution(total_distance=distance)
+    rates = heralded.calculate_rate()
+    print(f"\n{distance} km:")
+    print(f"  Transmission (each leg): {heralded.eta_alice:.4f}")
+    print(f"  Success probability: {rates['success_probability']:.2e}")
+    print(f"  Distribution rate: {rates['distribution_rate']:.2f} pairs/s")
+```
+
+## Multiplexed Distribution
+
+Multiplexing improves rates by attempting distribution in parallel across multiple modes:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              MULTIPLEXED DISTRIBUTION                               │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Types of Multiplexing:                                             │
+│                                                                     │
+│  TEMPORAL:        Multiple attempts per channel use time            │
+│  ┌──┬──┬──┬──┐                                                     │
+│  │t₁│t₂│t₃│t₄│ ...   (different time bins)                         │
+│  └──┴──┴──┴──┘                                                     │
+│                                                                     │
+│  SPECTRAL:        Different wavelength channels                     │
+│  ════λ₁════>                                                       │
+│  ════λ₂════>      (WDM - wavelength division)                      │
+│  ════λ₃════>                                                       │
+│                                                                     │
+│  SPATIAL:         Multiple fiber modes or cores                     │
+│  ────────────>   Core 1                                            │
+│  ────────────>   Core 2                                            │
+│  ────────────>   Core 3                                            │
+│                                                                     │
+│  Benefit: If one mode succeeds, use it; discard others             │
+│  Rate improvement: ≈ N × single-mode rate (N = # modes)            │
+│  Challenge: Quantum memories needed to synchronize                  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Multiplexed Protocol
+
+```python
+class MultiplexedDistribution:
+    """
+    Multiplexed entanglement distribution.
+
+    Uses multiple parallel modes to increase effective rate.
+    Requires quantum memories for mode selection.
+    """
+
+    def __init__(
+        self,
+        n_modes: int = 10,           # Number of parallel modes
+        mode_type: str = "temporal",  # temporal, spectral, spatial
+        base_success_prob: float = 0.01,
+        memory_efficiency: float = 0.8,
+        memory_coherence_time: float = 1e-3  # seconds
+    ):
+        self.n_modes = n_modes
+        self.mode_type = mode_type
+        self.base_success_prob = base_success_prob
+        self.memory_efficiency = memory_efficiency
+        self.memory_coherence_time = memory_coherence_time
+
+    def attempt_multiplexed(self) -> Tuple[bool, int, float]:
+        """
+        Attempt distribution across all modes.
+
+        Returns (any_success, successful_mode_index, fidelity).
+        """
+        successes = []
+
+        for mode in range(self.n_modes):
+            if np.random.random() < self.base_success_prob:
+                successes.append(mode)
+
+        if not successes:
+            return False, -1, 0.0
+
+        # Select first successful mode (or could optimize)
+        selected = successes[0]
+
+        # Memory retrieval
+        if np.random.random() > self.memory_efficiency:
+            return False, selected, 0.0
+
+        # Fidelity with memory decay
+        # Assume mode selection takes some time
+        selection_time = selected * 1e-9  # ns per mode
+        decay = np.exp(-selection_time / self.memory_coherence_time)
+        fidelity = 0.95 * decay
+
+        return True, selected, fidelity
+
+    def effective_success_probability(self) -> float:
+        """
+        Calculate probability at least one mode succeeds.
+
+        P(≥1 success) = 1 - (1-p)^N
+        """
+        p_all_fail = (1 - self.base_success_prob) ** self.n_modes
+        return (1 - p_all_fail) * self.memory_efficiency
+
+    def rate_improvement(self) -> float:
+        """Calculate rate improvement over single mode."""
+        p_single = self.base_success_prob
+        p_mux = self.effective_success_probability()
+        return p_mux / p_single if p_single > 0 else 0
+
+    def analyze_scaling(self, max_modes: int = 100) -> List[dict]:
+        """Analyze how rate scales with number of modes."""
+        results = []
+
+        for n in range(1, max_modes + 1, 5):
+            self.n_modes = n
+            results.append({
+                "n_modes": n,
+                "success_prob": self.effective_success_probability(),
+                "improvement_factor": self.rate_improvement()
+            })
+
+        return results
+
+# Demonstrate multiplexing advantage
+print("\nMultiplexed Distribution Analysis")
+print("=" * 60)
+
+mux = MultiplexedDistribution(
+    n_modes=10,
+    base_success_prob=0.01,
+    memory_efficiency=0.8
+)
+
+print(f"Single mode success prob: {mux.base_success_prob:.4f}")
+print(f"10-mode multiplexed: {mux.effective_success_probability():.4f}")
+print(f"Rate improvement: {mux.rate_improvement():.1f}×")
+
+# Scaling analysis
+print("\nScaling with number of modes:")
+scaling = mux.analyze_scaling(max_modes=50)
+for result in scaling[::2]:  # Every other
+    print(f"  N={result['n_modes']:3d}: P_success={result['success_prob']:.4f}, "
+          f"Improvement={result['improvement_factor']:.1f}×")
+```
+
+## Rate-Distance Tradeoffs
+
+Understanding the fundamental limits of entanglement distribution:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              RATE-DISTANCE ANALYSIS                                 │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Rate                                                               │
+│   ↑                                                                 │
+│   │ ●                                                               │
+│   │  ●                                                              │
+│   │   ●                                                             │
+│   │    ●                Direct                                      │
+│   │     ●●              R ∝ η(L)                                    │
+│   │       ●●●                                                       │
+│   │          ●●●●                                                   │
+│   │              ●●●●●●                                             │
+│   │                    ●●●●●●●●●●                                   │
+│   └──────────────────────────────────────────────────> Distance     │
+│                                                                     │
+│  Key limits:                                                        │
+│  • Direct: R ∝ 10^(-αL/10), drops 10× per 50km (α=0.2 dB/km)      │
+│  • Repeater-less bound: R ≤ -log₂(1-η) ≈ 1.44η (PLOB bound)        │
+│  • Repeaters can beat this exponential scaling!                    │
+│                                                                     │
+│  Practical constraints:                                             │
+│  • Source rate limited (~GHz max)                                  │
+│  • Detector jitter limits minimum time bins (~100 ps)              │
+│  • Memory coherence limits waiting time                             │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Rate Analysis Tool
+
+```python
+class RateDistanceAnalyzer:
+    """
+    Analyze rate-distance tradeoffs for distribution protocols.
+    """
+
+    def __init__(
+        self,
+        source_rate: float = 1e9,      # Hz
+        loss_db_km: float = 0.2,       # dB/km
+        detector_efficiency: float = 0.9,
+        coupling_efficiency: float = 0.9
+    ):
+        self.source_rate = source_rate
+        self.loss_db_km = loss_db_km
+        self.detector_efficiency = detector_efficiency
+        self.coupling_efficiency = coupling_efficiency
+
+    def transmission(self, distance: float) -> float:
+        """Calculate fiber transmission at given distance."""
+        return 10**(-self.loss_db_km * distance / 10)
+
+    def direct_rate(self, distance: float) -> float:
+        """Rate for direct distribution."""
+        eta = (self.transmission(distance) *
+               self.detector_efficiency *
+               self.coupling_efficiency)
+        return self.source_rate * eta
+
+    def heralded_midpoint_rate(self, distance: float) -> float:
+        """Rate for heralded distribution with midpoint BSM."""
+        eta_half = self.transmission(distance / 2)
+        # Both photons must arrive, BSM must succeed (50%)
+        p_success = (eta_half**2 * 0.5 *
+                    self.detector_efficiency**2 *
+                    self.coupling_efficiency**2)
+        return self.source_rate * p_success * 0.01  # Emission prob
+
+    def plob_bound(self, distance: float) -> float:
+        """
+        PLOB (Pirandola-Laurenza-Ottaviani-Banchi) bound.
+
+        Fundamental limit for repeater-less quantum communication:
+        Capacity ≤ -log₂(1-η) bits per channel use
+        """
+        eta = self.transmission(distance)
+        if eta >= 1:
+            return float('inf')
+        return -np.log2(1 - eta) * self.source_rate
+
+    def compare_protocols(
+        self,
+        distances: List[float]
+    ) -> Dict[str, List[float]]:
+        """Compare rates across distances."""
+        results = {
+            "distance": distances,
+            "direct": [],
+            "heralded": [],
+            "plob_bound": []
+        }
+
+        for d in distances:
+            results["direct"].append(self.direct_rate(d))
+            results["heralded"].append(self.heralded_midpoint_rate(d))
+            results["plob_bound"].append(self.plob_bound(d))
+
+        return results
+
+    def find_crossover_distance(self) -> float:
+        """Find distance where rate drops below 1 Hz."""
+        for d in range(1, 500):
+            if self.direct_rate(d) < 1:
+                return d
+        return 500
+
+# Comprehensive rate analysis
+analyzer = RateDistanceAnalyzer()
+
+print("\nRate-Distance Analysis")
+print("=" * 60)
+
+distances = [10, 25, 50, 75, 100, 150, 200, 300]
+comparison = analyzer.compare_protocols(distances)
+
+print("\nDistance (km) | Direct Rate | Heralded | PLOB Bound")
+print("-" * 60)
+
+for i, d in enumerate(distances):
+    print(f"    {d:3d}       | {comparison['direct'][i]:9.2e} | "
+          f"{comparison['heralded'][i]:8.2e} | {comparison['plob_bound'][i]:.2e}")
+
+crossover = analyzer.find_crossover_distance()
+print(f"\nDirect rate drops below 1 Hz at: {crossover} km")
+```
+
+## Practical Distribution Systems
+
+Real-world implementation considerations:
+
+```python
+@dataclass
+class DistributionSystem:
+    """
+    Complete entanglement distribution system model.
+    """
+    # Source parameters
+    source_type: str = "SPDC"
+    pair_rate: float = 1e6         # pairs/s
+    source_fidelity: float = 0.98
+
+    # Channel parameters
+    fiber_length: float = 50.0     # km
+    fiber_loss: float = 0.2        # dB/km
+    coupling_losses: float = 1.0   # dB total
+
+    # Detection parameters
+    detector_type: str = "SNSPD"
+    detector_efficiency: float = 0.9
+    dark_count_rate: float = 100   # Hz
+    timing_jitter: float = 50e-12  # s
+
+    # Protocol parameters
+    protocol: str = "direct"       # direct, heralded, multiplexed
+    n_multiplexed_modes: int = 1
+
+    def calculate_system_performance(self) -> dict:
+        """Calculate complete system performance metrics."""
+        # Total transmission
+        fiber_trans = 10**(-self.fiber_loss * self.fiber_length / 10)
+        coupling_trans = 10**(-self.coupling_losses / 10)
+        total_trans = fiber_trans * coupling_trans * self.detector_efficiency
+
+        # Success probability per attempt
+        if self.protocol == "direct":
+            p_success = total_trans
+        elif self.protocol == "heralded":
+            half_trans = np.sqrt(total_trans)
+            p_success = half_trans**2 * 0.5  # BSM efficiency
+        else:  # multiplexed
+            p_single = total_trans
+            p_success = 1 - (1 - p_single)**self.n_multiplexed_modes
+
+        # Rates
+        raw_rate = self.pair_rate * p_success
+
+        # Signal to noise
+        signal_counts = raw_rate
+        noise_counts = self.dark_count_rate * 2  # Two detectors
+        snr = signal_counts / noise_counts if noise_counts > 0 else float('inf')
+
+        # Fidelity including noise
+        noise_fraction = noise_counts / (signal_counts + noise_counts)
+        effective_fidelity = self.source_fidelity * (1 - noise_fraction)
+
+        # QBER estimate
+        qber = 0.5 * noise_fraction + (1 - self.source_fidelity) / 2
+
+        return {
+            "transmission": total_trans,
+            "success_probability": p_success,
+            "raw_pair_rate": raw_rate,
+            "signal_to_noise": snr,
+            "effective_fidelity": effective_fidelity,
+            "estimated_qber": qber,
+            "protocol": self.protocol,
+            "distance": self.fiber_length
+        }
+
+# Compare system configurations
+print("\nPractical Distribution Systems")
+print("=" * 60)
+
+configs = [
+    ("Direct, 50km", DistributionSystem(fiber_length=50, protocol="direct")),
+    ("Direct, 100km", DistributionSystem(fiber_length=100, protocol="direct")),
+    ("Heralded, 100km", DistributionSystem(fiber_length=100, protocol="heralded")),
+    ("Multiplexed ×10", DistributionSystem(fiber_length=100, protocol="multiplexed",
+                                          n_multiplexed_modes=10)),
+]
+
+for name, system in configs:
+    perf = system.calculate_system_performance()
+    print(f"\n{name}:")
+    print(f"  Success prob: {perf['success_probability']:.2e}")
+    print(f"  Pair rate: {perf['raw_pair_rate']:.1f} Hz")
+    print(f"  Fidelity: {perf['effective_fidelity']:.3f}")
+    print(f"  Est. QBER: {perf['estimated_qber']*100:.2f}%")
+```
+
+## Summary
+
+Entanglement distribution protocols face the fundamental challenge of channel loss:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              DISTRIBUTION PROTOCOLS SUMMARY                         │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Protocol        Scaling    Advantage           Challenge           │
+│  ──────────────────────────────────────────────────────────────────│
+│  Direct          η^L        Simple              Exponential loss    │
+│  Heralded        η^L        Know when success   Still exponential   │
+│  Multiplexed     N×η^L      Higher rate         Need memories       │
+│                                                                     │
+│  Key Insight: All direct schemes scale exponentially with loss     │
+│  → Quantum repeaters needed to break this barrier (next chapter)   │
+│                                                                     │
+│  Practical distances (rate > 1 Hz):                                │
+│  • Direct: ~150 km with MHz source, good detectors                 │
+│  • Heralded: ~100 km with current technology                       │
+│  • With multiplexing: Can extend by factor of ln(N)               │
+│                                                                     │
+│  Technology improvements needed:                                    │
+│  • Better sources (higher rates, wavelength flexibility)           │
+│  • Lower-loss fibers (hollow-core ~0.1 dB/km possible)            │
+│  • More efficient detectors (approaching 100%)                     │
+│  • Quantum memories for synchronization                            │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```

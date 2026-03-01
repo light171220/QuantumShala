@@ -1,0 +1,846 @@
+---
+title: "QNG Applications"
+description: "Apply quantum natural gradients to practical problems including VQE, quantum machine learning, and noise-adaptive optimization"
+---
+
+# QNG Applications
+
+Quantum natural gradients provide significant advantages in real-world quantum computing applications. This lesson demonstrates practical implementations across VQE, quantum machine learning, and noise-resilient optimization.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Apply QNG to VQE optimization
+- Implement QNG for quantum classifiers
+- Handle barren plateaus with natural gradients
+- Develop noise-adaptive QNG strategies
+- Benchmark QNG against other optimizers
+- Design QNG-friendly circuit architectures
+
+## 1. QNG for Variational Quantum Eigensolver
+
+VQE benefits significantly from QNG due to its complex energy landscape.
+
+<Definition term="VQE with QNG">
+In VQE, we minimize E(θ) = ⟨ψ(θ)|H|ψ(θ)⟩ using natural gradient updates that account for the quantum state geometry.
+</Definition>
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+class QNGVQE:
+    """
+    VQE optimizer using Quantum Natural Gradients.
+    """
+
+    def __init__(self, hamiltonian, n_qubits, n_layers=2):
+        self.H = hamiltonian
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dim = 2**n_qubits
+        self.history = {'energy': [], 'gradient_norm': []}
+
+    def create_state(self, params):
+        """Create variational state |ψ(θ)⟩."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1.0
+
+        param_idx = 0
+        for layer in range(self.n_layers):
+            # RY rotations
+            for q in range(self.n_qubits):
+                if param_idx < len(params):
+                    state = self._apply_ry(state, params[param_idx], q)
+                    param_idx += 1
+
+            # RZ rotations
+            for q in range(self.n_qubits):
+                if param_idx < len(params):
+                    state = self._apply_rz(state, params[param_idx], q)
+                    param_idx += 1
+
+            # Entangling layer
+            for q in range(self.n_qubits - 1):
+                state = self._apply_cnot(state, q, q + 1)
+
+        return state
+
+    def _apply_ry(self, state, angle, qubit):
+        """Apply RY rotation."""
+        new_state = np.zeros(self.dim, dtype=complex)
+        c, s = np.cos(angle/2), np.sin(angle/2)
+
+        for i in range(self.dim):
+            bit = (i >> qubit) & 1
+            j0 = i & ~(1 << qubit)
+            j1 = i | (1 << qubit)
+            if bit == 0:
+                new_state[i] += c * state[j0] - s * state[j1]
+            else:
+                new_state[i] += s * state[j0] + c * state[j1]
+        return new_state
+
+    def _apply_rz(self, state, angle, qubit):
+        """Apply RZ rotation."""
+        new_state = state.copy()
+        phase = np.exp(1j * angle / 2)
+
+        for i in range(self.dim):
+            bit = (i >> qubit) & 1
+            if bit == 0:
+                new_state[i] *= np.conj(phase)
+            else:
+                new_state[i] *= phase
+        return new_state
+
+    def _apply_cnot(self, state, control, target):
+        """Apply CNOT gate."""
+        new_state = np.zeros(self.dim, dtype=complex)
+
+        for i in range(self.dim):
+            c_bit = (i >> control) & 1
+            if c_bit == 1:
+                j = i ^ (1 << target)
+                new_state[i] = state[j]
+            else:
+                new_state[i] = state[i]
+        return new_state
+
+    def compute_energy(self, params):
+        """Compute VQE energy."""
+        state = self.create_state(params)
+        return np.real(np.vdot(state, self.H @ state))
+
+    def compute_gradient(self, params, eps=1e-5):
+        """Compute energy gradient."""
+        n = len(params)
+        gradient = np.zeros(n)
+
+        for i in range(n):
+            params_plus = params.copy()
+            params_plus[i] += eps
+            params_minus = params.copy()
+            params_minus[i] -= eps
+
+            gradient[i] = (self.compute_energy(params_plus) -
+                          self.compute_energy(params_minus)) / (2 * eps)
+        return gradient
+
+    def compute_qfi(self, params, eps=1e-5):
+        """Compute quantum Fisher information matrix."""
+        n = len(params)
+        state = self.create_state(params)
+
+        derivs = []
+        for i in range(n):
+            params_plus = params.copy()
+            params_plus[i] += eps
+            params_minus = params.copy()
+            params_minus[i] -= eps
+            deriv = (self.create_state(params_plus) -
+                    self.create_state(params_minus)) / (2 * eps)
+            derivs.append(deriv)
+
+        qfi = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                term1 = np.vdot(derivs[i], derivs[j])
+                term2 = np.vdot(derivs[i], state) * np.vdot(state, derivs[j])
+                qfi[i, j] = 4 * np.real(term1 - term2)
+
+        return qfi
+
+    def optimize(self, initial_params, n_steps=100, lr=0.5, reg_lambda=1e-4):
+        """Run QNG optimization."""
+        params = initial_params.copy()
+
+        for step in range(n_steps):
+            energy = self.compute_energy(params)
+            gradient = self.compute_gradient(params)
+            qfi = self.compute_qfi(params)
+
+            # Regularized natural gradient
+            n = len(params)
+            qfi_reg = qfi + reg_lambda * np.eye(n)
+            natural_grad = np.linalg.solve(qfi_reg, gradient)
+
+            params = params - lr * natural_grad
+
+            self.history['energy'].append(energy)
+            self.history['gradient_norm'].append(np.linalg.norm(gradient))
+
+        return params
+
+# Create molecular Hamiltonian (simplified H2)
+def create_h2_hamiltonian():
+    """Create simplified H2 Hamiltonian."""
+    # Pauli matrices
+    I = np.eye(2)
+    Z = np.array([[1, 0], [0, -1]])
+    X = np.array([[0, 1], [1, 0]])
+
+    # H2 Hamiltonian terms (simplified)
+    H = (-1.0 * np.kron(Z, I) +
+         -1.0 * np.kron(I, Z) +
+         0.5 * np.kron(Z, Z) +
+         0.3 * np.kron(X, X))
+    return H
+
+# Run VQE with QNG
+np.random.seed(42)
+
+H = create_h2_hamiltonian()
+vqe = QNGVQE(H, n_qubits=2, n_layers=2)
+
+# Initialize parameters
+n_params = 2 * 2 * 2  # n_layers * n_qubits * 2 (RY + RZ)
+initial_params = np.random.randn(n_params) * 0.5
+
+final_params = vqe.optimize(initial_params, n_steps=50, lr=0.5)
+
+# Compare with exact ground state
+eigenvalues = np.linalg.eigvalsh(H)
+exact_gs = eigenvalues[0]
+
+print("VQE with Quantum Natural Gradient:")
+print(f"Initial energy: {vqe.history['energy'][0]:.6f}")
+print(f"Final energy: {vqe.history['energy'][-1]:.6f}")
+print(f"Exact ground state: {exact_gs:.6f}")
+print(f"Error: {abs(vqe.history['energy'][-1] - exact_gs):.6f}")
+```
+
+## 2. QNG for Quantum Classifiers
+
+Quantum classifiers can leverage QNG for faster and more robust training.
+
+```python
+class QNGClassifier:
+    """
+    Quantum classifier with QNG optimization.
+    """
+
+    def __init__(self, n_qubits, n_layers=2):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dim = 2**n_qubits
+        self.history = {'loss': [], 'accuracy': []}
+
+    def encode_data(self, x):
+        """Encode classical data into quantum state."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1.0
+
+        # Angle encoding
+        for i, val in enumerate(x):
+            if i < self.n_qubits:
+                state = self._apply_ry(state, val * np.pi, i)
+
+        return state
+
+    def apply_ansatz(self, state, params):
+        """Apply variational ansatz."""
+        param_idx = 0
+
+        for layer in range(self.n_layers):
+            for q in range(self.n_qubits):
+                if param_idx < len(params):
+                    state = self._apply_ry(state, params[param_idx], q)
+                    param_idx += 1
+
+            for q in range(self.n_qubits - 1):
+                state = self._apply_cnot(state, q, q + 1)
+
+        return state
+
+    def _apply_ry(self, state, angle, qubit):
+        new_state = np.zeros(self.dim, dtype=complex)
+        c, s = np.cos(angle/2), np.sin(angle/2)
+
+        for i in range(self.dim):
+            bit = (i >> qubit) & 1
+            j0 = i & ~(1 << qubit)
+            j1 = i | (1 << qubit)
+            if bit == 0:
+                new_state[i] += c * state[j0] - s * state[j1]
+            else:
+                new_state[i] += s * state[j0] + c * state[j1]
+        return new_state
+
+    def _apply_cnot(self, state, control, target):
+        new_state = np.zeros(self.dim, dtype=complex)
+        for i in range(self.dim):
+            c_bit = (i >> control) & 1
+            if c_bit == 1:
+                j = i ^ (1 << target)
+                new_state[i] = state[j]
+            else:
+                new_state[i] = state[i]
+        return new_state
+
+    def predict_proba(self, x, params):
+        """Predict class probability."""
+        state = self.encode_data(x)
+        state = self.apply_ansatz(state, params)
+
+        # Measure expectation of Z on first qubit
+        Z = np.diag([1, -1])
+        Z_full = np.kron(Z, np.eye(self.dim // 2))
+        expectation = np.real(np.vdot(state, Z_full @ state))
+
+        # Map to probability
+        prob = (expectation + 1) / 2
+        return prob
+
+    def compute_loss(self, X, y, params):
+        """Compute binary cross-entropy loss."""
+        loss = 0
+        for xi, yi in zip(X, y):
+            prob = np.clip(self.predict_proba(xi, params), 1e-7, 1-1e-7)
+            loss -= yi * np.log(prob) + (1 - yi) * np.log(1 - prob)
+        return loss / len(X)
+
+    def compute_accuracy(self, X, y, params):
+        """Compute classification accuracy."""
+        correct = 0
+        for xi, yi in zip(X, y):
+            prob = self.predict_proba(xi, params)
+            pred = 1 if prob > 0.5 else 0
+            correct += (pred == yi)
+        return correct / len(X)
+
+    def compute_qfi_average(self, X, params, eps=1e-5):
+        """Compute averaged QFI over dataset."""
+        n = len(params)
+        qfi_sum = np.zeros((n, n))
+
+        for x in X:
+            state = self.encode_data(x)
+            state = self.apply_ansatz(state, params)
+
+            # Compute derivatives with respect to ansatz params
+            derivs = []
+            for i in range(n):
+                params_plus = params.copy()
+                params_plus[i] += eps
+                params_minus = params.copy()
+                params_minus[i] -= eps
+
+                s_plus = self.encode_data(x)
+                s_plus = self.apply_ansatz(s_plus, params_plus)
+                s_minus = self.encode_data(x)
+                s_minus = self.apply_ansatz(s_minus, params_minus)
+
+                deriv = (s_plus - s_minus) / (2 * eps)
+                derivs.append(deriv)
+
+            # Add to QFI sum
+            for i in range(n):
+                for j in range(n):
+                    term1 = np.vdot(derivs[i], derivs[j])
+                    term2 = np.vdot(derivs[i], state) * np.vdot(state, derivs[j])
+                    qfi_sum[i, j] += 4 * np.real(term1 - term2)
+
+        return qfi_sum / len(X)
+
+    def train(self, X, y, n_epochs=50, lr=0.5, reg_lambda=1e-4):
+        """Train classifier using QNG."""
+        n_params = self.n_layers * self.n_qubits
+        params = np.random.randn(n_params) * 0.5
+
+        for epoch in range(n_epochs):
+            # Compute loss gradient via finite differences
+            gradient = np.zeros(n_params)
+            eps = 1e-5
+            base_loss = self.compute_loss(X, y, params)
+
+            for i in range(n_params):
+                params_plus = params.copy()
+                params_plus[i] += eps
+                gradient[i] = (self.compute_loss(X, y, params_plus) - base_loss) / eps
+
+            # Compute averaged QFI
+            qfi = self.compute_qfi_average(X, params)
+            qfi_reg = qfi + reg_lambda * np.eye(n_params)
+
+            # Natural gradient update
+            natural_grad = np.linalg.solve(qfi_reg, gradient)
+            params = params - lr * natural_grad
+
+            # Record metrics
+            loss = self.compute_loss(X, y, params)
+            acc = self.compute_accuracy(X, y, params)
+            self.history['loss'].append(loss)
+            self.history['accuracy'].append(acc)
+
+        return params
+
+# Create synthetic classification dataset
+np.random.seed(42)
+n_samples = 50
+
+# XOR-like dataset
+X = np.random.randn(n_samples, 2)
+y = ((X[:, 0] * X[:, 1]) > 0).astype(float)
+
+# Train classifier
+classifier = QNGClassifier(n_qubits=2, n_layers=2)
+final_params = classifier.train(X, y, n_epochs=30, lr=0.5)
+
+print("\nQuantum Classifier with QNG:")
+print(f"Initial accuracy: {classifier.history['accuracy'][0]:.2%}")
+print(f"Final accuracy: {classifier.history['accuracy'][-1]:.2%}")
+print(f"Final loss: {classifier.history['loss'][-1]:.4f}")
+```
+
+<Tip>
+For classification tasks, average the QFI over the training batch to capture the overall geometry of the loss landscape.
+</Tip>
+
+## 3. Mitigating Barren Plateaus with QNG
+
+Natural gradients can help navigate barren plateaus by rescaling gradients based on curvature.
+
+```python
+def analyze_barren_plateau(n_qubits_list, n_layers, n_samples=20):
+    """
+    Analyze gradient scaling with QNG vs standard gradients.
+    """
+    results = {'n_qubits': [], 'std_grad': [], 'nat_grad': []}
+
+    for n_qubits in n_qubits_list:
+        dim = 2**n_qubits
+        n_params = n_layers * n_qubits
+
+        std_norms = []
+        nat_norms = []
+
+        for _ in range(n_samples):
+            # Random parameters
+            params = np.random.randn(n_params) * 0.5
+
+            # Create random state and compute gradients
+            state = np.zeros(dim, dtype=complex)
+            state[0] = 1.0
+
+            # Apply random rotations
+            for i, angle in enumerate(params):
+                q = i % n_qubits
+                c, s = np.cos(angle/2), np.sin(angle/2)
+                new_state = np.zeros(dim, dtype=complex)
+                for j in range(dim):
+                    bit = (j >> q) & 1
+                    j0 = j & ~(1 << q)
+                    j1 = j | (1 << q)
+                    if bit == 0:
+                        new_state[j] += c * state[j0] - s * state[j1]
+                    else:
+                        new_state[j] += s * state[j0] + c * state[j1]
+                state = new_state
+
+            # Random observable
+            H = np.random.randn(dim, dim) + 1j * np.random.randn(dim, dim)
+            H = (H + H.conj().T) / 2
+
+            # Compute gradient
+            gradient = np.random.randn(n_params)  # Simplified
+
+            # Compute QFI (simplified estimation)
+            qfi = np.random.randn(n_params, n_params)
+            qfi = qfi @ qfi.T + 0.1 * np.eye(n_params)
+
+            # Standard gradient norm
+            std_norms.append(np.linalg.norm(gradient))
+
+            # Natural gradient norm
+            qfi_reg = qfi + 1e-4 * np.eye(n_params)
+            nat_grad = np.linalg.solve(qfi_reg, gradient)
+            nat_norms.append(np.linalg.norm(nat_grad))
+
+        results['n_qubits'].append(n_qubits)
+        results['std_grad'].append(np.mean(std_norms))
+        results['nat_grad'].append(np.mean(nat_norms))
+
+    return results
+
+# Note: Simplified analysis - real barren plateau analysis requires
+# careful gradient computation with deep circuits
+print("Barren Plateau Analysis (conceptual):")
+print("Standard gradients decay exponentially with depth")
+print("Natural gradients can partially compensate by QFI rescaling")
+print("However, QFI eigenvalues may also decay, limiting effectiveness")
+```
+
+<Warning>
+QNG helps with barren plateaus by rescaling gradients, but if QFI eigenvalues also become exponentially small, the natural gradient may still vanish. Careful circuit design remains essential.
+</Warning>
+
+## 4. Noise-Adaptive QNG
+
+Adapt QNG strategies based on hardware noise characteristics.
+
+```python
+class NoiseAdaptiveQNG:
+    """
+    QNG optimizer that adapts to noise levels.
+    """
+
+    def __init__(self, circuit_fn, loss_fn, noise_model=None):
+        self.circuit_fn = circuit_fn
+        self.loss_fn = loss_fn
+        self.noise_model = noise_model
+        self.history = []
+
+    def apply_noise(self, state, noise_strength=0.01):
+        """Apply simplified depolarizing noise."""
+        if self.noise_model is None:
+            return state
+
+        # Depolarizing channel: ρ → (1-p)ρ + p/d * I
+        n = len(state)
+        noisy_state = (1 - noise_strength) * state
+        noisy_state += noise_strength * np.ones(n) / np.sqrt(n)
+        noisy_state /= np.linalg.norm(noisy_state)
+
+        return noisy_state
+
+    def compute_noisy_qfi(self, params, noise_strength=0.01, eps=1e-5):
+        """
+        Compute QFI accounting for noise.
+
+        Noise typically reduces QFI, requiring stronger regularization.
+        """
+        n = len(params)
+
+        state = self.circuit_fn(params)
+        state = self.apply_noise(state, noise_strength)
+
+        derivs = []
+        for i in range(n):
+            params_plus = params.copy()
+            params_plus[i] += eps
+            params_minus = params.copy()
+            params_minus[i] -= eps
+
+            s_plus = self.circuit_fn(params_plus)
+            s_plus = self.apply_noise(s_plus, noise_strength)
+            s_minus = self.circuit_fn(params_minus)
+            s_minus = self.apply_noise(s_minus, noise_strength)
+
+            deriv = (s_plus - s_minus) / (2 * eps)
+            derivs.append(deriv)
+
+        qfi = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                term1 = np.vdot(derivs[i], derivs[j])
+                term2 = np.vdot(derivs[i], state) * np.vdot(state, derivs[j])
+                qfi[i, j] = 4 * np.real(term1 - term2)
+
+        return qfi
+
+    def adaptive_regularization(self, qfi, noise_strength):
+        """
+        Choose regularization based on noise level.
+
+        Higher noise → stronger regularization needed.
+        """
+        # Estimate effective rank of QFI
+        eigenvalues = np.linalg.eigvalsh(qfi)
+        effective_rank = np.sum(eigenvalues > 1e-6)
+
+        # Scale regularization with noise
+        base_lambda = 1e-4
+        noise_factor = 1 + 10 * noise_strength
+        rank_factor = len(eigenvalues) / max(effective_rank, 1)
+
+        return base_lambda * noise_factor * rank_factor
+
+    def optimize(self, initial_params, n_steps=50, lr=0.5, noise_strength=0.01):
+        """Run noise-adaptive QNG optimization."""
+        params = initial_params.copy()
+
+        for step in range(n_steps):
+            # Compute noisy QFI
+            qfi = self.compute_noisy_qfi(params, noise_strength)
+
+            # Adaptive regularization
+            reg_lambda = self.adaptive_regularization(qfi, noise_strength)
+
+            # Compute gradient
+            gradient = np.zeros(len(params))
+            eps = 1e-5
+            base_loss = self.loss_fn(params)
+
+            for i in range(len(params)):
+                params_plus = params.copy()
+                params_plus[i] += eps
+                gradient[i] = (self.loss_fn(params_plus) - base_loss) / eps
+
+            # Natural gradient with adaptive regularization
+            n = len(params)
+            qfi_reg = qfi + reg_lambda * np.eye(n)
+            natural_grad = np.linalg.solve(qfi_reg, gradient)
+
+            # Adaptive learning rate (reduce in noisy regime)
+            effective_lr = lr / (1 + 5 * noise_strength)
+            params = params - effective_lr * natural_grad
+
+            self.history.append(self.loss_fn(params))
+
+        return params
+
+# Demonstrate noise-adaptive QNG
+def simple_circuit(params):
+    dim = 4
+    state = np.zeros(dim, dtype=complex)
+    state[0] = 1.0
+
+    for i, angle in enumerate(params):
+        q = i % 2
+        c, s = np.cos(angle/2), np.sin(angle/2)
+        new_state = np.zeros(dim, dtype=complex)
+        for j in range(dim):
+            bit = (j >> q) & 1
+            j0 = j & ~(1 << q)
+            j1 = j | (1 << q)
+            if bit == 0:
+                new_state[j] += c * state[j0] - s * state[j1]
+            else:
+                new_state[j] += s * state[j0] + c * state[j1]
+        state = new_state
+    return state
+
+def simple_loss(params):
+    state = simple_circuit(params)
+    H = np.diag([0, 1, 2, 3])
+    return np.real(np.vdot(state, H @ state))
+
+np.random.seed(42)
+initial_params = np.random.randn(4) * 0.5
+
+# Low noise regime
+optimizer_low = NoiseAdaptiveQNG(simple_circuit, simple_loss, noise_model=True)
+final_low = optimizer_low.optimize(initial_params.copy(), noise_strength=0.01)
+
+# High noise regime
+optimizer_high = NoiseAdaptiveQNG(simple_circuit, simple_loss, noise_model=True)
+final_high = optimizer_high.optimize(initial_params.copy(), noise_strength=0.1)
+
+print("Noise-Adaptive QNG Results:")
+print(f"Low noise (1%):  {optimizer_low.history[0]:.4f} → {optimizer_low.history[-1]:.4f}")
+print(f"High noise (10%): {optimizer_high.history[0]:.4f} → {optimizer_high.history[-1]:.4f}")
+```
+
+## 5. Benchmarking QNG
+
+Compare QNG against other popular optimizers.
+
+```python
+class OptimizerBenchmark:
+    """
+    Benchmark different optimizers on VQC tasks.
+    """
+
+    def __init__(self, loss_fn, state_fn, n_params):
+        self.loss_fn = loss_fn
+        self.state_fn = state_fn
+        self.n_params = n_params
+
+    def standard_gd(self, initial_params, n_steps=100, lr=0.01):
+        """Standard gradient descent."""
+        params = initial_params.copy()
+        history = []
+
+        for _ in range(n_steps):
+            gradient = self._compute_gradient(params)
+            params = params - lr * gradient
+            history.append(self.loss_fn(params))
+
+        return history
+
+    def adam(self, initial_params, n_steps=100, lr=0.01, beta1=0.9, beta2=0.999):
+        """Adam optimizer."""
+        params = initial_params.copy()
+        m = np.zeros_like(params)
+        v = np.zeros_like(params)
+        history = []
+        eps = 1e-8
+
+        for t in range(1, n_steps + 1):
+            gradient = self._compute_gradient(params)
+
+            m = beta1 * m + (1 - beta1) * gradient
+            v = beta2 * v + (1 - beta2) * gradient**2
+
+            m_hat = m / (1 - beta1**t)
+            v_hat = v / (1 - beta2**t)
+
+            params = params - lr * m_hat / (np.sqrt(v_hat) + eps)
+            history.append(self.loss_fn(params))
+
+        return history
+
+    def qng(self, initial_params, n_steps=100, lr=0.5, reg_lambda=1e-4):
+        """Quantum natural gradient."""
+        params = initial_params.copy()
+        history = []
+
+        for _ in range(n_steps):
+            gradient = self._compute_gradient(params)
+            qfi = self._compute_qfi(params)
+
+            qfi_reg = qfi + reg_lambda * np.eye(self.n_params)
+            natural_grad = np.linalg.solve(qfi_reg, gradient)
+
+            params = params - lr * natural_grad
+            history.append(self.loss_fn(params))
+
+        return history
+
+    def _compute_gradient(self, params, eps=1e-5):
+        gradient = np.zeros(self.n_params)
+        for i in range(self.n_params):
+            params_plus = params.copy()
+            params_plus[i] += eps
+            params_minus = params.copy()
+            params_minus[i] -= eps
+            gradient[i] = (self.loss_fn(params_plus) -
+                          self.loss_fn(params_minus)) / (2 * eps)
+        return gradient
+
+    def _compute_qfi(self, params, eps=1e-5):
+        state = self.state_fn(params)
+
+        derivs = []
+        for i in range(self.n_params):
+            params_plus = params.copy()
+            params_plus[i] += eps
+            params_minus = params.copy()
+            params_minus[i] -= eps
+            deriv = (self.state_fn(params_plus) -
+                    self.state_fn(params_minus)) / (2 * eps)
+            derivs.append(deriv)
+
+        qfi = np.zeros((self.n_params, self.n_params))
+        for i in range(self.n_params):
+            for j in range(self.n_params):
+                term1 = np.vdot(derivs[i], derivs[j])
+                term2 = np.vdot(derivs[i], state) * np.vdot(state, derivs[j])
+                qfi[i, j] = 4 * np.real(term1 - term2)
+
+        return qfi
+
+# Run benchmark
+np.random.seed(42)
+initial_params = np.random.randn(4) * 0.5
+
+benchmark = OptimizerBenchmark(simple_loss, simple_circuit, n_params=4)
+
+std_history = benchmark.standard_gd(initial_params.copy(), n_steps=100, lr=0.01)
+adam_history = benchmark.adam(initial_params.copy(), n_steps=100, lr=0.05)
+qng_history = benchmark.qng(initial_params.copy(), n_steps=100, lr=0.5)
+
+print("\nOptimizer Benchmark (100 steps):")
+print(f"Standard GD: {std_history[0]:.4f} → {std_history[-1]:.4f}")
+print(f"Adam:        {adam_history[0]:.4f} → {adam_history[-1]:.4f}")
+print(f"QNG:         {qng_history[0]:.4f} → {qng_history[-1]:.4f}")
+
+# Find convergence iteration (loss < 0.5)
+for name, hist in [("Standard GD", std_history), ("Adam", adam_history), ("QNG", qng_history)]:
+    conv_iter = next((i for i, v in enumerate(hist) if v < 0.5), len(hist))
+    print(f"{name} converged at step: {conv_iter}")
+```
+
+## 6. QNG-Friendly Circuit Design
+
+Design circuits that work well with quantum natural gradients.
+
+```python
+def analyze_circuit_qfi_properties(circuit_fn, n_params, n_samples=20):
+    """
+    Analyze QFI properties across parameter space.
+
+    Good circuits have:
+    - High average QFI trace (expressibility)
+    - Low condition number (balanced sensitivity)
+    - Full rank (no redundant parameters)
+    """
+    traces = []
+    condition_numbers = []
+    ranks = []
+
+    for _ in range(n_samples):
+        params = np.random.randn(n_params) * np.pi
+
+        state = circuit_fn(params)
+
+        # Compute QFI
+        derivs = []
+        eps = 1e-5
+        for i in range(n_params):
+            params_plus = params.copy()
+            params_plus[i] += eps
+            params_minus = params.copy()
+            params_minus[i] -= eps
+            deriv = (circuit_fn(params_plus) - circuit_fn(params_minus)) / (2 * eps)
+            derivs.append(deriv)
+
+        qfi = np.zeros((n_params, n_params))
+        for i in range(n_params):
+            for j in range(n_params):
+                term1 = np.vdot(derivs[i], derivs[j])
+                term2 = np.vdot(derivs[i], state) * np.vdot(state, derivs[j])
+                qfi[i, j] = 4 * np.real(term1 - term2)
+
+        eigenvalues = np.linalg.eigvalsh(qfi)
+        traces.append(np.sum(eigenvalues))
+        ranks.append(np.sum(eigenvalues > 1e-6))
+
+        nonzero = eigenvalues[eigenvalues > 1e-6]
+        if len(nonzero) > 1:
+            condition_numbers.append(nonzero[-1] / nonzero[0])
+
+    return {
+        'avg_trace': np.mean(traces),
+        'avg_rank': np.mean(ranks),
+        'avg_condition': np.mean(condition_numbers) if condition_numbers else float('inf')
+    }
+
+# Analyze our simple circuit
+analysis = analyze_circuit_qfi_properties(simple_circuit, n_params=4)
+
+print("\nCircuit QFI Analysis:")
+print(f"Average QFI trace: {analysis['avg_trace']:.4f}")
+print(f"Average rank: {analysis['avg_rank']:.2f}/4")
+print(f"Average condition number: {analysis['avg_condition']:.2f}")
+
+print("\nDesign Guidelines for QNG-Friendly Circuits:")
+print("1. Maximize QFI trace → higher expressibility")
+print("2. Minimize condition number → balanced optimization")
+print("3. Ensure full rank → no redundant parameters")
+print("4. Use interleaved rotation-entangling layers")
+print("5. Avoid excessive depth that causes QFI decay")
+```
+
+<Tip>
+For QNG-friendly circuits: use interleaved single-qubit rotations and entangling gates, avoid redundant parameters, and keep circuit depth moderate to maintain QFI eigenvalue magnitude.
+</Tip>
+
+## Summary
+
+In this lesson, you learned:
+
+- **VQE with QNG** achieves faster convergence to ground state energies
+- **Quantum classifiers** benefit from geometry-aware training
+- **Barren plateaus** can be partially mitigated through QFI rescaling
+- **Noise-adaptive QNG** adjusts regularization and learning rates
+- **Benchmarking** shows QNG typically converges in fewer iterations
+- **Circuit design** principles for maximizing QNG effectiveness
+
+Quantum natural gradients represent a powerful optimization technique that leverages the unique geometry of quantum state space.
+
+## Next Steps
+
+With this chapter complete, you now have a comprehensive understanding of quantum natural gradients. In the next chapter, we'll explore error mitigation techniques for quantum machine learning.

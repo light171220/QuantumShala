@@ -1,0 +1,537 @@
+---
+title: "VQE for Portfolio Optimization"
+description: "Apply the Variational Quantum Eigensolver (VQE) to portfolio optimization. Learn how VQE differs from QAOA, implement custom ansätze, and understand when to use each approach."
+duration: 60
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand VQE algorithm structure and its differences from QAOA
+- Implement hardware-efficient ansätze for portfolio problems
+- Convert QUBO to Hamiltonian form for VQE
+- Compare VQE and QAOA performance characteristics
+- Apply VQE to constrained portfolio optimization
+
+## 1. Introduction to VQE
+
+The Variational Quantum Eigensolver (VQE) is a hybrid quantum-classical algorithm originally designed for finding ground state energies of molecular Hamiltonians.
+
+<Definition term="VQE">
+VQE prepares a parametrized quantum state using an ansatz circuit and measures the expectation value of a Hamiltonian. Classical optimization adjusts parameters to minimize this expectation value.
+</Definition>
+
+### VQE vs QAOA
+
+| Aspect | VQE | QAOA |
+|--------|-----|------|
+| Ansatz | General parametrized circuit | Alternating cost/mixer structure |
+| Problem encoding | Hamiltonian | QUBO/Ising |
+| Parameter count | Varies with ansatz | 2p (fixed structure) |
+| Hardware adaptation | Highly flexible | Fixed structure |
+| Original application | Quantum chemistry | Combinatorial optimization |
+
+<Formula>
+The VQE objective is:
+$$E(\boldsymbol{\theta}) = \langle \psi(\boldsymbol{\theta}) | H | \psi(\boldsymbol{\theta}) \rangle$$
+where $|\psi(\boldsymbol{\theta})\rangle$ is the ansatz state with parameters $\boldsymbol{\theta}$.
+</Formula>
+
+## 2. QUBO to Hamiltonian Conversion
+
+To use VQE for portfolio optimization, convert the QUBO to a Hamiltonian.
+
+```python
+import numpy as np
+from qiskit.quantum_info import SparsePauliOp
+
+def qubo_to_hamiltonian(qubo_matrix):
+    """
+    Convert QUBO matrix to Pauli Hamiltonian.
+
+    QUBO: minimize x^T Q x where x ∈ {0,1}^n
+    Mapping: x_i = (1 - Z_i) / 2
+
+    Args:
+        qubo_matrix: QUBO matrix Q (n x n)
+
+    Returns:
+        SparsePauliOp representing the Hamiltonian
+    """
+    n = qubo_matrix.shape[0]
+    Q_sym = (qubo_matrix + qubo_matrix.T) / 2
+
+    pauli_terms = []
+    coeffs = []
+
+    # Constant term
+    constant = Q_sym.sum() / 4 + np.trace(Q_sym) / 4
+    pauli_terms.append('I' * n)
+    coeffs.append(constant)
+
+    # Linear terms (Z_i)
+    for i in range(n):
+        coeff = -(Q_sym[i, :].sum() + Q_sym[:, i].sum()) / 4
+        if coeff != 0:
+            pauli_str = ['I'] * n
+            pauli_str[n - 1 - i] = 'Z'  # Qiskit ordering
+            pauli_terms.append(''.join(pauli_str))
+            coeffs.append(coeff)
+
+    # Quadratic terms (Z_i Z_j)
+    for i in range(n):
+        for j in range(i + 1, n):
+            coeff = Q_sym[i, j] / 2
+            if coeff != 0:
+                pauli_str = ['I'] * n
+                pauli_str[n - 1 - i] = 'Z'
+                pauli_str[n - 1 - j] = 'Z'
+                pauli_terms.append(''.join(pauli_str))
+                coeffs.append(coeff)
+
+    return SparsePauliOp(pauli_terms, coeffs)
+
+# Example
+Q = np.array([
+    [-1.0, 0.5, 0.3],
+    [0.5, -0.8, 0.4],
+    [0.3, 0.4, -1.2]
+])
+
+H = qubo_to_hamiltonian(Q)
+print("Hamiltonian:")
+print(H)
+```
+
+## 3. Hardware-Efficient Ansatz
+
+VQE uses flexible ansätze that can be adapted to hardware constraints.
+
+```python
+from qiskit import QuantumCircuit
+from qiskit.circuit import Parameter
+
+def hardware_efficient_ansatz(n_qubits, n_layers, entanglement='linear'):
+    """
+    Create a hardware-efficient ansatz.
+
+    Structure per layer:
+    - RY rotation on each qubit
+    - RZ rotation on each qubit
+    - Entangling CNOT gates
+
+    Args:
+        n_qubits: Number of qubits
+        n_layers: Number of repetitions
+        entanglement: 'linear', 'circular', or 'full'
+
+    Returns:
+        QuantumCircuit with parameters
+    """
+    qc = QuantumCircuit(n_qubits)
+    params = []
+
+    for layer in range(n_layers):
+        # Rotation layer
+        for qubit in range(n_qubits):
+            theta_y = Parameter(f'θy_{layer}_{qubit}')
+            theta_z = Parameter(f'θz_{layer}_{qubit}')
+            params.extend([theta_y, theta_z])
+
+            qc.ry(theta_y, qubit)
+            qc.rz(theta_z, qubit)
+
+        # Entanglement layer
+        if entanglement == 'linear':
+            for i in range(n_qubits - 1):
+                qc.cx(i, i + 1)
+        elif entanglement == 'circular':
+            for i in range(n_qubits - 1):
+                qc.cx(i, i + 1)
+            if n_qubits > 2:
+                qc.cx(n_qubits - 1, 0)
+        elif entanglement == 'full':
+            for i in range(n_qubits):
+                for j in range(i + 1, n_qubits):
+                    qc.cx(i, j)
+
+    # Final rotation layer
+    for qubit in range(n_qubits):
+        theta_y = Parameter(f'θy_{n_layers}_{qubit}')
+        theta_z = Parameter(f'θz_{n_layers}_{qubit}')
+        params.extend([theta_y, theta_z])
+        qc.ry(theta_y, qubit)
+        qc.rz(theta_z, qubit)
+
+    return qc, params
+
+# Create ansatz
+ansatz, params = hardware_efficient_ansatz(4, n_layers=2, entanglement='linear')
+print(f"Parameters: {len(params)}")
+print(ansatz.draw(fold=80))
+```
+
+<Tip>
+Hardware-efficient ansätze are designed to match the connectivity of specific quantum processors. Linear entanglement works well for devices with nearest-neighbor connections.
+</Tip>
+
+## 4. VQE Implementation
+
+Complete VQE implementation for portfolio optimization.
+
+```python
+from qiskit_aer import AerSimulator
+from qiskit import transpile
+from scipy.optimize import minimize
+
+class PortfolioVQE:
+    """
+    VQE for portfolio optimization.
+    """
+
+    def __init__(self, expected_returns, cov_matrix, n_select,
+                 risk_aversion=1.0, penalty=10.0):
+        self.mu = expected_returns
+        self.Sigma = cov_matrix
+        self.n_assets = len(expected_returns)
+        self.n_select = n_select
+
+        # Build QUBO and Hamiltonian
+        self.Q = self._build_qubo(risk_aversion, penalty)
+        self.H = qubo_to_hamiltonian(self.Q)
+
+        # Create ansatz
+        self.ansatz, self.params = hardware_efficient_ansatz(
+            self.n_assets, n_layers=2, entanglement='linear'
+        )
+
+        self.simulator = AerSimulator()
+        self.optimization_history = []
+
+    def _build_qubo(self, risk_aversion, penalty):
+        """Build portfolio selection QUBO."""
+        n = self.n_assets
+        Q = np.zeros((n, n))
+
+        Q += risk_aversion * self.Sigma
+        for i in range(n):
+            Q[i, i] -= self.mu[i]
+
+        Q += penalty * np.ones((n, n))
+        for i in range(n):
+            Q[i, i] -= 2 * penalty * self.n_select
+
+        return Q
+
+    def compute_expectation(self, param_values, shots=1024):
+        """
+        Compute expectation value ⟨H⟩ for given parameters.
+        """
+        # Bind parameters
+        param_dict = dict(zip(self.params, param_values))
+        bound_circuit = self.ansatz.assign_parameters(param_dict)
+        bound_circuit.measure_all()
+
+        # Execute
+        compiled = transpile(bound_circuit, self.simulator)
+        result = self.simulator.run(compiled, shots=shots).result()
+        counts = result.get_counts()
+
+        # Compute expectation
+        expectation = 0.0
+        for bitstring, count in counts.items():
+            # Convert to +1/-1 spins
+            z_vals = np.array([1 - 2*int(b) for b in bitstring[::-1]])
+            # Evaluate Hamiltonian
+            for pauli_str, coeff in zip(self.H.paulis.to_labels(),
+                                        self.H.coeffs):
+                term_val = coeff
+                for i, p in enumerate(reversed(pauli_str)):
+                    if p == 'Z':
+                        term_val *= z_vals[i]
+                expectation += np.real(term_val) * count / shots
+
+        return expectation
+
+    def cost_function(self, param_values):
+        """Objective for classical optimizer."""
+        energy = self.compute_expectation(param_values)
+        self.optimization_history.append(energy)
+        return energy
+
+    def optimize(self, method='COBYLA', maxiter=200):
+        """
+        Run VQE optimization.
+        """
+        n_params = len(self.params)
+        x0 = np.random.uniform(-np.pi, np.pi, n_params)
+
+        result = minimize(
+            self.cost_function,
+            x0,
+            method=method,
+            options={'maxiter': maxiter}
+        )
+
+        self.optimal_params = result.x
+        self.optimal_energy = result.fun
+
+        return result
+
+    def get_solution(self, shots=4096):
+        """Get most likely solution from optimized circuit."""
+        param_dict = dict(zip(self.params, self.optimal_params))
+        bound_circuit = self.ansatz.assign_parameters(param_dict)
+        bound_circuit.measure_all()
+
+        compiled = transpile(bound_circuit, self.simulator)
+        result = self.simulator.run(compiled, shots=shots).result()
+        counts = result.get_counts()
+
+        # Find most frequent
+        best_bitstring = max(counts, key=counts.get)
+        x = np.array([int(b) for b in best_bitstring[::-1]])
+
+        return x, counts[best_bitstring] / shots
+
+# Example usage
+mu = np.array([0.12, 0.10, 0.08, 0.15, 0.09])
+Sigma = np.array([
+    [0.04, 0.01, 0.005, 0.02, 0.008],
+    [0.01, 0.03, 0.008, 0.015, 0.005],
+    [0.005, 0.008, 0.02, 0.01, 0.003],
+    [0.02, 0.015, 0.01, 0.05, 0.012],
+    [0.008, 0.005, 0.003, 0.012, 0.025]
+])
+
+vqe = PortfolioVQE(mu, Sigma, n_select=2, risk_aversion=2.0, penalty=10.0)
+result = vqe.optimize(maxiter=100)
+
+print(f"Optimal energy: {vqe.optimal_energy:.4f}")
+x_opt, prob = vqe.get_solution()
+print(f"Solution: {x_opt}, probability: {prob:.2%}")
+print(f"Selected assets: {np.where(x_opt == 1)[0]}")
+```
+
+## 5. Ansatz Comparison
+
+Different ansätze have different expressibility and trainability.
+
+```python
+def create_ry_ansatz(n_qubits, n_layers):
+    """Simple RY-only ansatz."""
+    qc = QuantumCircuit(n_qubits)
+    params = []
+
+    for layer in range(n_layers):
+        for qubit in range(n_qubits):
+            theta = Parameter(f'θ_{layer}_{qubit}')
+            params.append(theta)
+            qc.ry(theta, qubit)
+
+        for i in range(n_qubits - 1):
+            qc.cx(i, i + 1)
+
+    return qc, params
+
+def create_excitation_preserving_ansatz(n_qubits, n_layers):
+    """
+    Ansatz that preserves the number of excitations (1s).
+    Good for cardinality-constrained problems.
+    """
+    qc = QuantumCircuit(n_qubits)
+    params = []
+
+    for layer in range(n_layers):
+        for i in range(n_qubits - 1):
+            theta = Parameter(f'θ_{layer}_{i}')
+            params.append(theta)
+
+            # iSWAP-like gate (preserves particle number)
+            qc.rxx(theta, i, i + 1)
+            qc.ryy(theta, i, i + 1)
+
+    return qc, params
+
+# Compare parameter counts
+for name, create_fn in [('HW-Efficient', hardware_efficient_ansatz),
+                         ('RY-only', create_ry_ansatz),
+                         ('Excitation-Preserving', create_excitation_preserving_ansatz)]:
+    qc, params = create_fn(5, 2)
+    print(f"{name}: {len(params)} parameters, depth {qc.depth()}")
+```
+
+<Warning>
+More expressive ansätze aren't always better. They can suffer from barren plateaus where gradients vanish, making optimization difficult.
+</Warning>
+
+## 6. VQE with Constraints
+
+Handle constraints by modifying the Hamiltonian or ansatz.
+
+### Penalty Approach
+
+```python
+def build_constrained_hamiltonian(qubo_matrix, constraint_type='cardinality',
+                                   n_select=None, penalty=100.0):
+    """
+    Build Hamiltonian with constraint penalties.
+    """
+    n = qubo_matrix.shape[0]
+    Q_constrained = qubo_matrix.copy()
+
+    if constraint_type == 'cardinality' and n_select is not None:
+        # Add (sum x_i - k)^2 penalty
+        Q_constrained += penalty * np.ones((n, n))
+        for i in range(n):
+            Q_constrained[i, i] -= 2 * penalty * n_select
+
+    return qubo_to_hamiltonian(Q_constrained)
+```
+
+### Ansatz That Preserves Constraints
+
+```python
+def prepare_k_hot_state(n_qubits, k):
+    """
+    Prepare a superposition of all k-hot states.
+
+    Uses Dicke state preparation (simplified version).
+    """
+    qc = QuantumCircuit(n_qubits)
+
+    # Initialize first k qubits to |1⟩
+    for i in range(k):
+        qc.x(i)
+
+    # Create superposition (simplified - uses partial swaps)
+    for layer in range(n_qubits):
+        for i in range(n_qubits - 1):
+            # Partial swap creates superposition
+            theta = np.pi / 4  # Could be parametrized
+            qc.rxx(theta, i, i + 1)
+            qc.ryy(theta, i, i + 1)
+
+    return qc
+
+# This state has Hamming weight = k for all basis states
+```
+
+## 7. Comparing VQE and QAOA
+
+```python
+def compare_vqe_qaoa(qubo_matrix, n_trials=3):
+    """
+    Compare VQE and QAOA on the same problem.
+    """
+    n = qubo_matrix.shape[0]
+
+    # Find true optimal
+    true_optimal = float('inf')
+    for bits in range(2**n):
+        x = np.array([(bits >> i) & 1 for i in range(n)])
+        cost = x @ qubo_matrix @ x
+        true_optimal = min(true_optimal, cost)
+
+    results = {'VQE': [], 'QAOA': []}
+
+    for trial in range(n_trials):
+        # VQE
+        vqe_qc, vqe_params = hardware_efficient_ansatz(n, 2)
+        # ... run VQE optimization ...
+        # results['VQE'].append(vqe_cost)
+
+        # QAOA
+        # ... run QAOA optimization ...
+        # results['QAOA'].append(qaoa_cost)
+
+    return {
+        'true_optimal': true_optimal,
+        'vqe_mean': np.mean(results['VQE']) if results['VQE'] else None,
+        'qaoa_mean': np.mean(results['QAOA']) if results['QAOA'] else None
+    }
+```
+
+### When to Use Which
+
+| Scenario | Recommended | Reason |
+|----------|-------------|--------|
+| Specific hardware constraints | VQE | Flexible ansatz design |
+| Pure combinatorial problem | QAOA | Problem-inspired structure |
+| Need constraint preservation | VQE | Custom ansätze possible |
+| Limited classical optimization | QAOA | Fewer parameters |
+| Hybrid/chemistry problems | VQE | Originally designed for this |
+
+## 8. Advanced VQE Techniques
+
+### Adaptive VQE
+
+Grow the ansatz during optimization:
+
+```python
+def adaptive_vqe_step(current_circuit, hamiltonian, operator_pool):
+    """
+    Add one gate from the operator pool that reduces energy most.
+    """
+    best_operator = None
+    best_energy_reduction = 0
+
+    for operator in operator_pool:
+        # Test adding this operator
+        test_circuit = current_circuit.copy()
+        # Add operator with small parameter
+        # Measure energy gradient
+        # Select operator with largest gradient magnitude
+
+    return best_operator
+```
+
+### Noise-Aware VQE
+
+Account for hardware noise in the optimization:
+
+```python
+def noise_aware_cost(param_values, ansatz, hamiltonian, noise_model):
+    """
+    Compute expectation value including noise effects.
+    """
+    # Execute on noisy simulator or real hardware
+    # Return noisy expectation value
+    pass
+```
+
+<Tip>
+On real hardware, shorter circuits often outperform theoretically better but deeper circuits due to accumulated noise. Always benchmark on your target hardware.
+</Tip>
+
+## Summary
+
+In this lesson, you learned:
+
+1. **VQE** uses flexible ansätze for ground state preparation
+2. **QUBO to Hamiltonian** conversion enables VQE for optimization
+3. **Hardware-efficient ansätze** adapt to device constraints
+4. **Constraint handling** via penalties or ansatz design
+5. **VQE vs QAOA** have different strengths depending on the problem
+6. **Advanced techniques** like adaptive VQE can improve results
+
+## Module Summary
+
+In this Portfolio Optimization module, you learned:
+
+- **Markowitz theory** provides the mathematical foundation
+- **Mean-variance optimization** is a quadratic program
+- **Real-world constraints** affect complexity and quantum applicability
+- **QUBO formulation** converts problems to quantum-compatible form
+- **QAOA** uses problem structure for optimization
+- **VQE** offers flexibility in circuit design
+
+Quantum computing offers potential advantages for NP-hard portfolio problems, especially those with cardinality or integer constraints.
+
+## Further Reading
+
+- Next module: Risk Analysis with Quantum Computing
+- Related: Quantum Machine Learning for Finance
+- Application: Hybrid Classical-Quantum Portfolio Management

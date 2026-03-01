@@ -1,0 +1,746 @@
+---
+title: "Distributed VQE"
+description: "Learn how to distribute Variational Quantum Eigensolver computations across multiple quantum devices using federated approaches."
+---
+
+# Distributed VQE
+
+The Variational Quantum Eigensolver (VQE) can be distributed across multiple quantum devices to speed up computation and handle larger problems. This lesson explores federated approaches to VQE.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand distributed VQE architectures
+- Partition Hamiltonians across devices
+- Implement parallel expectation value estimation
+- Aggregate results from multiple quantum backends
+- Handle device-specific calibration in VQE
+- Optimize convergence in distributed settings
+
+## 1. VQE Review and Distribution Motivation
+
+VQE finds the ground state energy of a Hamiltonian by optimizing a parameterized quantum circuit.
+
+<Definition term="Variational Quantum Eigensolver">
+A hybrid quantum-classical algorithm that prepares a parameterized quantum state and optimizes parameters to minimize the expectation value of a Hamiltonian.
+</Definition>
+
+<Formula>
+VQE objective:
+$$E(\theta) = \langle \psi(\theta) | H | \psi(\theta) \rangle = \sum_i c_i \langle \psi(\theta) | P_i | \psi(\theta) \rangle$$
+where $H = \sum_i c_i P_i$ is the Hamiltonian as a sum of Pauli terms.
+</Formula>
+
+```python
+import numpy as np
+
+class VQESimulator:
+    """
+    Basic VQE simulator for demonstration.
+    """
+
+    def __init__(self, n_qubits):
+        self.n_qubits = n_qubits
+
+    def prepare_state(self, params):
+        """
+        Simulate parameterized state preparation.
+        Returns state vector.
+        """
+        # Simple variational ansatz simulation
+        dim = 2 ** self.n_qubits
+        state = np.zeros(dim, dtype=complex)
+        state[0] = 1.0  # Start in |0...0⟩
+
+        # Apply rotations (simplified)
+        for i, p in enumerate(params[:self.n_qubits]):
+            # Ry rotation on qubit i
+            idx = 2 ** i
+            new_state = state.copy()
+            c, s = np.cos(p/2), np.sin(p/2)
+            for j in range(0, dim, 2*idx):
+                for k in range(idx):
+                    a, b = state[j+k], state[j+k+idx]
+                    new_state[j+k] = c*a - s*b
+                    new_state[j+k+idx] = s*a + c*b
+            state = new_state
+
+        return state
+
+    def measure_pauli_z(self, state, qubit):
+        """Measure Z expectation on a qubit."""
+        dim = len(state)
+        expectation = 0.0
+        idx = 2 ** qubit
+        for i in range(dim):
+            # +1 if bit is 0, -1 if bit is 1
+            sign = 1 - 2 * ((i >> qubit) & 1)
+            expectation += sign * np.abs(state[i])**2
+        return expectation
+
+    def compute_energy(self, params, hamiltonian):
+        """
+        Compute energy expectation value.
+
+        Args:
+            params: Circuit parameters
+            hamiltonian: List of (coefficient, pauli_string) tuples
+        """
+        state = self.prepare_state(params)
+        energy = 0.0
+
+        for coeff, pauli in hamiltonian:
+            # Simplified: only handle Z terms
+            if pauli == 'I' * self.n_qubits:
+                energy += coeff
+            elif all(p in ['I', 'Z'] for p in pauli):
+                term_exp = 1.0
+                for q, p in enumerate(pauli):
+                    if p == 'Z':
+                        term_exp *= self.measure_pauli_z(state, q)
+                energy += coeff * term_exp
+
+        return energy
+
+# Demonstration
+print("VQE Basics:")
+print("=" * 50)
+
+n_qubits = 2
+vqe = VQESimulator(n_qubits)
+
+# Simple Hamiltonian: H = Z0 + 0.5*Z1 + 0.3*Z0Z1
+hamiltonian = [
+    (1.0, 'ZI'),   # Z on qubit 0
+    (0.5, 'IZ'),   # Z on qubit 1
+    (0.3, 'ZZ'),   # Z on both
+    (-0.2, 'II')   # Constant offset
+]
+
+print(f"\nHamiltonian: {len(hamiltonian)} terms")
+for coeff, pauli in hamiltonian:
+    print(f"  {coeff:+.1f} × {pauli}")
+
+# Optimize parameters
+np.random.seed(42)
+params = np.random.randn(n_qubits) * 0.1
+
+print(f"\nInitial energy: {vqe.compute_energy(params, hamiltonian):.4f}")
+
+# Simple gradient descent
+lr = 0.1
+for step in range(20):
+    grad = np.zeros_like(params)
+    eps = 0.01
+    for i in range(len(params)):
+        params[i] += eps
+        e_plus = vqe.compute_energy(params, hamiltonian)
+        params[i] -= 2*eps
+        e_minus = vqe.compute_energy(params, hamiltonian)
+        params[i] += eps
+        grad[i] = (e_plus - e_minus) / (2*eps)
+
+    params -= lr * grad
+
+    if step % 5 == 0:
+        energy = vqe.compute_energy(params, hamiltonian)
+        print(f"Step {step}: E = {energy:.4f}")
+
+final_energy = vqe.compute_energy(params, hamiltonian)
+print(f"\nFinal energy: {final_energy:.4f}")
+```
+
+<Tip>
+VQE is naturally parallelizable: each Pauli term can be measured independently, making it ideal for distribution across multiple quantum devices.
+</Tip>
+
+## 2. Hamiltonian Partitioning
+
+Large Hamiltonians can be partitioned across devices for parallel evaluation.
+
+```python
+import numpy as np
+from collections import defaultdict
+
+class HamiltonianPartitioner:
+    """
+    Partition Hamiltonians for distributed evaluation.
+    """
+
+    def __init__(self, hamiltonian):
+        """
+        Args:
+            hamiltonian: List of (coefficient, pauli_string) tuples
+        """
+        self.hamiltonian = hamiltonian
+        self.n_terms = len(hamiltonian)
+
+    def partition_by_count(self, n_partitions):
+        """
+        Simple partition by term count.
+        """
+        partition_size = (self.n_terms + n_partitions - 1) // n_partitions
+        partitions = []
+
+        for i in range(0, self.n_terms, partition_size):
+            partitions.append(self.hamiltonian[i:i+partition_size])
+
+        return partitions
+
+    def partition_by_weight(self, n_partitions):
+        """
+        Partition to balance coefficient magnitudes.
+        """
+        # Sort by magnitude
+        sorted_terms = sorted(self.hamiltonian,
+                            key=lambda x: abs(x[0]), reverse=True)
+
+        partitions = [[] for _ in range(n_partitions)]
+        weights = [0.0] * n_partitions
+
+        # Greedy assignment to balance weights
+        for coeff, pauli in sorted_terms:
+            # Assign to partition with smallest weight
+            min_idx = np.argmin(weights)
+            partitions[min_idx].append((coeff, pauli))
+            weights[min_idx] += abs(coeff)
+
+        return partitions, weights
+
+    def partition_by_commutation(self, n_partitions):
+        """
+        Partition based on commuting groups.
+
+        Terms that commute can be measured simultaneously.
+        """
+        def commutes(p1, p2):
+            """Check if two Pauli strings commute."""
+            anticommute_count = 0
+            for a, b in zip(p1, p2):
+                if a != 'I' and b != 'I' and a != b:
+                    anticommute_count += 1
+            return anticommute_count % 2 == 0
+
+        # Greedy grouping
+        groups = []
+        for coeff, pauli in self.hamiltonian:
+            placed = False
+            for group in groups:
+                # Check if commutes with all in group
+                if all(commutes(pauli, p) for _, p in group):
+                    group.append((coeff, pauli))
+                    placed = True
+                    break
+            if not placed:
+                groups.append([(coeff, pauli)])
+
+        # Merge groups if too many
+        while len(groups) > n_partitions:
+            # Merge two smallest groups
+            groups.sort(key=len)
+            groups[0].extend(groups[1])
+            groups.pop(1)
+
+        return groups
+
+# Demonstration
+print("Hamiltonian Partitioning:")
+print("=" * 50)
+
+# Create a larger Hamiltonian
+np.random.seed(42)
+n_qubits = 4
+paulis = ['I', 'X', 'Y', 'Z']
+
+hamiltonian = []
+for _ in range(20):
+    coeff = np.random.randn()
+    pauli_str = ''.join(np.random.choice(paulis) for _ in range(n_qubits))
+    hamiltonian.append((coeff, pauli_str))
+
+print(f"\nHamiltonian: {len(hamiltonian)} terms on {n_qubits} qubits")
+
+partitioner = HamiltonianPartitioner(hamiltonian)
+
+# Method 1: By count
+count_parts = partitioner.partition_by_count(4)
+print(f"\nBy count ({len(count_parts)} partitions):")
+for i, p in enumerate(count_parts):
+    print(f"  Device {i}: {len(p)} terms")
+
+# Method 2: By weight
+weight_parts, weights = partitioner.partition_by_weight(4)
+print(f"\nBy weight ({len(weight_parts)} partitions):")
+for i, (p, w) in enumerate(zip(weight_parts, weights)):
+    print(f"  Device {i}: {len(p)} terms, weight={w:.2f}")
+
+# Method 3: By commutation
+comm_parts = partitioner.partition_by_commutation(4)
+print(f"\nBy commutation ({len(comm_parts)} groups):")
+for i, p in enumerate(comm_parts):
+    print(f"  Group {i}: {len(p)} terms")
+```
+
+<Warning>
+Commuting terms can share measurement circuits, but finding optimal groupings is NP-hard. Greedy algorithms provide practical approximations.
+</Warning>
+
+## 3. Parallel Expectation Value Estimation
+
+Different quantum devices evaluate different Hamiltonian partitions in parallel.
+
+```python
+import numpy as np
+from concurrent.futures import ThreadPoolExecutor
+import time
+
+class DistributedVQE:
+    """
+    Distributed VQE across multiple simulated devices.
+    """
+
+    def __init__(self, n_qubits, n_devices):
+        self.n_qubits = n_qubits
+        self.n_devices = n_devices
+        self.devices = [VQESimulator(n_qubits) for _ in range(n_devices)]
+        self.device_times = [0.0] * n_devices
+
+    def evaluate_partition(self, device_id, params, partition):
+        """
+        Evaluate Hamiltonian partition on one device.
+        """
+        start = time.time()
+
+        partial_energy = 0.0
+        for coeff, pauli in partition:
+            # Simulate measurement
+            state = self.devices[device_id].prepare_state(params)
+
+            term_exp = 1.0
+            for q, p in enumerate(pauli):
+                if p == 'Z':
+                    term_exp *= self.devices[device_id].measure_pauli_z(state, q)
+                elif p == 'I':
+                    pass  # Identity contributes 1
+                else:
+                    # X and Y need basis rotation (simplified)
+                    term_exp *= np.random.uniform(-1, 1)
+
+            partial_energy += coeff * term_exp
+
+        elapsed = time.time() - start
+        self.device_times[device_id] += elapsed
+
+        return partial_energy
+
+    def compute_energy_distributed(self, params, partitions):
+        """
+        Compute total energy using all devices in parallel.
+        """
+        with ThreadPoolExecutor(max_workers=self.n_devices) as executor:
+            futures = []
+            for i, partition in enumerate(partitions):
+                device_id = i % self.n_devices
+                future = executor.submit(
+                    self.evaluate_partition, device_id, params, partition
+                )
+                futures.append(future)
+
+            partial_energies = [f.result() for f in futures]
+
+        return sum(partial_energies)
+
+    def optimize(self, partitions, n_steps=20, lr=0.1):
+        """
+        Optimize VQE parameters.
+        """
+        params = np.random.randn(self.n_qubits) * 0.1
+        energies = []
+
+        for step in range(n_steps):
+            # Compute gradient via parameter shift
+            grad = np.zeros_like(params)
+            shift = np.pi / 2
+
+            for i in range(len(params)):
+                params[i] += shift
+                e_plus = self.compute_energy_distributed(params, partitions)
+                params[i] -= 2 * shift
+                e_minus = self.compute_energy_distributed(params, partitions)
+                params[i] += shift
+
+                grad[i] = (e_plus - e_minus) / 2
+
+            params -= lr * grad
+            energy = self.compute_energy_distributed(params, partitions)
+            energies.append(energy)
+
+        return params, energies
+
+# Demonstration
+print("Distributed VQE Execution:")
+print("=" * 50)
+
+np.random.seed(42)
+n_qubits = 4
+n_devices = 4
+
+# Create Hamiltonian
+hamiltonian = []
+for i in range(16):
+    coeff = np.random.randn() * 0.5
+    pauli = ''.join(np.random.choice(['I', 'Z']) for _ in range(n_qubits))
+    hamiltonian.append((coeff, pauli))
+
+print(f"\nHamiltonian: {len(hamiltonian)} terms")
+print(f"Devices: {n_devices}")
+
+# Partition
+partitioner = HamiltonianPartitioner(hamiltonian)
+partitions = partitioner.partition_by_count(n_devices)
+
+# Distributed VQE
+dvqe = DistributedVQE(n_qubits, n_devices)
+params, energies = dvqe.optimize(partitions, n_steps=10, lr=0.1)
+
+print(f"\nOptimization progress:")
+for i in [0, 4, 9]:
+    print(f"  Step {i+1}: E = {energies[i]:.4f}")
+
+print(f"\nDevice usage times:")
+for i, t in enumerate(dvqe.device_times):
+    print(f"  Device {i}: {t:.4f}s")
+```
+
+## 4. Result Aggregation and Error Handling
+
+Combining results from different devices requires handling varying noise levels.
+
+```python
+import numpy as np
+
+class DistributedResultAggregator:
+    """
+    Aggregate VQE results from multiple devices.
+    """
+
+    def __init__(self, n_devices):
+        self.n_devices = n_devices
+        self.device_errors = {}  # Track error estimates per device
+
+    def estimate_variance(self, device_id, measurements, n_shots):
+        """
+        Estimate measurement variance for a device.
+        """
+        # Shot noise variance: var = (1 - <O>^2) / n_shots
+        mean_val = np.mean(measurements)
+        variance = (1 - mean_val**2) / n_shots
+        self.device_errors[device_id] = np.sqrt(variance)
+        return variance
+
+    def weighted_aggregate(self, partial_energies, variances):
+        """
+        Combine partial energies with inverse variance weighting.
+        """
+        variances = np.array(variances)
+        weights = 1.0 / (variances + 1e-10)
+        weights /= np.sum(weights)
+
+        total_energy = np.sum(weights * partial_energies)
+
+        # Combined variance
+        combined_var = 1.0 / np.sum(1.0 / (variances + 1e-10))
+
+        return total_energy, combined_var, weights
+
+    def detect_outliers(self, partial_energies, threshold=3.0):
+        """
+        Detect outlier results using z-scores.
+        """
+        mean = np.mean(partial_energies)
+        std = np.std(partial_energies)
+
+        z_scores = np.abs((partial_energies - mean) / (std + 1e-10))
+        outliers = z_scores > threshold
+
+        return outliers, z_scores
+
+    def robust_aggregate(self, partial_energies, variances):
+        """
+        Aggregate with outlier detection.
+        """
+        # Detect outliers
+        outliers, z_scores = self.detect_outliers(partial_energies)
+
+        if np.any(outliers):
+            # Exclude outliers
+            valid = ~outliers
+            partial_energies = np.array(partial_energies)[valid]
+            variances = np.array(variances)[valid]
+
+        return self.weighted_aggregate(partial_energies, variances)
+
+# Demonstration
+print("Result Aggregation:")
+print("=" * 50)
+
+np.random.seed(42)
+aggregator = DistributedResultAggregator(n_devices=4)
+
+# Simulate partial energy results with varying quality
+true_energy = -1.5
+
+# Device results: some more accurate than others
+partial_results = [
+    {'energy': true_energy + np.random.randn() * 0.1, 'variance': 0.01},
+    {'energy': true_energy + np.random.randn() * 0.2, 'variance': 0.04},
+    {'energy': true_energy + np.random.randn() * 0.5, 'variance': 0.25},
+    {'energy': true_energy + np.random.randn() * 0.15, 'variance': 0.02},
+]
+
+energies = [r['energy'] for r in partial_results]
+variances = [r['variance'] for r in partial_results]
+
+print(f"\nTrue energy: {true_energy:.4f}")
+print("\nDevice results:")
+for i, r in enumerate(partial_results):
+    print(f"  Device {i}: E = {r['energy']:.4f}, var = {r['variance']:.4f}")
+
+# Weighted aggregation
+total_e, total_var, weights = aggregator.weighted_aggregate(energies, variances)
+print(f"\nWeighted aggregate:")
+print(f"  Energy: {total_e:.4f} ± {np.sqrt(total_var):.4f}")
+print(f"  Weights: {weights}")
+print(f"  Error from true: {abs(total_e - true_energy):.4f}")
+
+# Compare to simple average
+simple_avg = np.mean(energies)
+print(f"\nSimple average: {simple_avg:.4f}")
+print(f"  Error from true: {abs(simple_avg - true_energy):.4f}")
+```
+
+<Tip>
+Inverse variance weighting naturally gives more importance to higher-quality measurements, improving overall accuracy in distributed VQE.
+</Tip>
+
+## 5. Synchronization Strategies
+
+Coordinating parameter updates across devices affects convergence.
+
+```python
+import numpy as np
+
+class SynchronizedVQE:
+    """
+    VQE with different synchronization strategies.
+    """
+
+    def __init__(self, n_qubits, n_devices):
+        self.n_qubits = n_qubits
+        self.n_devices = n_devices
+        self.global_params = np.random.randn(n_qubits) * 0.1
+
+    def synchronous_update(self, device_gradients, lr=0.1):
+        """
+        Wait for all devices, then update.
+        """
+        # Average gradients from all devices
+        avg_grad = np.mean(device_gradients, axis=0)
+        self.global_params -= lr * avg_grad
+        return self.global_params.copy()
+
+    def asynchronous_update(self, device_id, gradient, lr=0.1,
+                            staleness_weight=1.0):
+        """
+        Update immediately from any device.
+        """
+        self.global_params -= lr * staleness_weight * gradient
+        return self.global_params.copy()
+
+    def periodic_averaging(self, local_params_list, weights=None):
+        """
+        Periodically average parameters from all devices.
+        """
+        if weights is None:
+            weights = np.ones(len(local_params_list)) / len(local_params_list)
+
+        self.global_params = np.sum([w * p for w, p in
+                                     zip(weights, local_params_list)], axis=0)
+        return self.global_params.copy()
+
+    def compare_strategies(self, hamiltonian, n_iterations=20):
+        """
+        Compare convergence of different strategies.
+        """
+        results = {}
+
+        for strategy in ['synchronous', 'async', 'periodic']:
+            np.random.seed(42)
+            self.global_params = np.random.randn(self.n_qubits) * 0.1
+
+            energies = []
+
+            for it in range(n_iterations):
+                # Simulate device computations
+                device_gradients = []
+                for d in range(self.n_devices):
+                    # Add device-specific noise
+                    noise = np.random.randn(self.n_qubits) * 0.1
+                    grad = self.global_params + noise  # Simplified gradient
+                    device_gradients.append(grad)
+
+                if strategy == 'synchronous':
+                    self.synchronous_update(device_gradients)
+                elif strategy == 'async':
+                    # Simulate random arrival order
+                    order = np.random.permutation(self.n_devices)
+                    for d in order:
+                        staleness = np.random.uniform(0.5, 1.0)
+                        self.asynchronous_update(d, device_gradients[d],
+                                                staleness_weight=staleness)
+                else:  # periodic
+                    local_params = [self.global_params + g * 0.1
+                                   for g in device_gradients]
+                    if it % 5 == 4:  # Sync every 5 iterations
+                        self.periodic_averaging(local_params)
+
+                # Compute energy (simplified)
+                energy = np.sum(self.global_params ** 2)
+                energies.append(energy)
+
+            results[strategy] = energies
+
+        return results
+
+# Demonstration
+print("Synchronization Strategies:")
+print("=" * 50)
+
+np.random.seed(42)
+sync_vqe = SynchronizedVQE(n_qubits=4, n_devices=4)
+
+# Create simple Hamiltonian
+hamiltonian = [(1.0, 'ZIII'), (0.5, 'IZII'), (0.3, 'IIZI'), (0.2, 'IIIZ')]
+
+results = sync_vqe.compare_strategies(hamiltonian, n_iterations=20)
+
+print("\nConvergence comparison (energy at steps 5, 10, 20):")
+for strategy, energies in results.items():
+    print(f"\n{strategy.capitalize()}:")
+    for i in [4, 9, 19]:
+        print(f"  Step {i+1}: E = {energies[i]:.4f}")
+```
+
+## 6. Practical Considerations
+
+Real-world distributed VQE faces additional challenges.
+
+```python
+import numpy as np
+
+def distributed_vqe_checklist():
+    """
+    Practical considerations for distributed VQE.
+    """
+    print("Distributed VQE Checklist:")
+    print("=" * 50)
+
+    considerations = {
+        'Hardware Selection': [
+            'Match qubit count to circuit requirements',
+            'Consider device connectivity for entangling gates',
+            'Check calibration schedules to avoid drift',
+            'Balance queue times across providers'
+        ],
+        'Partitioning Strategy': [
+            'Use commuting groups to minimize circuits',
+            'Balance work across devices by coefficient weight',
+            'Consider device fidelity when assigning critical terms',
+            'Keep identity term on any single device'
+        ],
+        'Error Mitigation': [
+            'Apply device-specific error mitigation',
+            'Use zero-noise extrapolation where possible',
+            'Weight results by estimated fidelity',
+            'Monitor for calibration drift during optimization'
+        ],
+        'Optimization': [
+            'Use gradient-free methods if gradients are noisy',
+            'Consider SPSA for stochastic gradients',
+            'Warm-start from classical approximations',
+            'Implement early stopping on convergence'
+        ],
+        'Communication': [
+            'Minimize round trips between classical and quantum',
+            'Batch circuits where possible',
+            'Use async execution to hide latency',
+            'Cache intermediate results'
+        ]
+    }
+
+    for category, items in considerations.items():
+        print(f"\n{category}:")
+        for item in items:
+            print(f"  • {item}")
+
+def estimate_resources(n_qubits, n_terms, n_devices, shots_per_term):
+    """
+    Estimate resources for distributed VQE.
+    """
+    print(f"\nResource Estimation:")
+    print("=" * 50)
+
+    # Circuits per iteration
+    circuits_per_device = n_terms // n_devices
+    total_shots = n_terms * shots_per_term
+
+    # Gradient estimation (parameter shift needs 2× circuits per parameter)
+    n_params = n_qubits  # Simplified
+    gradient_circuits = 2 * n_params * n_terms
+
+    print(f"\nProblem size:")
+    print(f"  Qubits: {n_qubits}")
+    print(f"  Hamiltonian terms: {n_terms}")
+    print(f"  Parameters: {n_params}")
+
+    print(f"\nPer iteration:")
+    print(f"  Circuits per device: ~{circuits_per_device}")
+    print(f"  Total shots: {total_shots:,}")
+    print(f"  Gradient circuits: {gradient_circuits}")
+
+    # Time estimate (rough)
+    circuit_time_ms = 100  # Typical execution time
+    total_time_s = (n_terms * shots_per_term * circuit_time_ms) / (1000 * n_devices)
+    print(f"\nEstimated time per iteration: {total_time_s:.1f}s")
+
+    return {
+        'circuits_per_device': circuits_per_device,
+        'total_shots': total_shots,
+        'gradient_circuits': gradient_circuits
+    }
+
+# Run
+distributed_vqe_checklist()
+estimate_resources(n_qubits=8, n_terms=100, n_devices=4, shots_per_term=1000)
+```
+
+<Warning>
+Distributed VQE requires careful coordination. Device calibration can drift during long optimizations, so monitor fidelity metrics and recalibrate as needed.
+</Warning>
+
+## Summary
+
+Distributed VQE enables solving larger quantum chemistry problems by:
+
+1. **Partitioning**: Divide Hamiltonian terms across devices
+2. **Parallel Evaluation**: Measure terms simultaneously on multiple backends
+3. **Weighted Aggregation**: Combine results accounting for device quality
+4. **Synchronization**: Choose appropriate update strategies
+5. **Error Handling**: Detect and handle outlier results
+
+This federated approach scales VQE beyond single-device limitations.
+
+## Next Steps
+
+In the next lesson, we'll explore federated quantum classifiers—training classification models across distributed quantum devices.

@@ -1,0 +1,717 @@
+---
+title: "Hybrid Quantum-Classical GANs"
+description: "Master the design and implementation of hybrid QGANs that combine quantum generators with classical discriminators or vice versa."
+estimatedMinutes: 65
+difficulty: "advanced"
+tags: ["hybrid-qgan", "quantum-classical", "neural-network", "gradient-flow", "architecture-design", "optimization"]
+---
+
+# Hybrid Quantum-Classical GANs
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Design hybrid QGAN architectures
+- Implement quantum generator with classical discriminator
+- Implement classical generator with quantum discriminator
+- Handle gradient flow between quantum and classical components
+- Optimize hybrid training loops
+- Balance quantum and classical computational resources
+
+## 1. Introduction to Hybrid QGANs
+
+<Definition term="Hybrid QGAN">
+A Generative Adversarial Network where either the generator or discriminator (or parts of both) uses quantum circuits while the other component uses classical neural networks, leveraging the strengths of both paradigms.
+</Definition>
+
+Hybrid QGANs offer practical advantages for near-term quantum devices:
+
+<Formula>
+\text{Hybrid QGAN Configurations:}
+\\[8pt]
+\text{Type A: } G_\theta^{(Q)} \text{ (quantum) } + D_\phi^{(C)} \text{ (classical)}
+\\[4pt]
+\text{Type B: } G_\theta^{(C)} \text{ (classical) } + D_\phi^{(Q)} \text{ (quantum)}
+\\[4pt]
+\text{Type C: } G_\theta^{(H)} \text{ (hybrid) } + D_\phi^{(H)} \text{ (hybrid)}
+</Formula>
+
+```python
+import numpy as np
+from typing import Tuple, Optional, Callable
+
+class HybridQGANConfig:
+    """Configuration for hybrid QGAN architectures."""
+
+    # Type A: Quantum Generator + Classical Discriminator
+    TYPE_A = "quantum_gen_classical_disc"
+
+    # Type B: Classical Generator + Quantum Discriminator
+    TYPE_B = "classical_gen_quantum_disc"
+
+    # Type C: Both Hybrid
+    TYPE_C = "both_hybrid"
+
+    def __init__(self, config_type: str,
+                 n_qubits: int = 4,
+                 latent_dim: int = 16,
+                 hidden_dims: list = [64, 32]):
+        self.config_type = config_type
+        self.n_qubits = n_qubits
+        self.latent_dim = latent_dim
+        self.hidden_dims = hidden_dims
+
+    def describe(self) -> str:
+        descriptions = {
+            self.TYPE_A: "Quantum generator explores quantum state space, "
+                        "classical discriminator provides flexible classification",
+            self.TYPE_B: "Classical generator for complex distributions, "
+                        "quantum discriminator for quantum feature extraction",
+            self.TYPE_C: "Both components leverage quantum-classical hybrid "
+                        "processing for maximum flexibility"
+        }
+        return descriptions.get(self.config_type, "Unknown configuration")
+```
+
+## 2. Quantum Generator with Classical Discriminator
+
+<Tip>
+Type A hybrids are ideal when the data has structure that quantum circuits can naturally represent (e.g., quantum states, certain probability distributions) while needing flexible classical discrimination.
+</Tip>
+
+```python
+class QuantumGenerator:
+    """Quantum circuit generator for hybrid QGAN."""
+
+    def __init__(self, n_qubits: int, n_layers: int = 3,
+                 output_dim: int = None):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.output_dim = output_dim or 2**n_qubits
+
+        # Variational parameters
+        params_per_layer = 3 * n_qubits  # RX, RY, RZ per qubit
+        self.n_params = n_layers * params_per_layer
+        self.params = np.random.randn(self.n_params) * 0.1
+
+    def _rotation_gates(self, theta: float, axis: str) -> np.ndarray:
+        """Single-qubit rotation gate."""
+        if axis == 'x':
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            return np.array([[c, -1j*s], [-1j*s, c]])
+        elif axis == 'y':
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            return np.array([[c, -s], [s, c]])
+        elif axis == 'z':
+            return np.array([[np.exp(-1j*theta/2), 0],
+                            [0, np.exp(1j*theta/2)]])
+
+    def _apply_gate(self, state: np.ndarray, gate: np.ndarray,
+                    qubit: int) -> np.ndarray:
+        """Apply single-qubit gate."""
+        n_qubits = int(np.log2(len(state)))
+        full_gate = np.eye(1)
+        for q in range(n_qubits):
+            full_gate = np.kron(full_gate,
+                               gate if q == qubit else np.eye(2))
+        return full_gate @ state
+
+    def _entangling_layer(self, state: np.ndarray) -> np.ndarray:
+        """Apply CNOT entanglement."""
+        n = self.n_qubits
+        dim = 2**n
+
+        for i in range(n - 1):
+            # CNOT(i, i+1) effect
+            new_state = np.zeros_like(state)
+            for basis in range(dim):
+                bits = list(format(basis, f'0{n}b'))
+                if bits[i] == '1':
+                    bits[i+1] = '0' if bits[i+1] == '1' else '1'
+                new_basis = int(''.join(bits), 2)
+                new_state[new_basis] += state[basis]
+            state = new_state
+
+        return state
+
+    def generate(self, z: np.ndarray) -> np.ndarray:
+        """Generate output from noise vector z."""
+        dim = 2**self.n_qubits
+        state = np.zeros(dim, dtype=complex)
+        state[0] = 1.0
+
+        # Encode noise into initial rotations
+        for i in range(self.n_qubits):
+            zi = z[i % len(z)]
+            ry = self._rotation_gates(np.pi * zi, 'y')
+            state = self._apply_gate(state, ry, i)
+
+        # Variational layers
+        params_per_layer = 3 * self.n_qubits
+        for layer in range(self.n_layers):
+            layer_params = self.params[layer*params_per_layer:
+                                       (layer+1)*params_per_layer]
+
+            # RX, RY, RZ on each qubit
+            for q in range(self.n_qubits):
+                rx = self._rotation_gates(layer_params[q], 'x')
+                ry = self._rotation_gates(layer_params[self.n_qubits + q], 'y')
+                rz = self._rotation_gates(layer_params[2*self.n_qubits + q], 'z')
+                state = self._apply_gate(state, rx, q)
+                state = self._apply_gate(state, ry, q)
+                state = self._apply_gate(state, rz, q)
+
+            # Entanglement
+            if layer < self.n_layers - 1:
+                state = self._entangling_layer(state)
+
+        # Output: probabilities or expectation values
+        probs = np.abs(state)**2
+
+        if self.output_dim <= 2**self.n_qubits:
+            return probs[:self.output_dim]
+        else:
+            # Upsample if needed
+            return np.tile(probs, self.output_dim // len(probs) + 1)[:self.output_dim]
+
+
+class ClassicalDiscriminator:
+    """Classical neural network discriminator."""
+
+    def __init__(self, input_dim: int, hidden_dims: list = [64, 32]):
+        self.input_dim = input_dim
+        self.layers = []
+
+        dims = [input_dim] + hidden_dims + [1]
+        for i in range(len(dims) - 1):
+            W = np.random.randn(dims[i+1], dims[i]) * np.sqrt(2/dims[i])
+            b = np.zeros(dims[i+1])
+            self.layers.append({'W': W, 'b': b})
+
+    def forward(self, x: np.ndarray) -> float:
+        """Forward pass through discriminator."""
+        h = x
+        for i, layer in enumerate(self.layers[:-1]):
+            h = layer['W'] @ h + layer['b']
+            h = np.maximum(0, h)  # ReLU
+
+        # Output layer with sigmoid
+        out = self.layers[-1]['W'] @ h + self.layers[-1]['b']
+        return 1 / (1 + np.exp(-out[0]))
+
+    def get_params(self) -> list:
+        """Get all parameters."""
+        return [(l['W'].copy(), l['b'].copy()) for l in self.layers]
+
+    def set_params(self, params: list):
+        """Set all parameters."""
+        for i, (W, b) in enumerate(params):
+            self.layers[i]['W'] = W
+            self.layers[i]['b'] = b
+```
+
+## 3. Classical Generator with Quantum Discriminator
+
+<Definition term="Quantum Feature Discriminator">
+A discriminator that uses quantum circuits to extract features from classical inputs, potentially capturing correlations that classical networks miss, before making the real/fake classification.
+</Definition>
+
+```python
+class ClassicalGenerator:
+    """Classical neural network generator."""
+
+    def __init__(self, latent_dim: int, output_dim: int,
+                 hidden_dims: list = [32, 64]):
+        self.latent_dim = latent_dim
+        self.output_dim = output_dim
+        self.layers = []
+
+        dims = [latent_dim] + hidden_dims + [output_dim]
+        for i in range(len(dims) - 1):
+            W = np.random.randn(dims[i+1], dims[i]) * np.sqrt(2/dims[i])
+            b = np.zeros(dims[i+1])
+            self.layers.append({'W': W, 'b': b})
+
+    def forward(self, z: np.ndarray) -> np.ndarray:
+        """Generate output from latent vector."""
+        h = z
+        for i, layer in enumerate(self.layers[:-1]):
+            h = layer['W'] @ h + layer['b']
+            h = np.maximum(0, h)  # ReLU
+
+        # Output with tanh activation
+        out = self.layers[-1]['W'] @ h + self.layers[-1]['b']
+        return np.tanh(out)
+
+
+class QuantumDiscriminator:
+    """Quantum circuit discriminator."""
+
+    def __init__(self, n_qubits: int, n_layers: int = 2):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+
+        # Parameters for variational circuit
+        self.n_params = n_layers * 2 * n_qubits
+        self.params = np.random.randn(self.n_params) * 0.1
+
+    def _ry_gate(self, theta: float) -> np.ndarray:
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        return np.array([[c, -s], [s, c]])
+
+    def _apply_gate(self, state: np.ndarray, gate: np.ndarray,
+                    qubit: int) -> np.ndarray:
+        n_qubits = int(np.log2(len(state)))
+        full_gate = np.eye(1)
+        for q in range(n_qubits):
+            full_gate = np.kron(full_gate,
+                               gate if q == qubit else np.eye(2))
+        return full_gate @ state
+
+    def discriminate(self, x: np.ndarray) -> float:
+        """Classify input as real (1) or fake (0)."""
+        dim = 2**self.n_qubits
+        state = np.zeros(dim, dtype=complex)
+        state[0] = 1.0
+
+        # Encode classical data
+        for i in range(self.n_qubits):
+            xi = x[i % len(x)] if i < len(x) else 0
+            # Scale to reasonable rotation angle
+            ry = self._ry_gate(np.pi * np.tanh(xi))
+            state = self._apply_gate(state, ry, i)
+
+        # Variational layers
+        params_per_layer = 2 * self.n_qubits
+        for layer in range(self.n_layers):
+            layer_params = self.params[layer*params_per_layer:
+                                       (layer+1)*params_per_layer]
+
+            for q in range(self.n_qubits):
+                ry1 = self._ry_gate(layer_params[q])
+                ry2 = self._ry_gate(layer_params[self.n_qubits + q])
+                state = self._apply_gate(state, ry1, q)
+                state = self._apply_gate(state, ry2, q)
+
+        # Measure first qubit
+        probs = np.abs(state)**2
+        p0 = sum(probs[i] for i in range(dim) if i < dim//2)
+        return p0  # P(first qubit = 0) as "real" probability
+```
+
+## 4. Gradient Flow in Hybrid Systems
+
+<Warning>
+Gradient flow between quantum and classical components requires careful handling. The quantum gradients use parameter-shift while classical gradients use backpropagation - these must be connected properly.
+</Warning>
+
+<Formula>
+\text{Hybrid Gradient Chain:}
+\\[8pt]
+\frac{\partial L}{\partial \theta_G^{(Q)}} = \frac{\partial L}{\partial D(G)} \cdot \frac{\partial D(G)}{\partial G} \cdot \frac{\partial G}{\partial \theta_G^{(Q)}}
+\\[8pt]
+\text{where } \frac{\partial G}{\partial \theta_G^{(Q)}} \text{ uses parameter-shift rule}
+</Formula>
+
+```python
+class HybridGradientComputer:
+    """Compute gradients for hybrid quantum-classical systems."""
+
+    def __init__(self, quantum_gen: QuantumGenerator,
+                 classical_disc: ClassicalDiscriminator):
+        self.gen = quantum_gen
+        self.disc = classical_disc
+        self.shift = np.pi / 2
+
+    def discriminator_loss(self, x_real: np.ndarray,
+                           x_fake: np.ndarray) -> float:
+        """Binary cross-entropy loss for discriminator."""
+        eps = 1e-7
+        d_real = self.disc.forward(x_real)
+        d_fake = self.disc.forward(x_fake)
+
+        loss = -(np.log(d_real + eps) + np.log(1 - d_fake + eps)) / 2
+        return loss
+
+    def generator_loss(self, x_fake: np.ndarray) -> float:
+        """Generator loss: -log(D(G(z)))."""
+        eps = 1e-7
+        d_fake = self.disc.forward(x_fake)
+        return -np.log(d_fake + eps)
+
+    def quantum_generator_gradient(self, z: np.ndarray) -> np.ndarray:
+        """Compute gradient for quantum generator using parameter-shift."""
+        gradients = np.zeros_like(self.gen.params)
+
+        for i in range(len(self.gen.params)):
+            # Forward shift
+            params_plus = self.gen.params.copy()
+            params_plus[i] += self.shift
+            self.gen.params = params_plus
+            x_plus = self.gen.generate(z)
+            loss_plus = self.generator_loss(x_plus)
+
+            # Backward shift
+            params_minus = self.gen.params.copy()
+            params_minus[i] -= self.shift
+            self.gen.params = params_minus
+            x_minus = self.gen.generate(z)
+            loss_minus = self.generator_loss(x_minus)
+
+            # Restore original
+            self.gen.params = params_plus.copy()
+            self.gen.params[i] -= self.shift
+
+            gradients[i] = (loss_plus - loss_minus) / 2
+
+        return gradients
+
+    def classical_discriminator_gradient(self, x_real: np.ndarray,
+                                          x_fake: np.ndarray,
+                                          epsilon: float = 1e-5) -> list:
+        """Compute gradient for classical discriminator (finite diff)."""
+        param_grads = []
+        original_params = self.disc.get_params()
+
+        for layer_idx, (W, b) in enumerate(original_params):
+            W_grad = np.zeros_like(W)
+            b_grad = np.zeros_like(b)
+
+            # Gradient for weights
+            for i in range(W.shape[0]):
+                for j in range(W.shape[1]):
+                    params = [p.copy() for p in original_params]
+                    W_copy, b_copy = params[layer_idx]
+
+                    W_copy[i, j] += epsilon
+                    params[layer_idx] = (W_copy, b_copy)
+                    self.disc.set_params(params)
+                    loss_plus = self.discriminator_loss(x_real, x_fake)
+
+                    W_copy[i, j] -= 2*epsilon
+                    params[layer_idx] = (W_copy, b_copy)
+                    self.disc.set_params(params)
+                    loss_minus = self.discriminator_loss(x_real, x_fake)
+
+                    W_grad[i, j] = (loss_plus - loss_minus) / (2*epsilon)
+
+            # Gradient for biases
+            for i in range(b.shape[0]):
+                params = [p.copy() for p in original_params]
+                W_copy, b_copy = params[layer_idx]
+
+                b_copy[i] += epsilon
+                params[layer_idx] = (W_copy, b_copy)
+                self.disc.set_params(params)
+                loss_plus = self.discriminator_loss(x_real, x_fake)
+
+                b_copy[i] -= 2*epsilon
+                params[layer_idx] = (W_copy, b_copy)
+                self.disc.set_params(params)
+                loss_minus = self.discriminator_loss(x_real, x_fake)
+
+                b_grad[i] = (loss_plus - loss_minus) / (2*epsilon)
+
+            param_grads.append((W_grad, b_grad))
+
+        # Restore original parameters
+        self.disc.set_params(original_params)
+        return param_grads
+```
+
+## 5. Hybrid Training Loop
+
+<Tip>
+Alternating training between generator and discriminator requires careful balancing. The quantum component typically needs more iterations due to the noise in parameter-shift gradients.
+</Tip>
+
+```python
+class HybridQGANTrainer:
+    """Complete training loop for hybrid QGANs."""
+
+    def __init__(self, generator, discriminator,
+                 gen_lr: float = 0.01, disc_lr: float = 0.001,
+                 gen_is_quantum: bool = True):
+        self.gen = generator
+        self.disc = discriminator
+        self.gen_lr = gen_lr
+        self.disc_lr = disc_lr
+        self.gen_is_quantum = gen_is_quantum
+
+        if gen_is_quantum:
+            self.grad_computer = HybridGradientComputer(generator, discriminator)
+
+    def sample_noise(self, n_samples: int, dim: int) -> np.ndarray:
+        """Sample noise vectors."""
+        return np.random.randn(n_samples, dim)
+
+    def train_discriminator_step(self, x_real: np.ndarray,
+                                  z: np.ndarray) -> float:
+        """One discriminator training step."""
+        if self.gen_is_quantum:
+            x_fake = self.gen.generate(z)
+        else:
+            x_fake = self.gen.forward(z)
+
+        # Compute gradients
+        if hasattr(self.grad_computer, 'classical_discriminator_gradient'):
+            grads = self.grad_computer.classical_discriminator_gradient(
+                x_real, x_fake)
+
+            # Update parameters
+            params = self.disc.get_params()
+            new_params = []
+            for (W, b), (gW, gb) in zip(params, grads):
+                new_params.append((W - self.disc_lr * gW,
+                                   b - self.disc_lr * gb))
+            self.disc.set_params(new_params)
+
+        # Return loss
+        eps = 1e-7
+        d_real = self.disc.forward(x_real)
+        d_fake = self.disc.forward(x_fake)
+        return -(np.log(d_real + eps) + np.log(1 - d_fake + eps)) / 2
+
+    def train_generator_step(self, z: np.ndarray) -> float:
+        """One generator training step."""
+        if self.gen_is_quantum:
+            # Parameter-shift gradient
+            grads = self.grad_computer.quantum_generator_gradient(z)
+            self.gen.params -= self.gen_lr * grads
+
+            x_fake = self.gen.generate(z)
+        else:
+            # Classical gradient (finite diff for simplicity)
+            x_fake = self.gen.forward(z)
+
+        eps = 1e-7
+        d_fake = self.disc.forward(x_fake)
+        return -np.log(d_fake + eps)
+
+    def train(self, real_data: np.ndarray, n_epochs: int = 100,
+              batch_size: int = 32, disc_steps: int = 1,
+              gen_steps: int = 1, verbose: bool = True) -> dict:
+        """Full training loop."""
+        history = {'d_loss': [], 'g_loss': [], 'd_real': [], 'd_fake': []}
+
+        n_samples = len(real_data)
+        latent_dim = self.gen.n_qubits if self.gen_is_quantum else self.gen.latent_dim
+
+        for epoch in range(n_epochs):
+            # Sample batch
+            idx = np.random.randint(0, n_samples)
+            x_real = real_data[idx]
+            z = np.random.randn(latent_dim)
+
+            # Train discriminator
+            d_loss = 0
+            for _ in range(disc_steps):
+                d_loss += self.train_discriminator_step(x_real, z)
+            d_loss /= disc_steps
+
+            # Train generator
+            g_loss = 0
+            for _ in range(gen_steps):
+                z = np.random.randn(latent_dim)
+                g_loss += self.train_generator_step(z)
+            g_loss /= gen_steps
+
+            # Logging
+            if self.gen_is_quantum:
+                x_fake = self.gen.generate(z)
+            else:
+                x_fake = self.gen.forward(z)
+
+            d_real = self.disc.forward(x_real)
+            d_fake = self.disc.forward(x_fake)
+
+            history['d_loss'].append(d_loss)
+            history['g_loss'].append(g_loss)
+            history['d_real'].append(d_real)
+            history['d_fake'].append(d_fake)
+
+            if verbose and (epoch + 1) % 10 == 0:
+                print(f"Epoch {epoch+1}: D_loss={d_loss:.4f}, "
+                      f"G_loss={g_loss:.4f}, D(real)={d_real:.4f}, "
+                      f"D(fake)={d_fake:.4f}")
+
+        return history
+```
+
+## 6. Balanced Hybrid Architectures
+
+<Definition term="Balanced Hybrid">
+An architecture where both generator and discriminator have quantum and classical components, carefully designed to share the computational load between quantum and classical resources.
+</Definition>
+
+```python
+class BalancedHybridGenerator:
+    """Generator with both quantum and classical components."""
+
+    def __init__(self, latent_dim: int, n_qubits: int,
+                 output_dim: int, hidden_dim: int = 32):
+        self.latent_dim = latent_dim
+        self.n_qubits = n_qubits
+        self.output_dim = output_dim
+
+        # Classical preprocessing
+        self.W_pre = np.random.randn(n_qubits, latent_dim) * 0.1
+        self.b_pre = np.zeros(n_qubits)
+
+        # Quantum processing
+        self.quantum_params = np.random.randn(2 * n_qubits) * 0.1
+
+        # Classical post-processing
+        self.W_post = np.random.randn(output_dim, 2**n_qubits) * 0.1
+        self.b_post = np.zeros(output_dim)
+
+    def _ry_gate(self, theta: float) -> np.ndarray:
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        return np.array([[c, -s], [s, c]])
+
+    def _apply_gate(self, state: np.ndarray, gate: np.ndarray,
+                    qubit: int) -> np.ndarray:
+        n_qubits = int(np.log2(len(state)))
+        full_gate = np.eye(1)
+        for q in range(n_qubits):
+            full_gate = np.kron(full_gate,
+                               gate if q == qubit else np.eye(2))
+        return full_gate @ state
+
+    def forward(self, z: np.ndarray) -> np.ndarray:
+        """Full forward pass."""
+        # Classical preprocessing: z -> angles
+        angles = np.tanh(self.W_pre @ z + self.b_pre)
+
+        # Quantum processing
+        dim = 2**self.n_qubits
+        state = np.zeros(dim, dtype=complex)
+        state[0] = 1.0
+
+        # Encoding
+        for i in range(self.n_qubits):
+            ry = self._ry_gate(np.pi * angles[i])
+            state = self._apply_gate(state, ry, i)
+
+        # Variational
+        for i in range(self.n_qubits):
+            ry1 = self._ry_gate(self.quantum_params[i])
+            ry2 = self._ry_gate(self.quantum_params[self.n_qubits + i])
+            state = self._apply_gate(state, ry1, i)
+            state = self._apply_gate(state, ry2, i)
+
+        quantum_features = np.abs(state)**2
+
+        # Classical post-processing
+        output = self.W_post @ quantum_features + self.b_post
+        return np.tanh(output)
+
+
+class BalancedHybridDiscriminator:
+    """Discriminator with both quantum and classical components."""
+
+    def __init__(self, input_dim: int, n_qubits: int, hidden_dim: int = 32):
+        self.input_dim = input_dim
+        self.n_qubits = n_qubits
+
+        # Classical feature extraction
+        self.W1 = np.random.randn(hidden_dim, input_dim) * 0.1
+        self.b1 = np.zeros(hidden_dim)
+        self.W2 = np.random.randn(n_qubits, hidden_dim) * 0.1
+        self.b2 = np.zeros(n_qubits)
+
+        # Quantum processing
+        self.quantum_params = np.random.randn(2 * n_qubits) * 0.1
+
+        # Classical output
+        self.W_out = np.random.randn(1, n_qubits) * 0.1
+        self.b_out = np.zeros(1)
+
+    def _ry_gate(self, theta: float) -> np.ndarray:
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        return np.array([[c, -s], [s, c]])
+
+    def _apply_gate(self, state: np.ndarray, gate: np.ndarray,
+                    qubit: int) -> np.ndarray:
+        n_qubits = int(np.log2(len(state)))
+        full_gate = np.eye(1)
+        for q in range(n_qubits):
+            full_gate = np.kron(full_gate,
+                               gate if q == qubit else np.eye(2))
+        return full_gate @ state
+
+    def forward(self, x: np.ndarray) -> float:
+        """Full forward pass."""
+        # Classical feature extraction
+        h = np.maximum(0, self.W1 @ x + self.b1)
+        angles = np.tanh(self.W2 @ h + self.b2)
+
+        # Quantum processing
+        dim = 2**self.n_qubits
+        state = np.zeros(dim, dtype=complex)
+        state[0] = 1.0
+
+        for i in range(self.n_qubits):
+            ry = self._ry_gate(np.pi * angles[i])
+            state = self._apply_gate(state, ry, i)
+
+        for i in range(self.n_qubits):
+            ry1 = self._ry_gate(self.quantum_params[i])
+            ry2 = self._ry_gate(self.quantum_params[self.n_qubits + i])
+            state = self._apply_gate(state, ry1, i)
+            state = self._apply_gate(state, ry2, i)
+
+        # Quantum features: expectation of Z on each qubit
+        probs = np.abs(state)**2
+        quantum_features = np.zeros(self.n_qubits)
+        for q in range(self.n_qubits):
+            p0 = sum(probs[i] for i in range(dim)
+                     if (i >> (self.n_qubits - 1 - q)) & 1 == 0)
+            quantum_features[q] = 2 * p0 - 1
+
+        # Classical output
+        out = self.W_out @ quantum_features + self.b_out
+        return 1 / (1 + np.exp(-out[0]))
+
+
+class BalancedHybridQGAN:
+    """Complete balanced hybrid QGAN system."""
+
+    def __init__(self, latent_dim: int, data_dim: int,
+                 n_qubits: int = 4, hidden_dim: int = 32):
+        self.generator = BalancedHybridGenerator(
+            latent_dim, n_qubits, data_dim, hidden_dim)
+        self.discriminator = BalancedHybridDiscriminator(
+            data_dim, n_qubits, hidden_dim)
+        self.latent_dim = latent_dim
+
+    def generate(self, z: np.ndarray) -> np.ndarray:
+        """Generate sample."""
+        return self.generator.forward(z)
+
+    def discriminate(self, x: np.ndarray) -> float:
+        """Discriminate sample."""
+        return self.discriminator.forward(x)
+
+    def sample(self, n_samples: int = 1) -> np.ndarray:
+        """Generate multiple samples."""
+        samples = []
+        for _ in range(n_samples):
+            z = np.random.randn(self.latent_dim)
+            samples.append(self.generate(z))
+        return np.array(samples)
+```
+
+## Summary
+
+In this lesson, you learned:
+
+- **Hybrid QGAN types**: Type A (quantum G + classical D), Type B (classical G + quantum D), and Type C (both hybrid)
+- **Quantum generators**: Use parameterized circuits to transform noise into samples
+- **Classical discriminators**: Provide flexible, high-capacity classification
+- **Gradient flow**: Connect parameter-shift (quantum) with backpropagation (classical)
+- **Training loops**: Balance updates between quantum and classical components
+- **Balanced architectures**: Both components have quantum and classical parts
+
+Hybrid QGANs leverage the strengths of both paradigms: quantum circuits for exploring high-dimensional spaces efficiently and classical networks for flexible function approximation.

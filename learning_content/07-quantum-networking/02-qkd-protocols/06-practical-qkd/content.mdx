@@ -1,0 +1,734 @@
+# Practical QKD Systems
+
+Moving from QKD theory to practice requires understanding real hardware constraints, performance limitations, and deployment considerations. This lesson bridges the gap between protocol design and operational systems.
+
+## System Architecture
+
+Practical QKD systems integrate multiple components working together to generate secure keys.
+
+### Complete System Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  Practical QKD System Architecture              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ALICE (Transmitter)           BOB (Receiver)                 │
+│   ┌─────────────────┐           ┌─────────────────┐            │
+│   │ ┌─────────────┐ │           │ ┌─────────────┐ │            │
+│   │ │   Laser     │ │           │ │  Detector   │ │            │
+│   │ │   Source    │ │           │ │   Array     │ │            │
+│   │ └──────┬──────┘ │           │ └──────┬──────┘ │            │
+│   │        │        │           │        │        │            │
+│   │ ┌──────▼──────┐ │           │ ┌──────▼──────┐ │            │
+│   │ │ Modulator   │ │           │ │   Basis     │ │            │
+│   │ │ (state prep)│ │           │ │  Selector   │ │            │
+│   │ └──────┬──────┘ │           │ └──────┬──────┘ │            │
+│   │        │        │           │        │        │            │
+│   │ ┌──────▼──────┐ │           │ ┌──────▼──────┐ │            │
+│   │ │   QRNG     │ │           │ │    QRNG     │ │            │
+│   │ └──────┬──────┘ │           │ └──────┬──────┘ │            │
+│   │        │        │           │        │        │            │
+│   │ ┌──────▼──────┐ │           │ ┌──────▼──────┐ │            │
+│   │ │ Controller  │◄──Classical──►│ Controller  │ │            │
+│   │ │ & Post-proc│ │   Channel  │ │ & Post-proc│ │            │
+│   │ └─────────────┘ │           │ └─────────────┘ │            │
+│   └────────┬────────┘           └────────┬────────┘            │
+│            │                             │                      │
+│            └────────Quantum Channel──────┘                      │
+│                    (Fiber or Free-space)                        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Component Specifications
+
+```python
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+from enum import Enum
+import numpy as np
+
+class DetectorType(Enum):
+    APD = "Avalanche Photodiode"
+    SNSPD = "Superconducting Nanowire"
+    SSPD = "Superconducting Single-Photon"
+
+class SourceType(Enum):
+    WCP = "Weak Coherent Pulse"
+    HSPS = "Heralded Single-Photon"
+    QD = "Quantum Dot"
+
+@dataclass
+class LaserSource:
+    """QKD laser source specifications."""
+    source_type: SourceType
+    wavelength_nm: float
+    pulse_width_ps: float
+    repetition_rate_mhz: float
+    mean_photon_number: float  # μ for WCP
+    extinction_ratio_db: float
+    linewidth_khz: float
+
+    def validate(self) -> List[str]:
+        """Check specifications against requirements."""
+        issues = []
+        if self.extinction_ratio_db < 20:
+            issues.append("Extinction ratio should be >20 dB for security")
+        if self.mean_photon_number > 1 and self.source_type == SourceType.WCP:
+            issues.append("Mean photon number >1 vulnerable to PNS")
+        return issues
+
+@dataclass
+class SinglePhotonDetector:
+    """Single-photon detector specifications."""
+    detector_type: DetectorType
+    efficiency: float
+    dark_count_rate_hz: float
+    timing_jitter_ps: float
+    dead_time_ns: float
+    operating_temp_k: float
+    afterpulse_prob: float
+
+    def calculate_max_count_rate(self) -> float:
+        """Maximum detection rate considering dead time."""
+        return 1e9 / (self.dead_time_ns + 10)  # Buffer
+
+    def expected_snr(self, signal_rate_hz: float,
+                     background_hz: float = 0) -> float:
+        """Calculate signal-to-noise ratio."""
+        noise = self.dark_count_rate_hz + background_hz
+        return signal_rate_hz / (signal_rate_hz + noise)
+
+@dataclass
+class QKDSystemSpecs:
+    """Complete QKD system specifications."""
+    source: LaserSource
+    detector: SinglePhotonDetector
+    fiber_loss_db_km: float = 0.2
+    system_loss_db: float = 3.0
+    clock_rate_mhz: float = 100
+
+    def max_distance_km(self, min_detection_prob: float = 1e-6) -> float:
+        """Calculate maximum operational distance."""
+        total_system_loss_db = -10 * np.log10(min_detection_prob)
+        fiber_budget_db = total_system_loss_db - self.system_loss_db
+        return fiber_budget_db / self.fiber_loss_db_km
+
+    def key_rate_at_distance(self, distance_km: float,
+                            qber: float = 0.03) -> float:
+        """Estimate secret key rate at given distance."""
+        # Channel transmission
+        channel_loss_db = self.fiber_loss_db_km * distance_km
+        eta_channel = 10 ** (-channel_loss_db / 10)
+        eta_system = 10 ** (-self.system_loss_db / 10)
+
+        # Detection probability
+        p_detect = (self.source.mean_photon_number *
+                   eta_channel * eta_system *
+                   self.detector.efficiency)
+
+        # Sifting efficiency
+        sift_eff = 0.5
+
+        # Secret fraction (simplified)
+        h = lambda p: -p*np.log2(p)-(1-p)*np.log2(1-p) if 0<p<1 else 0
+        secret_frac = max(0, 1 - 2*h(qber))
+
+        # Key rate
+        raw_rate = self.clock_rate_mhz * 1e6 * p_detect
+        return raw_rate * sift_eff * secret_frac
+
+# Example system
+source = LaserSource(
+    source_type=SourceType.WCP,
+    wavelength_nm=1550,
+    pulse_width_ps=50,
+    repetition_rate_mhz=1000,
+    mean_photon_number=0.5,
+    extinction_ratio_db=30,
+    linewidth_khz=100
+)
+
+detector = SinglePhotonDetector(
+    detector_type=DetectorType.SNSPD,
+    efficiency=0.85,
+    dark_count_rate_hz=100,
+    timing_jitter_ps=50,
+    dead_time_ns=50,
+    operating_temp_k=2.5,
+    afterpulse_prob=0.001
+)
+
+system = QKDSystemSpecs(source=source, detector=detector)
+print(f"Max distance: {system.max_distance_km():.1f} km")
+print(f"Key rate at 50 km: {system.key_rate_at_distance(50)/1000:.1f} kbps")
+```
+
+## Key Hardware Components
+
+### Quantum Random Number Generators
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│               Quantum Random Number Generators                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Purpose: Generate truly random bits for:                      │
+│   • Basis selection                                             │
+│   • Bit encoding                                                │
+│   • Privacy amplification seeds                                 │
+│                                                                 │
+│   QRNG Methods:                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ Vacuum Fluctuations:                                    │  │
+│   │   Homodyne detection of vacuum state                    │  │
+│   │   Rate: >1 Gbps achievable                              │  │
+│   │   Certified by quantum mechanics                        │  │
+│   │                                                         │  │
+│   │ Photon Path:                                            │  │
+│   │   Single photon at beam splitter                        │  │
+│   │   50/50 → random bit                                    │  │
+│   │   Rate: Limited by photon generation                    │  │
+│   │                                                         │  │
+│   │ Photon Arrival Time:                                    │  │
+│   │   Random timing of photon detection                     │  │
+│   │   High entropy per detection                            │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Integration: QRNG often integrated into QKD transmitter      │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Detector Comparison
+
+```python
+class DetectorComparison:
+    """Compare different single-photon detector technologies."""
+
+    def __init__(self):
+        self.detectors = {
+            'InGaAs APD (gated)': {
+                'efficiency': 0.25,
+                'dark_count_hz': 1e4,
+                'timing_jitter_ps': 200,
+                'dead_time_ns': 10000,  # 10 μs for afterpulse suppression
+                'operating_temp_k': 220,  # Peltier cooled
+                'cost': 'Low',
+                'wavelength': '1550 nm',
+                'pros': ['Room temp operation', 'Cost effective', 'Compact'],
+                'cons': ['High dark counts', 'Afterpulsing', 'Low efficiency']
+            },
+            'InGaAs APD (free-running)': {
+                'efficiency': 0.20,
+                'dark_count_hz': 1e5,
+                'timing_jitter_ps': 100,
+                'dead_time_ns': 1000,
+                'operating_temp_k': 220,
+                'cost': 'Low',
+                'wavelength': '1550 nm',
+                'pros': ['No gating needed', 'Higher max rate'],
+                'cons': ['Higher dark counts', 'Lower efficiency']
+            },
+            'SNSPD': {
+                'efficiency': 0.90,
+                'dark_count_hz': 10,
+                'timing_jitter_ps': 30,
+                'dead_time_ns': 20,
+                'operating_temp_k': 2.5,  # Cryogenic
+                'cost': 'High',
+                'wavelength': '1550 nm',
+                'pros': ['Highest efficiency', 'Lowest dark counts', 'Fast'],
+                'cons': ['Cryogenic cooling required', 'Expensive']
+            },
+            'Si SPAD': {
+                'efficiency': 0.70,
+                'dark_count_hz': 25,
+                'timing_jitter_ps': 50,
+                'dead_time_ns': 50,
+                'operating_temp_k': 250,
+                'cost': 'Medium',
+                'wavelength': '800 nm',
+                'pros': ['High efficiency at 800nm', 'Room temp'],
+                'cons': ['Not telecom wavelength', 'Fiber loss higher']
+            }
+        }
+
+    def recommend_for_application(self, application: str) -> str:
+        """Recommend detector for specific application."""
+        recommendations = {
+            'long_distance': 'SNSPD',
+            'metropolitan': 'InGaAs APD (gated)',
+            'high_rate': 'SNSPD',
+            'cost_sensitive': 'InGaAs APD (gated)',
+            'free_space': 'Si SPAD',
+            'satellite': 'Si SPAD'
+        }
+        return recommendations.get(application, 'InGaAs APD (gated)')
+
+    def generate_comparison_table(self) -> str:
+        """Generate comparison table."""
+        header = f"{'Detector':<25} {'Eff.':<8} {'Dark(Hz)':<10} {'Jitter(ps)':<12} {'Temp(K)':<10}"
+        lines = [header, "=" * 70]
+
+        for name, specs in self.detectors.items():
+            line = f"{name:<25} {specs['efficiency']:<8.2f} {specs['dark_count_hz']:<10.0f} "
+            line += f"{specs['timing_jitter_ps']:<12.0f} {specs['operating_temp_k']:<10.0f}"
+            lines.append(line)
+
+        return "\n".join(lines)
+
+comparison = DetectorComparison()
+print(comparison.generate_comparison_table())
+```
+
+## Performance Metrics
+
+### Key Rate Analysis
+
+```python
+class QKDPerformanceAnalysis:
+    """Analyze QKD system performance."""
+
+    def __init__(self, system: QKDSystemSpecs):
+        self.system = system
+
+    def full_analysis(self, distances: List[float]) -> Dict:
+        """Perform full performance analysis."""
+        results = {
+            'distances_km': distances,
+            'key_rates_bps': [],
+            'detection_probs': [],
+            'expected_qber': [],
+            'link_budget_db': []
+        }
+
+        for d in distances:
+            # Link budget
+            channel_loss = self.system.fiber_loss_db_km * d
+            total_loss = channel_loss + self.system.system_loss_db
+            results['link_budget_db'].append(total_loss)
+
+            # Detection probability
+            eta = 10 ** (-total_loss / 10) * self.system.detector.efficiency
+            mu = self.system.source.mean_photon_number
+            p_detect = mu * eta
+            results['detection_probs'].append(p_detect)
+
+            # QBER estimation
+            dark_rate = self.system.detector.dark_count_rate_hz
+            signal_rate = self.system.clock_rate_mhz * 1e6 * p_detect
+            qber = dark_rate / (2 * (signal_rate + dark_rate)) + 0.01  # 1% optical errors
+            results['expected_qber'].append(min(0.5, qber))
+
+            # Key rate
+            key_rate = self.system.key_rate_at_distance(d, qber)
+            results['key_rates_bps'].append(max(0, key_rate))
+
+        return results
+
+    def find_operational_range(self, min_key_rate_bps: float = 100) -> float:
+        """Find maximum distance meeting minimum key rate."""
+        for d in np.arange(0, 500, 1):
+            rate = self.system.key_rate_at_distance(d)
+            if rate < min_key_rate_bps:
+                return d - 1
+        return 500
+
+class DecoyStateAnalysis:
+    """Analyze decoy-state QKD performance."""
+
+    def __init__(self, mu: float = 0.5, nu: float = 0.1):
+        """
+        Args:
+            mu: Signal state mean photon number
+            nu: Decoy state mean photon number
+        """
+        self.mu = mu
+        self.nu = nu
+
+    def estimate_single_photon_yield(self,
+                                     Q_mu: float,
+                                     Q_nu: float) -> float:
+        """
+        Estimate single-photon yield Y_1 using decoy states.
+
+        Decoy method removes PNS vulnerability.
+        """
+        # Simplified decoy analysis
+        # Full analysis requires vacuum decoy too
+        e_mu = np.exp(-self.mu)
+        e_nu = np.exp(-self.nu)
+
+        # Lower bound on Y_1
+        Y_1_lower = (Q_mu * e_mu - Q_nu * e_nu * (self.mu / self.nu) ** 2) / (
+            self.mu * e_mu - self.nu * e_nu * (self.mu / self.nu)
+        )
+
+        return max(0, Y_1_lower)
+
+    def decoy_key_rate(self, distance_km: float,
+                       detector_efficiency: float = 0.1,
+                       dark_count: float = 1e-6) -> Dict:
+        """Calculate key rate with decoy-state protocol."""
+        # Channel transmission
+        eta = 10 ** (-0.2 * distance_km / 10) * detector_efficiency
+
+        # Gains
+        Q_mu = 1 - np.exp(-self.mu * eta) + dark_count
+        Q_nu = 1 - np.exp(-self.nu * eta) + dark_count
+
+        # Single-photon yield estimate
+        Y_1 = self.estimate_single_photon_yield(Q_mu, Q_nu)
+
+        # Single-photon fraction
+        p1 = self.mu * np.exp(-self.mu)
+
+        # Gain from single photons
+        Q_1 = Y_1 * p1
+
+        # Secure key rate (simplified)
+        h = lambda p: -p*np.log2(p)-(1-p)*np.log2(1-p) if 0<p<1 else 0
+        e_1 = 0.02  # Assume 2% single-photon QBER
+
+        key_rate = Q_1 * (1 - h(e_1)) - Q_mu * h(e_1)
+
+        return {
+            'distance_km': distance_km,
+            'Q_mu': Q_mu,
+            'Q_nu': Q_nu,
+            'Y_1': Y_1,
+            'key_rate': max(0, key_rate),
+            'improvement_over_no_decoy': 'Significant at long distance'
+        }
+```
+
+## Commercial Systems
+
+### Market Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                Commercial QKD Systems                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Major Vendors (as of 2024):                                   │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ ID Quantique (Switzerland)                              │  │
+│   │ • Cerberis XG series                                    │  │
+│   │ • Up to 100 km, Gbps key rates (metro)                 │  │
+│   │ • Integrated key management                             │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ Toshiba (Japan/UK)                                      │  │
+│   │ • Record distances (600+ km in lab)                     │  │
+│   │ • Twin-field QKD technology                             │  │
+│   │ • Network integration focus                             │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ QuantumCTek (China)                                     │  │
+│   │ • Large-scale network deployments                       │  │
+│   │ • Beijing-Shanghai backbone                             │  │
+│   │ • Satellite QKD (Micius)                                │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ Quantinuum (QuIntessence)                               │  │
+│   │ • Integrated with classical security products           │  │
+│   │ • Enterprise-focused solutions                          │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Typical Specifications:                                       │
+│   • Distance: 50-150 km (fiber), 1000+ km (satellite)          │
+│   • Key rate: 1-10 kbps (long), 1+ Mbps (metro)               │
+│   • QBER: < 5%                                                 │
+│   • Availability: 99.9%+                                       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Integration Considerations
+
+```python
+class QKDDeploymentPlanner:
+    """Plan QKD system deployment."""
+
+    def __init__(self):
+        self.requirements = {}
+
+    def assess_requirements(self, organization_type: str,
+                           data_sensitivity: str,
+                           geographic_scope: str) -> Dict:
+        """Assess QKD requirements for organization."""
+        profiles = {
+            'financial': {
+                'key_rate_min_kbps': 10,
+                'availability_percent': 99.99,
+                'compliance': ['PCI-DSS', 'SOX'],
+                'redundancy': 'Required',
+                'typical_distances_km': [10, 50],
+                'priority': 'Ultra-high security'
+            },
+            'government': {
+                'key_rate_min_kbps': 1,
+                'availability_percent': 99.9,
+                'compliance': ['NIST', 'CC', 'National standards'],
+                'redundancy': 'Required',
+                'typical_distances_km': [20, 100],
+                'priority': 'Long-term secrecy'
+            },
+            'telecom': {
+                'key_rate_min_kbps': 100,
+                'availability_percent': 99.999,
+                'compliance': ['ITU-T', 'ETSI'],
+                'redundancy': 'Multi-path required',
+                'typical_distances_km': [50, 300],
+                'priority': 'Scalability'
+            },
+            'healthcare': {
+                'key_rate_min_kbps': 5,
+                'availability_percent': 99.9,
+                'compliance': ['HIPAA', 'GDPR'],
+                'redundancy': 'Recommended',
+                'typical_distances_km': [5, 30],
+                'priority': 'Patient data protection'
+            }
+        }
+
+        return profiles.get(organization_type, profiles['government'])
+
+    def estimate_costs(self, configuration: str) -> Dict:
+        """Estimate deployment costs."""
+        configurations = {
+            'point_to_point': {
+                'hardware_usd': 150000,
+                'installation_usd': 30000,
+                'annual_maintenance_usd': 15000,
+                'fiber_per_km_usd': 5000,
+                'description': 'Single link between two sites'
+            },
+            'metro_network': {
+                'hardware_usd': 500000,
+                'installation_usd': 100000,
+                'annual_maintenance_usd': 50000,
+                'fiber_per_km_usd': 5000,
+                'description': 'Multi-node metropolitan network'
+            },
+            'backbone': {
+                'hardware_usd': 2000000,
+                'installation_usd': 500000,
+                'annual_maintenance_usd': 200000,
+                'fiber_per_km_usd': 3000,
+                'description': 'Long-distance backbone with trusted nodes'
+            }
+        }
+
+        return configurations.get(configuration, configurations['point_to_point'])
+
+    def check_infrastructure(self, fiber_type: str,
+                            existing_traffic: bool) -> Dict:
+        """Check infrastructure compatibility."""
+        return {
+            'fiber_compatibility': {
+                'single_mode': 'Optimal for QKD',
+                'multi_mode': 'Not suitable - too much dispersion',
+                'dark_fiber': 'Ideal - no crosstalk'
+            }.get(fiber_type, 'Unknown'),
+            'wavelength_allocation': {
+                'c_band': '1530-1565 nm (standard QKD)',
+                'o_band': '1260-1360 nm (alternative)',
+                'separation': 'Requires >100 GHz from classical'
+            },
+            'coexistence_possible': not existing_traffic or True,
+            'recommendations': [
+                'Use dedicated fiber if available',
+                'Implement wavelength filtering',
+                'Monitor for Raman scattering'
+            ]
+        }
+```
+
+## Standards and Certification
+
+### Relevant Standards
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   QKD Standards Landscape                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ETSI ISG QKD (European):                                      │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ • GS QKD 004: Application interface                     │  │
+│   │ • GS QKD 005: Security proofs                           │  │
+│   │ • GS QKD 008: QKD module security specification         │  │
+│   │ • GS QKD 014: Protocol and data format                  │  │
+│   │ • GS QKD 015: Implementation security                   │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   ITU-T (International):                                        │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ • Y.3800: Framework for quantum networks                │  │
+│   │ • Y.3801: Functional requirements                       │  │
+│   │ • Y.3802: QKD network terminology                       │  │
+│   │ • X.1710: Security framework for QKD                    │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   ISO/IEC:                                                      │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ • ISO/IEC 23837: Security requirements for QKD          │  │
+│   │ • Part 1: Requirements and test methods                 │  │
+│   │ • Part 2: Evaluation methodology                        │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Certification Bodies:                                         │
+│   • BSI (Germany): QKD module certification                    │
+│   • ANSSI (France): Security evaluation                        │
+│   • GCHQ/NCSC (UK): Implementation guidance                    │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Security Evaluation
+
+```python
+class QKDSecurityEvaluation:
+    """Framework for QKD system security evaluation."""
+
+    def __init__(self):
+        self.evaluation_criteria = {
+            'protocol_security': {
+                'weight': 0.25,
+                'checks': [
+                    'Security proof published and peer-reviewed',
+                    'Finite-key analysis included',
+                    'Attack model clearly stated',
+                    'Composable security achieved'
+                ]
+            },
+            'implementation_security': {
+                'weight': 0.30,
+                'checks': [
+                    'Side-channel attacks mitigated',
+                    'Source characterization complete',
+                    'Detector characterization complete',
+                    'Timing attacks addressed'
+                ]
+            },
+            'key_management': {
+                'weight': 0.20,
+                'checks': [
+                    'Secure key storage',
+                    'Key lifecycle management',
+                    'Emergency key destruction',
+                    'Audit logging'
+                ]
+            },
+            'operational_security': {
+                'weight': 0.15,
+                'checks': [
+                    'Physical security of endpoints',
+                    'Tamper detection',
+                    'Personnel security',
+                    'Incident response procedures'
+                ]
+            },
+            'classical_components': {
+                'weight': 0.10,
+                'checks': [
+                    'Authenticated classical channel',
+                    'Post-processing security',
+                    'Random number quality',
+                    'Software integrity'
+                ]
+            }
+        }
+
+    def evaluate_system(self, checklist_results: Dict) -> Dict:
+        """Evaluate QKD system against criteria."""
+        scores = {}
+        total_score = 0
+
+        for category, info in self.evaluation_criteria.items():
+            checks = info['checks']
+            passed = sum(1 for c in checks
+                        if checklist_results.get(c, False))
+            category_score = passed / len(checks)
+            scores[category] = category_score
+            total_score += category_score * info['weight']
+
+        return {
+            'category_scores': scores,
+            'overall_score': total_score,
+            'certification_ready': total_score >= 0.8,
+            'recommendations': self._generate_recommendations(scores)
+        }
+
+    def _generate_recommendations(self, scores: Dict) -> List[str]:
+        """Generate improvement recommendations."""
+        recommendations = []
+        for category, score in scores.items():
+            if score < 0.8:
+                recommendations.append(
+                    f"Improve {category}: currently at {score*100:.0f}%"
+                )
+        return recommendations
+```
+
+## Future Trends
+
+### Emerging Technologies
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              QKD Technology Evolution                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   CURRENT → NEAR-TERM → LONG-TERM                              │
+│                                                                 │
+│   Point-to-Point        Trusted-Node          Quantum           │
+│   QKD Links             Networks              Repeater          │
+│        │                    │                 Networks          │
+│        │                    │                     │             │
+│   ┌────▼────┐          ┌────▼────┐          ┌────▼────┐        │
+│   │ 100 km  │─────────►│ 1000 km │─────────►│ Global  │        │
+│   │ fiber   │          │ backbone│          │ quantum │        │
+│   └─────────┘          └─────────┘          │ internet│        │
+│                                             └─────────┘        │
+│                                                                 │
+│   Key Developments:                                             │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ Twin-Field QKD:                                         │  │
+│   │   Extends range beyond repeaterless limit (~500 km)     │  │
+│   │                                                         │  │
+│   │ MDI-QKD:                                                │  │
+│   │   Removes detector side-channel attacks                 │  │
+│   │                                                         │  │
+│   │ Chip-based QKD:                                         │  │
+│   │   Miniaturization for cost reduction                    │  │
+│   │                                                         │  │
+│   │ Satellite QKD:                                          │  │
+│   │   Intercontinental key distribution                     │  │
+│   │                                                         │  │
+│   │ Integration with PQC:                                   │  │
+│   │   Hybrid classical-quantum solutions                    │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Summary
+
+Practical QKD systems require careful integration of multiple components:
+
+- **Hardware**: Sources, detectors, modulators, and QRNGs with stringent specifications
+- **Performance**: Trade-offs between distance, key rate, and cost
+- **Commercial**: Multiple vendors with various technology approaches
+- **Standards**: ETSI, ITU-T, and ISO providing interoperability and security frameworks
+- **Deployment**: Infrastructure assessment, integration planning, and security evaluation
+
+Understanding these practical aspects is essential for successful QKD implementation.

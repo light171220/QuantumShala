@@ -1,0 +1,355 @@
+---
+title: "ADAPT-VQE: Adaptive Derivative-Assembled Pseudo-Trotter Ansatz"
+description: "Master the ADAPT-VQE algorithm that dynamically constructs optimal quantum circuits by iteratively adding operators from a predefined pool based on gradient information."
+duration: 75
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the limitations of fixed ansatz structures in VQE
+- Explain the ADAPT-VQE algorithm and its iterative circuit construction
+- Define and construct operator pools for molecular systems
+- Calculate gradient-based operator selection criteria
+- Implement ADAPT-VQE for simple molecular systems
+- Compare ADAPT-VQE performance against fixed-depth ansatze
+
+## 1. The Problem with Fixed Ansatze
+
+The Variational Quantum Eigensolver (VQE) is one of the most promising near-term quantum algorithms for finding ground state energies of molecular systems. However, traditional VQE faces a critical challenge: **how do we design the variational ansatz?**
+
+<Definition term="Ansatz">
+An ansatz is a parameterized quantum circuit that prepares trial wavefunctions. The parameters are optimized to minimize the expectation value of the Hamiltonian, yielding an approximation to the ground state energy.
+</Definition>
+
+### Limitations of Fixed Ansatze
+
+Fixed ansatz structures like the Unitary Coupled Cluster Singles and Doubles (UCCSD) have several drawbacks:
+
+1. **Over-parameterization**: UCCSD includes all possible single and double excitations, many of which may contribute negligibly
+2. **Deep circuits**: The full UCCSD ansatz requires circuit depths that exceed current NISQ device capabilities
+3. **System-agnostic**: The same structure is used regardless of the specific molecular system
+
+<Warning>
+For a molecule with $n$ orbitals and $\eta$ electrons, UCCSD has $O(n^2\eta^2)$ parameters, leading to extremely deep circuits for even modest molecular systems.
+</Warning>
+
+## 2. The ADAPT-VQE Approach
+
+ADAPT-VQE (Adaptive Derivative-Assembled Pseudo-Trotter) solves these problems by **growing the ansatz iteratively**, adding one operator at a time based on which operator reduces the energy most effectively.
+
+<Definition term="ADAPT-VQE">
+ADAPT-VQE is an iterative algorithm that constructs a problem-tailored ansatz by repeatedly selecting operators from a predefined pool based on the magnitude of their energy gradients, adding only the operators that significantly contribute to lowering the energy.
+</Definition>
+
+### Core Philosophy
+
+Instead of asking "What operators might be useful?", ADAPT-VQE asks "What operator would be most useful right now?"
+
+<Formula>
+$$|\psi(\vec{\theta})\rangle = \prod_{k=1}^{n} e^{\theta_k \hat{A}_k} |\psi_0\rangle$$
+</Formula>
+
+where each $\hat{A}_k$ is selected from an operator pool $\{\hat{A}_i\}$ based on gradient information.
+
+## 3. The ADAPT-VQE Algorithm
+
+### Step-by-Step Process
+
+```
+1. Initialize: Start with reference state |ψ₀⟩ (e.g., Hartree-Fock)
+2. Compute Gradients: For each operator Âᵢ in pool, calculate ∂E/∂θᵢ|_{θᵢ=0}
+3. Select Operator: Choose Âₘₐₓ with largest |gradient|
+4. Check Convergence: If max|gradient| < ε, terminate
+5. Grow Ansatz: Add e^{θₙₑᵥ·Âₘₐₓ} to the circuit
+6. Optimize: Run VQE to optimize ALL parameters
+7. Repeat: Go to step 2
+```
+
+### Gradient Calculation
+
+The key insight is that the gradient of the energy with respect to a new parameter can be computed efficiently:
+
+<Formula>
+$$\frac{\partial E}{\partial \theta_i}\bigg|_{\theta_i=0} = \langle\psi|[\hat{H}, \hat{A}_i]|\psi\rangle$$
+</Formula>
+
+This commutator expectation value tells us how much adding operator $\hat{A}_i$ would change the energy.
+
+<Tip>
+The gradient calculation requires measuring the commutator $[\hat{H}, \hat{A}_i]$, which can be decomposed into Pauli strings and measured on quantum hardware.
+</Tip>
+
+## 4. Operator Pools
+
+The choice of operator pool is crucial for ADAPT-VQE's success.
+
+### Fermionic Pool (Original ADAPT-VQE)
+
+The original pool consists of spin-complemented single and double excitation operators:
+
+<Formula>
+$$\hat{A}_{pq} = \hat{a}_p^\dagger \hat{a}_q - \hat{a}_q^\dagger \hat{a}_p$$
+</Formula>
+
+<Formula>
+$$\hat{A}_{pqrs} = \hat{a}_p^\dagger \hat{a}_q^\dagger \hat{a}_r \hat{a}_s - \hat{a}_s^\dagger \hat{a}_r^\dagger \hat{a}_q \hat{a}_p$$
+</Formula>
+
+### Qubit-ADAPT Pool
+
+A more hardware-efficient alternative uses individual Pauli strings:
+
+```python
+import numpy as np
+from itertools import combinations
+
+def generate_qubit_adapt_pool(n_qubits):
+    """Generate qubit-ADAPT operator pool."""
+    pool = []
+
+    # Single-qubit Y rotations (minimal pool)
+    for i in range(n_qubits):
+        pool.append(f"Y{i}")
+
+    # Two-qubit entangling operators
+    for i, j in combinations(range(n_qubits), 2):
+        pool.append(f"Y{i}X{j}")
+        pool.append(f"X{i}Y{j}")
+        pool.append(f"Y{i}Z{j}")
+        pool.append(f"Z{i}Y{j}")
+
+    return pool
+
+# Example for 4-qubit system
+pool = generate_qubit_adapt_pool(4)
+print(f"Pool size: {len(pool)} operators")
+for op in pool[:10]:
+    print(f"  {op}")
+```
+
+<Definition term="Qubit-ADAPT">
+Qubit-ADAPT uses individual Pauli strings as pool operators instead of fermionic operators, resulting in shallower circuits per operator addition while maintaining chemical accuracy.
+</Definition>
+
+## 5. Implementation
+
+Here's a complete ADAPT-VQE implementation for a simple system:
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+
+class ADAPTVQE:
+    def __init__(self, hamiltonian, operator_pool, reference_state):
+        """
+        Initialize ADAPT-VQE.
+
+        Args:
+            hamiltonian: The molecular Hamiltonian (as Pauli sum)
+            operator_pool: List of anti-Hermitian operators
+            reference_state: Initial reference state vector
+        """
+        self.H = hamiltonian
+        self.pool = operator_pool
+        self.psi_ref = reference_state
+        self.ansatz_ops = []  # Selected operators
+        self.parameters = []   # Optimized parameters
+
+    def compute_gradient(self, operator, current_state):
+        """
+        Compute gradient for a candidate operator.
+
+        ∂E/∂θ|_{θ=0} = ⟨ψ|[H, A]|ψ⟩
+        """
+        # Compute commutator [H, A]
+        commutator = self.H @ operator - operator @ self.H
+
+        # Compute expectation value
+        gradient = np.real(
+            current_state.conj().T @ commutator @ current_state
+        )
+        return gradient
+
+    def select_operator(self, current_state):
+        """Select operator with maximum gradient magnitude."""
+        gradients = []
+        for op in self.pool:
+            grad = self.compute_gradient(op, current_state)
+            gradients.append(abs(grad))
+
+        max_idx = np.argmax(gradients)
+        return max_idx, gradients[max_idx]
+
+    def build_ansatz_unitary(self, parameters):
+        """Construct the full ansatz unitary from parameters."""
+        n = len(self.psi_ref)
+        U = np.eye(n, dtype=complex)
+
+        for theta, op in zip(parameters, self.ansatz_ops):
+            # U = exp(θ·A) implemented via matrix exponential
+            U = scipy.linalg.expm(theta * op) @ U
+
+        return U
+
+    def energy(self, parameters):
+        """Compute energy expectation value."""
+        U = self.build_ansatz_unitary(parameters)
+        psi = U @ self.psi_ref
+        E = np.real(psi.conj().T @ self.H @ psi)
+        return E
+
+    def run(self, max_iterations=50, gradient_threshold=1e-5):
+        """
+        Run ADAPT-VQE algorithm.
+
+        Returns:
+            Final energy and optimized parameters
+        """
+        current_state = self.psi_ref.copy()
+
+        for iteration in range(max_iterations):
+            # Step 1: Compute all gradients
+            op_idx, max_grad = self.select_operator(current_state)
+
+            print(f"Iteration {iteration + 1}: "
+                  f"Max gradient = {max_grad:.2e}")
+
+            # Step 2: Check convergence
+            if max_grad < gradient_threshold:
+                print("Converged!")
+                break
+
+            # Step 3: Add selected operator
+            self.ansatz_ops.append(self.pool[op_idx])
+            self.parameters.append(0.0)
+
+            # Step 4: Optimize all parameters
+            result = minimize(
+                self.energy,
+                self.parameters,
+                method='BFGS'
+            )
+            self.parameters = list(result.x)
+
+            # Update current state
+            U = self.build_ansatz_unitary(self.parameters)
+            current_state = U @ self.psi_ref
+
+            print(f"  Energy = {result.fun:.8f}")
+            print(f"  Circuit depth = {len(self.ansatz_ops)}")
+
+        return self.energy(self.parameters), self.parameters
+```
+
+## 6. Example: H₂ Molecule
+
+Let's apply ADAPT-VQE to the hydrogen molecule:
+
+```python
+import numpy as np
+
+# H2 Hamiltonian in minimal basis (STO-3G)
+# In the Jordan-Wigner encoding with 4 qubits
+def create_h2_hamiltonian():
+    """Create H2 Hamiltonian matrix."""
+    # Coefficients for H2 at equilibrium bond length
+    g0 = -0.8105479805373266
+    g1 = 0.1721839326191554
+    g2 = -0.22575349222402397
+    g3 = 0.17218393261915543
+    g4 = 0.12091263261776633
+    g5 = 0.16892753870087907
+    g6 = 0.045232799946057826
+
+    # Build 4-qubit Hamiltonian
+    I = np.eye(2)
+    Z = np.array([[1, 0], [0, -1]])
+    X = np.array([[0, 1], [1, 0]])
+    Y = np.array([[0, -1j], [1j, 0]])
+
+    def kron_n(*ops):
+        result = ops[0]
+        for op in ops[1:]:
+            result = np.kron(result, op)
+        return result
+
+    H = (g0 * kron_n(I, I, I, I) +
+         g1 * kron_n(Z, I, I, I) +
+         g2 * kron_n(I, Z, I, I) +
+         g3 * kron_n(I, I, Z, I) +
+         g4 * kron_n(I, I, I, Z) +
+         g5 * kron_n(Z, Z, I, I) +
+         g6 * kron_n(Y, X, X, Y))
+
+    return H
+
+# Run ADAPT-VQE
+H = create_h2_hamiltonian()
+print(f"Exact ground state energy: {np.linalg.eigvalsh(H)[0]:.8f}")
+```
+
+## 7. Convergence and Performance
+
+### Convergence Criteria
+
+ADAPT-VQE uses gradient-based convergence:
+
+<Formula>
+$$\max_i \left|\frac{\partial E}{\partial \theta_i}\bigg|_{\theta_i=0}\right| < \epsilon$$
+</Formula>
+
+Typical values: $\epsilon \sim 10^{-3}$ to $10^{-5}$ Hartree.
+
+### Performance Comparison
+
+| Method | Parameters | Circuit Depth | Accuracy |
+|--------|------------|---------------|----------|
+| UCCSD | O(n²η²) | Very Deep | Chemical |
+| ADAPT-VQE | System-dependent | Moderate | Chemical |
+| Qubit-ADAPT | System-dependent | Shallow | Chemical |
+
+<Tip>
+ADAPT-VQE typically requires 10-100× fewer parameters than UCCSD while achieving the same accuracy, making it much more suitable for NISQ devices.
+</Tip>
+
+## 8. Advantages and Challenges
+
+### Advantages
+
+1. **Compact circuits**: Only necessary operators are included
+2. **Problem-tailored**: Ansatz adapts to the specific system
+3. **Systematic improvement**: Each iteration improves the approximation
+4. **Chemical accuracy**: Achieves the same accuracy as full UCCSD
+
+### Challenges
+
+1. **Gradient measurements**: Requires many measurements per iteration
+2. **Classical optimization**: Must re-optimize all parameters each iteration
+3. **Pool selection**: Results depend on the operator pool choice
+4. **Barren plateaus**: Can still encounter optimization difficulties
+
+<Warning>
+Each ADAPT-VQE iteration requires computing gradients for all pool operators, which scales as O(|pool|) quantum circuits per iteration. For large pools, this overhead can be significant.
+</Warning>
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Fixed ansatz limitations** lead to over-parameterized, deep circuits unsuitable for NISQ devices
+2. **ADAPT-VQE** iteratively constructs compact, problem-tailored ansatze
+3. **Gradient-based selection** identifies the most impactful operator at each step
+4. **Operator pools** can be fermionic (original) or qubit-based (hardware-efficient)
+5. **Convergence** is achieved when maximum gradient falls below threshold
+6. **Performance gains** of 10-100× fewer parameters compared to UCCSD
+
+ADAPT-VQE represents a paradigm shift in variational algorithm design, moving from static to dynamic ansatz construction, making it one of the most promising approaches for near-term quantum chemistry simulations.
+
+## Further Reading
+
+- Next lesson: Layer VQE Architecture
+- Related: Hardware-Efficient Ansatze Design
+- Application: Quantum Chemistry with ADAPT-VQE

@@ -1,0 +1,618 @@
+# BB84 Implementation
+
+Moving from BB84 theory to practice requires addressing numerous hardware challenges, timing constraints, and real-world imperfections. This lesson covers practical BB84 implementation from complete system architecture to modern enhancements like decoy states.
+
+## System Architecture
+
+A complete BB84 system integrates multiple components working in precise synchronization.
+
+### Complete System Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  Complete BB84 System                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ALICE (Transmitter)                                           │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │  ┌──────┐   ┌──────────┐   ┌────────────┐   ┌───────┐ │  │
+│   │  │ QRNG │──►│   Laser  │──►│ Modulator  │──►│ Atten │ │  │
+│   │  │      │   │  Source  │   │(Pol/Phase) │   │ uator │ │  │
+│   │  └──┬───┘   └──────────┘   └──────┬─────┘   └───┬───┘ │  │
+│   │     │                             │              │      │  │
+│   │  ┌──▼───────────────────────────▼──────────────▼───┐  │  │
+│   │  │           Controller (FPGA)                      │  │  │
+│   │  └──────────────────────┬───────────────────────────┘  │  │
+│   │                         │                               │  │
+│   └─────────────────────────┼───────────────────────────────┘  │
+│                             │                                   │
+│                    ═════════╪═════════  Quantum Channel        │
+│                    ═════════╪═════════  (Fiber/Free-space)     │
+│                             │                                   │
+│   BOB (Receiver)            │                                   │
+│   ┌─────────────────────────┼───────────────────────────────┐  │
+│   │                         │                               │  │
+│   │  ┌──────────────────────▼───────────────────────────┐  │  │
+│   │  │           Controller (FPGA)                      │  │  │
+│   │  └──────────────────────┬───────────────────────────┘  │  │
+│   │     │              │              │                     │  │
+│   │  ┌──▼───┐   ┌──────▼──────┐   ┌──▼──────┐              │  │
+│   │  │ QRNG │   │    Basis    │   │Detectors│              │  │
+│   │  │      │   │   Selector  │   │(SPD x4) │              │  │
+│   │  └──────┘   └─────────────┘   └─────────┘              │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   ═══════════════════════════════════════════════════════════  │
+│                    Classical Channel                            │
+│                (Authenticated, TCP/IP)                          │
+│   ═══════════════════════════════════════════════════════════  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Component Specifications
+
+```python
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+from enum import Enum
+import numpy as np
+
+class ComponentType(Enum):
+    LASER = "laser_source"
+    MODULATOR = "modulator"
+    DETECTOR = "single_photon_detector"
+    QRNG = "quantum_rng"
+    CONTROLLER = "fpga_controller"
+
+@dataclass
+class LaserSpecification:
+    """Laser source specifications for BB84."""
+    wavelength_nm: float = 1550  # Telecom wavelength
+    pulse_width_ps: float = 50   # Short pulses
+    repetition_rate_mhz: float = 100
+    linewidth_khz: float = 100
+    extinction_ratio_db: float = 30
+    polarization_er_db: float = 25
+
+    def validate(self) -> List[str]:
+        issues = []
+        if self.extinction_ratio_db < 20:
+            issues.append("Extinction ratio should be >20dB")
+        if self.polarization_er_db < 20:
+            issues.append("Polarization ER should be >20dB")
+        return issues
+
+@dataclass
+class DetectorSpecification:
+    """Single-photon detector specifications."""
+    efficiency: float = 0.25
+    dark_count_hz: float = 1000
+    timing_jitter_ps: float = 200
+    dead_time_ns: float = 10000
+    afterpulse_prob: float = 0.01
+
+    def max_count_rate(self) -> float:
+        """Maximum practical detection rate."""
+        return 1e9 / (self.dead_time_ns + 100)
+
+@dataclass
+class SystemSpecification:
+    """Complete BB84 system specification."""
+    laser: LaserSpecification
+    detector: DetectorSpecification
+    fiber_loss_db_km: float = 0.2
+    system_loss_db: float = 3.0
+    timing_resolution_ps: float = 50
+
+    def expected_qber_components(self) -> Dict[str, float]:
+        """Break down expected QBER contributions."""
+        # Optical misalignment
+        e_optical = 0.01
+
+        # Detector dark counts (at 50km)
+        eta = 10 ** (-0.2 * 50 / 10) * self.detector.efficiency
+        signal_rate = 1e8 * eta  # Approximate
+        dark_fraction = self.detector.dark_count_hz / (signal_rate + self.detector.dark_count_hz)
+        e_dark = 0.5 * dark_fraction
+
+        # Afterpulsing
+        e_afterpulse = 0.5 * self.detector.afterpulse_prob
+
+        return {
+            'optical_misalignment': e_optical,
+            'dark_counts': e_dark,
+            'afterpulsing': e_afterpulse,
+            'total_estimated': e_optical + e_dark + e_afterpulse
+        }
+```
+
+## Timing and Synchronization
+
+Precise timing is critical for BB84 operation.
+
+### Timing Requirements
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│               Timing and Synchronization                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   CLOCK SYNCHRONIZATION:                                        │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Alice's clock ────────────────── Bob's clock         │  │
+│   │        │                               │                │  │
+│   │   Pulse at t₀     Fiber delay      Detection at t₀+Δt  │  │
+│   │        │          (~5 μs/km)           │                │  │
+│   │        │                               │                │  │
+│   │   Sync methods:                                         │  │
+│   │   • Bright timing pulses                               │  │
+│   │   • GPS disciplined oscillators                        │  │
+│   │   • Classical sync channel                             │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   DETECTION WINDOW:                                             │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   ────┬─────────────────────┬─────────────────────      │  │
+│   │       │                     │                           │  │
+│   │       │◄─ Detection Window ─►│                          │  │
+│   │       │     (typically      │                           │  │
+│   │       │      1-10 ns)       │                           │  │
+│   │                                                         │  │
+│   │   Too narrow: Miss real photons                         │  │
+│   │   Too wide: More dark counts                           │  │
+│   │   Optimal: Match laser pulse + jitter                   │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   TIMING JITTER BUDGET:                                         │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Source                    Contribution                │  │
+│   │   ──────────────────────────────────────────            │  │
+│   │   Laser pulse width         ~50 ps                      │  │
+│   │   Detector jitter           ~200 ps                     │  │
+│   │   Electronics               ~50 ps                      │  │
+│   │   Fiber dispersion          ~10 ps/km                   │  │
+│   │   ──────────────────────────────────────────            │  │
+│   │   Total (RSS)               ~250 ps typical             │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Timing Implementation
+
+```python
+class TimingSystem:
+    """BB84 timing and synchronization system."""
+
+    def __init__(self,
+                 clock_rate_mhz: float = 100,
+                 detection_window_ns: float = 2.0):
+        self.clock_rate = clock_rate_mhz * 1e6
+        self.clock_period = 1e9 / self.clock_rate  # in ns
+        self.detection_window = detection_window_ns
+
+    def calculate_fiber_delay(self, distance_km: float) -> float:
+        """Calculate fiber propagation delay in seconds."""
+        # Speed of light in fiber: ~200,000 km/s
+        c_fiber = 2e5  # km/s
+        return distance_km / c_fiber
+
+    def optimal_window_size(self,
+                           pulse_width_ps: float,
+                           detector_jitter_ps: float,
+                           fiber_length_km: float) -> float:
+        """Calculate optimal detection window size."""
+        # Fiber dispersion (~10 ps/km for standard fiber at 1550nm)
+        fiber_dispersion = 10 * fiber_length_km
+
+        # Total jitter (root sum of squares)
+        total_jitter = np.sqrt(
+            pulse_width_ps**2 +
+            detector_jitter_ps**2 +
+            fiber_dispersion**2
+        )
+
+        # Window = 3-4 sigma for high capture probability
+        optimal_window = 4 * total_jitter / 1000  # Convert to ns
+
+        return optimal_window
+
+    def dark_count_probability(self, window_ns: float,
+                               dark_rate_hz: float) -> float:
+        """Probability of dark count within detection window."""
+        return 1 - np.exp(-dark_rate_hz * window_ns * 1e-9)
+
+class ClockRecovery:
+    """Clock recovery from timing pulses."""
+
+    def __init__(self, expected_rate_hz: float):
+        self.expected_period = 1 / expected_rate_hz
+        self.phase_offset = 0
+        self.frequency_offset = 0
+
+    def process_timing_pulse(self, arrival_time: float,
+                             expected_time: float) -> Dict:
+        """Process timing pulse and update synchronization."""
+        error = arrival_time - expected_time
+
+        # Simple PLL-style update
+        phase_gain = 0.1
+        freq_gain = 0.001
+
+        self.phase_offset += phase_gain * error
+        self.frequency_offset += freq_gain * error
+
+        return {
+            'timing_error': error,
+            'phase_correction': self.phase_offset,
+            'frequency_correction': self.frequency_offset
+        }
+```
+
+## Decoy-State Protocol
+
+Decoy states are essential for practical BB84 with weak coherent pulses.
+
+### Decoy-State Principle
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  Decoy-State Protocol                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   PROBLEM: Weak Coherent Pulses have multi-photon components   │
+│                                                                 │
+│   Poisson distribution for mean photon number μ:               │
+│   P(n) = (μⁿ/n!) × e^(-μ)                                      │
+│                                                                 │
+│   For μ = 0.5:                                                 │
+│   P(0) = 60.7%  (vacuum - useless)                             │
+│   P(1) = 30.3%  (single photon - secure)                       │
+│   P(2) = 7.6%   (two photons - vulnerable to PNS)              │
+│   P(≥3) = 1.4%  (multi-photon - vulnerable)                    │
+│                                                                 │
+│   PNS ATTACK:                                                   │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Eve: Count photons in pulse                           │  │
+│   │        If n ≥ 2: Keep one, forward rest                │  │
+│   │        If n = 1: Block (attribute to loss)              │  │
+│   │                                                         │  │
+│   │   Result: Eve has copies of all detected photons        │  │
+│   │           No added QBER!                                │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   DECOY SOLUTION:                                               │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Alice randomly varies intensity:                      │  │
+│   │   • Signal (μ ~ 0.5): Main key generation              │  │
+│   │   • Decoy (ν ~ 0.1): Statistics for single photons     │  │
+│   │   • Vacuum (ω ~ 0): Measure dark counts                │  │
+│   │                                                         │  │
+│   │   Eve cannot distinguish intensities before measuring   │  │
+│   │   PNS attack changes statistics detectably              │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Decoy-State Implementation
+
+```python
+class DecoyStateProtocol:
+    """
+    Decoy-state BB84 implementation.
+    """
+
+    def __init__(self,
+                 mu: float = 0.5,      # Signal intensity
+                 nu: float = 0.1,      # Decoy intensity
+                 omega: float = 0.001  # Vacuum intensity
+                 ):
+        self.mu = mu
+        self.nu = nu
+        self.omega = omega
+
+        # Probability of each intensity (optimize for key rate)
+        self.p_mu = 0.5
+        self.p_nu = 0.25
+        self.p_omega = 0.25
+
+    def select_intensity(self) -> str:
+        """Randomly select pulse intensity."""
+        r = np.random.random()
+        if r < self.p_mu:
+            return 'signal'
+        elif r < self.p_mu + self.p_nu:
+            return 'decoy'
+        else:
+            return 'vacuum'
+
+    def get_intensity_value(self, intensity_type: str) -> float:
+        """Get actual intensity for type."""
+        return {
+            'signal': self.mu,
+            'decoy': self.nu,
+            'vacuum': self.omega
+        }[intensity_type]
+
+    def estimate_single_photon_parameters(self,
+                                          Q_mu: float,
+                                          Q_nu: float,
+                                          Q_omega: float,
+                                          E_mu: float,
+                                          E_nu: float) -> Dict:
+        """
+        Estimate single-photon yield and error rate.
+
+        Uses decoy analysis to bound Y_1 and e_1.
+        """
+        # Vacuum yield (background)
+        Y_0 = Q_omega
+
+        # Single-photon yield lower bound
+        tau_mu = self.mu * np.exp(-self.mu)
+        tau_nu = self.nu * np.exp(-self.nu)
+
+        # Lower bound on Y_1
+        Y_1_lower = (Q_mu * np.exp(self.mu) -
+                     Q_nu * np.exp(self.nu) * (self.mu/self.nu)**2 -
+                     Y_0 * ((self.mu**2 - self.nu**2) / self.nu**2)) / (
+                         self.mu - self.nu**2/self.mu
+                     )
+        Y_1_lower = max(0, Y_1_lower)
+
+        # Upper bound on single-photon error rate
+        e_1_upper = (E_nu * Q_nu * np.exp(self.nu) - Y_0 * 0.5) / (
+            self.nu * Y_1_lower
+        ) if Y_1_lower > 0 else 0.5
+
+        e_1_upper = min(0.5, max(0, e_1_upper))
+
+        # Gain from single photons
+        Q_1 = self.mu * np.exp(-self.mu) * Y_1_lower
+
+        return {
+            'Y_0': Y_0,
+            'Y_1_lower': Y_1_lower,
+            'e_1_upper': e_1_upper,
+            'Q_1': Q_1,
+            'fraction_single_photon': Q_1 / Q_mu if Q_mu > 0 else 0
+        }
+
+    def calculate_key_rate(self, params: Dict, f_ec: float = 1.16) -> float:
+        """Calculate secure key rate with decoy analysis."""
+        Q_1 = params['Q_1']
+        e_1 = params['e_1_upper']
+
+        if Q_1 <= 0:
+            return 0
+
+        # Binary entropy
+        h = lambda p: -p*np.log2(p)-(1-p)*np.log2(1-p) if 0 < p < 1 else 0
+
+        # Key rate from single-photon events
+        # R ≥ Q_1 × [1 - h(e_1)] - Q_μ × f × h(E_μ)
+        key_rate = Q_1 * (1 - h(e_1))
+
+        return max(0, key_rate)
+
+# Demonstration
+decoy = DecoyStateProtocol()
+
+# Simulated measurements
+Q_mu = 0.01   # Gain with signal intensity
+Q_nu = 0.005  # Gain with decoy intensity
+Q_omega = 1e-6  # Dark counts only
+
+E_mu = 0.03  # QBER with signal
+E_nu = 0.04  # QBER with decoy
+
+params = decoy.estimate_single_photon_parameters(Q_mu, Q_nu, Q_omega, E_mu, E_nu)
+key_rate = decoy.calculate_key_rate(params)
+
+print("Decoy-State Analysis:")
+for k, v in params.items():
+    print(f"  {k}: {v:.6f}")
+print(f"  Key rate: {key_rate:.6f}")
+```
+
+## Complete BB84 Implementation
+
+```python
+class CompleteBB84System:
+    """
+    Complete BB84 system simulation including all practical aspects.
+    """
+
+    def __init__(self, config: Dict = None):
+        self.config = config or self._default_config()
+        self.decoy = DecoyStateProtocol()
+
+    def _default_config(self) -> Dict:
+        return {
+            'n_pulses': 1000000,
+            'clock_rate_mhz': 100,
+            'fiber_length_km': 50,
+            'fiber_loss_db_km': 0.2,
+            'detector_efficiency': 0.2,
+            'dark_count_hz': 1000,
+            'system_loss_db': 3.0,
+            'misalignment_qber': 0.01
+        }
+
+    def run_simulation(self) -> Dict:
+        """Run complete BB84 simulation."""
+        cfg = self.config
+        n = cfg['n_pulses']
+
+        # Channel transmission
+        channel_loss = cfg['fiber_loss_db_km'] * cfg['fiber_length_km']
+        total_loss = channel_loss + cfg['system_loss_db']
+        eta_channel = 10 ** (-total_loss / 10)
+        eta_total = eta_channel * cfg['detector_efficiency']
+
+        # Generate pulses with random intensities
+        intensities = [self.decoy.select_intensity() for _ in range(n)]
+        intensity_values = [self.decoy.get_intensity_value(i) for i in intensities]
+
+        # Simulate detection (Poisson + detection efficiency)
+        detected = []
+        for mu in intensity_values:
+            n_photons = np.random.poisson(mu)
+            detected_photons = np.random.binomial(n_photons, eta_total)
+            dark = np.random.random() < cfg['dark_count_hz'] * 1e-8
+            detected.append(detected_photons > 0 or dark)
+
+        detected = np.array(detected)
+
+        # Calculate gains per intensity
+        gains = {}
+        for int_type in ['signal', 'decoy', 'vacuum']:
+            mask = [i == int_type for i in intensities]
+            if sum(mask) > 0:
+                gains[int_type] = np.sum(detected[mask]) / sum(mask)
+            else:
+                gains[int_type] = 0
+
+        # Generate bits and bases
+        alice_bits = np.random.randint(0, 2, n)
+        alice_bases = np.random.randint(0, 2, n)
+        bob_bases = np.random.randint(0, 2, n)
+
+        # Bob's results (for detected pulses only)
+        bob_results = np.zeros(n, dtype=int)
+        for i in range(n):
+            if detected[i]:
+                if alice_bases[i] == bob_bases[i]:
+                    # Matching basis - may have error
+                    if np.random.random() < cfg['misalignment_qber']:
+                        bob_results[i] = 1 - alice_bits[i]
+                    else:
+                        bob_results[i] = alice_bits[i]
+                else:
+                    # Mismatched basis - random
+                    bob_results[i] = np.random.randint(0, 2)
+
+        # Sifting (only detected, matching basis)
+        sift_mask = detected & (alice_bases == bob_bases)
+        sifted_alice = alice_bits[sift_mask]
+        sifted_bob = bob_results[sift_mask]
+
+        # Calculate QBER
+        if len(sifted_alice) > 0:
+            qber = np.mean(sifted_alice != sifted_bob)
+        else:
+            qber = 0.5
+
+        # Decoy analysis
+        decoy_params = self.decoy.estimate_single_photon_parameters(
+            gains.get('signal', 0),
+            gains.get('decoy', 0),
+            gains.get('vacuum', 0),
+            qber,
+            qber  # Simplified: same QBER for all
+        )
+
+        # Key rate
+        key_rate = self.decoy.calculate_key_rate(decoy_params)
+
+        return {
+            'n_pulses': n,
+            'n_detected': np.sum(detected),
+            'n_sifted': len(sifted_alice),
+            'detection_rate': np.mean(detected),
+            'sifting_efficiency': len(sifted_alice) / np.sum(detected) if np.sum(detected) > 0 else 0,
+            'qber': qber,
+            'gains': gains,
+            'decoy_analysis': decoy_params,
+            'key_rate_per_pulse': key_rate,
+            'expected_key_bits': int(n * key_rate),
+            'distance_km': cfg['fiber_length_km'],
+            'secure': qber < 0.11
+        }
+
+
+# Run complete simulation
+system = CompleteBB84System()
+result = system.run_simulation()
+
+print("\nComplete BB84 Simulation Results:")
+print(f"Distance: {result['distance_km']} km")
+print(f"Pulses sent: {result['n_pulses']}")
+print(f"Detected: {result['n_detected']} ({result['detection_rate']*100:.2f}%)")
+print(f"Sifted: {result['n_sifted']}")
+print(f"QBER: {result['qber']*100:.2f}%")
+print(f"Key rate: {result['key_rate_per_pulse']:.6f} bits/pulse")
+print(f"Expected key: {result['expected_key_bits']} bits")
+print(f"Secure: {result['secure']}")
+```
+
+## Implementation Checklist
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              BB84 Implementation Checklist                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   HARDWARE:                                                     │
+│   □ Laser source with good extinction ratio (>20dB)           │
+│   □ Fast modulator for state preparation                       │
+│   □ Variable attenuator for decoy states                       │
+│   □ Single-photon detectors (4 for 2 bases)                   │
+│   □ QRNG for basis/bit selection                               │
+│   □ FPGA controller for timing                                 │
+│                                                                 │
+│   TIMING:                                                       │
+│   □ Clock synchronization mechanism                            │
+│   □ Optimized detection windows                                │
+│   □ Timing calibration procedure                               │
+│   □ Jitter budget analysis                                     │
+│                                                                 │
+│   PROTOCOL:                                                     │
+│   □ Decoy-state implementation                                 │
+│   □ Basis reconciliation over authenticated channel           │
+│   □ Parameter estimation                                       │
+│   □ Error correction (CASCADE or LDPC)                         │
+│   □ Privacy amplification (Toeplitz hash)                      │
+│   □ Key verification                                           │
+│                                                                 │
+│   SECURITY:                                                     │
+│   □ Random number quality testing                              │
+│   □ Side-channel analysis                                      │
+│   □ Watchdog for bright-light attacks                         │
+│   □ Authenticated classical channel                            │
+│   □ Finite-key security analysis                               │
+│                                                                 │
+│   OPERATIONS:                                                   │
+│   □ Polarization/phase tracking                                │
+│   □ Performance monitoring                                      │
+│   □ Fault detection and recovery                               │
+│   □ Key management integration                                 │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Summary
+
+Practical BB84 implementation requires attention to:
+
+- **Hardware**: Laser sources, modulators, detectors, and timing systems
+- **Synchronization**: Precise timing between Alice and Bob
+- **Decoy states**: Essential for security with weak coherent pulses
+- **Complete system**: Integration of all protocol phases
+- **Security**: Beyond theory—side-channels and practical attacks
+
+Understanding these practical aspects is essential for deploying real QKD systems.

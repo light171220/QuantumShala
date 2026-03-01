@@ -1,0 +1,466 @@
+---
+title: "Quantum Feature Maps"
+description: "Learn to design and implement quantum feature maps for kernel methods. Master ZZ-feature maps, IQP circuits, and custom feature map design."
+duration: 45
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Implement standard quantum feature maps (ZZ, IQP, Pauli)
+- Design custom feature maps for specific problems
+- Analyze feature map expressibility
+- Balance circuit depth with kernel quality
+- Choose appropriate feature maps for different data types
+
+## 1. Feature Map Fundamentals
+
+Quantum feature maps encode classical data into quantum states.
+
+<Definition term="Quantum Feature Map">
+A parameterized quantum circuit U(x) that maps classical data x to a quantum state |φ(x)⟩ = U(x)|0⟩, creating an implicit feature representation in the 2ⁿ-dimensional Hilbert space.
+</Definition>
+
+```python
+import numpy as np
+
+def feature_map_basics():
+    """Introduction to quantum feature maps."""
+
+    print("Quantum Feature Maps")
+    print("=" * 60)
+
+    print("""
+    Feature Map Structure:
+
+    |0⟩ ─── H ─── Rz(x₁) ─── ● ─── Rz(x₁x₂) ─── ...
+                            │
+    |0⟩ ─── H ─── Rz(x₂) ─── ⊕ ─── ...
+
+    Components:
+    1. Initial superposition (Hadamard)
+    2. Data encoding (rotations)
+    3. Entanglement (CNOTs, CZ)
+    4. Feature interactions (product terms)
+    """)
+
+    # Simple feature map implementation
+    def simple_feature_map(x, n_qubits=2):
+        """Basic feature map: H → Rz(x)."""
+        dim = 2 ** n_qubits
+        state = np.ones(dim, dtype=complex) / np.sqrt(dim)  # |+⟩^n
+
+        # Apply Rz(x_i) on each qubit
+        for i in range(dim):
+            bits = format(i, f'0{n_qubits}b')
+            phase = 0
+            for q in range(min(len(x), n_qubits)):
+                if bits[q] == '1':
+                    phase += x[q]
+            state[i] *= np.exp(1j * phase)
+
+        return state
+
+    x = [0.5, 0.3]
+    state = simple_feature_map(x)
+    print(f"\nExample: x = {x}")
+    print(f"State: {np.round(state, 4)}")
+    print(f"Probabilities: {np.round(np.abs(state)**2, 4)}")
+
+feature_map_basics()
+```
+
+## 2. ZZ-Feature Map
+
+The standard feature map with pairwise interactions.
+
+```python
+import numpy as np
+
+class ZZFeatureMap:
+    """ZZ-Feature Map implementation."""
+
+    def __init__(self, n_qubits, reps=1):
+        self.n_qubits = n_qubits
+        self.reps = reps
+        self.dim = 2 ** n_qubits
+
+    def encode(self, x):
+        """Encode data using ZZ-feature map."""
+        # Start with |+⟩^n
+        state = np.ones(self.dim, dtype=complex) / np.sqrt(self.dim)
+
+        for _ in range(self.reps):
+            # Single-qubit Z rotations
+            for i in range(self.dim):
+                bits = format(i, f'0{self.n_qubits}b')
+                phase = 0
+                for q in range(self.n_qubits):
+                    if bits[q] == '1':
+                        phase += x[q] if q < len(x) else 0
+                state[i] *= np.exp(1j * phase)
+
+            # ZZ interactions
+            for i in range(self.dim):
+                bits = format(i, f'0{self.n_qubits}b')
+                phase = 0
+                for q1 in range(self.n_qubits):
+                    for q2 in range(q1 + 1, self.n_qubits):
+                        if bits[q1] == '1' and bits[q2] == '1':
+                            x1 = x[q1] if q1 < len(x) else 0
+                            x2 = x[q2] if q2 < len(x) else 0
+                            phase += (np.pi - x1) * (np.pi - x2)
+                state[i] *= np.exp(1j * phase)
+
+        return state
+
+    def kernel(self, x1, x2):
+        """Compute kernel between two data points."""
+        state1 = self.encode(x1)
+        state2 = self.encode(x2)
+        return np.abs(np.vdot(state1, state2)) ** 2
+
+# Example
+zz_map = ZZFeatureMap(n_qubits=2, reps=2)
+
+print("ZZ-Feature Map")
+print("=" * 50)
+
+x1 = [0.5, 0.3]
+x2 = [0.5, 0.3]
+x3 = [1.0, 0.8]
+
+print(f"k(x1, x1) = {zz_map.kernel(x1, x1):.6f}")  # Should be 1
+print(f"k(x1, x2) = {zz_map.kernel(x1, x2):.6f}")  # Same point
+print(f"k(x1, x3) = {zz_map.kernel(x1, x3):.6f}")  # Different point
+
+# Effect of repetitions
+print("\nEffect of repetitions:")
+for reps in [1, 2, 3]:
+    fm = ZZFeatureMap(n_qubits=2, reps=reps)
+    k = fm.kernel(x1, x3)
+    print(f"  reps={reps}: k(x1, x3) = {k:.6f}")
+```
+
+## 3. IQP Feature Map
+
+Instantaneous Quantum Polynomial circuits.
+
+```python
+import numpy as np
+
+class IQPFeatureMap:
+    """IQP-style feature map."""
+
+    def __init__(self, n_qubits, reps=1):
+        self.n_qubits = n_qubits
+        self.reps = reps
+        self.dim = 2 ** n_qubits
+
+    def encode(self, x):
+        """Encode using IQP structure: H → diagonal → H."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1.0
+
+        # Hadamard layer
+        H_n = np.ones((self.dim, self.dim)) / np.sqrt(self.dim)
+        for i in range(self.dim):
+            for j in range(self.dim):
+                parity = bin(i & j).count('1')
+                H_n[i, j] *= (-1) ** parity
+
+        for _ in range(self.reps):
+            # Apply H^⊗n
+            state = H_n @ state
+
+            # Diagonal phase layer
+            for i in range(self.dim):
+                bits = format(i, f'0{self.n_qubits}b')
+                phase = 0
+                # Linear terms
+                for q in range(self.n_qubits):
+                    if bits[q] == '1':
+                        phase += x[q] if q < len(x) else 0
+                # Quadratic terms
+                for q1 in range(self.n_qubits):
+                    for q2 in range(q1 + 1, self.n_qubits):
+                        if bits[q1] == '1' and bits[q2] == '1':
+                            x1 = x[q1] if q1 < len(x) else 0
+                            x2 = x[q2] if q2 < len(x) else 0
+                            phase += x1 * x2
+                state[i] *= np.exp(1j * phase)
+
+            # Final H^⊗n
+            state = H_n @ state
+
+        return state
+
+    def kernel(self, x1, x2):
+        state1 = self.encode(x1)
+        state2 = self.encode(x2)
+        return np.abs(np.vdot(state1, state2)) ** 2
+
+# Compare with ZZ
+print("IQP vs ZZ Feature Maps")
+print("=" * 50)
+
+iqp = IQPFeatureMap(n_qubits=2, reps=1)
+zz = ZZFeatureMap(n_qubits=2, reps=1)
+
+x1, x2 = [0.5, 0.3], [0.8, 0.6]
+
+print(f"IQP kernel: {iqp.kernel(x1, x2):.6f}")
+print(f"ZZ kernel:  {zz.kernel(x1, x2):.6f}")
+```
+
+## 4. Pauli Feature Map
+
+Using different Pauli rotation axes.
+
+```python
+import numpy as np
+
+class PauliFeatureMap:
+    """Feature map with configurable Pauli rotations."""
+
+    def __init__(self, n_qubits, paulis=['Z', 'ZZ'], reps=1):
+        self.n_qubits = n_qubits
+        self.paulis = paulis
+        self.reps = reps
+        self.dim = 2 ** n_qubits
+
+    def _apply_rotation(self, state, pauli, angle, qubits):
+        """Apply Pauli rotation."""
+        new_state = state.copy()
+
+        for i in range(self.dim):
+            bits = format(i, f'0{self.n_qubits}b')
+
+            if pauli == 'Z':
+                if bits[qubits[0]] == '1':
+                    new_state[i] *= np.exp(1j * angle)
+            elif pauli == 'ZZ':
+                if bits[qubits[0]] == '1' and bits[qubits[1]] == '1':
+                    new_state[i] *= np.exp(1j * angle)
+
+        return new_state
+
+    def encode(self, x):
+        # Start with |+⟩^n
+        state = np.ones(self.dim, dtype=complex) / np.sqrt(self.dim)
+
+        for _ in range(self.reps):
+            for pauli in self.paulis:
+                if pauli == 'Z':
+                    for q in range(self.n_qubits):
+                        angle = x[q] if q < len(x) else 0
+                        state = self._apply_rotation(state, 'Z', angle, [q])
+                elif pauli == 'ZZ':
+                    for q1 in range(self.n_qubits):
+                        for q2 in range(q1 + 1, self.n_qubits):
+                            x1 = x[q1] if q1 < len(x) else 0
+                            x2 = x[q2] if q2 < len(x) else 0
+                            state = self._apply_rotation(state, 'ZZ', x1 * x2, [q1, q2])
+
+        return state
+
+    def kernel(self, x1, x2):
+        state1 = self.encode(x1)
+        state2 = self.encode(x2)
+        return np.abs(np.vdot(state1, state2)) ** 2
+
+# Compare different Pauli combinations
+print("Pauli Feature Map Variants")
+print("=" * 50)
+
+configs = [
+    ['Z'],
+    ['Z', 'ZZ'],
+    ['ZZ'],
+]
+
+x1, x2 = [0.5, 0.3], [0.8, 0.6]
+
+for paulis in configs:
+    fm = PauliFeatureMap(n_qubits=2, paulis=paulis, reps=2)
+    k = fm.kernel(x1, x2)
+    print(f"Paulis {paulis}: k = {k:.6f}")
+```
+
+## 5. Custom Feature Map Design
+
+Design feature maps for specific problems.
+
+```python
+import numpy as np
+
+def custom_feature_map_design():
+    """Guidelines for designing custom feature maps."""
+
+    print("Custom Feature Map Design")
+    print("=" * 60)
+
+    guidelines = {
+        "Data-Driven": {
+            "approach": "Match feature interactions to data structure",
+            "example": "Use ZZ for pairwise correlations",
+            "benefit": "Better separation for specific problems"
+        },
+        "Hardware-Aware": {
+            "approach": "Match circuit to device connectivity",
+            "example": "Linear entanglement for linear topology",
+            "benefit": "Fewer SWAP gates, less noise"
+        },
+        "Depth-Balanced": {
+            "approach": "Trade expressibility for trainability",
+            "example": "Fewer reps for noisy devices",
+            "benefit": "Better kernel estimation"
+        },
+        "Symmetry-Preserving": {
+            "approach": "Encode known data symmetries",
+            "example": "Permutation-invariant for sets",
+            "benefit": "Reduced effective dimension"
+        }
+    }
+
+    for name, details in guidelines.items():
+        print(f"\n{name}:")
+        for key, value in details.items():
+            print(f"  {key}: {value}")
+
+custom_feature_map_design()
+
+class CustomFeatureMap:
+    """Example custom feature map with configurable structure."""
+
+    def __init__(self, n_qubits, encoding_func, interaction_func=None, reps=1):
+        self.n_qubits = n_qubits
+        self.encoding_func = encoding_func
+        self.interaction_func = interaction_func
+        self.reps = reps
+        self.dim = 2 ** n_qubits
+
+    def encode(self, x):
+        state = np.ones(self.dim, dtype=complex) / np.sqrt(self.dim)
+
+        for _ in range(self.reps):
+            # Apply custom encoding
+            for i in range(self.dim):
+                bits = format(i, f'0{self.n_qubits}b')
+                phase = self.encoding_func(x, bits)
+                if self.interaction_func:
+                    phase += self.interaction_func(x, bits)
+                state[i] *= np.exp(1j * phase)
+
+        return state
+
+    def kernel(self, x1, x2):
+        state1 = self.encode(x1)
+        state2 = self.encode(x2)
+        return np.abs(np.vdot(state1, state2)) ** 2
+
+# Example: Custom encoding for angular data
+def angular_encoding(x, bits):
+    """Encode angular/periodic data."""
+    phase = 0
+    for q, b in enumerate(bits):
+        if b == '1' and q < len(x):
+            phase += np.sin(x[q]) + np.cos(x[q])
+    return phase
+
+def angular_interaction(x, bits):
+    """Pairwise angular interactions."""
+    phase = 0
+    n = len(bits)
+    for q1 in range(n):
+        for q2 in range(q1 + 1, n):
+            if bits[q1] == '1' and bits[q2] == '1':
+                if q1 < len(x) and q2 < len(x):
+                    phase += np.sin(x[q1] - x[q2])
+    return phase
+
+print("\n" + "=" * 60)
+print("Custom Angular Feature Map:")
+
+angular_fm = CustomFeatureMap(
+    n_qubits=2,
+    encoding_func=angular_encoding,
+    interaction_func=angular_interaction,
+    reps=1
+)
+
+x1 = [0, 0]
+x2 = [np.pi/4, np.pi/4]
+x3 = [np.pi/2, np.pi/2]
+
+print(f"k([0,0], [π/4,π/4]) = {angular_fm.kernel(x1, x2):.6f}")
+print(f"k([0,0], [π/2,π/2]) = {angular_fm.kernel(x1, x3):.6f}")
+```
+
+## 6. Feature Map Comparison
+
+Evaluate and compare feature maps.
+
+```python
+import numpy as np
+
+def compare_feature_maps():
+    """Compare different feature maps on sample data."""
+
+    print("Feature Map Comparison")
+    print("=" * 60)
+
+    # Generate sample data
+    np.random.seed(42)
+    X = np.random.rand(10, 2) * 2 * np.pi
+
+    feature_maps = {
+        'ZZ (1 rep)': ZZFeatureMap(2, reps=1),
+        'ZZ (2 reps)': ZZFeatureMap(2, reps=2),
+        'Pauli Z': PauliFeatureMap(2, paulis=['Z'], reps=2),
+        'Pauli ZZ': PauliFeatureMap(2, paulis=['Z', 'ZZ'], reps=1),
+    }
+
+    for name, fm in feature_maps.items():
+        # Build kernel matrix
+        n = len(X)
+        K = np.array([[fm.kernel(X[i], X[j]) for j in range(n)] for i in range(n)])
+
+        # Analyze
+        off_diag = K[np.triu_indices(n, k=1)]
+        eigvals = np.linalg.eigvalsh(K)
+
+        print(f"\n{name}:")
+        print(f"  Mean kernel (off-diag): {np.mean(off_diag):.4f}")
+        print(f"  Std kernel: {np.std(off_diag):.4f}")
+        print(f"  Condition number: {np.max(eigvals)/np.max(np.min(eigvals), 1e-10):.2f}")
+
+compare_feature_maps()
+```
+
+<Tip>
+The choice of feature map significantly impacts classification performance. Start with ZZ-feature map as a baseline, then try IQP or custom designs. More repetitions increase expressibility but also circuit depth—find the right balance for your hardware.
+</Tip>
+
+## Summary
+
+In this lesson, you learned about quantum feature maps:
+
+1. **Fundamentals**: H → rotations → entanglement structure
+2. **ZZ-Feature Map**: Standard with pairwise interactions
+3. **IQP**: Instantaneous quantum polynomial circuits
+4. **Pauli Maps**: Configurable rotation axes
+5. **Custom Design**: Problem-specific feature maps
+6. **Comparison**: Evaluate expressibility and kernel quality
+
+<Warning>
+Deep feature maps with many repetitions may produce kernels that are too "sharp" (low off-diagonal values), making classification difficult. Always analyze kernel matrix properties before training.
+</Warning>
+
+## Further Reading
+
+- Next: Kernel Estimation
+- Advanced: Trainable Feature Maps
+- Application: Feature Map Selection

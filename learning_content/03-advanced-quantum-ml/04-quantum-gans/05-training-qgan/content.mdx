@@ -1,0 +1,912 @@
+---
+title: "Training Quantum GANs"
+description: "Master the techniques for stable and effective training of quantum GANs, including loss functions, optimization strategies, and convergence diagnostics."
+estimatedMinutes: 70
+difficulty: "advanced"
+tags: ["qgan-training", "optimization", "loss-functions", "regularization", "convergence", "barren-plateaus"]
+---
+
+# Training Quantum GANs
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Implement QGAN loss functions and gradients
+- Apply optimization strategies for quantum circuits
+- Diagnose and address training instabilities
+- Use regularization techniques for QGANs
+- Monitor convergence metrics
+- Handle barren plateaus and mode collapse
+
+## 1. QGAN Loss Functions
+
+<Definition term="QGAN Objective">
+The quantum GAN minimax game where the generator G(θ) and discriminator D(φ) compete: the generator minimizes the probability of fake samples being detected, while the discriminator maximizes its classification accuracy.
+</Definition>
+
+<Formula>
+\text{Standard GAN Loss:}
+\\[8pt]
+\min_\theta \max_\phi V(G_\theta, D_\phi) = \mathbb{E}_{x \sim p_{data}}[\log D_\phi(x)] + \mathbb{E}_{z \sim p_z}[\log(1 - D_\phi(G_\theta(z)))]
+\\[12pt]
+\text{Generator Loss: } L_G = -\mathbb{E}_z[\log D_\phi(G_\theta(z))]
+\\[8pt]
+\text{Discriminator Loss: } L_D = -\mathbb{E}_x[\log D_\phi(x)] - \mathbb{E}_z[\log(1 - D_\phi(G_\theta(z)))]
+</Formula>
+
+```python
+import numpy as np
+from typing import Callable, Dict, Tuple, List
+
+class QGANLossFunctions:
+    """Loss functions for quantum GAN training."""
+
+    def __init__(self, epsilon: float = 1e-7):
+        self.eps = epsilon
+
+    def standard_generator_loss(self, d_fake: float) -> float:
+        """Standard GAN generator loss: -log(D(G(z)))."""
+        return -np.log(d_fake + self.eps)
+
+    def standard_discriminator_loss(self, d_real: float,
+                                     d_fake: float) -> float:
+        """Standard GAN discriminator loss."""
+        return -(np.log(d_real + self.eps) +
+                 np.log(1 - d_fake + self.eps)) / 2
+
+    def wasserstein_generator_loss(self, d_fake: float) -> float:
+        """Wasserstein GAN generator loss: -D(G(z))."""
+        return -d_fake
+
+    def wasserstein_discriminator_loss(self, d_real: float,
+                                        d_fake: float) -> float:
+        """Wasserstein GAN discriminator (critic) loss."""
+        return d_fake - d_real  # Minimize this
+
+    def least_squares_generator_loss(self, d_fake: float,
+                                      target: float = 1.0) -> float:
+        """Least squares GAN generator loss."""
+        return 0.5 * (d_fake - target) ** 2
+
+    def least_squares_discriminator_loss(self, d_real: float,
+                                          d_fake: float) -> float:
+        """Least squares GAN discriminator loss."""
+        return 0.5 * ((d_real - 1) ** 2 + d_fake ** 2)
+
+    def hinge_generator_loss(self, d_fake: float) -> float:
+        """Hinge loss for generator."""
+        return -d_fake
+
+    def hinge_discriminator_loss(self, d_real: float,
+                                  d_fake: float) -> float:
+        """Hinge loss for discriminator."""
+        return np.maximum(0, 1 - d_real) + np.maximum(0, 1 + d_fake)
+
+
+class QGANGradientComputer:
+    """Compute gradients for QGAN components."""
+
+    def __init__(self, generator, discriminator,
+                 loss_fn: QGANLossFunctions = None):
+        self.gen = generator
+        self.disc = discriminator
+        self.loss_fn = loss_fn or QGANLossFunctions()
+        self.shift = np.pi / 2
+
+    def generator_gradient(self, z: np.ndarray,
+                           loss_type: str = 'standard') -> np.ndarray:
+        """Compute generator gradient using parameter-shift."""
+        gradients = np.zeros_like(self.gen.params)
+        original_params = self.gen.params.copy()
+
+        for i in range(len(self.gen.params)):
+            # Forward shift
+            self.gen.params = original_params.copy()
+            self.gen.params[i] += self.shift
+            x_plus = self.gen.generate(z)
+            d_plus = self.disc.forward(x_plus)
+
+            if loss_type == 'standard':
+                loss_plus = self.loss_fn.standard_generator_loss(d_plus)
+            elif loss_type == 'wasserstein':
+                loss_plus = self.loss_fn.wasserstein_generator_loss(d_plus)
+            elif loss_type == 'least_squares':
+                loss_plus = self.loss_fn.least_squares_generator_loss(d_plus)
+            else:
+                loss_plus = self.loss_fn.standard_generator_loss(d_plus)
+
+            # Backward shift
+            self.gen.params = original_params.copy()
+            self.gen.params[i] -= self.shift
+            x_minus = self.gen.generate(z)
+            d_minus = self.disc.forward(x_minus)
+
+            if loss_type == 'standard':
+                loss_minus = self.loss_fn.standard_generator_loss(d_minus)
+            elif loss_type == 'wasserstein':
+                loss_minus = self.loss_fn.wasserstein_generator_loss(d_minus)
+            elif loss_type == 'least_squares':
+                loss_minus = self.loss_fn.least_squares_generator_loss(d_minus)
+            else:
+                loss_minus = self.loss_fn.standard_generator_loss(d_minus)
+
+            gradients[i] = (loss_plus - loss_minus) / 2
+
+        self.gen.params = original_params
+        return gradients
+
+    def discriminator_gradient(self, x_real: np.ndarray,
+                                x_fake: np.ndarray,
+                                loss_type: str = 'standard') -> np.ndarray:
+        """Compute discriminator gradient using parameter-shift."""
+        gradients = np.zeros_like(self.disc.params)
+        original_params = self.disc.params.copy()
+
+        for i in range(len(self.disc.params)):
+            # Forward shift
+            self.disc.params = original_params.copy()
+            self.disc.params[i] += self.shift
+            d_real_plus = self.disc.forward(x_real)
+            d_fake_plus = self.disc.forward(x_fake)
+
+            if loss_type == 'standard':
+                loss_plus = self.loss_fn.standard_discriminator_loss(
+                    d_real_plus, d_fake_plus)
+            elif loss_type == 'wasserstein':
+                loss_plus = self.loss_fn.wasserstein_discriminator_loss(
+                    d_real_plus, d_fake_plus)
+            else:
+                loss_plus = self.loss_fn.standard_discriminator_loss(
+                    d_real_plus, d_fake_plus)
+
+            # Backward shift
+            self.disc.params = original_params.copy()
+            self.disc.params[i] -= self.shift
+            d_real_minus = self.disc.forward(x_real)
+            d_fake_minus = self.disc.forward(x_fake)
+
+            if loss_type == 'standard':
+                loss_minus = self.loss_fn.standard_discriminator_loss(
+                    d_real_minus, d_fake_minus)
+            elif loss_type == 'wasserstein':
+                loss_minus = self.loss_fn.wasserstein_discriminator_loss(
+                    d_real_minus, d_fake_minus)
+            else:
+                loss_minus = self.loss_fn.standard_discriminator_loss(
+                    d_real_minus, d_fake_minus)
+
+            gradients[i] = (loss_plus - loss_minus) / 2
+
+        self.disc.params = original_params
+        return gradients
+```
+
+## 2. Optimization Strategies
+
+<Tip>
+Quantum circuits benefit from specialized optimizers that account for the geometry of parameter space and the stochastic nature of quantum measurements.
+</Tip>
+
+```python
+class QGANOptimizer:
+    """Optimizers tailored for QGAN training."""
+
+    def __init__(self, learning_rate: float = 0.01):
+        self.lr = learning_rate
+
+    def sgd_update(self, params: np.ndarray,
+                   gradients: np.ndarray) -> np.ndarray:
+        """Standard SGD update."""
+        return params - self.lr * gradients
+
+    def momentum_update(self, params: np.ndarray, gradients: np.ndarray,
+                        velocity: np.ndarray, beta: float = 0.9) -> Tuple:
+        """SGD with momentum."""
+        velocity = beta * velocity + gradients
+        new_params = params - self.lr * velocity
+        return new_params, velocity
+
+    def adam_update(self, params: np.ndarray, gradients: np.ndarray,
+                    m: np.ndarray, v: np.ndarray, t: int,
+                    beta1: float = 0.9, beta2: float = 0.999,
+                    epsilon: float = 1e-8) -> Tuple:
+        """Adam optimizer update."""
+        m = beta1 * m + (1 - beta1) * gradients
+        v = beta2 * v + (1 - beta2) * gradients**2
+
+        # Bias correction
+        m_hat = m / (1 - beta1**t)
+        v_hat = v / (1 - beta2**t)
+
+        new_params = params - self.lr * m_hat / (np.sqrt(v_hat) + epsilon)
+        return new_params, m, v
+
+
+class AdaptiveQGANTrainer:
+    """QGAN trainer with adaptive optimization."""
+
+    def __init__(self, generator, discriminator,
+                 gen_lr: float = 0.01, disc_lr: float = 0.005,
+                 optimizer: str = 'adam'):
+        self.gen = generator
+        self.disc = discriminator
+        self.gen_opt = QGANOptimizer(gen_lr)
+        self.disc_opt = QGANOptimizer(disc_lr)
+        self.optimizer = optimizer
+        self.loss_fn = QGANLossFunctions()
+        self.grad_computer = QGANGradientComputer(generator, discriminator,
+                                                   self.loss_fn)
+
+        # Adam state
+        if optimizer == 'adam':
+            self.gen_m = np.zeros_like(generator.params)
+            self.gen_v = np.zeros_like(generator.params)
+            self.disc_m = np.zeros_like(discriminator.params)
+            self.disc_v = np.zeros_like(discriminator.params)
+            self.t = 0
+
+        # Momentum state
+        elif optimizer == 'momentum':
+            self.gen_vel = np.zeros_like(generator.params)
+            self.disc_vel = np.zeros_like(discriminator.params)
+
+    def train_step(self, x_real: np.ndarray, z: np.ndarray,
+                   loss_type: str = 'standard') -> Dict:
+        """Single training step with chosen optimizer."""
+        self.t += 1
+
+        # Generate fake sample
+        x_fake = self.gen.generate(z)
+
+        # Compute discriminator gradient and update
+        disc_grad = self.grad_computer.discriminator_gradient(
+            x_real, x_fake, loss_type)
+
+        if self.optimizer == 'adam':
+            self.disc.params, self.disc_m, self.disc_v = \
+                self.disc_opt.adam_update(self.disc.params, disc_grad,
+                                          self.disc_m, self.disc_v, self.t)
+        elif self.optimizer == 'momentum':
+            self.disc.params, self.disc_vel = \
+                self.disc_opt.momentum_update(self.disc.params, disc_grad,
+                                              self.disc_vel)
+        else:
+            self.disc.params = self.disc_opt.sgd_update(
+                self.disc.params, disc_grad)
+
+        # Compute generator gradient and update
+        gen_grad = self.grad_computer.generator_gradient(z, loss_type)
+
+        if self.optimizer == 'adam':
+            self.gen.params, self.gen_m, self.gen_v = \
+                self.gen_opt.adam_update(self.gen.params, gen_grad,
+                                         self.gen_m, self.gen_v, self.t)
+        elif self.optimizer == 'momentum':
+            self.gen.params, self.gen_vel = \
+                self.gen_opt.momentum_update(self.gen.params, gen_grad,
+                                             self.gen_vel)
+        else:
+            self.gen.params = self.gen_opt.sgd_update(
+                self.gen.params, gen_grad)
+
+        # Compute losses for monitoring
+        x_fake_new = self.gen.generate(z)
+        d_real = self.disc.forward(x_real)
+        d_fake = self.disc.forward(x_fake_new)
+
+        if loss_type == 'standard':
+            d_loss = self.loss_fn.standard_discriminator_loss(d_real, d_fake)
+            g_loss = self.loss_fn.standard_generator_loss(d_fake)
+        elif loss_type == 'wasserstein':
+            d_loss = self.loss_fn.wasserstein_discriminator_loss(d_real, d_fake)
+            g_loss = self.loss_fn.wasserstein_generator_loss(d_fake)
+        else:
+            d_loss = self.loss_fn.standard_discriminator_loss(d_real, d_fake)
+            g_loss = self.loss_fn.standard_generator_loss(d_fake)
+
+        return {
+            'd_loss': d_loss,
+            'g_loss': g_loss,
+            'd_real': d_real,
+            'd_fake': d_fake,
+            'gen_grad_norm': np.linalg.norm(gen_grad),
+            'disc_grad_norm': np.linalg.norm(disc_grad)
+        }
+```
+
+## 3. Training Instabilities and Solutions
+
+<Warning>
+QGANs face unique challenges: barren plateaus from deep circuits, mode collapse from limited expressiveness, and gradient vanishing from stochastic measurements. Each requires specific mitigation strategies.
+</Warning>
+
+```python
+class TrainingStabilizer:
+    """Techniques to stabilize QGAN training."""
+
+    def __init__(self, generator, discriminator):
+        self.gen = generator
+        self.disc = discriminator
+
+    def gradient_clipping(self, gradients: np.ndarray,
+                          max_norm: float = 1.0) -> np.ndarray:
+        """Clip gradients to prevent explosion."""
+        norm = np.linalg.norm(gradients)
+        if norm > max_norm:
+            gradients = gradients * (max_norm / norm)
+        return gradients
+
+    def label_smoothing(self, real_label: float = 1.0,
+                        fake_label: float = 0.0,
+                        smoothing: float = 0.1) -> Tuple[float, float]:
+        """Apply label smoothing for stable training."""
+        smooth_real = real_label - smoothing
+        smooth_fake = fake_label + smoothing
+        return smooth_real, smooth_fake
+
+    def add_instance_noise(self, x: np.ndarray,
+                           noise_std: float = 0.1) -> np.ndarray:
+        """Add noise to inputs for regularization."""
+        return x + np.random.randn(*x.shape) * noise_std
+
+    def spectral_normalization_approx(self, W: np.ndarray,
+                                       n_iterations: int = 1) -> np.ndarray:
+        """Approximate spectral normalization for weight matrix."""
+        u = np.random.randn(W.shape[0])
+        u = u / np.linalg.norm(u)
+
+        for _ in range(n_iterations):
+            v = W.T @ u
+            v = v / np.linalg.norm(v)
+            u = W @ v
+            u = u / np.linalg.norm(u)
+
+        sigma = u @ W @ v
+        return W / sigma
+
+    def compute_gradient_penalty(self, x_real: np.ndarray,
+                                  x_fake: np.ndarray,
+                                  lambda_gp: float = 10.0) -> float:
+        """Gradient penalty for WGAN-GP style training."""
+        alpha = np.random.uniform(0, 1)
+        x_interpolated = alpha * x_real + (1 - alpha) * x_fake
+
+        # Approximate gradient norm via finite difference
+        eps = 1e-5
+        gradients = np.zeros_like(x_interpolated)
+
+        for i in range(len(x_interpolated)):
+            x_plus = x_interpolated.copy()
+            x_plus[i] += eps
+            x_minus = x_interpolated.copy()
+            x_minus[i] -= eps
+
+            d_plus = self.disc.forward(x_plus)
+            d_minus = self.disc.forward(x_minus)
+
+            gradients[i] = (d_plus - d_minus) / (2 * eps)
+
+        gradient_norm = np.linalg.norm(gradients)
+        penalty = lambda_gp * (gradient_norm - 1) ** 2
+
+        return penalty
+
+
+class BarrenPlateauMitigator:
+    """Strategies to avoid barren plateaus in quantum circuits."""
+
+    def __init__(self, n_qubits: int):
+        self.n_qubits = n_qubits
+
+    def layerwise_training(self, circuit_params: np.ndarray,
+                           n_layers: int) -> List[np.ndarray]:
+        """Initialize for layerwise training strategy."""
+        params_per_layer = len(circuit_params) // n_layers
+        layer_masks = []
+
+        for l in range(n_layers):
+            mask = np.zeros_like(circuit_params)
+            start = l * params_per_layer
+            end = (l + 1) * params_per_layer
+            mask[start:end] = 1.0
+            layer_masks.append(mask)
+
+        return layer_masks
+
+    def identity_initialization(self, n_params: int) -> np.ndarray:
+        """Initialize parameters near identity operation."""
+        # Small random values around 0 make circuit close to identity
+        return np.random.randn(n_params) * 0.01
+
+    def block_initialization(self, n_params: int,
+                             n_blocks: int) -> np.ndarray:
+        """Initialize with hardware-efficient block structure."""
+        params_per_block = n_params // n_blocks
+        params = np.zeros(n_params)
+
+        for b in range(n_blocks):
+            start = b * params_per_block
+            # Initialize each block with small variance
+            params[start:start + params_per_block] = \
+                np.random.randn(params_per_block) * 0.1
+
+        return params
+
+    def local_cost_function(self, state: np.ndarray,
+                            target_qubit: int) -> float:
+        """Use local cost function to avoid barren plateaus."""
+        dim = len(state)
+        n_qubits = int(np.log2(dim))
+        probs = np.abs(state) ** 2
+
+        # Measure only on target qubit (local observable)
+        p0 = sum(probs[i] for i in range(dim)
+                 if (i >> (n_qubits - 1 - target_qubit)) & 1 == 0)
+
+        return 2 * p0 - 1  # ⟨Z_target⟩
+```
+
+## 4. Regularization Techniques
+
+<Definition term="QGAN Regularization">
+Techniques applied during training to prevent overfitting, improve generalization, and stabilize the adversarial dynamics, adapted for quantum circuit constraints.
+</Definition>
+
+```python
+class QGANRegularizer:
+    """Regularization methods for QGAN training."""
+
+    def __init__(self, lambda_param: float = 0.01):
+        self.lambda_param = lambda_param
+
+    def parameter_regularization(self, params: np.ndarray,
+                                  reg_type: str = 'l2') -> float:
+        """Regularization penalty on circuit parameters."""
+        if reg_type == 'l2':
+            return self.lambda_param * np.sum(params ** 2)
+        elif reg_type == 'l1':
+            return self.lambda_param * np.sum(np.abs(params))
+        else:
+            return 0.0
+
+    def parameter_regularization_gradient(self, params: np.ndarray,
+                                          reg_type: str = 'l2') -> np.ndarray:
+        """Gradient of regularization penalty."""
+        if reg_type == 'l2':
+            return 2 * self.lambda_param * params
+        elif reg_type == 'l1':
+            return self.lambda_param * np.sign(params)
+        else:
+            return np.zeros_like(params)
+
+    def entropy_regularization(self, probs: np.ndarray) -> float:
+        """Entropy regularization to encourage diverse outputs."""
+        eps = 1e-10
+        entropy = -np.sum(probs * np.log(probs + eps))
+        # Negative because we want to maximize entropy
+        return -self.lambda_param * entropy
+
+    def diversity_regularization(self, samples: np.ndarray) -> float:
+        """Encourage diversity among generated samples."""
+        n_samples = len(samples)
+        if n_samples < 2:
+            return 0.0
+
+        # Compute pairwise distances
+        total_dist = 0.0
+        count = 0
+        for i in range(n_samples):
+            for j in range(i + 1, n_samples):
+                total_dist += np.linalg.norm(samples[i] - samples[j])
+                count += 1
+
+        avg_dist = total_dist / count if count > 0 else 0
+        # Negative because we want to maximize diversity
+        return -self.lambda_param * avg_dist
+
+
+class RegularizedQGANTrainer:
+    """QGAN trainer with regularization."""
+
+    def __init__(self, generator, discriminator,
+                 gen_lr: float = 0.01, disc_lr: float = 0.005,
+                 reg_lambda: float = 0.01):
+        self.gen = generator
+        self.disc = discriminator
+        self.gen_lr = gen_lr
+        self.disc_lr = disc_lr
+        self.regularizer = QGANRegularizer(reg_lambda)
+        self.stabilizer = TrainingStabilizer(generator, discriminator)
+        self.loss_fn = QGANLossFunctions()
+        self.shift = np.pi / 2
+
+    def regularized_generator_gradient(self, z: np.ndarray,
+                                        reg_type: str = 'l2') -> np.ndarray:
+        """Generator gradient with regularization."""
+        gradients = np.zeros_like(self.gen.params)
+        original_params = self.gen.params.copy()
+
+        for i in range(len(self.gen.params)):
+            # Standard parameter-shift
+            self.gen.params = original_params.copy()
+            self.gen.params[i] += self.shift
+            x_plus = self.gen.generate(z)
+            d_plus = self.disc.forward(x_plus)
+            loss_plus = self.loss_fn.standard_generator_loss(d_plus)
+            loss_plus += self.regularizer.parameter_regularization(
+                self.gen.params, reg_type)
+
+            self.gen.params = original_params.copy()
+            self.gen.params[i] -= self.shift
+            x_minus = self.gen.generate(z)
+            d_minus = self.disc.forward(x_minus)
+            loss_minus = self.loss_fn.standard_generator_loss(d_minus)
+            loss_minus += self.regularizer.parameter_regularization(
+                self.gen.params, reg_type)
+
+            gradients[i] = (loss_plus - loss_minus) / 2
+
+        self.gen.params = original_params
+        return gradients
+
+    def train_step(self, x_real: np.ndarray, z: np.ndarray,
+                   use_noise: bool = True,
+                   noise_std: float = 0.05) -> Dict:
+        """Training step with regularization and stabilization."""
+        # Optional instance noise
+        if use_noise:
+            x_real = self.stabilizer.add_instance_noise(x_real, noise_std)
+
+        # Generate fake sample
+        x_fake = self.gen.generate(z)
+
+        # Label smoothing
+        smooth_real, smooth_fake = self.stabilizer.label_smoothing()
+
+        # Discriminator update (simplified for demonstration)
+        d_real = self.disc.forward(x_real)
+        d_fake = self.disc.forward(x_fake)
+        d_loss = self.loss_fn.standard_discriminator_loss(d_real, d_fake)
+
+        # Generator update with regularization
+        gen_grad = self.regularized_generator_gradient(z)
+        gen_grad = self.stabilizer.gradient_clipping(gen_grad, max_norm=1.0)
+        self.gen.params -= self.gen_lr * gen_grad
+
+        # Compute metrics
+        x_fake_new = self.gen.generate(z)
+        d_fake_new = self.disc.forward(x_fake_new)
+        g_loss = self.loss_fn.standard_generator_loss(d_fake_new)
+        g_loss += self.regularizer.parameter_regularization(self.gen.params)
+
+        return {
+            'd_loss': d_loss,
+            'g_loss': g_loss,
+            'd_real': d_real,
+            'd_fake': d_fake_new,
+            'reg_penalty': self.regularizer.parameter_regularization(
+                self.gen.params)
+        }
+```
+
+## 5. Convergence Monitoring
+
+<Tip>
+Monitor multiple metrics during training: discriminator outputs on real and fake data should converge toward 0.5, generator loss should decrease, and sample quality metrics should improve.
+</Tip>
+
+```python
+class QGANConvergenceMonitor:
+    """Monitor and diagnose QGAN training convergence."""
+
+    def __init__(self, window_size: int = 50):
+        self.window_size = window_size
+        self.history = {
+            'd_loss': [],
+            'g_loss': [],
+            'd_real': [],
+            'd_fake': [],
+            'gen_grad_norm': [],
+            'disc_grad_norm': []
+        }
+
+    def update(self, metrics: Dict):
+        """Record metrics from training step."""
+        for key in self.history:
+            if key in metrics:
+                self.history[key].append(metrics[key])
+
+    def moving_average(self, key: str) -> float:
+        """Compute moving average of metric."""
+        values = self.history.get(key, [])
+        if len(values) == 0:
+            return 0.0
+        window = values[-self.window_size:]
+        return np.mean(window)
+
+    def convergence_score(self) -> float:
+        """Score indicating convergence (higher is better)."""
+        d_real_avg = self.moving_average('d_real')
+        d_fake_avg = self.moving_average('d_fake')
+
+        # Ideal: both around 0.5 (Nash equilibrium)
+        real_deviation = abs(d_real_avg - 0.5)
+        fake_deviation = abs(d_fake_avg - 0.5)
+
+        # Score: 1 when perfect, 0 when worst
+        score = 1 - (real_deviation + fake_deviation)
+        return max(0, score)
+
+    def detect_mode_collapse(self, samples: np.ndarray,
+                              threshold: float = 0.1) -> bool:
+        """Detect if generator has collapsed to limited modes."""
+        if len(samples) < 5:
+            return False
+
+        # Compute variance of samples
+        variance = np.var(samples, axis=0).mean()
+        return variance < threshold
+
+    def detect_vanishing_gradients(self, threshold: float = 1e-6) -> bool:
+        """Detect if gradients are vanishing."""
+        gen_grad_avg = self.moving_average('gen_grad_norm')
+        return gen_grad_avg < threshold
+
+    def detect_discriminator_dominance(self,
+                                        threshold: float = 0.9) -> bool:
+        """Detect if discriminator is too strong."""
+        d_real_avg = self.moving_average('d_real')
+        d_fake_avg = self.moving_average('d_fake')
+
+        return d_real_avg > threshold and d_fake_avg < (1 - threshold)
+
+    def get_diagnostics(self) -> Dict:
+        """Get comprehensive training diagnostics."""
+        return {
+            'convergence_score': self.convergence_score(),
+            'd_real_avg': self.moving_average('d_real'),
+            'd_fake_avg': self.moving_average('d_fake'),
+            'g_loss_avg': self.moving_average('g_loss'),
+            'd_loss_avg': self.moving_average('d_loss'),
+            'gen_grad_norm_avg': self.moving_average('gen_grad_norm'),
+            'disc_grad_norm_avg': self.moving_average('disc_grad_norm')
+        }
+
+    def should_adjust_learning_rates(self) -> Tuple[float, float]:
+        """Suggest learning rate adjustments based on diagnostics."""
+        gen_lr_multiplier = 1.0
+        disc_lr_multiplier = 1.0
+
+        if self.detect_discriminator_dominance():
+            # Slow down discriminator, speed up generator
+            disc_lr_multiplier = 0.5
+            gen_lr_multiplier = 1.5
+
+        if self.detect_vanishing_gradients():
+            # Increase learning rate to escape plateau
+            gen_lr_multiplier = 2.0
+
+        return gen_lr_multiplier, disc_lr_multiplier
+
+
+class AdaptiveLearningRateScheduler:
+    """Adaptive learning rate scheduling for QGAN."""
+
+    def __init__(self, initial_lr: float, min_lr: float = 1e-6,
+                 patience: int = 10, factor: float = 0.5):
+        self.lr = initial_lr
+        self.min_lr = min_lr
+        self.patience = patience
+        self.factor = factor
+        self.best_score = -np.inf
+        self.wait = 0
+
+    def step(self, score: float) -> float:
+        """Update learning rate based on score."""
+        if score > self.best_score:
+            self.best_score = score
+            self.wait = 0
+        else:
+            self.wait += 1
+
+        if self.wait >= self.patience:
+            self.lr = max(self.min_lr, self.lr * self.factor)
+            self.wait = 0
+
+        return self.lr
+
+    def warmup(self, epoch: int, warmup_epochs: int,
+               target_lr: float) -> float:
+        """Linear warmup schedule."""
+        if epoch < warmup_epochs:
+            return target_lr * (epoch + 1) / warmup_epochs
+        return target_lr
+```
+
+## 6. Complete Training Pipeline
+
+```python
+class CompleteQGANTrainer:
+    """Full QGAN training pipeline with all features."""
+
+    def __init__(self, generator, discriminator,
+                 gen_lr: float = 0.01, disc_lr: float = 0.005,
+                 reg_lambda: float = 0.01, optimizer: str = 'adam'):
+        self.gen = generator
+        self.disc = discriminator
+        self.gen_lr = gen_lr
+        self.disc_lr = disc_lr
+
+        self.loss_fn = QGANLossFunctions()
+        self.regularizer = QGANRegularizer(reg_lambda)
+        self.stabilizer = TrainingStabilizer(generator, discriminator)
+        self.monitor = QGANConvergenceMonitor()
+        self.gen_scheduler = AdaptiveLearningRateScheduler(gen_lr)
+        self.disc_scheduler = AdaptiveLearningRateScheduler(disc_lr)
+
+        self.shift = np.pi / 2
+        self.optimizer = optimizer
+
+        # Optimizer state
+        if optimizer == 'adam':
+            self.gen_m = np.zeros_like(generator.params)
+            self.gen_v = np.zeros_like(generator.params)
+            self.disc_m = np.zeros_like(discriminator.params)
+            self.disc_v = np.zeros_like(discriminator.params)
+            self.t = 0
+
+    def train(self, real_data: np.ndarray, n_epochs: int = 100,
+              batch_size: int = 1, disc_steps: int = 1,
+              gen_steps: int = 1, verbose: bool = True,
+              early_stopping_patience: int = 20) -> Dict:
+        """Complete training loop."""
+        history = {'metrics': [], 'diagnostics': []}
+        best_score = -np.inf
+        patience_counter = 0
+
+        for epoch in range(n_epochs):
+            self.t += 1
+
+            # Sample real data and noise
+            idx = np.random.randint(len(real_data))
+            x_real = real_data[idx]
+            z = np.random.randn(self.gen.n_qubits)
+
+            # Train discriminator
+            for _ in range(disc_steps):
+                x_fake = self.gen.generate(z)
+                disc_grad = self._compute_disc_gradient(x_real, x_fake)
+                disc_grad = self.stabilizer.gradient_clipping(disc_grad)
+                self._update_disc(disc_grad)
+
+            # Train generator
+            for _ in range(gen_steps):
+                z = np.random.randn(self.gen.n_qubits)
+                gen_grad = self._compute_gen_gradient(z)
+                gen_grad = self.stabilizer.gradient_clipping(gen_grad)
+                self._update_gen(gen_grad)
+
+            # Compute metrics
+            x_fake = self.gen.generate(z)
+            d_real = self.disc.forward(x_real)
+            d_fake = self.disc.forward(x_fake)
+            d_loss = self.loss_fn.standard_discriminator_loss(d_real, d_fake)
+            g_loss = self.loss_fn.standard_generator_loss(d_fake)
+
+            metrics = {
+                'd_loss': d_loss, 'g_loss': g_loss,
+                'd_real': d_real, 'd_fake': d_fake,
+                'gen_grad_norm': np.linalg.norm(gen_grad),
+                'disc_grad_norm': np.linalg.norm(disc_grad)
+            }
+
+            self.monitor.update(metrics)
+            history['metrics'].append(metrics)
+
+            # Adjust learning rates
+            score = self.monitor.convergence_score()
+            self.gen_lr = self.gen_scheduler.step(score)
+            self.disc_lr = self.disc_scheduler.step(score)
+
+            # Early stopping check
+            if score > best_score:
+                best_score = score
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            if patience_counter >= early_stopping_patience:
+                if verbose:
+                    print(f"Early stopping at epoch {epoch+1}")
+                break
+
+            # Logging
+            if verbose and (epoch + 1) % 10 == 0:
+                diag = self.monitor.get_diagnostics()
+                print(f"Epoch {epoch+1}: D_loss={d_loss:.4f}, "
+                      f"G_loss={g_loss:.4f}, Score={score:.4f}")
+                history['diagnostics'].append(diag)
+
+        return history
+
+    def _compute_gen_gradient(self, z: np.ndarray) -> np.ndarray:
+        """Compute generator gradient."""
+        gradients = np.zeros_like(self.gen.params)
+        original = self.gen.params.copy()
+
+        for i in range(len(self.gen.params)):
+            self.gen.params = original.copy()
+            self.gen.params[i] += self.shift
+            x_plus = self.gen.generate(z)
+            loss_plus = self.loss_fn.standard_generator_loss(
+                self.disc.forward(x_plus))
+
+            self.gen.params = original.copy()
+            self.gen.params[i] -= self.shift
+            x_minus = self.gen.generate(z)
+            loss_minus = self.loss_fn.standard_generator_loss(
+                self.disc.forward(x_minus))
+
+            gradients[i] = (loss_plus - loss_minus) / 2
+
+        self.gen.params = original
+        return gradients
+
+    def _compute_disc_gradient(self, x_real: np.ndarray,
+                                x_fake: np.ndarray) -> np.ndarray:
+        """Compute discriminator gradient."""
+        gradients = np.zeros_like(self.disc.params)
+        original = self.disc.params.copy()
+
+        for i in range(len(self.disc.params)):
+            self.disc.params = original.copy()
+            self.disc.params[i] += self.shift
+            loss_plus = self.loss_fn.standard_discriminator_loss(
+                self.disc.forward(x_real), self.disc.forward(x_fake))
+
+            self.disc.params = original.copy()
+            self.disc.params[i] -= self.shift
+            loss_minus = self.loss_fn.standard_discriminator_loss(
+                self.disc.forward(x_real), self.disc.forward(x_fake))
+
+            gradients[i] = (loss_plus - loss_minus) / 2
+
+        self.disc.params = original
+        return gradients
+
+    def _update_gen(self, gradients: np.ndarray):
+        """Update generator parameters."""
+        if self.optimizer == 'adam':
+            self.gen_m = 0.9 * self.gen_m + 0.1 * gradients
+            self.gen_v = 0.999 * self.gen_v + 0.001 * gradients**2
+            m_hat = self.gen_m / (1 - 0.9**self.t)
+            v_hat = self.gen_v / (1 - 0.999**self.t)
+            self.gen.params -= self.gen_lr * m_hat / (np.sqrt(v_hat) + 1e-8)
+        else:
+            self.gen.params -= self.gen_lr * gradients
+
+    def _update_disc(self, gradients: np.ndarray):
+        """Update discriminator parameters."""
+        if self.optimizer == 'adam':
+            self.disc_m = 0.9 * self.disc_m + 0.1 * gradients
+            self.disc_v = 0.999 * self.disc_v + 0.001 * gradients**2
+            m_hat = self.disc_m / (1 - 0.9**self.t)
+            v_hat = self.disc_v / (1 - 0.999**self.t)
+            self.disc.params -= self.disc_lr * m_hat / (np.sqrt(v_hat) + 1e-8)
+        else:
+            self.disc.params -= self.disc_lr * gradients
+```
+
+## Summary
+
+In this lesson, you learned:
+
+- **Loss functions**: Standard, Wasserstein, least squares, and hinge losses for QGANs
+- **Optimization**: SGD, momentum, and Adam optimizers adapted for quantum circuits
+- **Stabilization**: Gradient clipping, label smoothing, instance noise, spectral normalization
+- **Barren plateaus**: Layerwise training, identity initialization, local cost functions
+- **Regularization**: L1/L2 parameter penalties, entropy regularization, diversity encouragement
+- **Monitoring**: Convergence scores, mode collapse detection, gradient diagnostics
+
+Effective QGAN training requires careful attention to quantum-specific challenges and systematic use of stabilization techniques.

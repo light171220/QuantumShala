@@ -1,0 +1,537 @@
+---
+title: "Quantum Derivative Pricing"
+duration: "50 minutes"
+---
+
+# Quantum Derivative Pricing
+
+Quantum computing offers theoretical speedups for derivative pricing through amplitude estimation and quantum sampling. This module explores how quantum algorithms can price options and other derivatives.
+
+## Quantum Advantage for Pricing
+
+Classical Monte Carlo pricing has O(1/ε²) convergence - halving the error requires 4x the samples. Quantum amplitude estimation achieves O(1/ε) - a quadratic speedup.
+
+<QuizQuestion
+  question="What speedup does quantum amplitude estimation provide over classical Monte Carlo?"
+  options={[
+    "Exponential speedup",
+    "Quadratic speedup",
+    "Linear speedup",
+    "No speedup"
+  ]}
+  correctAnswer={1}
+  explanation="Quantum amplitude estimation provides a quadratic speedup: O(1/ε) samples vs O(1/ε²) classical samples for error ε. This means achieving 10x better accuracy requires only ~3x more quantum samples vs 100x classical samples."
+/>
+
+```python
+import numpy as np
+from typing import Callable, Tuple, Optional
+from dataclasses import dataclass
+
+@dataclass
+class QuantumPricingResult:
+    """Result from quantum pricing algorithm."""
+    price: float
+    confidence_interval: Tuple[float, float]
+    num_oracle_calls: int
+    quantum_advantage: str
+
+class QuantumPricingFramework:
+    """
+    Framework for quantum derivative pricing.
+
+    Implements the mathematical structure of quantum pricing
+    without requiring actual quantum hardware.
+    """
+
+    def __init__(self, num_qubits: int = 8):
+        self.num_qubits = num_qubits
+        self.num_states = 2 ** num_qubits
+
+    def encode_probability_distribution(
+        self,
+        distribution: np.ndarray
+    ) -> np.ndarray:
+        """
+        Encode a probability distribution into quantum amplitudes.
+
+        |ψ⟩ = Σ √p_i |i⟩
+
+        The quantum state stores √prob as amplitudes,
+        so measuring gives probabilities.
+        """
+        # Normalize to ensure valid probabilities
+        probs = distribution / np.sum(distribution)
+
+        # Amplitudes are square roots of probabilities
+        amplitudes = np.sqrt(probs)
+
+        return amplitudes
+
+    def encode_payoff(
+        self,
+        payoff_values: np.ndarray,
+        max_payoff: float
+    ) -> np.ndarray:
+        """
+        Encode payoff values as rotation angles.
+
+        Payoff is encoded in the amplitude of an ancilla qubit.
+        """
+        # Normalize payoffs to [0, 1]
+        normalized = payoff_values / max_payoff
+        normalized = np.clip(normalized, 0, 1)
+
+        # Convert to rotation angles
+        # sin²(θ/2) = normalized_payoff
+        angles = 2 * np.arcsin(np.sqrt(normalized))
+
+        return angles
+
+    def amplitude_estimation_simulation(
+        self,
+        target_amplitude: float,
+        num_evaluation_qubits: int = 4
+    ) -> dict:
+        """
+        Simulate quantum amplitude estimation.
+
+        QAE estimates a = sin²(πθ) where θ is encoded in a quantum state.
+        """
+        # In real QAE, we would use phase estimation on the Grover operator
+        # Here we simulate the statistical behavior
+
+        M = 2 ** num_evaluation_qubits  # Number of evaluation points
+
+        # QAE gives estimate with error O(1/M)
+        # Classical would need O(M²) samples for same precision
+
+        # Simulate measurement outcome
+        true_theta = np.arcsin(np.sqrt(target_amplitude)) / np.pi
+        estimated_theta = true_theta + np.random.normal(0, 1/(2*M))
+        estimated_amplitude = np.sin(np.pi * estimated_theta) ** 2
+
+        return {
+            'estimated_amplitude': estimated_amplitude,
+            'true_amplitude': target_amplitude,
+            'error': abs(estimated_amplitude - target_amplitude),
+            'num_oracle_calls': M,
+            'classical_equivalent_calls': M ** 2,
+            'speedup': M
+        }
+```
+
+## Quantum Circuit for European Options
+
+A quantum circuit for option pricing encodes the asset price distribution and computes payoffs.
+
+```python
+class QuantumEuropeanOptionPricer:
+    """
+    Quantum algorithm for European option pricing.
+
+    Steps:
+    1. Prepare superposition of price states
+    2. Apply payoff computation
+    3. Use amplitude estimation to extract expected payoff
+    """
+
+    def __init__(
+        self,
+        num_uncertainty_qubits: int = 4,
+        num_payoff_qubits: int = 1
+    ):
+        self.n_uncertainty = num_uncertainty_qubits
+        self.n_payoff = num_payoff_qubits
+        self.n_states = 2 ** num_uncertainty_qubits
+
+    def discretize_lognormal(
+        self,
+        spot: float,
+        rate: float,
+        volatility: float,
+        time: float,
+        num_points: int
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Discretize log-normal distribution for quantum encoding.
+
+        Returns (prices, probabilities) arrays.
+        """
+        # Log-normal parameters
+        mu = np.log(spot) + (rate - 0.5 * volatility**2) * time
+        sigma = volatility * np.sqrt(time)
+
+        # Create grid of prices
+        log_prices = np.linspace(mu - 4*sigma, mu + 4*sigma, num_points)
+        prices = np.exp(log_prices)
+
+        # Calculate probabilities (discretized normal)
+        from scipy.stats import norm
+        probs = norm.pdf(log_prices, mu, sigma)
+        probs = probs / np.sum(probs)  # Normalize
+
+        return prices, probs
+
+    def compute_payoff_amplitudes(
+        self,
+        prices: np.ndarray,
+        strike: float,
+        is_call: bool
+    ) -> np.ndarray:
+        """
+        Compute payoff for each price state.
+
+        In quantum implementation, this would be a quantum comparator
+        and controlled rotations.
+        """
+        if is_call:
+            payoffs = np.maximum(prices - strike, 0)
+        else:
+            payoffs = np.maximum(strike - prices, 0)
+
+        return payoffs
+
+    def price_option(
+        self,
+        spot: float,
+        strike: float,
+        rate: float,
+        volatility: float,
+        time: float,
+        is_call: bool,
+        num_amplitude_estimation_qubits: int = 6
+    ) -> QuantumPricingResult:
+        """
+        Price European option using quantum amplitude estimation.
+
+        This simulates the quantum algorithm classically.
+        """
+        # Discretize the price distribution
+        prices, probs = self.discretize_lognormal(
+            spot, rate, volatility, time, self.n_states
+        )
+
+        # Compute payoffs
+        payoffs = self.compute_payoff_amplitudes(prices, strike, is_call)
+
+        # Expected payoff (what QAE would estimate)
+        expected_payoff = np.sum(payoffs * probs)
+
+        # Discount to present value
+        price = expected_payoff * np.exp(-rate * time)
+
+        # Simulate QAE estimation
+        M = 2 ** num_amplitude_estimation_qubits
+        estimation_error = price / M  # Simplified error model
+
+        return QuantumPricingResult(
+            price=price,
+            confidence_interval=(price - estimation_error, price + estimation_error),
+            num_oracle_calls=M,
+            quantum_advantage=f"{M}x fewer samples than classical for same accuracy"
+        )
+
+    def compare_with_black_scholes(
+        self,
+        spot: float,
+        strike: float,
+        rate: float,
+        volatility: float,
+        time: float,
+        is_call: bool
+    ) -> dict:
+        """Compare quantum price with analytical Black-Scholes."""
+        from scipy.stats import norm
+
+        # Black-Scholes price
+        d1 = (np.log(spot/strike) + (rate + 0.5*volatility**2)*time) / (volatility*np.sqrt(time))
+        d2 = d1 - volatility*np.sqrt(time)
+
+        if is_call:
+            bs_price = spot*norm.cdf(d1) - strike*np.exp(-rate*time)*norm.cdf(d2)
+        else:
+            bs_price = strike*np.exp(-rate*time)*norm.cdf(-d2) - spot*norm.cdf(-d1)
+
+        # Quantum price
+        quantum_result = self.price_option(spot, strike, rate, volatility, time, is_call)
+
+        return {
+            'black_scholes_price': bs_price,
+            'quantum_price': quantum_result.price,
+            'difference': abs(bs_price - quantum_result.price),
+            'relative_error': abs(bs_price - quantum_result.price) / bs_price * 100
+        }
+```
+
+<QuizQuestion
+  question="What is encoded in the quantum state for option pricing?"
+  options={[
+    "The option price directly",
+    "The price distribution as amplitudes",
+    "Only the strike price",
+    "The volatility parameter"
+  ]}
+  correctAnswer={1}
+  explanation="The quantum state encodes the probability distribution of asset prices as amplitudes. Each computational basis state |i⟩ represents a price level, with amplitude √p_i encoding the probability of that price."
+/>
+
+## Quantum Monte Carlo for Path-Dependent Options
+
+Path-dependent options benefit from quantum speedup for Monte Carlo simulation.
+
+```python
+class QuantumPathDependentPricer:
+    """
+    Quantum Monte Carlo for path-dependent options.
+
+    Uses quantum sampling to achieve quadratic speedup
+    in convergence rate.
+    """
+
+    def __init__(self, num_time_steps: int = 50):
+        self.num_steps = num_time_steps
+
+    def quantum_asian_option(
+        self,
+        spot: float,
+        strike: float,
+        rate: float,
+        volatility: float,
+        time: float,
+        num_samples: int = 10000
+    ) -> dict:
+        """
+        Price Asian option with quantum-inspired sampling.
+
+        In practice, quantum advantage comes from amplitude estimation
+        on the expected payoff, not from faster path generation.
+        """
+        dt = time / self.num_steps
+        payoffs = []
+
+        # Simulate with variance reduction (quantum-inspired)
+        for _ in range(num_samples // 2):
+            # Generate correlated paths (antithetic variates)
+            z = np.random.standard_normal(self.num_steps)
+
+            # Path 1
+            path1 = self._generate_path(spot, rate, volatility, dt, z)
+            avg1 = np.mean(path1)
+            payoff1 = max(0, avg1 - strike)
+
+            # Path 2 (antithetic)
+            path2 = self._generate_path(spot, rate, volatility, dt, -z)
+            avg2 = np.mean(path2)
+            payoff2 = max(0, avg2 - strike)
+
+            # Average (reduces variance)
+            payoffs.append((payoff1 + payoff2) / 2)
+
+        price = np.exp(-rate * time) * np.mean(payoffs)
+        std_error = np.exp(-rate * time) * np.std(payoffs) / np.sqrt(len(payoffs))
+
+        return {
+            'price': price,
+            'std_error': std_error,
+            'effective_speedup': 'Quadratic in error reduction'
+        }
+
+    def quantum_barrier_option(
+        self,
+        spot: float,
+        strike: float,
+        barrier: float,
+        rate: float,
+        volatility: float,
+        time: float,
+        is_knock_out: bool = True,
+        num_samples: int = 10000
+    ) -> dict:
+        """
+        Price barrier option with quantum sampling benefits.
+        """
+        dt = time / self.num_steps
+        payoffs = []
+        knock_events = 0
+
+        for _ in range(num_samples):
+            z = np.random.standard_normal(self.num_steps)
+            path = self._generate_path(spot, rate, volatility, dt, z)
+
+            # Check barrier
+            touched_barrier = np.any(path >= barrier)
+
+            if is_knock_out:
+                if touched_barrier:
+                    payoff = 0
+                    knock_events += 1
+                else:
+                    payoff = max(0, path[-1] - strike)
+            else:  # Knock-in
+                if touched_barrier:
+                    payoff = max(0, path[-1] - strike)
+                else:
+                    payoff = 0
+
+            payoffs.append(payoff)
+
+        price = np.exp(-rate * time) * np.mean(payoffs)
+
+        return {
+            'price': price,
+            'knock_probability': knock_events / num_samples,
+            'quantum_note': 'QAE can estimate knock probability with quadratic speedup'
+        }
+
+    def _generate_path(
+        self,
+        spot: float,
+        rate: float,
+        vol: float,
+        dt: float,
+        z: np.ndarray
+    ) -> np.ndarray:
+        """Generate GBM path from random numbers."""
+        path = [spot]
+        for zi in z:
+            drift = (rate - 0.5 * vol**2) * dt
+            diffusion = vol * np.sqrt(dt) * zi
+            path.append(path[-1] * np.exp(drift + diffusion))
+        return np.array(path)
+```
+
+## Variational Quantum Pricing
+
+Near-term quantum devices use variational algorithms for pricing.
+
+```python
+class VariationalQuantumPricer:
+    """
+    Variational quantum eigensolver approach to pricing.
+
+    Uses parameterized quantum circuits that can run on
+    near-term noisy quantum computers.
+    """
+
+    def __init__(self, num_qubits: int = 4, num_layers: int = 2):
+        self.num_qubits = num_qubits
+        self.num_layers = num_layers
+        self.num_params = num_qubits * num_layers * 3  # RX, RY, RZ per qubit per layer
+
+    def variational_circuit(
+        self,
+        params: np.ndarray,
+        input_features: np.ndarray
+    ) -> float:
+        """
+        Simulate a variational quantum circuit.
+
+        In practice, this would be implemented in Qiskit/Pennylane.
+        """
+        # Simplified simulation of circuit output
+        # Real implementation uses parameterized gates
+
+        # Feature encoding
+        encoded = np.tanh(input_features @ params[:len(input_features)])
+
+        # Variational layers (simulated)
+        layer_params = params[len(input_features):]
+        for i in range(self.num_layers):
+            layer_start = i * self.num_qubits * 3
+            layer_end = (i + 1) * self.num_qubits * 3
+            lp = layer_params[layer_start:layer_end] if layer_end <= len(layer_params) else np.zeros(self.num_qubits * 3)
+
+            # Simulated rotation effects
+            encoded = np.sin(encoded + np.sum(lp) * 0.1)
+
+        # Output expectation value
+        return np.mean(encoded)
+
+    def train_price_model(
+        self,
+        training_data: list,  # List of (features, true_price) tuples
+        num_iterations: int = 100,
+        learning_rate: float = 0.1
+    ) -> dict:
+        """
+        Train variational circuit to predict option prices.
+        """
+        # Initialize random parameters
+        params = np.random.randn(self.num_params) * 0.1
+
+        losses = []
+
+        for iteration in range(num_iterations):
+            total_loss = 0
+
+            for features, true_price in training_data:
+                # Forward pass
+                predicted = self.variational_circuit(params, features)
+                predicted_price = predicted * 100  # Scale to price range
+
+                # Compute loss
+                loss = (predicted_price - true_price) ** 2
+                total_loss += loss
+
+                # Gradient estimation (parameter shift rule simulation)
+                gradient = np.zeros_like(params)
+                for i in range(len(params)):
+                    params_plus = params.copy()
+                    params_plus[i] += np.pi / 2
+                    params_minus = params.copy()
+                    params_minus[i] -= np.pi / 2
+
+                    pred_plus = self.variational_circuit(params_plus, features) * 100
+                    pred_minus = self.variational_circuit(params_minus, features) * 100
+
+                    gradient[i] = (pred_plus - pred_minus) / 2 * 2 * (predicted_price - true_price)
+
+                # Update parameters
+                params -= learning_rate * gradient / len(training_data)
+
+            avg_loss = total_loss / len(training_data)
+            losses.append(avg_loss)
+
+        return {
+            'trained_params': params,
+            'final_loss': losses[-1],
+            'loss_history': losses
+        }
+
+    def predict_price(
+        self,
+        params: np.ndarray,
+        features: np.ndarray
+    ) -> float:
+        """Predict option price using trained circuit."""
+        output = self.variational_circuit(params, features)
+        return output * 100  # Scale to price range
+```
+
+<QuizQuestion
+  question="What is the advantage of variational quantum algorithms for near-term devices?"
+  options={[
+    "They require no quantum hardware",
+    "They can work with noisy qubits using shallow circuits",
+    "They always give exact solutions",
+    "They don't require any classical optimization"
+  ]}
+  correctAnswer={1}
+  explanation="Variational quantum algorithms use shallow parameterized circuits that can run on noisy near-term quantum computers. The classical optimizer finds good parameters despite hardware noise."
+/>
+
+## Summary
+
+Quantum computing offers advantages for derivative pricing:
+
+- **Amplitude Estimation**: Quadratic speedup for expected value calculations
+- **Quantum Monte Carlo**: Faster convergence for path-dependent options
+- **Variational Methods**: Near-term algorithms that work with noise
+
+Current state:
+- Demonstrations on small problems with few qubits
+- Active research on error mitigation and scaling
+- Hybrid quantum-classical approaches most practical
+
+The quadratic speedup becomes significant for high-precision requirements or complex multi-asset derivatives where classical methods are slow.

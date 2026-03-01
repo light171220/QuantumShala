@@ -1,0 +1,601 @@
+# Surface Code Basics
+
+## Introduction
+
+The surface code is the leading candidate for fault-tolerant quantum computing, combining high error thresholds (~1%) with a simple 2D layout compatible with current hardware. This lesson introduces the fundamental structure of surface codes, showing how qubits and stabilizers are arranged to create robust quantum error correction.
+
+## The Rotated Surface Code
+
+```
+Rotated vs Standard Surface Code
+════════════════════════════════
+
+The ROTATED surface code is the practical version used in experiments:
+    - 45° rotation reduces qubit count
+    - Same code distance with fewer qubits
+    - All stabilizers are 4-body (except boundaries)
+
+Standard Layout (d=3):         Rotated Layout (d=3):
+
+    ●───●───●───●───●              ●
+    │ Z │ Z │ Z │ Z │             / \
+    ●───●───●───●───●            ●   ●
+    │ Z │ Z │ Z │ Z │           / X / \
+    ●───●───●───●───●          ●   ●   ●
+    │ Z │ Z │ Z │ Z │           \ Z \ /
+    ●───●───●───●───●            ●   ●
+    │ Z │ Z │ Z │ Z │             \ /
+    ●───●───●───●───●              ●
+
+    25 data qubits                9 data qubits
+    Same distance d=3             Same distance d=3
+
+For distance d:
+    - Standard: d² data qubits (approx)
+    - Rotated: d² data qubits (exact)
+```
+
+## Qubit Layout
+
+```python
+import numpy as np
+from typing import List, Tuple, Dict, Set
+
+class SurfaceCodeLayout:
+    """
+    Define the qubit layout for a rotated surface code.
+    """
+
+    def __init__(self, distance: int):
+        """
+        Create a distance-d rotated surface code.
+
+        Parameters:
+            distance: Code distance (must be odd for standard layout)
+        """
+        self.d = distance
+        self.data_qubits = []
+        self.x_ancillas = []
+        self.z_ancillas = []
+        self._create_layout()
+
+    def _create_layout(self):
+        """Generate qubit positions on the rotated lattice."""
+        d = self.d
+
+        # Data qubits form a d×d grid
+        # Coordinates: (row, col) where both are in [0, d-1]
+        for row in range(d):
+            for col in range(d):
+                self.data_qubits.append((row, col))
+
+        # Ancilla qubits for stabilizer measurements
+        # X-stabilizers (measure in Z basis, detect X errors)
+        # Z-stabilizers (measure in X basis, detect Z errors)
+
+        for row in range(d + 1):
+            for col in range(d + 1):
+                # Checkerboard pattern for X and Z ancillas
+                if (row + col) % 2 == 0:
+                    # Check if this is a valid X-ancilla position
+                    if self._is_valid_x_ancilla(row, col):
+                        self.x_ancillas.append((row, col))
+                else:
+                    # Check if this is a valid Z-ancilla position
+                    if self._is_valid_z_ancilla(row, col):
+                        self.z_ancillas.append((row, col))
+
+    def _is_valid_x_ancilla(self, row: int, col: int) -> bool:
+        """Check if position is valid for X-type ancilla."""
+        d = self.d
+        # X ancillas on corners are excluded
+        if row == 0 and col == 0:
+            return False
+        if row == 0 and col == d:
+            return False
+        if row == d and col == 0:
+            return False
+        if row == d and col == d:
+            return False
+        # Interior and valid boundary positions
+        return 0 <= row <= d and 0 <= col <= d
+
+    def _is_valid_z_ancilla(self, row: int, col: int) -> bool:
+        """Check if position is valid for Z-type ancilla."""
+        d = self.d
+        # Z ancillas at certain boundaries are excluded
+        if row == 0 or row == d:
+            if col == 0 or col == d:
+                return False
+        return 0 <= row <= d and 0 <= col <= d
+
+    def get_code_parameters(self) -> Tuple[int, int, int]:
+        """Return [[n, k, d]] code parameters."""
+        n = len(self.data_qubits)  # d²
+        k = 1  # Planar surface code encodes 1 logical qubit
+        d = self.d
+        return (n, k, d)
+
+    def print_layout(self):
+        """Visualize the surface code layout."""
+        d = self.d
+        print(f"\nRotated Surface Code (d = {d})")
+        print("=" * 50)
+
+        # Create grid for visualization
+        grid_size = 2 * d + 1
+        grid = [[' ' for _ in range(grid_size)] for _ in range(grid_size)]
+
+        # Place data qubits (at odd positions in visualization grid)
+        for (r, c) in self.data_qubits:
+            grid[2*r + 1][2*c + 1] = '●'
+
+        # Place X ancillas (even row + col)
+        for (r, c) in self.x_ancillas:
+            grid[2*r][2*c] = 'X'
+
+        # Place Z ancillas
+        for (r, c) in self.z_ancillas:
+            grid[2*r][2*c] = 'Z'
+
+        # Add connections
+        for r in range(grid_size):
+            for c in range(grid_size):
+                if grid[r][c] == ' ':
+                    # Check if this should be a connection
+                    if r % 2 == 1 and c % 2 == 0:
+                        if c > 0 and c < grid_size - 1:
+                            grid[r][c] = '─'
+                    elif r % 2 == 0 and c % 2 == 1:
+                        if r > 0 and r < grid_size - 1:
+                            grid[r][c] = '│'
+
+        # Print grid
+        for row in grid:
+            print(' '.join(row))
+
+        print(f"\nData qubits: {len(self.data_qubits)}")
+        print(f"X-ancillas: {len(self.x_ancillas)}")
+        print(f"Z-ancillas: {len(self.z_ancillas)}")
+
+
+# Create and visualize
+code = SurfaceCodeLayout(3)
+code.print_layout()
+print(f"\nCode parameters: [[n, k, d]] = {code.get_code_parameters()}")
+```
+
+## Stabilizer Operators
+
+```python
+class SurfaceCodeStabilizers:
+    """
+    Define stabilizer operators for the surface code.
+    """
+
+    def __init__(self, distance: int):
+        self.d = distance
+        self.layout = SurfaceCodeLayout(distance)
+        self.x_stabilizers = []
+        self.z_stabilizers = []
+        self._create_stabilizers()
+
+    def _get_neighboring_data_qubits(self, ancilla_pos: Tuple[int, int],
+                                       stab_type: str) -> List[Tuple[int, int]]:
+        """
+        Get data qubits adjacent to an ancilla.
+
+        For X-stabilizer at (r, c):
+            Adjacent data qubits at (r-1, c-1), (r-1, c), (r, c-1), (r, c)
+            (those that exist within the grid)
+        """
+        r, c = ancilla_pos
+        d = self.d
+        neighbors = []
+
+        # Potential neighbors (in data qubit coordinates)
+        candidates = [
+            (r - 1, c - 1),  # upper-left
+            (r - 1, c),      # upper-right
+            (r, c - 1),      # lower-left
+            (r, c)           # lower-right
+        ]
+
+        for (dr, dc) in candidates:
+            if 0 <= dr < d and 0 <= dc < d:
+                neighbors.append((dr, dc))
+
+        return neighbors
+
+    def _create_stabilizers(self):
+        """Create X and Z stabilizer operators."""
+        # X-stabilizers: X on all neighboring data qubits
+        for ancilla in self.layout.x_ancillas:
+            neighbors = self._get_neighboring_data_qubits(ancilla, 'X')
+            if neighbors:
+                self.x_stabilizers.append({
+                    'ancilla': ancilla,
+                    'data_qubits': neighbors,
+                    'type': 'X'
+                })
+
+        # Z-stabilizers: Z on all neighboring data qubits
+        for ancilla in self.layout.z_ancillas:
+            neighbors = self._get_neighboring_data_qubits(ancilla, 'Z')
+            if neighbors:
+                self.z_stabilizers.append({
+                    'ancilla': ancilla,
+                    'data_qubits': neighbors,
+                    'type': 'Z'
+                })
+
+    def print_stabilizers(self):
+        """Display all stabilizers."""
+        print(f"\nStabilizers for d={self.d} Surface Code")
+        print("=" * 50)
+
+        print(f"\nX-Stabilizers ({len(self.x_stabilizers)} total):")
+        for i, stab in enumerate(self.x_stabilizers):
+            weight = len(stab['data_qubits'])
+            qubits = stab['data_qubits']
+            print(f"  X_{i}: weight-{weight} at qubits {qubits}")
+
+        print(f"\nZ-Stabilizers ({len(self.z_stabilizers)} total):")
+        for i, stab in enumerate(self.z_stabilizers):
+            weight = len(stab['data_qubits'])
+            qubits = stab['data_qubits']
+            print(f"  Z_{i}: weight-{weight} at qubits {qubits}")
+
+    def verify_commutation(self) -> bool:
+        """
+        Verify all stabilizers commute.
+
+        X and Z stabilizers commute iff they share an even number
+        of qubits (0, 2, or 4 shared).
+        """
+        print("\nVerifying Stabilizer Commutation")
+        print("-" * 40)
+
+        all_commute = True
+        for i, x_stab in enumerate(self.x_stabilizers):
+            for j, z_stab in enumerate(self.z_stabilizers):
+                x_qubits = set(x_stab['data_qubits'])
+                z_qubits = set(z_stab['data_qubits'])
+                overlap = len(x_qubits & z_qubits)
+
+                if overlap % 2 != 0:
+                    print(f"  X_{i} and Z_{j} ANTICOMMUTE (overlap={overlap})")
+                    all_commute = False
+
+        if all_commute:
+            print("  All stabilizers commute ✓")
+
+        return all_commute
+
+
+stabs = SurfaceCodeStabilizers(3)
+stabs.print_stabilizers()
+stabs.verify_commutation()
+```
+
+## Stabilizer Weights
+
+```
+Understanding Stabilizer Weights
+════════════════════════════════
+
+In the bulk of the surface code, stabilizers are weight-4:
+
+    Weight-4 X-stabilizer:     Weight-4 Z-stabilizer:
+
+         ●                          ●───●
+        /|\                           \ /
+       X─┼─X                           Z
+        \|/                           / \
+         ●                          ●───●
+
+At boundaries, stabilizers are weight-2 (incomplete):
+
+    Weight-2 boundary stabilizer:
+
+    BOUNDARY
+    ═══════════
+         ●
+        / \
+       X   X      Only 2 data qubits
+        \ /       (boundary cuts off others)
+
+
+This is CRUCIAL for:
+┌─────────────────────────────────────────────────────────────────┐
+│  1. Syndrome measurement - fewer gates at boundaries           │
+│  2. Logical operators - can terminate at correct boundary      │
+│  3. Error detection - boundary syndromes still valid           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Code Parameters
+
+```python
+class SurfaceCodeParameters:
+    """
+    Analyze and compute surface code parameters.
+    """
+
+    def __init__(self):
+        pass
+
+    def compute_parameters(self, d: int) -> Dict:
+        """
+        Compute [[n, k, d]] and related parameters.
+
+        For rotated planar surface code:
+            n = d² (data qubits)
+            k = 1 (logical qubits)
+            d = distance (minimum weight of logical operator)
+        """
+        n = d * d  # Data qubits
+        k = 1      # Logical qubits (planar code)
+
+        # Ancilla qubits
+        # X-ancillas: approximately (d²-1)/2
+        # Z-ancillas: approximately (d²-1)/2
+        num_x_ancillas = (d * d - 1) // 2
+        num_z_ancillas = (d * d - 1) // 2
+        total_ancillas = num_x_ancillas + num_z_ancillas
+
+        # Total physical qubits
+        total_qubits = n + total_ancillas
+
+        # Number of stabilizers
+        num_x_stabilizers = num_x_ancillas
+        num_z_stabilizers = num_z_ancillas
+        total_stabilizers = num_x_stabilizers + num_z_stabilizers
+
+        # Encoding rate
+        rate = k / n
+
+        return {
+            'distance': d,
+            'data_qubits': n,
+            'logical_qubits': k,
+            'x_ancillas': num_x_ancillas,
+            'z_ancillas': num_z_ancillas,
+            'total_qubits': total_qubits,
+            'x_stabilizers': num_x_stabilizers,
+            'z_stabilizers': num_z_stabilizers,
+            'encoding_rate': rate
+        }
+
+    def print_parameter_table(self, max_d: int = 11):
+        """Display parameter table for various distances."""
+        print("\nSurface Code Parameter Table")
+        print("=" * 70)
+        print(f"{'d':^5} {'n':^8} {'k':^5} {'Ancillas':^10} {'Total':^10} {'Rate':^10}")
+        print("-" * 70)
+
+        for d in range(3, max_d + 1, 2):
+            params = self.compute_parameters(d)
+            print(f"{d:^5} {params['data_qubits']:^8} {params['logical_qubits']:^5} "
+                  f"{params['x_ancillas'] + params['z_ancillas']:^10} "
+                  f"{params['total_qubits']:^10} {params['encoding_rate']:^10.4f}")
+
+    def overhead_analysis(self, d: int):
+        """Analyze the overhead of the surface code."""
+        params = self.compute_parameters(d)
+
+        print(f"\nOverhead Analysis for d={d} Surface Code")
+        print("=" * 50)
+        print(f"Physical qubits per logical qubit: {params['total_qubits']}")
+        print(f"Data qubits: {params['data_qubits']}")
+        print(f"Ancilla overhead: {params['x_ancillas'] + params['z_ancillas']}")
+        print(f"Encoding rate: {params['encoding_rate']:.4f} = 1/{params['data_qubits']}")
+
+        print(f"\nScaling:")
+        print(f"  Physical qubits ~ O(d²)")
+        print(f"  Logical error rate ~ O((p/p_th)^(d/2))")
+        print(f"  For p < p_th ≈ 1%, larger d gives exponentially better protection")
+
+
+params = SurfaceCodeParameters()
+params.print_parameter_table()
+params.overhead_analysis(5)
+```
+
+## Boundary Structure
+
+```python
+class BoundaryAnalysis:
+    """
+    Analyze boundary structure of the surface code.
+    """
+
+    def explain_boundaries(self):
+        """Explain the two types of boundaries."""
+        print("""
+Surface Code Boundary Structure
+═══════════════════════════════
+
+The rotated surface code has TWO types of boundaries:
+
+ROUGH BOUNDARIES (top and bottom):
+    - X-stabilizers are truncated (weight-2)
+    - Z logical operator terminates here
+    - Rough because Z-stabilizers "stick out"
+
+SMOOTH BOUNDARIES (left and right):
+    - Z-stabilizers are truncated (weight-2)
+    - X logical operator terminates here
+    - Smooth because X-stabilizers complete
+
+Visualization (d=3):
+
+           ─── Rough (top) ───
+          ╱                    ╲
+         Z₂      Z₂      Z₂
+        /  ╲    /  ╲    /  ╲
+    S  X₄  ●  X₄  ●  X₄  ●   S
+    m    ╲  /    ╲  /    ╲  / m
+    o     Z₄      Z₄      Z₄  o
+    o    /  ╲    /  ╲    /  ╲ o
+    t  X₄  ●  X₄  ●  X₄  ●   t
+    h    ╲  /    ╲  /    ╲  / h
+         Z₂      Z₂      Z₂
+          ╲                    ╱
+           ─── Rough (bottom) ───
+
+Legend:
+    Z₂, Z₄ = Z-stabilizers (weight 2 or 4)
+    X₂, X₄ = X-stabilizers (weight 2 or 4)
+    ● = data qubit
+
+Key properties:
+┌─────────────────────────────────────────────────────────────────┐
+│  • Z_L connects rough boundaries (top to bottom)               │
+│  • X_L connects smooth boundaries (left to right)              │
+│  • Minimum path length = d (the code distance)                 │
+└─────────────────────────────────────────────────────────────────┘
+        """)
+
+    def show_logical_operators(self, d: int = 3):
+        """Show logical operator paths."""
+        print(f"\nLogical Operators for d={d}")
+        print("=" * 50)
+
+        print("""
+Z Logical (connects rough boundaries):
+
+    ROUGH ═══════════════════ ROUGH
+           ●   ●   ●
+           │   │   │
+           Z   Z   Z     ← Z_L (any column works)
+           │   │   │
+           ●   ●   ●
+    ROUGH ═══════════════════ ROUGH
+
+All Z_L paths of minimum weight d are equivalent (homologous).
+
+X Logical (connects smooth boundaries):
+
+    S         ●───●───●         S
+    M         │   │   │         M
+    O    X────X────X────X────   O
+    O         │   │   │         O
+    T         ●───●───●         T
+    H                           H
+
+    ↑ X_L (any row works)
+
+All X_L paths of minimum weight d are equivalent (homologous).
+        """)
+
+        print(f"\nMinimum weight: d = {d} for both X_L and Z_L")
+
+
+boundary = BoundaryAnalysis()
+boundary.explain_boundaries()
+boundary.show_logical_operators()
+```
+
+## Complete Surface Code Structure
+
+```python
+class CompleteSurfaceCode:
+    """
+    Complete surface code structure combining all components.
+    """
+
+    def __init__(self, distance: int):
+        self.d = distance
+        self.layout = SurfaceCodeLayout(distance)
+        self.stabilizers = SurfaceCodeStabilizers(distance)
+
+    def get_data_qubit_index(self, pos: Tuple[int, int]) -> int:
+        """Convert position to linear index."""
+        row, col = pos
+        return row * self.d + col
+
+    def create_stabilizer_matrix(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Create stabilizer check matrices H_x and H_z.
+
+        H_x[i, j] = 1 if X-stabilizer i acts on qubit j
+        H_z[i, j] = 1 if Z-stabilizer i acts on qubit j
+        """
+        n = self.d * self.d
+        num_x = len(self.stabilizers.x_stabilizers)
+        num_z = len(self.stabilizers.z_stabilizers)
+
+        H_x = np.zeros((num_x, n), dtype=int)
+        H_z = np.zeros((num_z, n), dtype=int)
+
+        for i, stab in enumerate(self.stabilizers.x_stabilizers):
+            for qubit in stab['data_qubits']:
+                j = self.get_data_qubit_index(qubit)
+                H_x[i, j] = 1
+
+        for i, stab in enumerate(self.stabilizers.z_stabilizers):
+            for qubit in stab['data_qubits']:
+                j = self.get_data_qubit_index(qubit)
+                H_z[i, j] = 1
+
+        return H_x, H_z
+
+    def verify_css_property(self) -> bool:
+        """
+        Verify the CSS property: H_x H_z^T = 0 (mod 2).
+
+        This ensures X and Z stabilizers commute.
+        """
+        H_x, H_z = self.create_stabilizer_matrix()
+        product = H_x @ H_z.T % 2
+
+        is_css = np.all(product == 0)
+        print(f"\nCSS Property Check: H_x · H_z^T = 0 (mod 2)")
+        print(f"Result: {'PASS ✓' if is_css else 'FAIL ✗'}")
+
+        return is_css
+
+    def print_summary(self):
+        """Print complete code summary."""
+        n, k, d = self.layout.get_code_parameters()
+
+        print(f"\n{'='*60}")
+        print(f"SURFACE CODE SUMMARY (d = {d})")
+        print(f"{'='*60}")
+        print(f"\nCode Parameters: [[{n}, {k}, {d}]]")
+        print(f"  - {n} data qubits")
+        print(f"  - {k} logical qubit(s)")
+        print(f"  - {d} code distance")
+
+        print(f"\nStabilizer Structure:")
+        print(f"  - {len(self.stabilizers.x_stabilizers)} X-stabilizers")
+        print(f"  - {len(self.stabilizers.z_stabilizers)} Z-stabilizers")
+
+        print(f"\nLogical Operators:")
+        print(f"  - X_L: Minimum weight {d}, connects smooth boundaries")
+        print(f"  - Z_L: Minimum weight {d}, connects rough boundaries")
+
+        print(f"\nError Correction Capacity:")
+        print(f"  - Corrects up to {(d-1)//2} arbitrary errors")
+        print(f"  - Detects up to {d-1} errors")
+
+        self.verify_css_property()
+
+
+# Complete example
+code = CompleteSurfaceCode(5)
+code.print_summary()
+```
+
+## Summary
+
+The surface code structure is built from simple components:
+
+1. **Data qubits**: Arranged in a d×d grid for distance-d code
+2. **X-stabilizers**: Measure products of X operators, detect Z errors
+3. **Z-stabilizers**: Measure products of Z operators, detect X errors
+4. **Boundaries**: Rough (for Z_L) and smooth (for X_L)
+5. **Parameters**: [[n=d², k=1, d]] with ~2d² total physical qubits
+
+This elegant structure enables high error thresholds while requiring only nearest-neighbor interactions—the key to practical quantum error correction.

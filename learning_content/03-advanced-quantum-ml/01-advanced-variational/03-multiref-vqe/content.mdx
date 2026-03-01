@@ -1,0 +1,519 @@
+---
+title: "Multi-Reference VQE: Beyond Single Reference States"
+description: "Learn how to handle strongly correlated systems using multi-reference VQE approaches that combine multiple reference determinants for accurate ground state calculations."
+duration: 80
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand when single-reference methods fail and multi-reference is needed
+- Explain static vs dynamic electron correlation
+- Design multi-reference ansatze using multiple determinants
+- Implement state-averaged VQE for near-degenerate states
+- Apply CASSCF-inspired approaches to quantum computing
+- Handle bond-breaking and transition states with MR-VQE
+
+## 1. The Multi-Reference Problem
+
+Standard VQE typically starts from a single reference state, usually the Hartree-Fock determinant. However, many chemically important systems cannot be accurately described by a single electronic configuration.
+
+<Definition term="Multi-Reference System">
+A multi-reference system is one where the ground state wavefunction has significant contributions from multiple electronic configurations (Slater determinants). These systems exhibit strong static correlation that cannot be captured by a single reference.
+</Definition>
+
+### When Single Reference Fails
+
+Single-reference methods break down for:
+
+1. **Bond breaking**: As bonds stretch, multiple configurations become important
+2. **Transition states**: Near-degenerate configurations at reaction barriers
+3. **Open-shell systems**: Radicals with unpaired electrons
+4. **Transition metals**: Partially filled d-orbitals with near-degenerate states
+5. **Excited states**: Often require multiple references
+
+<Warning>
+Using single-reference VQE for multi-reference problems leads to qualitatively wrong potential energy surfaces, incorrect reaction barriers, and unreliable predictions.
+</Warning>
+
+### Example: H₂ Dissociation
+
+The simplest example is H₂ stretching:
+
+<Formula>
+$$|\psi\rangle \approx c_1|\sigma\bar{\sigma}\rangle + c_2|\sigma^*\bar{\sigma}^*\rangle$$
+</Formula>
+
+At equilibrium, $c_1 \approx 1, c_2 \approx 0$. At dissociation, $c_1 \approx c_2 \approx 1/\sqrt{2}$.
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def h2_coefficients(bond_length):
+    """
+    Approximate coefficients for H2 configurations
+    as a function of bond length.
+    """
+    # Simplified model - actual values from FCI
+    r_eq = 0.74  # Equilibrium in Angstroms
+    decay = 2.0
+
+    c1_sq = 0.5 * (1 + np.exp(-decay * (bond_length - r_eq)))
+    c2_sq = 1 - c1_sq
+
+    return np.sqrt(c1_sq), np.sqrt(c2_sq)
+
+# Plot coefficient evolution
+distances = np.linspace(0.5, 4.0, 100)
+c1_vals, c2_vals = [], []
+
+for r in distances:
+    c1, c2 = h2_coefficients(r)
+    c1_vals.append(c1)
+    c2_vals.append(c2)
+
+plt.figure(figsize=(10, 6))
+plt.plot(distances, c1_vals, label='|c₁|² (bonding)')
+plt.plot(distances, c2_vals, label='|c₂|² (antibonding)')
+plt.xlabel('Bond Length (Å)')
+plt.ylabel('Configuration Weight')
+plt.title('H₂ Multi-Reference Character vs Bond Length')
+plt.legend()
+plt.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
+plt.show()
+```
+
+## 2. Static vs Dynamic Correlation
+
+Understanding electron correlation types is essential for designing multi-reference methods.
+
+<Definition term="Static Correlation">
+Static (or strong) correlation arises from near-degeneracy of electronic configurations. It requires multiple determinants for a qualitatively correct description and cannot be captured by single-reference perturbation theory.
+</Definition>
+
+<Definition term="Dynamic Correlation">
+Dynamic correlation arises from the instantaneous electron-electron repulsion not captured by mean-field theory. It can be recovered through single-reference methods like coupled cluster or perturbation theory.
+</Definition>
+
+| Correlation Type | Origin | Treatment | Example |
+|-----------------|--------|-----------|---------|
+| Static | Near-degenerate configs | Multi-reference | Bond breaking |
+| Dynamic | e⁻-e⁻ instantaneous | Perturbation/CC | Dispersion |
+
+### The Challenge
+
+Multi-reference VQE must capture both:
+
+<Formula>
+$$|\psi\rangle = \sum_I c_I |\Phi_I\rangle + \text{dynamic corrections}$$
+</Formula>
+
+where $|\Phi_I\rangle$ are the reference configurations.
+
+## 3. Complete Active Space (CAS) Approach
+
+The CAS approach divides orbitals into three categories:
+
+<Definition term="Active Space">
+The active space consists of orbitals and electrons that are treated with full configuration interaction (FCI), allowing all possible occupations. Orbitals outside the active space are either always occupied (core) or always empty (virtual).
+</Definition>
+
+```
+Orbital Classification:
+├── Virtual (external): Always empty
+├── Active: Full CI treatment (n electrons in m orbitals)
+└── Core (inactive): Always doubly occupied
+```
+
+### CASSCF on Quantum Computers
+
+```python
+import numpy as np
+
+class CASVQESetup:
+    """Setup for CAS-based VQE calculations."""
+
+    def __init__(self, n_electrons, n_orbitals, n_active_electrons,
+                 n_active_orbitals):
+        self.n_elec = n_electrons
+        self.n_orb = n_orbitals
+        self.n_active_e = n_active_electrons
+        self.n_active_o = n_active_orbitals
+
+        # Core electrons (doubly occupied)
+        self.n_core_e = n_electrons - n_active_electrons
+        self.n_core_o = self.n_core_e // 2
+
+    def get_reference_determinants(self):
+        """
+        Generate reference determinants for the active space.
+
+        Returns list of occupation strings for active orbitals.
+        """
+        from itertools import combinations
+
+        n_alpha = self.n_active_e // 2
+        n_beta = self.n_active_e - n_alpha
+
+        determinants = []
+
+        # Generate alpha configurations
+        alpha_configs = list(combinations(
+            range(self.n_active_o), n_alpha
+        ))
+
+        # Generate beta configurations
+        beta_configs = list(combinations(
+            range(self.n_active_o), n_beta
+        ))
+
+        # Combine into determinants
+        for alpha in alpha_configs:
+            for beta in beta_configs:
+                det = {'alpha': alpha, 'beta': beta}
+                determinants.append(det)
+
+        return determinants
+
+    def count_determinants(self):
+        """Count total determinants in active space."""
+        from math import comb
+        n_alpha = self.n_active_e // 2
+        n_beta = self.n_active_e - n_alpha
+
+        return (comb(self.n_active_o, n_alpha) *
+                comb(self.n_active_o, n_beta))
+
+# Example: CAS(4,4) - 4 electrons in 4 orbitals
+cas = CASVQESetup(
+    n_electrons=10,
+    n_orbitals=20,
+    n_active_electrons=4,
+    n_active_orbitals=4
+)
+
+print(f"Active space: CAS({cas.n_active_e},{cas.n_active_o})")
+print(f"Number of determinants: {cas.count_determinants()}")
+print(f"Core orbitals: {cas.n_core_o}")
+```
+
+<Tip>
+For quantum computers, the active space size determines the number of qubits needed. A CAS(n,m) space requires 2m qubits in Jordan-Wigner encoding (m spin-up + m spin-down orbitals).
+</Tip>
+
+## 4. Multi-Configuration Reference States
+
+### Superposition of Determinants
+
+A multi-reference starting point uses:
+
+<Formula>
+$$|\psi_{\text{ref}}\rangle = \sum_I d_I |\Phi_I\rangle$$
+</Formula>
+
+where coefficients $d_I$ can be:
+- **Equal weight**: $d_I = 1/\sqrt{N}$ for complete active space
+- **CASSCF optimized**: From classical CASSCF calculation
+- **Variational**: Optimized during VQE
+
+```python
+import numpy as np
+
+def create_multiconfiguration_state(coefficients, determinant_states):
+    """
+    Create a multi-configuration reference state.
+
+    Args:
+        coefficients: List of CI coefficients [d_1, d_2, ...]
+        determinant_states: List of state vectors for each determinant
+
+    Returns:
+        Normalized multi-configuration state vector
+    """
+    coefficients = np.array(coefficients, dtype=complex)
+    determinant_states = np.array(determinant_states, dtype=complex)
+
+    # Normalize coefficients
+    coefficients = coefficients / np.linalg.norm(coefficients)
+
+    # Create superposition
+    state = np.zeros_like(determinant_states[0])
+    for c, det in zip(coefficients, determinant_states):
+        state += c * det
+
+    # Normalize final state
+    state = state / np.linalg.norm(state)
+
+    return state
+
+# Example: 2-determinant reference for H2
+# |Φ₁⟩ = |1100⟩ (both electrons in bonding orbital)
+# |Φ₂⟩ = |0011⟩ (both electrons in antibonding orbital)
+
+dim = 16  # 4 qubits
+phi1 = np.zeros(dim, dtype=complex)
+phi1[0b1100] = 1.0  # |1100⟩
+
+phi2 = np.zeros(dim, dtype=complex)
+phi2[0b0011] = 1.0  # |0011⟩
+
+# Equal weight superposition (dissociation limit)
+psi_ref = create_multiconfiguration_state(
+    [1.0, 1.0],
+    [phi1, phi2]
+)
+
+print(f"Multi-reference state created")
+print(f"Weight on |1100⟩: {abs(psi_ref[0b1100])**2:.4f}")
+print(f"Weight on |0011⟩: {abs(psi_ref[0b0011])**2:.4f}")
+```
+
+## 5. State-Averaged VQE
+
+For near-degenerate states, we optimize a weighted average of multiple state energies.
+
+<Definition term="State-Averaged VQE">
+State-averaged VQE (SA-VQE) minimizes a weighted average of energies for multiple electronic states, producing balanced descriptions of near-degenerate states and avoiding root flipping during optimization.
+</Definition>
+
+<Formula>
+$$E_{\text{SA}} = \sum_k w_k \langle\psi_k|H|\psi_k\rangle$$
+</Formula>
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+
+class StateAveragedVQE:
+    """State-averaged VQE for multiple electronic states."""
+
+    def __init__(self, hamiltonian, n_states, weights=None):
+        self.H = hamiltonian
+        self.n_states = n_states
+        self.dim = hamiltonian.shape[0]
+
+        # Default: equal weights
+        if weights is None:
+            self.weights = np.ones(n_states) / n_states
+        else:
+            self.weights = np.array(weights)
+            self.weights /= self.weights.sum()
+
+    def build_states(self, params):
+        """
+        Build orthogonal states from parameters.
+        Uses Gram-Schmidt to ensure orthogonality.
+        """
+        # Simplified: assume we have n_states sets of parameters
+        params_per_state = len(params) // self.n_states
+        states = []
+
+        for k in range(self.n_states):
+            start = k * params_per_state
+            end = start + params_per_state
+            state_params = params[start:end]
+
+            # Build state k (implementation depends on ansatz)
+            state = self._build_single_state(state_params)
+            states.append(state)
+
+        # Orthogonalize using Gram-Schmidt
+        orthogonal_states = self._gram_schmidt(states)
+
+        return orthogonal_states
+
+    def _build_single_state(self, params):
+        """Build a single variational state."""
+        # Simplified random unitary for demonstration
+        state = np.random.randn(self.dim) + 1j * np.random.randn(self.dim)
+        state /= np.linalg.norm(state)
+        return state
+
+    def _gram_schmidt(self, states):
+        """Gram-Schmidt orthogonalization."""
+        orthogonal = []
+        for state in states:
+            # Subtract projections onto previous states
+            for prev in orthogonal:
+                state = state - np.vdot(prev, state) * prev
+            # Normalize
+            norm = np.linalg.norm(state)
+            if norm > 1e-10:
+                orthogonal.append(state / norm)
+        return orthogonal
+
+    def state_averaged_energy(self, params):
+        """Compute state-averaged energy."""
+        states = self.build_states(params)
+
+        sa_energy = 0.0
+        for k, (state, weight) in enumerate(zip(states, self.weights)):
+            energy_k = np.real(state.conj() @ self.H @ state)
+            sa_energy += weight * energy_k
+
+        return sa_energy
+
+    def individual_energies(self, params):
+        """Get energies of individual states."""
+        states = self.build_states(params)
+        energies = []
+
+        for state in states:
+            E = np.real(state.conj() @ self.H @ state)
+            energies.append(E)
+
+        return energies
+```
+
+## 6. MR-VQE for Bond Breaking
+
+Multi-reference VQE is essential for potential energy surface (PES) calculations involving bond breaking.
+
+### Protocol for PES Scanning
+
+```
+1. Identify multi-reference regions (bond stretching, etc.)
+2. Select appropriate active space (breaking/forming bonds)
+3. Generate reference determinants for CAS
+4. Build multi-reference ansatz
+5. Scan geometry with continuous optimization
+```
+
+```python
+import numpy as np
+
+def mr_vqe_pes_scan(molecule, bond_distances, active_space):
+    """
+    Perform multi-reference VQE scan along bond coordinate.
+
+    Args:
+        molecule: Molecular system
+        bond_distances: List of distances to scan
+        active_space: (n_electrons, n_orbitals) for CAS
+
+    Returns:
+        List of energies at each geometry
+    """
+    energies = []
+    prev_params = None
+
+    for distance in bond_distances:
+        # Update molecular geometry
+        molecule.set_bond_distance(distance)
+
+        # Build Hamiltonian for this geometry
+        H = molecule.get_hamiltonian()
+
+        # Setup multi-reference VQE
+        mr_vqe = MultiReferenceVQE(
+            hamiltonian=H,
+            active_space=active_space
+        )
+
+        # Use previous parameters as initial guess (warm start)
+        if prev_params is not None:
+            init_params = prev_params
+        else:
+            init_params = mr_vqe.get_initial_params()
+
+        # Optimize
+        energy, params = mr_vqe.optimize(init_params)
+
+        energies.append(energy)
+        prev_params = params
+
+        print(f"R = {distance:.2f} Å: E = {energy:.6f} Ha")
+
+    return np.array(energies)
+```
+
+## 7. Quantum Natural Orbitals
+
+Natural orbitals improve multi-reference descriptions by providing optimal orbital basis.
+
+<Definition term="Natural Orbitals">
+Natural orbitals are the eigenvectors of the one-particle reduced density matrix (1-RDM). They provide the most compact representation of electron correlation, with occupation numbers indicating orbital importance.
+</Definition>
+
+<Formula>
+$$\gamma^{(1)}_{pq} = \langle\psi|a_p^\dagger a_q|\psi\rangle$$
+</Formula>
+
+```python
+import numpy as np
+
+def compute_natural_orbitals(one_rdm):
+    """
+    Compute natural orbitals from 1-RDM.
+
+    Args:
+        one_rdm: One-particle reduced density matrix
+
+    Returns:
+        occupations: Natural orbital occupation numbers
+        no_transform: Transformation to natural orbital basis
+    """
+    # Diagonalize 1-RDM
+    occupations, no_transform = np.linalg.eigh(one_rdm)
+
+    # Sort by occupation (descending)
+    idx = np.argsort(occupations)[::-1]
+    occupations = occupations[idx]
+    no_transform = no_transform[:, idx]
+
+    return occupations, no_transform
+
+def identify_active_orbitals(occupations, threshold=0.02):
+    """
+    Identify active orbitals based on fractional occupation.
+
+    Orbitals with occupation far from 0 or 2 are active.
+    """
+    active = []
+    for i, occ in enumerate(occupations):
+        # Check if fractionally occupied
+        if threshold < occ < (2 - threshold):
+            active.append(i)
+
+    return active
+
+# Example
+n_orbitals = 10
+# Simulated 1-RDM with some correlation
+gamma = np.diag([1.98, 1.95, 1.2, 0.8, 0.05, 0.02] +
+                [0.0] * 4)
+
+occupations, transform = compute_natural_orbitals(gamma)
+active = identify_active_orbitals(occupations)
+
+print("Natural orbital occupations:")
+for i, occ in enumerate(occupations):
+    status = "ACTIVE" if i in active else ""
+    print(f"  Orbital {i}: {occ:.4f} {status}")
+```
+
+<Tip>
+Natural orbitals from a preliminary CASSCF or even a UHF calculation can guide active space selection for MR-VQE, significantly improving the efficiency of quantum calculations.
+</Tip>
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Multi-reference necessity**: Single-reference methods fail for strongly correlated systems
+2. **Correlation types**: Static (near-degeneracy) vs dynamic (instantaneous) correlation
+3. **CAS approach**: Divides orbitals into core, active, and virtual spaces
+4. **Multi-configuration states**: Superpositions of determinants as reference
+5. **State-averaged VQE**: Balanced treatment of near-degenerate states
+6. **Natural orbitals**: Optimal basis for compact multi-reference descriptions
+
+Multi-reference VQE is essential for chemically accurate descriptions of bond breaking, transition states, and transition metal systems—problems where classical methods struggle but quantum advantage is most promising.
+
+## Further Reading
+
+- Next lesson: Excited States VQE Methods
+- Related: Symmetry-Preserving Ansatze
+- Application: Transition Metal Chemistry with MR-VQE

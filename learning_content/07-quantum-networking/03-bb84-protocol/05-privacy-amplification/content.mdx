@@ -1,0 +1,634 @@
+# Privacy Amplification
+
+Privacy amplification is the final cryptographic step in QKD, transforming a partially-secret reconciled key into a shorter but fully-secret key. This process ensures that even if Eve has partial information about the reconciled key, she has negligible information about the final key.
+
+## Why Privacy Amplification?
+
+After error correction, Eve may still have partial information about the key.
+
+### The Information Leakage Problem
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Eve's Information Sources                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   EVE'S POTENTIAL KNOWLEDGE:                                    │
+│                                                                 │
+│   1. QUANTUM EAVESDROPPING                                      │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ • Intercept-resend: ~50% of intercepted bits            │  │
+│   │ • Optimal attacks: bounded by Holevo information        │  │
+│   │ • Increases QBER, detected via parameter estimation     │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   2. CLASSICAL COMMUNICATION LEAKAGE                            │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │ • Basis announcements: Reveals basis, not bits          │  │
+│   │ • Error correction: Parities/syndromes (f×n×h(e) bits) │  │
+│   │ • Verification: Hash values                             │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   TOTAL EVE INFORMATION ≤ χ(A:E) + EC_leakage                 │
+│                                                                 │
+│   GOAL OF PRIVACY AMPLIFICATION:                                │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Reconciled key (n bits)                               │  │
+│   │   Eve knows: ~t bits (partial information)              │  │
+│   │                                                         │  │
+│   │           ↓ Universal Hash ↓                            │  │
+│   │                                                         │  │
+│   │   Final key (ℓ bits, where ℓ < n - t)                  │  │
+│   │   Eve knows: < ε bits (negligible)                     │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Universal Hashing
+
+Privacy amplification uses universal hash families to extract randomness.
+
+### Universal Hash Family Definition
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  Universal Hash Families                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   DEFINITION:                                                   │
+│   A family H of functions h: {0,1}ⁿ → {0,1}ˡ is 2-universal if:│
+│                                                                 │
+│   For all x ≠ y ∈ {0,1}ⁿ:                                      │
+│   Pr[h(x) = h(y)] ≤ 1/2ˡ  when h is chosen uniformly from H   │
+│                                                                 │
+│   INTUITION:                                                    │
+│   Random hash collisions are no more likely than random         │
+│                                                                 │
+│   COMMON CONSTRUCTIONS:                                         │
+│                                                                 │
+│   1. MULTIPLICATION HASH (Toeplitz Matrix):                    │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   h(x) = A·x mod 2  (matrix-vector multiplication)     │  │
+│   │                                                         │  │
+│   │   A = Toeplitz matrix (n+ℓ-1 random bits define it)    │  │
+│   │                                                         │  │
+│   │   ┌─────────────────┐                                  │  │
+│   │   │ r₁ r₂ r₃ r₄ r₅ │                                  │  │
+│   │   │ r₂ r₃ r₄ r₅ r₆ │  Each row is shifted version    │  │
+│   │   │ r₃ r₄ r₅ r₆ r₇ │  of previous row                 │  │
+│   │   └─────────────────┘                                  │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   2. POLYNOMIAL HASH (over GF(2ⁿ)):                            │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   h(x) = Σ xᵢ·aⁱ mod p  for random a                   │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Implementation
+
+```python
+import numpy as np
+from typing import Tuple, Dict
+from dataclasses import dataclass
+import hashlib
+
+class ToeplitzHash:
+    """
+    Toeplitz matrix universal hash for privacy amplification.
+    """
+
+    def __init__(self, input_bits: int, output_bits: int, seed: np.ndarray = None):
+        """
+        Args:
+            input_bits: Length of input (reconciled key)
+            output_bits: Length of output (final key)
+            seed: Random seed for Toeplitz matrix (n + ℓ - 1 bits)
+        """
+        self.n = input_bits
+        self.l = output_bits
+
+        if seed is None:
+            # Generate random seed
+            self.seed = np.random.randint(0, 2, self.n + self.l - 1)
+        else:
+            assert len(seed) == self.n + self.l - 1
+            self.seed = seed
+
+    def get_matrix(self) -> np.ndarray:
+        """Construct Toeplitz matrix from seed."""
+        matrix = np.zeros((self.l, self.n), dtype=int)
+
+        for i in range(self.l):
+            for j in range(self.n):
+                matrix[i, j] = self.seed[self.n - 1 - j + i]
+
+        return matrix
+
+    def hash(self, key: np.ndarray) -> np.ndarray:
+        """
+        Apply Toeplitz hash to key.
+
+        Args:
+            key: Input bit string (length n)
+
+        Returns:
+            Hashed output (length ℓ)
+        """
+        assert len(key) == self.n
+
+        matrix = self.get_matrix()
+        result = (matrix @ key) % 2
+
+        return result
+
+    def seed_as_bytes(self) -> bytes:
+        """Convert seed to bytes for transmission."""
+        return np.packbits(self.seed).tobytes()
+
+
+class PrivacyAmplification:
+    """
+    Complete privacy amplification protocol.
+    """
+
+    def __init__(self, security_parameter: float = 1e-10):
+        """
+        Args:
+            security_parameter: Target security ε
+        """
+        self.epsilon = security_parameter
+
+    def calculate_final_key_length(self,
+                                   n: int,
+                                   qber: float,
+                                   ec_efficiency: float = 1.16) -> int:
+        """
+        Calculate secure final key length.
+
+        ℓ = n - χ(A:E) - EC_leakage - 2log(1/ε)
+
+        Args:
+            n: Reconciled key length
+            qber: Quantum bit error rate
+            ec_efficiency: Error correction efficiency factor f
+
+        Returns:
+            Secure final key length
+        """
+        # Binary entropy
+        h = self._h(qber)
+
+        # Eve's Holevo information per bit (collective attack bound)
+        chi_per_bit = h
+
+        # Total Eve information from quantum
+        eve_quantum = n * chi_per_bit
+
+        # Error correction leakage
+        ec_leakage = ec_efficiency * n * h
+
+        # Security margin
+        security_bits = 2 * np.log2(1 / self.epsilon)
+
+        # Final key length
+        final_length = n - eve_quantum - ec_leakage - security_bits
+
+        return max(0, int(final_length))
+
+    def amplify(self, reconciled_key: np.ndarray,
+                final_length: int,
+                seed: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Perform privacy amplification.
+
+        Args:
+            reconciled_key: Key after error correction
+            final_length: Desired output length
+            seed: Optional seed (must be shared between Alice and Bob)
+
+        Returns:
+            (final_key, seed used)
+        """
+        n = len(reconciled_key)
+
+        if final_length >= n:
+            raise ValueError("Final length must be shorter than input")
+
+        if final_length <= 0:
+            return np.array([], dtype=int), np.array([], dtype=int)
+
+        # Create Toeplitz hash
+        hasher = ToeplitzHash(n, final_length, seed)
+
+        # Apply hash
+        final_key = hasher.hash(reconciled_key)
+
+        return final_key, hasher.seed
+
+    @staticmethod
+    def _h(p: float) -> float:
+        """Binary entropy function."""
+        if p <= 0 or p >= 1:
+            return 0
+        return -p * np.log2(p) - (1-p) * np.log2(1-p)
+
+
+# Demonstration
+np.random.seed(42)
+n = 100000
+qber = 0.03
+
+# Simulate reconciled key
+reconciled_key = np.random.randint(0, 2, n)
+
+# Privacy amplification
+pa = PrivacyAmplification(security_parameter=1e-10)
+final_length = pa.calculate_final_key_length(n, qber)
+
+print(f"Reconciled key: {n} bits")
+print(f"QBER: {qber*100:.1f}%")
+print(f"Final key length: {final_length} bits")
+print(f"Compression ratio: {final_length/n*100:.1f}%")
+
+# Perform amplification
+final_key, seed = pa.amplify(reconciled_key, final_length)
+print(f"Actual final key: {len(final_key)} bits")
+```
+
+## The Leftover Hash Lemma
+
+The theoretical foundation of privacy amplification.
+
+### Lemma Statement
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  Leftover Hash Lemma                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   CLASSICAL VERSION:                                            │
+│                                                                 │
+│   Let X be a random variable with min-entropy H_∞(X) ≥ k       │
+│   Let H be a 2-universal hash family with h: X → {0,1}ˡ       │
+│                                                                 │
+│   If ℓ ≤ k - 2log(1/ε), then:                                  │
+│                                                                 │
+│   ½||ρ_h(X),h - ρ_U ⊗ ρ_h||₁ ≤ ε                              │
+│                                                                 │
+│   where U is uniform on {0,1}ˡ                                 │
+│                                                                 │
+│   MEANING:                                                      │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   If Eve's uncertainty about X is at least k bits,     │  │
+│   │   then hash output looks uniform to her (within ε).    │  │
+│   │                                                         │  │
+│   │   Even knowing the hash function h, Eve cannot         │  │
+│   │   distinguish final key from random.                    │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   QUANTUM VERSION:                                              │
+│                                                                 │
+│   Uses conditional smooth min-entropy H_∞^ε(X|E)               │
+│                                                                 │
+│   Final key is ε-close to uniform and independent of Eve      │
+│   if ℓ ≤ H_∞^ε(X|E) - 2log(1/ε')                              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Entropy Analysis
+
+```python
+class EntropyAnalysis:
+    """Analyze entropy and privacy amplification parameters."""
+
+    @staticmethod
+    def min_entropy(probabilities: np.ndarray) -> float:
+        """
+        Calculate min-entropy: H_∞(X) = -log(max p_i)
+        """
+        max_prob = np.max(probabilities)
+        if max_prob == 0:
+            return float('inf')
+        return -np.log2(max_prob)
+
+    @staticmethod
+    def shannon_entropy(probabilities: np.ndarray) -> float:
+        """
+        Calculate Shannon entropy: H(X) = -Σ p_i log p_i
+        """
+        probs = probabilities[probabilities > 0]
+        return -np.sum(probs * np.log2(probs))
+
+    @staticmethod
+    def conditional_entropy_bound(n: int, qber: float,
+                                  attack_model: str = 'collective') -> float:
+        """
+        Bound on Eve's conditional entropy about the key.
+
+        H(K|E) ≥ n - χ(K:E)
+
+        where χ is Holevo information.
+        """
+        h = lambda p: -p*np.log2(p)-(1-p)*np.log2(1-p) if 0 < p < 1 else 0
+
+        if attack_model == 'collective':
+            # Holevo bound for collective attacks
+            chi_per_bit = h(qber)
+        elif attack_model == 'individual':
+            # Tighter bound for individual attacks
+            chi_per_bit = h(qber) / 2
+        else:
+            chi_per_bit = h(qber)
+
+        eve_information = n * chi_per_bit
+        key_entropy_given_eve = n - eve_information
+
+        return max(0, key_entropy_given_eve)
+
+    @staticmethod
+    def extractable_key_length(n: int, qber: float,
+                               ec_leakage: float,
+                               epsilon: float = 1e-10) -> int:
+        """
+        Calculate extractable key length.
+
+        ℓ = H(K|E) - EC_leakage - 2log(1/ε)
+        """
+        key_entropy = EntropyAnalysis.conditional_entropy_bound(n, qber)
+        security_margin = 2 * np.log2(1/epsilon)
+
+        extractable = key_entropy - ec_leakage - security_margin
+
+        return max(0, int(extractable))
+```
+
+## Seed Exchange
+
+Alice and Bob must share the hash seed securely.
+
+### Seed Exchange Protocol
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  Seed Exchange Options                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   OPTION 1: ALICE CHOOSES AND SENDS                            │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Alice: Generate random seed s                         │  │
+│   │   Alice → Bob: Send s over authenticated channel       │  │
+│   │   Both: Compute final_key = h_s(reconciled_key)        │  │
+│   │                                                         │  │
+│   │   Security: s is public, but hash is still secure      │  │
+│   │   (leftover hash lemma holds even if Eve knows h)      │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   OPTION 2: PRE-SHARED FROM PREVIOUS ROUND                     │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Use part of previous final key as seed               │  │
+│   │   Requires: First round uses Option 1                   │  │
+│   │   Advantage: No additional public communication        │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   SEED LENGTH:                                                  │
+│   For Toeplitz: n + ℓ - 1 bits                                 │
+│   This is significant overhead for short keys                  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Complete Pipeline
+
+```python
+class QKDPostProcessing:
+    """Complete QKD post-processing pipeline."""
+
+    def __init__(self, security_epsilon: float = 1e-10):
+        self.epsilon = security_epsilon
+        self.pa = PrivacyAmplification(security_epsilon)
+
+    def process(self, alice_sifted: np.ndarray,
+                bob_sifted: np.ndarray,
+                qber: float) -> Dict:
+        """
+        Complete post-processing: EC + PA.
+
+        Args:
+            alice_sifted: Alice's sifted key
+            bob_sifted: Bob's sifted key
+            qber: Measured QBER
+
+        Returns:
+            Dictionary with final keys and statistics
+        """
+        n = len(alice_sifted)
+
+        # Step 1: Error correction (simplified CASCADE)
+        from typing import Tuple
+
+        bob_corrected, ec_stats = self._error_correction(
+            alice_sifted, bob_sifted, qber
+        )
+
+        # Check EC success
+        if not np.array_equal(alice_sifted, bob_corrected):
+            ec_errors = np.sum(alice_sifted != bob_corrected)
+            return {
+                'success': False,
+                'reason': f'EC failed, {ec_errors} remaining errors',
+                'final_key_alice': None,
+                'final_key_bob': None
+            }
+
+        # Step 2: Calculate PA parameters
+        ec_leakage = ec_stats['bits_leaked']
+        final_length = self.pa.calculate_final_key_length(n, qber)
+
+        if final_length <= 0:
+            return {
+                'success': False,
+                'reason': 'No secret bits extractable (QBER too high)',
+                'final_key_alice': None,
+                'final_key_bob': None
+            }
+
+        # Step 3: Privacy amplification
+        # Alice generates seed
+        seed = np.random.randint(0, 2, n + final_length - 1)
+
+        final_key_alice, _ = self.pa.amplify(alice_sifted, final_length, seed)
+        final_key_bob, _ = self.pa.amplify(bob_corrected, final_length, seed)
+
+        # Verify keys match
+        keys_match = np.array_equal(final_key_alice, final_key_bob)
+
+        return {
+            'success': keys_match,
+            'reason': None if keys_match else 'Keys dont match after PA',
+            'final_key_alice': final_key_alice,
+            'final_key_bob': final_key_bob,
+            'statistics': {
+                'sifted_length': n,
+                'qber': qber,
+                'ec_leakage': ec_leakage,
+                'final_length': final_length,
+                'compression_ratio': final_length / n,
+                'security_parameter': self.epsilon
+            }
+        }
+
+    def _error_correction(self, alice: np.ndarray,
+                         bob: np.ndarray,
+                         qber: float) -> Tuple[np.ndarray, Dict]:
+        """Simplified error correction."""
+        # Simple parity-based correction (not CASCADE)
+        n = len(alice)
+        bob_corrected = bob.copy()
+        leaked_bits = 0
+
+        block_size = max(1, int(0.73 / qber))
+
+        for start in range(0, n, block_size):
+            end = min(start + block_size, n)
+
+            alice_parity = np.sum(alice[start:end]) % 2
+            bob_parity = np.sum(bob_corrected[start:end]) % 2
+            leaked_bits += 1
+
+            if alice_parity != bob_parity:
+                # Find and fix error (simplified binary search)
+                for i in range(start, end):
+                    if alice[i] != bob_corrected[i]:
+                        bob_corrected[i] = alice[i]
+                        leaked_bits += int(np.log2(end - start)) + 1
+                        break
+
+        return bob_corrected, {'bits_leaked': leaked_bits}
+
+
+# Full demonstration
+np.random.seed(42)
+
+# Generate test keys
+n_sifted = 50000
+qber = 0.035
+
+alice_key = np.random.randint(0, 2, n_sifted)
+bob_key = alice_key.copy()
+
+# Introduce errors
+errors = np.random.random(n_sifted) < qber
+bob_key[errors] = 1 - bob_key[errors]
+
+print(f"Initial errors: {np.sum(alice_key != bob_key)}")
+
+# Process
+pipeline = QKDPostProcessing()
+result = pipeline.process(alice_key, bob_key, qber)
+
+if result['success']:
+    print(f"\nQKD Successful!")
+    stats = result['statistics']
+    print(f"Sifted key: {stats['sifted_length']} bits")
+    print(f"Final key: {stats['final_length']} bits")
+    print(f"Compression: {stats['compression_ratio']*100:.1f}%")
+else:
+    print(f"\nQKD Failed: {result['reason']}")
+```
+
+## Security Analysis
+
+Privacy amplification provides composable security guarantees.
+
+```python
+class PASecurityAnalysis:
+    """Analyze privacy amplification security."""
+
+    @staticmethod
+    def trace_distance_bound(n: int, qber: float,
+                            final_length: int,
+                            epsilon: float) -> float:
+        """
+        Calculate trace distance to ideal (uniform) key.
+
+        Smaller is better. Goal: < ε.
+        """
+        h = lambda p: -p*np.log2(p)-(1-p)*np.log2(1-p) if 0 < p < 1 else 0
+
+        # Eve's information
+        eve_info = n * h(qber)
+
+        # Available entropy
+        key_entropy = n - eve_info
+
+        # Leftover hash lemma bound
+        if final_length <= key_entropy - 2*np.log2(1/epsilon):
+            return epsilon
+        else:
+            # Not enough entropy
+            slack = key_entropy - final_length
+            if slack <= 0:
+                return 1.0  # No security
+            return 2**(-slack/2)
+
+    @staticmethod
+    def composable_security_check(final_length: int,
+                                  n: int,
+                                  qber: float,
+                                  ec_efficiency: float,
+                                  target_epsilon: float) -> Dict:
+        """
+        Verify composable security requirements.
+        """
+        h = lambda p: -p*np.log2(p)-(1-p)*np.log2(1-p) if 0 < p < 1 else 0
+
+        # Components
+        eve_holevo = n * h(qber)
+        ec_leakage = ec_efficiency * n * h(qber)
+        security_cost = 2 * np.log2(1/target_epsilon)
+
+        # Maximum secure length
+        max_secure_length = n - eve_holevo - ec_leakage - security_cost
+
+        is_secure = final_length <= max_secure_length
+
+        return {
+            'key_entropy': n,
+            'eve_information': eve_holevo,
+            'ec_leakage': ec_leakage,
+            'security_margin': security_cost,
+            'max_secure_length': max(0, max_secure_length),
+            'actual_length': final_length,
+            'is_secure': is_secure,
+            'slack': max_secure_length - final_length
+        }
+```
+
+## Summary
+
+Privacy amplification is essential for extracting a secure final key:
+
+- **Purpose**: Remove Eve's partial information from the reconciled key
+- **Method**: Universal hashing (Toeplitz matrices)
+- **Theory**: Leftover Hash Lemma guarantees security
+- **Key length**: ℓ = n - χ(A:E) - EC_leakage - 2log(1/ε)
+- **Result**: Final key ε-close to uniform and independent of Eve
+
+This completes the QKD post-processing pipeline.

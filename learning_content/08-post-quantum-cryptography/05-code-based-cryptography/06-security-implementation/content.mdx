@@ -1,0 +1,576 @@
+---
+title: "Code-Based Cryptography: Security Analysis and Implementation"
+description: "Master the security analysis of code-based cryptography. Understand Information Set Decoding attacks, side-channel considerations, and practical implementation guidelines."
+duration: 70
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Analyze ISD attack complexity for different parameters
+- Implement constant-time code-based operations
+- Evaluate security margins for various schemes
+- Choose appropriate parameters for specific security levels
+- Apply best practices for code-based crypto deployment
+
+## 1. Information Set Decoding: The Main Attack
+
+```python
+import numpy as np
+import math
+from typing import Dict, Tuple
+
+def isd_overview():
+    """Overview of Information Set Decoding attacks."""
+    print("INFORMATION SET DECODING (ISD) ATTACKS")
+    print("=" * 70)
+    
+    overview = """
+    THE CORE PROBLEM:
+    ━━━━━━━━━━━━━━━━━
+    
+    Syndrome Decoding Problem (SDP):
+    Given: H ∈ F_2^{r×n}, syndrome s ∈ F_2^r, weight bound t
+    Find:  e ∈ F_2^n such that H·e = s and wt(e) ≤ t
+    
+    This is NP-complete! But specific instances can be easier.
+    
+    
+    BASIC ISD (Prange, 1962):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    1. Pick random k positions (information set)
+    2. Hope all t errors are in remaining n-k positions
+    3. Solve linear system to check
+    4. Repeat until successful
+    
+    Success probability: P = C(n-k, t) / C(n, t)
+    
+    Work: W = C(n, t) / C(n-k, t) ≈ 2^{t · log₂(n/k)}
+    
+    
+    ISD EVOLUTION:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Algorithm      │ Year │ Key Improvement                            │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ Prange         │ 1962 │ Basic ISD                                  │
+    │ Lee-Brickell   │ 1988 │ Allow p errors in information set          │
+    │ Leon           │ 1988 │ Collision search on columns                │
+    │ Stern          │ 1989 │ Birthday attack (meet-in-middle)           │
+    │ Dumer          │ 1991 │ Improved representation technique          │
+    │ MMT            │ 2011 │ Multiple collisions                        │
+    │ BJMM           │ 2012 │ Near-optimal classical ISD                 │
+    │ Both-May       │ 2018 │ Quantum speedup for ISD                    │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    QUANTUM ISD:
+    ━━━━━━━━━━━━━
+    
+    • Grover search gives quadratic speedup on the iteration count
+    • NOT exponential speedup like Shor's algorithm
+    • Classical work W → Quantum work ~√W
+    • Still exponential, just with smaller exponent
+    """
+    print(overview)
+
+isd_overview()
+
+
+class ISDComplexityAnalyzer:
+    """
+    Analyze ISD attack complexity for code-based parameters.
+    """
+    
+    def __init__(self):
+        self.cache = {}
+    
+    def log2_binomial(self, n: int, k: int) -> float:
+        """Compute log2(C(n,k)) using Stirling approximation for large values."""
+        if k < 0 or k > n:
+            return float('-inf')
+        if k == 0 or k == n:
+            return 0
+        
+        # For small values, compute exactly
+        if n <= 1000:
+            result = sum(math.log2(n - i) - math.log2(i + 1) for i in range(k))
+            return result
+        
+        # Stirling approximation: log2(C(n,k)) ≈ n*H(k/n) where H is binary entropy
+        p = k / n
+        if p == 0 or p == 1:
+            return 0
+        entropy = -p * math.log2(p) - (1-p) * math.log2(1-p)
+        return n * entropy
+    
+    def prange_complexity(self, n: int, k: int, t: int) -> float:
+        """
+        Prange's basic ISD complexity.
+        
+        Work ≈ C(n,t) / C(n-k,t)
+        """
+        log2_work = self.log2_binomial(n, t) - self.log2_binomial(n - k, t)
+        return log2_work
+    
+    def stern_complexity(self, n: int, k: int, t: int, p: int = None) -> float:
+        """
+        Stern's ISD complexity (simplified).
+        
+        Uses birthday attack with parameter p.
+        """
+        if p is None:
+            # Optimize p
+            best = float('inf')
+            for p_try in range(1, min(t//2 + 1, 20)):
+                cost = self._stern_cost(n, k, t, p_try)
+                best = min(best, cost)
+            return best
+        return self._stern_cost(n, k, t, p)
+    
+    def _stern_cost(self, n: int, k: int, t: int, p: int) -> float:
+        """Compute Stern cost for given p."""
+        l = (k + 1) // 2
+        
+        # Probability of success
+        log2_prob = (self.log2_binomial(k//2, p//2) * 2 + 
+                    self.log2_binomial(n-k, t-p) -
+                    self.log2_binomial(n, t))
+        
+        # List sizes
+        log2_list = self.log2_binomial(k//2, p//2)
+        
+        # Birthday collision cost
+        cost = -log2_prob + max(2 * log2_list - l, 0)
+        
+        return cost
+    
+    def bjmm_complexity(self, n: int, k: int, t: int) -> float:
+        """
+        BJMM complexity (simplified estimate).
+        
+        Best known classical ISD.
+        """
+        # Simplified: approximately 0.097n for typical parameters
+        r = n - k
+        rate = k / n
+        
+        if rate < 0.5:
+            # Low rate regime
+            return 0.102 * n
+        else:
+            # High rate regime
+            return self.stern_complexity(n, k, t) * 0.95
+    
+    def quantum_isd_complexity(self, classical_bits: float) -> float:
+        """
+        Quantum ISD complexity.
+        
+        Grover gives approximately square root speedup.
+        """
+        # Not exactly sqrt due to quantum overhead, use 0.06 factor
+        return classical_bits * 0.52  # Approximately sqrt(2^x) = 2^(x/2)
+    
+    def analyze_parameters(self, name: str, n: int, k: int, t: int) -> Dict:
+        """Analyze security of given parameters."""
+        prange = self.prange_complexity(n, k, t)
+        stern = self.stern_complexity(n, k, t)
+        bjmm = self.bjmm_complexity(n, k, t)
+        
+        classical_best = min(prange, stern, bjmm)
+        quantum_best = self.quantum_isd_complexity(classical_best)
+        
+        return {
+            'name': name,
+            'n': n, 'k': k, 't': t,
+            'prange_bits': prange,
+            'stern_bits': stern,
+            'bjmm_bits': bjmm,
+            'classical_best': classical_best,
+            'quantum_best': quantum_best
+        }
+
+
+def analyze_mceliece_security():
+    """Analyze Classic McEliece security."""
+    print("\nCLASSIC McELIECE SECURITY ANALYSIS")
+    print("=" * 70)
+    
+    analyzer = ISDComplexityAnalyzer()
+    
+    params = [
+        ('mceliece348864', 3488, 2720, 64),
+        ('mceliece460896', 4608, 3360, 96),
+        ('mceliece6688128', 6688, 5024, 128),
+        ('mceliece8192128', 8192, 6528, 128),
+    ]
+    
+    print(f"\n{'Variant':<18} {'n':<6} {'k':<6} {'t':<4} {'Classical':<12} {'Quantum'}")
+    print("-" * 70)
+    
+    for name, n, k, t in params:
+        result = analyzer.analyze_parameters(name, n, k, t)
+        print(f"{name:<18} {n:<6} {k:<6} {t:<4} "
+              f"~{result['classical_best']:.0f} bits    ~{result['quantum_best']:.0f} bits")
+    
+    print("\nNIST Security Categories:")
+    print("  Category 1: ≥128-bit classical, ≥64-bit quantum")
+    print("  Category 3: ≥192-bit classical, ≥96-bit quantum")
+    print("  Category 5: ≥256-bit classical, ≥128-bit quantum")
+
+analyze_mceliece_security()
+```
+
+## 2. Structural Attacks
+
+```python
+def structural_attacks():
+    """Discuss structural attacks on code-based crypto."""
+    print("\nSTRUCTURAL ATTACKS")
+    print("=" * 70)
+    
+    attacks = """
+    GOAL: Recover secret structure instead of solving SDP
+    
+    1. SUPPORT SPLITTING ATTACK (SSA):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    • Exploits algebraic structure in some codes
+    • Works against: Generalized Reed-Solomon, some algebraic codes
+    • DOES NOT WORK against: Binary Goppa codes
+    
+    Why binary Goppa resists SSA:
+    • Lacks distinguishable algebraic structure
+    • No efficient way to identify support
+    • 45+ years of analysis, no successful attack
+    
+    
+    2. DISTINGUISHING ATTACKS:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Can we distinguish G' = S·G·P from random matrix?
+    
+    For binary Goppa codes: NO efficient distinguisher known
+    
+    For quasi-cyclic (BIKE): Structure is intentionally visible
+                            Security relies on different hardness
+    
+    
+    3. KEY RECOVERY FROM PARTIAL INFORMATION:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Side-channel attacks might leak:
+    • Parts of permutation P
+    • Error locations during decoding
+    • Timing information
+    
+    Mitigation: Constant-time implementation
+    
+    
+    4. ATTACKS ON SPECIFIC CODE FAMILIES:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Code Family           │ Status          │ Notes                    │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ Binary Goppa          │ SECURE          │ No structural attacks    │
+    │ Gen. Reed-Solomon     │ BROKEN          │ SSA works                │
+    │ Algebraic Geometry    │ BROKEN          │ Algebraic attacks        │
+    │ LDPC                  │ CAUTION         │ Density matters          │
+    │ QC-MDPC (BIKE)        │ SECURE*         │ DFR concerns             │
+    └─────────────────────────────────────────────────────────────────────┘
+    """
+    print(attacks)
+
+structural_attacks()
+```
+
+## 3. Constant-Time Implementation
+
+```python
+class ConstantTimeOperations:
+    """
+    Constant-time operations for code-based cryptography.
+    
+    Critical for preventing timing side-channel attacks.
+    """
+    
+    @staticmethod
+    def ct_compare(a: bytes, b: bytes) -> bool:
+        """
+        Constant-time comparison.
+        
+        Always examines all bytes, regardless of match/mismatch.
+        """
+        if len(a) != len(b):
+            return False
+        
+        result = 0
+        for x, y in zip(a, b):
+            result |= x ^ y
+        
+        return result == 0
+    
+    @staticmethod
+    def ct_select(condition: bool, a: bytes, b: bytes) -> bytes:
+        """
+        Constant-time selection: return a if condition else b.
+        
+        Both values are always fully accessed.
+        """
+        mask = -int(condition) & 0xFF
+        return bytes((av & mask) | (bv & ~mask & 0xFF) 
+                    for av, bv in zip(a, b))
+    
+    @staticmethod
+    def ct_is_nonzero(x: int) -> int:
+        """
+        Return 1 if x != 0, else 0, in constant time.
+        """
+        # Propagate any set bit to LSB
+        x |= x >> 16
+        x |= x >> 8
+        x |= x >> 4
+        x |= x >> 2
+        x |= x >> 1
+        return x & 1
+    
+    @staticmethod
+    def ct_weight(data: bytes) -> int:
+        """
+        Compute Hamming weight in constant time.
+        
+        Always processes all bytes.
+        """
+        weight = 0
+        for byte in data:
+            # Count bits in each byte
+            for bit in range(8):
+                weight += (byte >> bit) & 1
+        return weight
+    
+    @staticmethod
+    def ct_syndrome_check(syndrome: np.ndarray, target: np.ndarray) -> int:
+        """
+        Check if syndrome matches target in constant time.
+        
+        Returns 1 if match, 0 otherwise.
+        """
+        diff = 0
+        for s, t in zip(syndrome, target):
+            diff |= int(s) ^ int(t)
+        
+        # Convert to 0 or 1
+        return 1 - ConstantTimeOperations.ct_is_nonzero(diff)
+
+
+def demonstrate_constant_time():
+    """Demonstrate constant-time operations."""
+    print("\nCONSTANT-TIME OPERATIONS")
+    print("=" * 65)
+    
+    ct = ConstantTimeOperations()
+    
+    # Test comparison
+    a = b"secret_key_value"
+    b = b"secret_key_value"
+    c = b"different_value!"
+    
+    print("1. Constant-time comparison:")
+    print(f"   ct_compare(a, b): {ct.ct_compare(a, b)} (same)")
+    print(f"   ct_compare(a, c): {ct.ct_compare(a, c)} (different)")
+    
+    # Test selection
+    print("\n2. Constant-time selection:")
+    x = b"value_if_true__"
+    y = b"value_if_false_"
+    print(f"   ct_select(True, x, y):  {ct.ct_select(True, x, y)}")
+    print(f"   ct_select(False, x, y): {ct.ct_select(False, x, y)}")
+    
+    # Test weight
+    print("\n3. Constant-time weight:")
+    data = bytes([0b11110000, 0b10101010, 0b00001111])
+    print(f"   ct_weight({[bin(b) for b in data]}): {ct.ct_weight(data)}")
+    
+    # Timing note
+    print("\n4. IMPORTANT: Python is NOT suitable for constant-time code!")
+    print("   Use C/assembly with careful review for production.")
+
+demonstrate_constant_time()
+```
+
+## 4. Implementation Best Practices
+
+```python
+def implementation_best_practices():
+    """Best practices for implementing code-based crypto."""
+    print("\nIMPLEMENTATION BEST PRACTICES")
+    print("=" * 70)
+    
+    practices = """
+    1. CONSTANT-TIME EXECUTION:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    ✓ All secret-dependent branches eliminated
+    ✓ Memory access patterns independent of secrets
+    ✓ No early termination based on secret values
+    ✓ Use constant-time primitives (compare, select, etc.)
+    
+    Critical operations:
+    • Patterson's algorithm (decoding)
+    • Error weight verification
+    • Implicit rejection logic
+    
+    
+    2. SIDE-CHANNEL PROTECTIONS:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Timing attacks:
+    ✓ Fixed iteration counts
+    ✓ Dummy operations where needed
+    
+    Power analysis:
+    ✓ Balanced gates
+    ✓ Random delays (with care)
+    
+    Cache attacks:
+    ✓ Table lookups with all entries accessed
+    ✓ Avoid secret-dependent array indices
+    
+    
+    3. MEMORY SAFETY:
+    ━━━━━━━━━━━━━━━━━
+    
+    ✓ Clear secret data after use
+    ✓ Use secure memory allocation
+    ✓ Avoid copying secrets unnecessarily
+    ✓ Verify buffer bounds
+    
+    
+    4. RANDOMNESS:
+    ━━━━━━━━━━━━━━
+    
+    ✓ Use cryptographic RNG (not rand())
+    ✓ Verify entropy source
+    ✓ Reseed periodically
+    ✓ Test for randomness quality
+    
+    
+    5. ERROR HANDLING:
+    ━━━━━━━━━━━━━━━━━━
+    
+    ✓ Implicit rejection (not error messages)
+    ✓ Constant-time even on failure
+    ✓ No information leakage in errors
+    
+    
+    6. TESTING:
+    ━━━━━━━━━━━
+    
+    ✓ Known-answer tests (KAT)
+    ✓ Negative tests (invalid inputs)
+    ✓ Timing tests (constant-time verification)
+    ✓ Fuzzing
+    
+    
+    REFERENCE IMPLEMENTATIONS:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Classic McEliece: https://classic.mceliece.org/
+    BIKE: https://bikesuite.org/
+    
+    Use reference implementations as starting point!
+    """
+    print(practices)
+
+implementation_best_practices()
+```
+
+## 5. Parameter Selection Guide
+
+```python
+def parameter_selection_guide():
+    """Guide for selecting code-based crypto parameters."""
+    print("\nPARAMETER SELECTION GUIDE")
+    print("=" * 70)
+    
+    guide = """
+    CHOOSING SECURITY LEVEL:
+    ━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    NIST Category 1 (128-bit):
+    • Typical applications
+    • Short-term secrets (< 10 years)
+    • Recommended: mceliece348864
+    
+    NIST Category 3 (192-bit):
+    • Sensitive applications
+    • Medium-term secrets (10-20 years)
+    • Recommended: mceliece460896
+    
+    NIST Category 5 (256-bit):
+    • Highest security applications
+    • Long-term secrets (20+ years)
+    • Government/military
+    • Recommended: mceliece6688128
+    
+    
+    CHOOSING BETWEEN SCHEMES:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Requirement              │ Recommendation                          │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ Maximum security conf.   │ Classic McEliece                        │
+    │ Smallest keys            │ BIKE or ML-KEM                          │
+    │ Smallest ciphertexts     │ Classic McEliece                        │
+    │ Fastest operations       │ ML-KEM (Kyber)                          │
+    │ No decoding failures     │ Classic McEliece                        │
+    │ Hybrid deployment        │ ML-KEM + Classic McEliece               │
+    │ Embedded/IoT             │ ML-KEM (resource constraints)           │
+    │ Long-term archival       │ Classic McEliece                        │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    
+    SECURITY MARGIN RECOMMENDATIONS:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Always choose parameters with margin above minimum:
+    
+    • For 128-bit classical → use parameters giving ~140+ bits
+    • For quantum security → remember Grover gives √ speedup
+    • Monitor research for improved attacks
+    • Plan for parameter increases over deployment lifetime
+    """
+    print(guide)
+
+parameter_selection_guide()
+```
+
+## Summary
+
+In this lesson, you learned about code-based crypto security:
+
+1. **ISD Attacks**: Prange → Stern → BJMM evolution
+2. **Complexity Analysis**: Classical ~0.1n bits, quantum ~0.05n bits
+3. **Structural Attacks**: Binary Goppa resists known attacks
+4. **Constant-Time**: Essential for side-channel resistance
+5. **Memory Safety**: Clear secrets, secure allocation
+6. **Parameter Selection**: Match security level to requirements
+7. **Best Practices**: Use reference implementations as starting point
+
+Code-based cryptography offers strong, well-analyzed security with proper implementation.
+
+## Module Summary
+
+You've completed Module 05: Code-Based Cryptography! You learned:
+
+- **Error-Correcting Codes**: Linear codes, syndrome decoding, hardness
+- **McEliece**: Original PKE, Goppa codes, security from random codes  
+- **Niederreiter**: Dual formulation, smaller ciphertexts
+- **BIKE**: Quasi-cyclic codes, compact keys, DFR considerations
+- **Classic McEliece**: NIST standard, parameter sets, deployment
+- **Security**: ISD attacks, constant-time implementation
+
+## Further Reading
+
+- Next Module: Isogeny-Based Cryptography
+- Related: Advanced ISD algorithms (BJMM, MMT)
+- Advanced: Patterson's algorithm implementation

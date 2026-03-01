@@ -1,0 +1,597 @@
+---
+title: "QAOA for Portfolio Optimization"
+description: "Apply the Quantum Approximate Optimization Algorithm (QAOA) to solve portfolio optimization problems. Understand the algorithm's structure, parameter optimization, and performance characteristics."
+duration: 65
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the QAOA algorithm structure and its components
+- Implement QAOA circuits for portfolio selection problems
+- Optimize variational parameters using classical optimizers
+- Analyze QAOA performance and solution quality
+- Compare QAOA results with classical optimization
+
+## 1. Introduction to QAOA
+
+The Quantum Approximate Optimization Algorithm (QAOA) is a hybrid quantum-classical algorithm for combinatorial optimization.
+
+<Definition term="QAOA">
+QAOA is a variational quantum algorithm that prepares a parametrized quantum state encoding solutions to combinatorial optimization problems. It alternates between "problem" and "mixer" unitaries, with parameters optimized classically.
+</Definition>
+
+### QAOA Circuit Structure
+
+<Formula>
+The QAOA ansatz with depth $p$ is:
+$$|\psi(\boldsymbol{\gamma}, \boldsymbol{\beta})\rangle = \prod_{l=1}^{p} e^{-i\beta_l H_M} e^{-i\gamma_l H_C} |+\rangle^{\otimes n}$$
+
+where $H_C$ is the cost Hamiltonian (from QUBO) and $H_M$ is the mixer Hamiltonian.
+</Formula>
+
+```python
+import numpy as np
+from qiskit import QuantumCircuit
+from qiskit.circuit import Parameter
+
+def create_qaoa_circuit(n_qubits, p_layers, qubo_matrix):
+    """
+    Create a QAOA circuit for a QUBO problem.
+
+    Args:
+        n_qubits: Number of qubits (= number of binary variables)
+        p_layers: QAOA depth (number of layers)
+        qubo_matrix: QUBO matrix Q (n x n)
+
+    Returns:
+        QuantumCircuit with parametrized QAOA ansatz
+    """
+    # Create parameters
+    gammas = [Parameter(f'γ_{l}') for l in range(p_layers)]
+    betas = [Parameter(f'β_{l}') for l in range(p_layers)]
+
+    qc = QuantumCircuit(n_qubits)
+
+    # Initial state: uniform superposition
+    qc.h(range(n_qubits))
+
+    for l in range(p_layers):
+        # Cost unitary: exp(-i γ H_C)
+        # Diagonal terms (Z_i)
+        for i in range(n_qubits):
+            if qubo_matrix[i, i] != 0:
+                qc.rz(2 * gammas[l] * qubo_matrix[i, i], i)
+
+        # Off-diagonal terms (Z_i Z_j)
+        for i in range(n_qubits):
+            for j in range(i + 1, n_qubits):
+                coeff = qubo_matrix[i, j] + qubo_matrix[j, i]
+                if coeff != 0:
+                    qc.cx(i, j)
+                    qc.rz(gammas[l] * coeff, j)
+                    qc.cx(i, j)
+
+        # Mixer unitary: exp(-i β H_M) with H_M = sum_i X_i
+        for i in range(n_qubits):
+            qc.rx(2 * betas[l], i)
+
+    qc.measure_all()
+
+    return qc, gammas, betas
+
+# Example: 4-qubit QAOA with 2 layers
+np.random.seed(42)
+Q = np.array([
+    [-1, 0.5, 0, 0],
+    [0.5, -0.8, 0.3, 0],
+    [0, 0.3, -1.2, 0.4],
+    [0, 0, 0.4, -0.6]
+])
+
+qc, gammas, betas = create_qaoa_circuit(4, p_layers=2, qubo_matrix=Q)
+print(f"Circuit depth: {qc.depth()}")
+print(f"Number of parameters: {len(gammas) + len(betas)}")
+print(qc.draw(fold=80))
+```
+
+## 2. Cost Function Evaluation
+
+QAOA optimizes parameters by minimizing the expected cost.
+
+<Formula>
+$$\langle C \rangle = \langle \psi(\boldsymbol{\gamma}, \boldsymbol{\beta}) | H_C | \psi(\boldsymbol{\gamma}, \boldsymbol{\beta}) \rangle$$
+</Formula>
+
+```python
+from qiskit_aer import AerSimulator
+from qiskit import transpile
+
+def evaluate_qaoa_cost(circuit, params, gammas, betas, qubo_matrix, shots=1024):
+    """
+    Evaluate QAOA expected cost for given parameters.
+
+    Args:
+        circuit: QAOA circuit (parametrized)
+        params: Parameter values [γ_0, ..., γ_{p-1}, β_0, ..., β_{p-1}]
+        gammas: List of gamma parameters
+        betas: List of beta parameters
+        qubo_matrix: QUBO matrix
+        shots: Number of measurement shots
+
+    Returns:
+        Expected cost value
+    """
+    n_qubits = circuit.num_qubits
+    p_layers = len(gammas)
+
+    # Bind parameters
+    param_dict = {}
+    for l in range(p_layers):
+        param_dict[gammas[l]] = params[l]
+        param_dict[betas[l]] = params[p_layers + l]
+
+    bound_circuit = circuit.assign_parameters(param_dict)
+
+    # Simulate
+    simulator = AerSimulator()
+    compiled = transpile(bound_circuit, simulator)
+    result = simulator.run(compiled, shots=shots).result()
+    counts = result.get_counts()
+
+    # Calculate expected cost
+    expected_cost = 0.0
+    for bitstring, count in counts.items():
+        # Reverse bitstring (Qiskit convention)
+        x = np.array([int(b) for b in bitstring[::-1]])
+        cost = x @ qubo_matrix @ x
+        expected_cost += cost * count / shots
+
+    return expected_cost
+
+def get_best_solution(circuit, params, gammas, betas, shots=4096):
+    """
+    Get most frequent measurement outcome.
+    """
+    p_layers = len(gammas)
+    param_dict = {}
+    for l in range(p_layers):
+        param_dict[gammas[l]] = params[l]
+        param_dict[betas[l]] = params[p_layers + l]
+
+    bound_circuit = circuit.assign_parameters(param_dict)
+
+    simulator = AerSimulator()
+    compiled = transpile(bound_circuit, simulator)
+    result = simulator.run(compiled, shots=shots).result()
+    counts = result.get_counts()
+
+    # Find most frequent
+    best_bitstring = max(counts, key=counts.get)
+    x = np.array([int(b) for b in best_bitstring[::-1]])
+
+    return x, counts[best_bitstring] / shots
+
+# Test
+params_test = [0.5, 0.3, 0.4, 0.2]  # 2 gammas, 2 betas
+cost = evaluate_qaoa_cost(qc, params_test, gammas, betas, Q)
+print(f"Expected cost at test params: {cost:.4f}")
+```
+
+## 3. Classical Parameter Optimization
+
+QAOA parameters are optimized using classical methods.
+
+```python
+from scipy.optimize import minimize
+
+class QAOAOptimizer:
+    """
+    Complete QAOA optimization pipeline.
+    """
+
+    def __init__(self, qubo_matrix, p_layers=1, shots=1024):
+        self.Q = qubo_matrix
+        self.n_qubits = qubo_matrix.shape[0]
+        self.p_layers = p_layers
+        self.shots = shots
+
+        # Build circuit
+        self.circuit, self.gammas, self.betas = create_qaoa_circuit(
+            self.n_qubits, p_layers, qubo_matrix
+        )
+
+        self.optimization_history = []
+
+    def cost_function(self, params):
+        """Objective for classical optimizer."""
+        cost = evaluate_qaoa_cost(
+            self.circuit, params, self.gammas, self.betas,
+            self.Q, self.shots
+        )
+        self.optimization_history.append(cost)
+        return cost
+
+    def optimize(self, method='COBYLA', maxiter=100):
+        """
+        Run QAOA parameter optimization.
+        """
+        # Initial parameters (heuristic starting point)
+        n_params = 2 * self.p_layers
+        x0 = np.random.uniform(0, np.pi, n_params)
+
+        # Optimize
+        result = minimize(
+            self.cost_function,
+            x0,
+            method=method,
+            options={'maxiter': maxiter}
+        )
+
+        self.optimal_params = result.x
+        self.optimal_cost = result.fun
+
+        return result
+
+    def get_solution(self, shots=4096):
+        """Get best solution from optimized circuit."""
+        return get_best_solution(
+            self.circuit, self.optimal_params,
+            self.gammas, self.betas, shots
+        )
+
+    def analyze_solution_distribution(self, shots=4096):
+        """Analyze the distribution of solutions."""
+        p_layers = len(self.gammas)
+        param_dict = {}
+        for l in range(p_layers):
+            param_dict[self.gammas[l]] = self.optimal_params[l]
+            param_dict[self.betas[l]] = self.optimal_params[p_layers + l]
+
+        bound_circuit = self.circuit.assign_parameters(param_dict)
+
+        simulator = AerSimulator()
+        compiled = transpile(bound_circuit, simulator)
+        result = simulator.run(compiled, shots=shots).result()
+        counts = result.get_counts()
+
+        # Sort by cost
+        solutions = []
+        for bitstring, count in counts.items():
+            x = np.array([int(b) for b in bitstring[::-1]])
+            cost = x @ self.Q @ x
+            solutions.append((x, cost, count / shots))
+
+        solutions.sort(key=lambda s: s[1])
+
+        return solutions[:10]  # Top 10
+
+# Run QAOA
+qaoa = QAOAOptimizer(Q, p_layers=2, shots=512)
+result = qaoa.optimize(maxiter=50)
+
+print(f"Optimal cost: {qaoa.optimal_cost:.4f}")
+print(f"Optimal parameters: {qaoa.optimal_params.round(3)}")
+
+# Get solution
+x_opt, prob = qaoa.get_solution()
+print(f"\nBest solution: {x_opt}, probability: {prob:.2%}")
+print(f"True cost: {x_opt @ Q @ x_opt:.4f}")
+```
+
+<Tip>
+QAOA performance depends heavily on circuit depth (p) and parameter initialization. Higher p generally gives better results but requires more optimization effort.
+</Tip>
+
+## 4. Portfolio Optimization with QAOA
+
+Apply QAOA to the portfolio selection problem.
+
+```python
+class PortfolioQAOA:
+    """
+    QAOA for portfolio asset selection.
+    """
+
+    def __init__(self, expected_returns, cov_matrix, n_select,
+                 risk_aversion=1.0, penalty=10.0, p_layers=2):
+        self.mu = expected_returns
+        self.Sigma = cov_matrix
+        self.n_assets = len(expected_returns)
+        self.n_select = n_select
+
+        # Build QUBO
+        self.Q = self._build_qubo(risk_aversion, penalty)
+
+        # Initialize QAOA
+        self.qaoa = QAOAOptimizer(self.Q, p_layers=p_layers)
+
+    def _build_qubo(self, risk_aversion, penalty):
+        """Build QUBO for portfolio selection."""
+        n = self.n_assets
+        Q = np.zeros((n, n))
+
+        # Objective: minimize risk - return
+        Q += risk_aversion * self.Sigma
+
+        for i in range(n):
+            Q[i, i] -= self.mu[i]
+
+        # Cardinality constraint
+        Q += penalty * np.ones((n, n))
+        for i in range(n):
+            Q[i, i] -= 2 * penalty * self.n_select
+
+        return Q
+
+    def optimize(self, **kwargs):
+        """Run QAOA optimization."""
+        return self.qaoa.optimize(**kwargs)
+
+    def get_portfolio(self, shots=4096):
+        """Get optimal portfolio selection."""
+        x, prob = self.qaoa.get_solution(shots)
+
+        selected = np.where(x == 1)[0]
+        expected_return = self.mu[selected].sum()
+        variance = x @ self.Sigma @ x
+
+        return {
+            'selection': x,
+            'selected_assets': selected,
+            'n_selected': len(selected),
+            'expected_return': expected_return,
+            'variance': variance,
+            'probability': prob
+        }
+
+    def compare_to_classical(self):
+        """Compare QAOA solution to exhaustive search."""
+        # Exhaustive search
+        best_x, best_cost = None, float('inf')
+        for bits in range(2**self.n_assets):
+            x = np.array([(bits >> i) & 1 for i in range(self.n_assets)])
+            if x.sum() == self.n_select:  # Feasible
+                cost = x @ self.Q @ x
+                if cost < best_cost:
+                    best_cost, best_x = cost, x
+
+        # QAOA solution
+        qaoa_x, _ = self.qaoa.get_solution()
+        qaoa_cost = qaoa_x @ self.Q @ qaoa_x
+
+        return {
+            'classical_solution': best_x,
+            'classical_cost': best_cost,
+            'qaoa_solution': qaoa_x,
+            'qaoa_cost': qaoa_cost,
+            'optimality_gap': (qaoa_cost - best_cost) / abs(best_cost) * 100
+        }
+
+# Example: 5 assets, select 2
+mu = np.array([0.12, 0.10, 0.08, 0.15, 0.09])
+Sigma = np.array([
+    [0.04, 0.01, 0.005, 0.02, 0.008],
+    [0.01, 0.03, 0.008, 0.015, 0.005],
+    [0.005, 0.008, 0.02, 0.01, 0.003],
+    [0.02, 0.015, 0.01, 0.05, 0.012],
+    [0.008, 0.005, 0.003, 0.012, 0.025]
+])
+
+portfolio_qaoa = PortfolioQAOA(mu, Sigma, n_select=2, p_layers=3)
+portfolio_qaoa.optimize(maxiter=100)
+
+result = portfolio_qaoa.get_portfolio()
+print("QAOA Portfolio Selection:")
+print(f"  Selected assets: {result['selected_assets']}")
+print(f"  Expected return: {result['expected_return']:.2%}")
+print(f"  Variance: {result['variance']:.4f}")
+
+comparison = portfolio_qaoa.compare_to_classical()
+print(f"\nClassical optimal: {np.where(comparison['classical_solution'] == 1)[0]}")
+print(f"Optimality gap: {comparison['optimality_gap']:.2f}%")
+```
+
+## 5. QAOA Depth Analysis
+
+Analyze how circuit depth affects solution quality.
+
+```python
+def depth_study(qubo_matrix, p_range, n_trials=5, maxiter=50):
+    """
+    Study QAOA performance vs circuit depth.
+    """
+    # Find optimal by exhaustive search
+    n = qubo_matrix.shape[0]
+    true_optimal = float('inf')
+    for bits in range(2**n):
+        x = np.array([(bits >> i) & 1 for i in range(n)])
+        cost = x @ qubo_matrix @ x
+        true_optimal = min(true_optimal, cost)
+
+    results = []
+
+    for p in p_range:
+        costs = []
+        for trial in range(n_trials):
+            qaoa = QAOAOptimizer(qubo_matrix, p_layers=p, shots=512)
+            qaoa.optimize(maxiter=maxiter)
+            x_opt, _ = qaoa.get_solution()
+            costs.append(x_opt @ qubo_matrix @ x_opt)
+
+        results.append({
+            'p': p,
+            'mean_cost': np.mean(costs),
+            'std_cost': np.std(costs),
+            'best_cost': np.min(costs),
+            'approx_ratio': true_optimal / np.mean(costs)
+        })
+
+    return results, true_optimal
+
+# Study (use small problem for speed)
+Q_small = np.array([
+    [-1, 0.3, 0.2],
+    [0.3, -0.8, 0.4],
+    [0.2, 0.4, -1.2]
+])
+
+depth_results, optimal = depth_study(Q_small, p_range=[1, 2, 3], n_trials=3)
+
+print(f"True optimal cost: {optimal:.4f}")
+print("\nDepth study results:")
+for r in depth_results:
+    print(f"  p={r['p']}: mean={r['mean_cost']:.4f}, "
+          f"best={r['best_cost']:.4f}, "
+          f"ratio={r['approx_ratio']:.3f}")
+```
+
+<Warning>
+Current NISQ hardware limits practical QAOA depth. Noise accumulates with circuit depth, so very deep circuits may perform worse than moderate depth due to errors.
+</Warning>
+
+## 6. Advanced QAOA Techniques
+
+### Warm Starting
+
+Initialize QAOA with classically computed hints:
+
+```python
+def warm_start_qaoa(qubo_matrix, classical_hint, p_layers=2):
+    """
+    Warm-start QAOA using classical solution as hint.
+
+    Uses WS-QAOA: modify initial state based on classical solution.
+    """
+    n = qubo_matrix.shape[0]
+
+    # Create circuit with warm start
+    qc = QuantumCircuit(n)
+
+    gammas = [Parameter(f'γ_{l}') for l in range(p_layers)]
+    betas = [Parameter(f'β_{l}') for l in range(p_layers)]
+
+    # Warm start: rotate toward classical solution
+    epsilon = 0.3  # Bias strength
+    for i in range(n):
+        if classical_hint[i] == 1:
+            # Bias toward |1⟩
+            theta = np.pi/2 - epsilon
+        else:
+            # Bias toward |0⟩
+            theta = np.pi/2 + epsilon
+        qc.ry(theta, i)
+
+    # Standard QAOA layers (same as before)
+    for l in range(p_layers):
+        for i in range(n):
+            if qubo_matrix[i, i] != 0:
+                qc.rz(2 * gammas[l] * qubo_matrix[i, i], i)
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                coeff = qubo_matrix[i, j] + qubo_matrix[j, i]
+                if coeff != 0:
+                    qc.cx(i, j)
+                    qc.rz(gammas[l] * coeff, j)
+                    qc.cx(i, j)
+
+        for i in range(n):
+            qc.rx(2 * betas[l], i)
+
+    qc.measure_all()
+    return qc, gammas, betas
+
+# Example: warm start with greedy solution
+def greedy_portfolio(returns, n_select):
+    """Simple greedy: select top n by return."""
+    indices = np.argsort(returns)[::-1][:n_select]
+    x = np.zeros(len(returns), dtype=int)
+    x[indices] = 1
+    return x
+
+greedy = greedy_portfolio(mu, 2)
+print(f"Greedy solution: {np.where(greedy == 1)[0]}")
+```
+
+### Constrained Mixer
+
+Replace standard X mixer with one that preserves constraints:
+
+```python
+def create_xy_mixer_circuit(n_qubits, beta):
+    """
+    XY mixer that preserves Hamming weight.
+    Good for cardinality-constrained problems.
+    """
+    qc = QuantumCircuit(n_qubits)
+
+    for i in range(n_qubits - 1):
+        # XY interaction between adjacent qubits
+        qc.rxx(beta, i, i+1)
+        qc.ryy(beta, i, i+1)
+
+    return qc
+```
+
+## 7. Practical Considerations
+
+### Noise Effects
+
+```python
+def estimate_noise_impact(circuit, noise_level=0.01):
+    """
+    Estimate how noise affects QAOA results.
+    """
+    # Approximate error rate
+    n_cnots = circuit.count_ops().get('cx', 0)
+    n_single = sum(circuit.count_ops().get(g, 0)
+                   for g in ['rx', 'ry', 'rz', 'h'])
+
+    total_gates = n_cnots + n_single
+    expected_fidelity = (1 - noise_level) ** total_gates
+
+    return {
+        'n_cnots': n_cnots,
+        'n_single_qubit': n_single,
+        'total_gates': total_gates,
+        'estimated_fidelity': expected_fidelity
+    }
+
+noise_analysis = estimate_noise_impact(qc)
+print("Noise analysis:")
+for key, val in noise_analysis.items():
+    print(f"  {key}: {val}")
+```
+
+### Problem Size Scaling
+
+| Qubits | Classical (2^n) | QAOA Advantage |
+|--------|-----------------|----------------|
+| 10 | 1,024 states | Minimal |
+| 20 | 1M states | Possible |
+| 50 | 10^15 states | Expected |
+| 100 | 10^30 states | Significant |
+
+<Tip>
+QAOA is most promising for problems too large for classical exhaustive search but small enough to run on available quantum hardware with acceptable noise.
+</Tip>
+
+## Summary
+
+In this lesson, you learned:
+
+1. **QAOA structure** alternates between cost and mixer unitaries
+2. **Parameter optimization** uses classical methods to minimize expected cost
+3. **Portfolio QAOA** encodes asset selection as a QUBO problem
+4. **Circuit depth** affects solution quality but increases noise sensitivity
+5. **Warm starting** and **constrained mixers** can improve performance
+6. **Current limitations** include noise and qubit connectivity
+
+## Further Reading
+
+- Next lesson: VQE for Portfolio Optimization
+- Related: Quantum Annealing for Optimization
+- Application: Running QAOA on Real Quantum Hardware

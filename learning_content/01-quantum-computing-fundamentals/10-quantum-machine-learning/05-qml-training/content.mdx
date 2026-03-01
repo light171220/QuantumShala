@@ -1,0 +1,317 @@
+# Training Quantum Models
+
+## Introduction
+
+Training variational quantum models requires computing gradients of quantum expectation values and using classical optimizers to update parameters. The hybrid nature of this process presents unique challenges and opportunities.
+
+## The Training Loop
+
+```
+Variational Training Loop
+═════════════════════════
+
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│  1. INITIALIZE                                                  │
+│     θ = random or structured initialization                    │
+│                                                                 │
+│  2. FORWARD PASS                                                │
+│     ┌───────────────────────────────────────────────────┐      │
+│     │  For each (x, y) in batch:                       │      │
+│     │    |ψ⟩ = U(θ, x)|0⟩                              │      │
+│     │    ŷ = ⟨ψ|O|ψ⟩  (measure observable)            │      │
+│     └───────────────────────────────────────────────────┘      │
+│                                                                 │
+│  3. COMPUTE LOSS                                                │
+│     L(θ) = (1/N) Σ loss(ŷᵢ, yᵢ)                               │
+│                                                                 │
+│  4. COMPUTE GRADIENTS                                           │
+│     ∇L = [∂L/∂θ₁, ∂L/∂θ₂, ..., ∂L/∂θₘ]                        │
+│                                                                 │
+│  5. UPDATE PARAMETERS                                           │
+│     θ ← θ - η · ∇L  (or more sophisticated update)            │
+│                                                                 │
+│  6. REPEAT until convergence                                    │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+KEY DIFFERENCES FROM CLASSICAL:
+    - Forward pass runs on quantum computer
+    - Gradients require special techniques
+    - Measurements are stochastic (shot noise)
+```
+
+## Gradient Computation
+
+```python
+def gradient_methods():
+    """
+    Methods for computing gradients in VQAs.
+    """
+    print("""
+Gradient Computation Methods
+════════════════════════════
+
+1. PARAMETER SHIFT RULE
+    For gates of form G(θ) = exp(-iθP/2) where P² = I:
+
+    ∂⟨O⟩/∂θ = (⟨O⟩_{θ+π/2} - ⟨O⟩_{θ-π/2}) / 2
+
+    Exact gradient from two circuit evaluations!
+
+    Example for Ry(θ):
+    ┌────────────────────────────────────────────────────┐
+    │                                                    │
+    │  gradient = (expectation(θ + π/2)                 │
+    │            - expectation(θ - π/2)) / 2            │
+    │                                                    │
+    └────────────────────────────────────────────────────┘
+
+
+2. FINITE DIFFERENCE
+    ∂⟨O⟩/∂θ ≈ (⟨O⟩_{θ+ε} - ⟨O⟩_{θ-ε}) / (2ε)
+
+    Approximate, works for any gate
+    Requires careful ε choice
+
+
+3. HADAMARD TEST GRADIENT
+    Direct gradient measurement using ancilla
+    More complex circuit, single evaluation
+
+
+COMPARISON:
+┌──────────────────────────────────────────────────────────┐
+│  Method           │  Evaluations  │  Exact?  │  Usage   │
+├──────────────────────────────────────────────────────────┤
+│  Parameter shift  │  2 per param  │  Yes     │  Common  │
+│  Finite diff      │  2 per param  │  No      │  Backup  │
+│  Hadamard test    │  1 per param  │  Yes     │  Special │
+│  SPSA             │  2 total      │  No      │  Noisy   │
+└──────────────────────────────────────────────────────────┘
+    """)
+
+gradient_methods()
+```
+
+## Parameter Shift Rule Details
+
+```
+Parameter Shift Rule
+════════════════════
+
+WHICH GATES?
+    Works for: Rx, Ry, Rz, and controlled versions
+    Specifically: exp(-iθG/2) where G² = I (Pauli-like)
+
+GENERAL FORMULA:
+    For R(θ) = exp(-iθG/2):
+
+    ∂⟨O⟩/∂θ = (1/2)[⟨O⟩_{θ+s} - ⟨O⟩_{θ-s}]
+
+    where s = π/2 for standard Paulis
+
+
+IMPLEMENTATION:
+
+    def gradient_param_shift(circuit, params, i, observable):
+        # Shift parameter i by +π/2
+        params_plus = params.copy()
+        params_plus[i] += np.pi/2
+        exp_plus = expectation(circuit, params_plus, observable)
+
+        # Shift parameter i by -π/2
+        params_minus = params.copy()
+        params_minus[i] -= np.pi/2
+        exp_minus = expectation(circuit, params_minus, observable)
+
+        return (exp_plus - exp_minus) / 2
+
+
+COST:
+    m parameters → 2m circuit evaluations for full gradient
+    Can be parallelized across different shifts
+
+
+CHAIN RULE:
+    For loss L(⟨O⟩):
+    ∂L/∂θ = (∂L/∂⟨O⟩) · (∂⟨O⟩/∂θ)
+
+    Combine quantum gradients with classical chain rule
+```
+
+## Classical Optimizers
+
+```python
+def optimizer_comparison():
+    """
+    Compare optimizers for quantum circuits.
+    """
+    print("""
+Classical Optimizers for QML
+════════════════════════════
+
+GRADIENT-BASED:
+
+1. GRADIENT DESCENT
+    θ_{t+1} = θ_t - η · ∇L
+    Simple but slow, sensitive to learning rate
+
+2. ADAM
+    Adaptive learning rates + momentum
+    Works well in practice
+    θ_{t+1} = θ_t - η · m_t / (√v_t + ε)
+
+3. NATURAL GRADIENT (Quantum Natural Gradient)
+    θ_{t+1} = θ_t - η · F⁻¹ · ∇L
+    F = Fisher information matrix
+    Accounts for geometry of parameter space
+
+
+GRADIENT-FREE:
+
+4. COBYLA
+    Constrained optimization
+    Good for small parameter counts
+    No gradients needed
+
+5. SPSA (Simultaneous Perturbation)
+    Random direction gradient approximation
+    Only 2 evaluations per iteration (not 2m)
+    Good for noisy settings
+
+6. POWELL
+    Direction set method
+    Sequential line searches
+
+
+RECOMMENDATIONS:
+┌──────────────────────────────────────────────────────────┐
+│  Scenario              │  Recommended Optimizer         │
+├──────────────────────────────────────────────────────────┤
+│  Simulator, low noise  │  Adam, L-BFGS                  │
+│  Real hardware, noisy  │  SPSA, COBYLA                  │
+│  Few parameters (<20)  │  COBYLA, Nelder-Mead           │
+│  Many parameters       │  Adam + parameter shift        │
+│  Very noisy            │  SPSA with averaging           │
+└──────────────────────────────────────────────────────────┘
+    """)
+
+optimizer_comparison()
+```
+
+## Shot-Based Training
+
+```
+Handling Shot Noise
+═══════════════════
+
+PROBLEM:
+    Quantum measurements are probabilistic
+    Each expectation requires finite "shots"
+    Limited shots → noisy estimates
+
+SHOT NOISE:
+    σ² ≈ σ²_O / n_shots
+
+    More shots → better estimates → slower
+
+BUDGET ALLOCATION:
+    ┌────────────────────────────────────────────────────┐
+    │                                                    │
+    │  Total budget: B shots per iteration              │
+    │                                                    │
+    │  Forward pass: B_f = B/3                          │
+    │  Gradient estimation: B_g = 2B/3                  │
+    │                                                    │
+    │  Per-parameter gradient: B_g / (2m) shots         │
+    │  (2 evaluations per parameter)                    │
+    │                                                    │
+    └────────────────────────────────────────────────────┘
+
+
+STRATEGIES:
+
+1. FIXED SHOTS
+    Same shots throughout training
+    Simple but not optimal
+
+2. INCREASING SHOTS
+    Start with few shots (explore)
+    Increase as training progresses (exploit)
+
+3. ADAPTIVE SHOTS
+    Allocate more shots to high-variance gradients
+    Importance sampling approach
+
+
+SHOT-FRUGAL METHODS:
+
+    SPSA: Only 2 evaluations per iteration
+    ROSALIN: Randomized estimator
+    iCANS: Importance-weighted sampling
+
+    Trade gradient quality for shot efficiency
+```
+
+## Loss Function Design
+
+```
+Loss Functions for QML
+══════════════════════
+
+CLASSIFICATION:
+
+1. MEAN SQUARED ERROR
+    L = (1/N) Σ (ŷ - y)²
+    Where ŷ = ⟨O⟩ is measured expectation
+
+2. CROSS-ENTROPY (for binary)
+    L = -(1/N) Σ [y log(p) + (1-y) log(1-p)]
+    p = (⟨O⟩ + 1) / 2  (map to [0,1])
+
+3. HINGE LOSS
+    L = (1/N) Σ max(0, 1 - y·ŷ)
+    For y ∈ {-1, +1}
+
+
+OBSERVABLE CHOICE:
+
+    Typical: O = Z⊗Z⊗...⊗Z (all Z product)
+    Or: O = Z_0 (measure first qubit)
+
+    Multiple observables for multi-class:
+    O₁, O₂, ..., O_k for k classes
+
+
+LOCAL vs GLOBAL COST:
+
+    LOCAL (recommended):
+        L = Σᵢ ⟨Oᵢ⟩ where Oᵢ acts on few qubits
+        Gradients don't vanish as fast
+
+    GLOBAL (prone to plateaus):
+        L = ⟨O⟩ where O acts on all qubits
+        Information diluted across system
+
+
+EXAMPLE SETUP:
+
+    Binary classification on n qubits:
+
+    |0⟩^n ─[encode(x)]─[ansatz(θ)]─[measure Z_0]─
+
+    ŷ = ⟨Z_0⟩ ∈ [-1, 1]
+    Predict class 0 if ŷ < 0, else class 1
+```
+
+## Summary
+
+Training quantum models involves:
+
+1. **Gradient computation**: Parameter shift rule for exact gradients
+2. **Optimizers**: Adam for clean gradients, SPSA for noisy settings
+3. **Shot management**: Balance precision vs. evaluation cost
+4. **Loss functions**: Design for trainability (prefer local costs)
+
+Understanding these techniques is essential for successful QML in practice.
