@@ -22,6 +22,7 @@ const CodePlaygroundPage = lazy(() => import('@/pages/simulator/CodePlaygroundPa
 const QMLStudioPage = lazy(() => import('@/pages/hubs/QMLStudioPage'))
 const PQCLabPage = lazy(() => import('@/pages/hubs/PQCLabPage'))
 const ChemistryLabPage = lazy(() => import('@/pages/hubs/ChemistryLabPage'))
+const ResearchHubPage = lazy(() => import('@/pages/hubs/ResearchHubPage'))
 const ProfilePage = lazy(() => import('@/pages/profile/ProfilePage'))
 const SettingsPage = lazy(() => import('@/pages/profile/SettingsPage'))
 const LeaderboardPage = lazy(() => import('@/pages/profile/LeaderboardPage'))
@@ -96,8 +97,7 @@ export default function App() {
     <Suspense fallback={<LoadingScreen />}>
       <Routes>
         <Route path="/" element={<HomePage />} />
-        
-        {/* Auth Routes */}
+
         <Route path="/login" element={
           <PublicRoute>
             <LoginPage />
@@ -117,16 +117,14 @@ export default function App() {
             <ForgotPasswordPage />
           </PublicRoute>
         } />
-        
-        {/* Legal & Info Routes (Public) */}
+
         <Route path="/about" element={<AboutPage />} />
         <Route path="/privacy" element={<PrivacyPolicyPage />} />
         <Route path="/terms" element={<TermsOfServicePage />} />
         <Route path="/cookies" element={<CookiePolicyPage />} />
         <Route path="/contact" element={<ContactPage />} />
         <Route path="/faq" element={<FAQPage />} />
-        
-        {/* Protected Routes with Layout */}
+
         <Route element={<MainLayout />}>
           <Route path="/dashboard" element={
             <ProtectedRoute>
@@ -205,7 +203,13 @@ export default function App() {
               <ChemistryLabPage />
             </ProtectedRoute>
           } />
-          
+
+          <Route path="/hub/research" element={
+            <ProtectedRoute>
+              <ResearchHubPage />
+            </ProtectedRoute>
+          } />
+
           <Route path="/profile" element={
             <ProtectedRoute>
               <ProfilePage />
@@ -235,8 +239,7 @@ export default function App() {
               <AchievementsPage />
             </ProtectedRoute>
           } />
-          
-          {/* Admin Routes - Inside MainLayout */}
+
           <Route path="/admin" element={
             <AdminRoute>
               <AdminDashboardPage />

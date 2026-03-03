@@ -1,0 +1,387 @@
+---
+title: "Backend-Specific Compilation"
+description: "Complete compilation pipelines for real quantum backends."
+duration: 60
+difficulty: "advanced"
+---
+
+## 1. Backend Properties
+
+Real backends have calibration data that affects compilation.
+
+```python
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Set, Optional
+import json
+
+@dataclass
+class QubitProperties:
+    t1: float  # T1 time in microseconds
+    t2: float  # T2 time in microseconds
+    frequency: float  # Qubit frequency in GHz
+    readout_error: float
+    gate_errors: Dict[str, float]
+
+@dataclass
+class GateProperties:
+    gate: str
+    qubits: Tuple[int, ...]
+    duration: int  # in dt
+    error: float
+
+@dataclass
+class BackendProperties:
+    name: str
+    num_qubits: int
+    coupling_map: Set[Tuple[int, int]]
+    qubit_properties: Dict[int, QubitProperties]
+    gate_properties: List[GateProperties]
+    dt: float  # Time unit in seconds
+
+    def get_gate_error(self, gate: str, qubits: Tuple[int, ...]) -> float:
+        """Get error rate for specific gate on qubits."""
+        for gp in self.gate_properties:
+            if gp.gate == gate and gp.qubits == qubits:
+                return gp.error
+        return 0.01  # Default
+
+    def get_gate_duration(self, gate: str, qubits: Tuple[int, ...]) -> int:
+        """Get duration for specific gate on qubits."""
+        for gp in self.gate_properties:
+            if gp.gate == gate and gp.qubits == qubits:
+                return gp.duration
+        return 160  # Default
+
+# Example backend (simplified IBM-like)
+def create_sample_backend() -> BackendProperties:
+    coupling = {(0, 1), (1, 2), (1, 3), (3, 4)}
+
+    qubit_props = {
+        i: QubitProperties(
+            t1=100.0 + i * 10,
+            t2=80.0 + i * 5,
+            frequency=5.0 + i * 0.1,
+            readout_error=0.02,
+            gate_errors={'sx': 0.001, 'x': 0.001, 'rz': 0.0}
+        )
+        for i in range(5)
+    }
+
+    gate_props = [
+        GateProperties('cx', (0, 1), 300, 0.01),
+        GateProperties('cx', (1, 0), 300, 0.012),
+        GateProperties('cx', (1, 2), 280, 0.009),
+        GateProperties('cx', (1, 3), 320, 0.015),
+        GateProperties('cx', (3, 4), 290, 0.011),
+    ]
+
+    return BackendProperties(
+        name="sample_backend",
+        num_qubits=5,
+        coupling_map=coupling,
+        qubit_properties=qubit_props,
+        gate_properties=gate_props,
+        dt=0.222e-9
+    )
+```
+
+## 2. Error-Aware Routing
+
+Choose routes that minimize error accumulation.
+
+```python
+@dataclass
+class Gate:
+    name: str
+    qubits: Tuple[int, ...]
+
+class ErrorAwareRouter:
+    """Route considering gate errors."""
+
+    def __init__(self, backend: BackendProperties):
+        self.backend = backend
+        self.coupling = backend.coupling_map
+
+    def route_cost(self, path: List[int]) -> float:
+        """Calculate total error cost for a routing path."""
+        cost = 0.0
+
+        for i in range(len(path) - 1):
+            q0, q1 = path[i], path[i + 1]
+
+            # SWAP = 3 CNOTs
+            cx_error_01 = self.backend.get_gate_error('cx', (q0, q1))
+            cx_error_10 = self.backend.get_gate_error('cx', (q1, q0))
+
+            # Approximate SWAP error
+            swap_error = 3 * (cx_error_01 + cx_error_10) / 2
+            cost += swap_error
+
+        return cost
+
+    def find_best_path(self, start: int, end: int) -> List[int]:
+        """Find path minimizing error cost."""
+        import heapq
+
+        # Dijkstra with error cost
+        costs = {start: 0.0}
+        paths = {start: [start]}
+        heap = [(0.0, start)]
+
+        while heap:
+            cost, current = heapq.heappop(heap)
+
+            if current == end:
+                return paths[current]
+
+            if cost > costs.get(current, float('inf')):
+                continue
+
+            for edge in self.coupling:
+                if edge[0] == current:
+                    neighbor = edge[1]
+                elif edge[1] == current:
+                    neighbor = edge[0]
+                else:
+                    continue
+
+                new_path = paths[current] + [neighbor]
+                new_cost = cost + self.route_cost([current, neighbor])
+
+                if new_cost < costs.get(neighbor, float('inf')):
+                    costs[neighbor] = new_cost
+                    paths[neighbor] = new_path
+                    heapq.heappush(heap, (new_cost, neighbor))
+
+        return []
+```
+
+## 3. CNOT Direction Selection
+
+Choose CNOT direction based on error rates.
+
+```python
+class CNOTDirectionSelector:
+    """Select optimal CNOT direction."""
+
+    def __init__(self, backend: BackendProperties):
+        self.backend = backend
+
+    def select_direction(self, q0: int, q1: int) -> Tuple[int, int]:
+        """Choose CNOT direction with lower error."""
+        error_01 = self.backend.get_gate_error('cx', (q0, q1))
+        error_10 = self.backend.get_gate_error('cx', (q1, q0))
+
+        if error_01 <= error_10:
+            return (q0, q1)
+        else:
+            return (q1, q0)
+
+    def needs_flip(self, control: int, target: int) -> bool:
+        """Check if CNOT direction needs to be flipped."""
+        optimal = self.select_direction(control, target)
+        return optimal != (control, target)
+
+    def flip_cnot(self, control: int, target: int) -> List[Tuple[str, Tuple]]:
+        """Convert CX(c,t) to CX(t,c) using Hadamards."""
+        return [
+            ('h', (control,)),
+            ('h', (target,)),
+            ('cx', (target, control)),
+            ('h', (control,)),
+            ('h', (target,)),
+        ]
+```
+
+## 4. Complete Transpilation Pipeline
+
+```python
+from abc import ABC, abstractmethod
+
+class TranspilerPass(ABC):
+    @abstractmethod
+    def run(self, circuit: List[Gate], backend: BackendProperties) -> List[Gate]:
+        pass
+
+class UnrollPass(TranspilerPass):
+    """Decompose gates to native set."""
+
+    def run(self, circuit: List[Gate], backend: BackendProperties) -> List[Gate]:
+        native_single = {'rz', 'sx', 'x'}
+        result = []
+
+        for gate in circuit:
+            if gate.name in native_single or gate.name == 'cx':
+                result.append(gate)
+            elif gate.name == 'h':
+                # H = RZ(pi/2) @ SX @ RZ(pi/2)
+                q = gate.qubits[0]
+                result.extend([
+                    Gate('rz', (q,)),
+                    Gate('sx', (q,)),
+                    Gate('rz', (q,)),
+                ])
+            # Add more decompositions...
+            else:
+                result.append(gate)
+
+        return result
+
+class LayoutPass(TranspilerPass):
+    """Initial qubit mapping."""
+
+    def run(self, circuit: List[Gate], backend: BackendProperties) -> List[Gate]:
+        # For now, trivial mapping
+        return circuit
+
+class RoutingPass(TranspilerPass):
+    """Insert SWAPs for connectivity."""
+
+    def __init__(self):
+        self.router = None
+
+    def run(self, circuit: List[Gate], backend: BackendProperties) -> List[Gate]:
+        self.router = ErrorAwareRouter(backend)
+        result = []
+        layout = {i: i for i in range(backend.num_qubits)}
+
+        for gate in circuit:
+            if len(gate.qubits) == 1:
+                phys = layout[gate.qubits[0]]
+                result.append(Gate(gate.name, (phys,)))
+            elif len(gate.qubits) == 2:
+                log_q0, log_q1 = gate.qubits
+                phys_q0, phys_q1 = layout[log_q0], layout[log_q1]
+
+                if (phys_q0, phys_q1) in backend.coupling_map or \
+                   (phys_q1, phys_q0) in backend.coupling_map:
+                    result.append(Gate(gate.name, (phys_q0, phys_q1)))
+                else:
+                    # Need routing
+                    path = self.router.find_best_path(phys_q0, phys_q1)
+                    swaps, new_layout = self._route_along_path(path, layout)
+                    result.extend(swaps)
+                    layout = new_layout
+                    result.append(Gate(gate.name, (layout[log_q0], layout[log_q1])))
+
+        return result
+
+    def _route_along_path(self, path, layout):
+        # Simplified
+        return [], layout
+
+class OptimizationPass(TranspilerPass):
+    """Gate cancellation and simplification."""
+
+    def run(self, circuit: List[Gate], backend: BackendProperties) -> List[Gate]:
+        # Basic cancellation
+        result = []
+        for gate in circuit:
+            if result and self._cancels(result[-1], gate):
+                result.pop()
+            else:
+                result.append(gate)
+        return result
+
+    def _cancels(self, g1: Gate, g2: Gate) -> bool:
+        if g1.name != g2.name or g1.qubits != g2.qubits:
+            return False
+        return g1.name in {'x', 'h', 'cx'}
+
+class SchedulingPass(TranspilerPass):
+    """Gate scheduling."""
+
+    def run(self, circuit: List[Gate], backend: BackendProperties) -> List[Gate]:
+        # ASAP scheduling (gates already in list, just return)
+        return circuit
+
+class TranspilerPipeline:
+    """Complete transpilation pipeline."""
+
+    def __init__(self, backend: BackendProperties,
+                 optimization_level: int = 1):
+        self.backend = backend
+        self.optimization_level = optimization_level
+        self.passes = self._build_passes()
+
+    def _build_passes(self) -> List[TranspilerPass]:
+        passes = [
+            UnrollPass(),
+            LayoutPass(),
+            RoutingPass(),
+        ]
+
+        if self.optimization_level >= 1:
+            passes.append(OptimizationPass())
+
+        passes.append(SchedulingPass())
+
+        return passes
+
+    def transpile(self, circuit: List[Gate]) -> List[Gate]:
+        """Run full transpilation."""
+        current = circuit
+
+        for pass_ in self.passes:
+            current = pass_.run(current, self.backend)
+
+        return current
+
+# Example usage
+backend = create_sample_backend()
+pipeline = TranspilerPipeline(backend, optimization_level=1)
+
+circuit = [
+    Gate('h', (0,)),
+    Gate('cx', (0, 2)),  # Not directly connected
+    Gate('h', (0,)),
+]
+
+transpiled = pipeline.transpile(circuit)
+print(f"Original: {len(circuit)} gates")
+print(f"Transpiled: {len(transpiled)} gates")
+```
+
+## 5. Calibration-Aware Optimization
+
+```python
+class CalibrationAwareOptimizer:
+    """Optimize based on current calibration data."""
+
+    def __init__(self, backend: BackendProperties):
+        self.backend = backend
+
+    def select_best_qubits(self, n_qubits: int) -> List[int]:
+        """Select qubits with best properties."""
+        # Score qubits by T1, T2, and error rates
+        scores = {}
+
+        for q, props in self.backend.qubit_properties.items():
+            score = props.t1 + props.t2 - 100 * props.readout_error
+            scores[q] = score
+
+        sorted_qubits = sorted(scores.keys(), key=lambda q: -scores[q])
+        return sorted_qubits[:n_qubits]
+
+    def should_avoid_qubit(self, qubit: int) -> bool:
+        """Check if qubit has poor calibration."""
+        props = self.backend.qubit_properties.get(qubit)
+        if props is None:
+            return True
+
+        # Thresholds for "bad" qubits
+        if props.t1 < 50 or props.t2 < 30:
+            return True
+        if props.readout_error > 0.1:
+            return True
+
+        return False
+```
+
+## Summary
+
+Backend compilation combines all techniques:
+1. **Properties**: Use calibration data for decisions
+2. **Error-aware routing**: Minimize error accumulation
+3. **Direction selection**: Choose best CNOT directions
+4. **Pipeline**: Chain passes for complete transpilation

@@ -6,3 +6,11 @@ export * from './circuit-analyzer'
 export * from './tensor-network'
 export * from './circuit-cutting'
 export * from './simulation-orchestrator'
+export * from './noise-simulator'
+export * from './optimizer'
+export * from './debugger'
+export * from './comparison'
+
+export * from './parsers'
+
+export * from './optimization'

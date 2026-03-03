@@ -21,12 +21,17 @@ import {
   Sparkles,
   Network,
   Shuffle,
+  ChevronRight,
+  Lightbulb,
+  TrendingUp,
+  GitBranch,
 } from 'lucide-react'
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs'
 import { Progress } from '@/components/ui/Progress'
 import { Badge } from '@/components/ui/Badge'
+import { Modal } from '@/components/ui/Modal'
 import { LossCurve } from '@/components/qml/training/LossCurve'
 import { DatasetBrowser } from '@/components/qml/datasets/DatasetBrowser'
 import { DecisionBoundary } from '@/components/qml/visualization/DecisionBoundary'
@@ -66,6 +71,64 @@ const BUILTIN_DATASETS = [
   { id: 'xor', name: 'XOR Problem', samples: 100, features: 2, classes: 2, icon: '✕' },
   { id: 'wine', name: 'Wine Quality', samples: 178, features: 13, classes: 3, icon: '🍷' },
   { id: 'breast_cancer', name: 'Breast Cancer', samples: 569, features: 30, classes: 2, icon: '🏥' },
+]
+
+const QML_GUIDE_SECTIONS = [
+  {
+    icon: Brain,
+    title: 'Algorithm Selection',
+    color: 'from-purple-500 to-pink-500',
+    description: 'Choose from multiple quantum machine learning algorithms for classification tasks.',
+    features: [
+      'VQC: Variational Quantum Classifier for general classification',
+      'QSVM: Quantum Support Vector Machine with quantum kernels',
+      'QCNN: Quantum Convolutional Neural Network for structured data',
+      'QGAN: Quantum Generative Adversarial Network for data generation',
+    ]
+  },
+  {
+    icon: Settings,
+    title: 'Model Configuration',
+    color: 'from-blue-500 to-cyan-500',
+    description: 'Customize your quantum circuit architecture and training parameters.',
+    features: [
+      'Adjust number of qubits (2-10) for model capacity',
+      'Configure circuit layers for expressibility',
+      'Choose data encoding (angle, amplitude, IQP, dense)',
+      'Select optimizer (Adam, SGD, SPSA, COBYLA)',
+    ]
+  },
+  {
+    icon: BarChart3,
+    title: 'Training & Metrics',
+    color: 'from-green-500 to-emerald-500',
+    description: 'Train your model and monitor real-time performance metrics.',
+    features: [
+      'Watch loss and accuracy curves during training',
+      'Track convergence with epoch progress',
+      'View confusion matrix for classification results',
+      'Analyze model performance across classes',
+    ]
+  },
+  {
+    icon: Sparkles,
+    title: 'Visualization',
+    color: 'from-orange-500 to-yellow-500',
+    description: 'Visualize decision boundaries and classification results.',
+    features: [
+      'Interactive 2D decision boundary plots',
+      'Color-coded predictions vs actual labels',
+      'Dataset scatter plots with class separation',
+      'Export trained model code to PennyLane',
+    ]
+  },
+]
+
+const QML_QUICK_START = [
+  { step: 1, text: 'Select a QML algorithm (VQC recommended for beginners)' },
+  { step: 2, text: 'Choose a dataset from the Datasets tab' },
+  { step: 3, text: 'Configure qubits, layers, and optimizer settings' },
+  { step: 4, text: 'Click "Start Training" and watch the model learn' },
 ]
 
 function generateSyntheticData(type: string, numSamples: number): { data: number[][]; labels: number[] } {
@@ -133,6 +196,7 @@ export default function QMLStudioPage() {
   const [predictions, setPredictions] = useState<number[]>([])
 
   const [showCode, setShowCode] = useState(false)
+  const [showGuide, setShowGuide] = useState(false)
 
   const { data: syntheticData, labels: syntheticLabels } = useMemo(() => {
     return generateSyntheticData(selectedDataset.id, 100)
@@ -362,7 +426,12 @@ def discriminator(data, disc_weights):
           >
             <span className="hidden sm:inline">Export Code</span>
           </Button>
-          <Button variant="secondary" leftIcon={<BookOpen className="w-4 h-4" />} size="sm">
+          <Button
+            variant="secondary"
+            leftIcon={<BookOpen className="w-4 h-4" />}
+            size="sm"
+            onClick={() => setShowGuide(true)}
+          >
             <span className="hidden sm:inline">Guide</span>
           </Button>
         </div>
@@ -785,6 +854,87 @@ def discriminator(data, disc_weights):
           </div>
         </TabsContent>
       </Tabs>
+
+      <Modal
+        isOpen={showGuide}
+        onClose={() => setShowGuide(false)}
+        title="QML Studio Guide"
+        description="Learn how to train quantum machine learning models"
+        size="full"
+        variant="neumorph"
+      >
+        <div className="space-y-6 max-h-[60vh] overflow-y-auto pr-2">
+          <div className="bg-gradient-to-r from-purple-500/10 to-pink-500/10 border border-purple-500/20 rounded-xl p-4">
+            <h3 className="text-white font-semibold mb-3 flex items-center gap-2">
+              <Zap className="w-5 h-5 text-purple-400" />
+              Quick Start
+            </h3>
+            <div className="space-y-2">
+              {QML_QUICK_START.map(({ step, text }) => (
+                <div key={step} className="flex items-center gap-3">
+                  <div className="w-6 h-6 rounded-full bg-purple-500/20 flex items-center justify-center text-xs font-bold text-purple-400">
+                    {step}
+                  </div>
+                  <span className="text-sm text-slate-300">{text}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {QML_GUIDE_SECTIONS.map((section) => (
+              <div
+                key={section.title}
+                className="bg-neumorph-darker rounded-xl p-4 border border-white/5"
+              >
+                <div className="flex items-start gap-3 mb-3">
+                  <div className={`w-10 h-10 rounded-lg bg-gradient-to-br ${section.color} flex items-center justify-center flex-shrink-0`}>
+                    <section.icon className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <h4 className="text-white font-semibold">{section.title}</h4>
+                    <p className="text-xs text-slate-400 mt-0.5">{section.description}</p>
+                  </div>
+                </div>
+                <ul className="space-y-1.5">
+                  {section.features.map((feature, idx) => (
+                    <li key={idx} className="flex items-start gap-2 text-xs text-slate-300">
+                      <ChevronRight className="w-3 h-3 text-slate-500 mt-0.5 flex-shrink-0" />
+                      <span>{feature}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+
+          <div className="bg-neumorph-darker rounded-xl p-4 border border-white/5">
+            <h3 className="text-white font-semibold mb-2 flex items-center gap-2">
+              <Lightbulb className="w-4 h-4 text-yellow-400" />
+              What is Quantum Machine Learning?
+            </h3>
+            <p className="text-sm text-slate-300 leading-relaxed">
+              <span className="text-purple-400 font-medium">Quantum Machine Learning (QML)</span> combines quantum computing with machine learning to potentially solve problems faster or find patterns classical computers cannot. Variational quantum circuits use parameterized quantum gates that are optimized during training, similar to weights in neural networks.
+            </p>
+            <div className="mt-3 flex items-center gap-4 text-xs">
+              <div className="flex items-center gap-1.5">
+                <TrendingUp className="w-4 h-4 text-green-400" />
+                <span className="text-slate-400">Potential quantum advantage for certain tasks</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-neumorph-darker rounded-xl p-4 border border-white/5">
+            <h3 className="text-white font-semibold mb-2 flex items-center gap-2">
+              <Code className="w-4 h-4 text-green-400" />
+              Export to PennyLane
+            </h3>
+            <p className="text-sm text-slate-300 leading-relaxed">
+              Click "Export Code" to generate PennyLane Python code for your configured model. You can run this code on real quantum hardware or simulators like IBM Quantum, Amazon Braket, or Google Cirq.
+            </p>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }

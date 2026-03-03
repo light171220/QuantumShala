@@ -1,0 +1,480 @@
+---
+title: "Connectivity Topologies: Qubit Interaction Graphs"
+description: "Understand how qubit connectivity affects algorithm implementation and circuit depth."
+duration: 50
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Describe common qubit connectivity topologies and their graph-theoretic properties
+- Calculate the SWAP overhead for implementing algorithms on different topologies
+- Analyze how connectivity affects circuit depth and error accumulation
+- Compare native connectivity across hardware platforms
+- Design qubit mapping strategies for specific topologies
+
+## 1. Introduction to Qubit Connectivity
+
+The connectivity topology of a quantum processor determines which qubits can directly interact through two-qubit gates. This fundamental constraint significantly impacts algorithm efficiency.
+
+<Definition term="Connectivity Graph">
+A graph G = (V, E) where vertices V represent qubits and edges E represent pairs of qubits that can perform native two-qubit gates. The topology determines circuit compilation overhead and achievable circuit depth.
+</Definition>
+
+### Why Connectivity Matters
+
+<Formula>
+$$\text{Circuit Depth} = D_{\text{ideal}} + D_{\text{routing}} \times N_{\text{SWAP}}$$
+</Formula>
+
+where:
+- $D_{\text{ideal}}$ is the depth assuming all-to-all connectivity
+- $D_{\text{routing}}$ is the depth penalty per SWAP operation
+- $N_{\text{SWAP}}$ is the number of SWAP gates needed
+
+<Warning>
+Each SWAP gate typically decomposes into 3 CNOT gates, tripling the error contribution from routing overhead. Poor connectivity can make the routing overhead dominate total circuit error.
+</Warning>
+
+## 2. Common Connectivity Topologies
+
+### Linear (1D Chain)
+
+The simplest topology where each qubit connects only to its neighbors.
+
+```
+Q0 -- Q1 -- Q2 -- Q3 -- Q4 -- Q5
+```
+
+**Properties:**
+- Degree: 2 (except endpoints)
+- Diameter: n-1
+- SWAP distance between qubits i, j: |i-j|
+
+<Formula>
+$$\text{Average SWAP distance} = \frac{n}{3}$$
+</Formula>
+
+**Used by:** Trapped ion chains (within a segment)
+
+### 2D Grid (Square Lattice)
+
+Each qubit connects to up to 4 nearest neighbors.
+
+```
+Q0 -- Q1 -- Q2
+|     |     |
+Q3 -- Q4 -- Q5
+|     |     |
+Q6 -- Q7 -- Q8
+```
+
+**Properties:**
+- Degree: 4 (interior), 2-3 (edges/corners)
+- Diameter: $2(\sqrt{n}-1)$ for n qubits
+- Supports surface code naturally
+
+<Formula>
+$$\text{Average SWAP distance} \approx \frac{2\sqrt{n}}{3}$$
+</Formula>
+
+**Used by:** Google Sycamore, early IBM devices
+
+### Heavy-Hex Topology
+
+IBM's current topology with reduced connectivity to improve gate fidelity.
+
+```
+    Q1 -- Q2 -- Q3
+   /           \
+Q0              Q4
+   \           /
+    Q5 -- Q6 -- Q7
+```
+
+**Properties:**
+- Degree: 2-3
+- Better isolation reduces crosstalk
+- Trade-off: higher routing overhead
+
+**Used by:** IBM Eagle, Heron, Condor processors
+
+### All-to-All Connectivity
+
+Every qubit can directly interact with every other qubit.
+
+**Properties:**
+- Degree: n-1
+- Diameter: 1
+- No SWAP overhead needed
+
+<Formula>
+$$\text{SWAP overhead} = 0$$
+</Formula>
+
+**Used by:** Trapped ions (within a chain), neutral atoms (via atom shuttling)
+
+## 3. Graph-Theoretic Metrics
+
+### Key Metrics for Evaluation
+
+```python
+import numpy as np
+import networkx as nx
+
+def analyze_topology(adjacency_list: dict, name: str) -> dict:
+    """
+    Analyze connectivity topology properties.
+
+    Args:
+        adjacency_list: Dictionary mapping qubit to list of neighbors
+        name: Topology name
+
+    Returns:
+        Dictionary with graph metrics
+    """
+    G = nx.Graph(adjacency_list)
+    n = G.number_of_nodes()
+
+    # Basic properties
+    degree_sequence = [d for n, d in G.degree()]
+    avg_degree = np.mean(degree_sequence)
+
+    # Diameter: longest shortest path
+    if nx.is_connected(G):
+        diameter = nx.diameter(G)
+        avg_path_length = nx.average_shortest_path_length(G)
+    else:
+        diameter = float('inf')
+        avg_path_length = float('inf')
+
+    # Clustering coefficient
+    clustering = nx.average_clustering(G)
+
+    # Edge connectivity (fault tolerance)
+    edge_connectivity = nx.edge_connectivity(G) if nx.is_connected(G) else 0
+
+    return {
+        'name': name,
+        'n_qubits': n,
+        'n_edges': G.number_of_edges(),
+        'avg_degree': avg_degree,
+        'max_degree': max(degree_sequence),
+        'min_degree': min(degree_sequence),
+        'diameter': diameter,
+        'avg_path_length': avg_path_length,
+        'clustering_coeff': clustering,
+        'edge_connectivity': edge_connectivity
+    }
+
+# Example: 9-qubit grid
+grid_adj = {
+    0: [1, 3], 1: [0, 2, 4], 2: [1, 5],
+    3: [0, 4, 6], 4: [1, 3, 5, 7], 5: [2, 4, 8],
+    6: [3, 7], 7: [4, 6, 8], 8: [5, 7]
+}
+
+metrics = analyze_topology(grid_adj, "3x3 Grid")
+print("Topology Analysis:")
+for key, value in metrics.items():
+    print(f"  {key}: {value}")
+```
+
+### Metric Comparison Table
+
+| Topology | Avg Degree | Diameter | Avg Path | Routing Cost |
+|----------|------------|----------|----------|--------------|
+| Linear (n) | ~2 | n-1 | n/3 | High |
+| 2D Grid (nxn) | ~4 | 2(n-1) | 2n/3 | Medium |
+| Heavy-Hex | ~2.5 | O(n) | O(n) | Medium-High |
+| All-to-All | n-1 | 1 | 1 | Zero |
+
+## 4. SWAP Overhead Analysis
+
+### The Routing Problem
+
+When a two-qubit gate is needed between non-adjacent qubits, SWAP operations must move qubit states.
+
+<Definition term="SWAP Overhead">
+The additional circuit depth and gates required to route qubit states to adjacent positions for two-qubit gate execution. Each SWAP = 3 CNOTs.
+</Definition>
+
+### SWAP Gate Decomposition
+
+<Formula>
+$$\text{SWAP} = \text{CNOT}_{12} \cdot \text{CNOT}_{21} \cdot \text{CNOT}_{12}$$
+</Formula>
+
+**Error Accumulation:**
+
+<Formula>
+$$\epsilon_{\text{SWAP}} \approx 3 \times \epsilon_{\text{CNOT}}$$
+</Formula>
+
+### Calculating Routing Overhead
+
+```python
+import numpy as np
+from collections import deque
+
+def calculate_swap_overhead(topology_adj: dict, qubit_pairs: list) -> dict:
+    """
+    Calculate SWAP overhead for a set of two-qubit gate operations.
+
+    Args:
+        topology_adj: Adjacency list of topology
+        qubit_pairs: List of (q1, q2) tuples for required gates
+
+    Returns:
+        Dictionary with routing analysis
+    """
+    n_qubits = len(topology_adj)
+
+    # Build shortest path matrix using BFS
+    def bfs_distances(start):
+        distances = {start: 0}
+        queue = deque([start])
+        while queue:
+            node = queue.popleft()
+            for neighbor in topology_adj.get(node, []):
+                if neighbor not in distances:
+                    distances[neighbor] = distances[node] + 1
+                    queue.append(neighbor)
+        return distances
+
+    # Calculate all-pairs shortest paths
+    distance_matrix = {}
+    for q in range(n_qubits):
+        distance_matrix[q] = bfs_distances(q)
+
+    # Calculate SWAP requirements
+    total_swaps = 0
+    max_swaps = 0
+    non_adjacent_gates = 0
+
+    for q1, q2 in qubit_pairs:
+        dist = distance_matrix[q1].get(q2, float('inf'))
+        swaps_needed = max(0, dist - 1)  # Adjacent = 0 SWAPs
+
+        total_swaps += swaps_needed
+        max_swaps = max(max_swaps, swaps_needed)
+        if dist > 1:
+            non_adjacent_gates += 1
+
+    n_gates = len(qubit_pairs)
+
+    return {
+        'total_2q_gates': n_gates,
+        'non_adjacent_gates': non_adjacent_gates,
+        'fraction_non_adjacent': non_adjacent_gates / n_gates if n_gates > 0 else 0,
+        'total_swaps_needed': total_swaps,
+        'max_swaps_single_gate': max_swaps,
+        'avg_swaps_per_gate': total_swaps / n_gates if n_gates > 0 else 0,
+        'cnot_overhead': total_swaps * 3  # 3 CNOTs per SWAP
+    }
+```
+
+## 5. Platform-Specific Topologies
+
+### IBM Quantum: Heavy-Hex
+
+<Tip>
+Heavy-hex topology reduces qubit degree to 2-3 connections, minimizing crosstalk at the cost of increased routing overhead. This trade-off improves overall fidelity for most algorithms.
+</Tip>
+
+**Structure:**
+- Hexagonal cells with degree-2 "bridge" qubits
+- Optimized for surface code patches
+
+**SWAP Overhead Example (127 qubits):**
+- Average SWAP distance: ~4-5
+- Maximum SWAP distance: ~12
+
+### Google Quantum: Grid/Sycamore
+
+- 2D grid with degree 4 connectivity
+- 54-72 qubits in recent processors
+- Good balance of connectivity and crosstalk
+
+### Trapped Ions: All-to-All (per chain)
+
+- Within a chain: full connectivity
+- Between chains: photonic links (lower fidelity)
+
+```python
+# All-to-all: every qubit pair is adjacent
+def all_to_all_adj(n):
+    return {i: [j for j in range(n) if j != i] for i in range(n)}
+
+# For 32 ions: no SWAP overhead within chain
+ion_adj = all_to_all_adj(32)
+```
+
+### Neutral Atoms: Reconfigurable
+
+Unique capability: atoms can be physically rearranged!
+
+<Formula>
+$$T_{\text{rearrange}} \approx 100\text{ ms} \ll T_{\text{algorithm}}$$
+</Formula>
+
+This allows effective all-to-all connectivity through atom shuttling.
+
+## 6. Circuit Compilation Strategies
+
+### Qubit Mapping
+
+Assign logical qubits to physical qubits to minimize routing.
+
+```python
+import networkx as nx
+from itertools import permutations
+
+def greedy_mapping(circuit_graph: dict, hardware_adj: dict) -> dict:
+    """
+    Greedy initial mapping based on interaction frequency.
+
+    Args:
+        circuit_graph: Weighted graph of qubit interactions in algorithm
+        hardware_adj: Hardware connectivity
+
+    Returns:
+        Mapping from logical to physical qubits
+    """
+    n_logical = len(circuit_graph)
+    n_physical = len(hardware_adj)
+
+    if n_logical > n_physical:
+        raise ValueError("Not enough physical qubits")
+
+    # Sort logical qubits by interaction count (most connected first)
+    interaction_counts = {q: sum(circuit_graph[q].values())
+                        for q in circuit_graph}
+    sorted_logical = sorted(interaction_counts.keys(),
+                           key=lambda x: interaction_counts[x],
+                           reverse=True)
+
+    # Sort physical qubits by degree (most connected first)
+    physical_degrees = {q: len(hardware_adj[q]) for q in hardware_adj}
+    sorted_physical = sorted(physical_degrees.keys(),
+                            key=lambda x: physical_degrees[x],
+                            reverse=True)
+
+    # Greedy assignment
+    mapping = {}
+    used_physical = set()
+
+    for logical in sorted_logical:
+        for physical in sorted_physical:
+            if physical not in used_physical:
+                mapping[logical] = physical
+                used_physical.add(physical)
+                break
+
+    return mapping
+```
+
+### Routing Algorithms
+
+**Common Approaches:**
+1. **Greedy routing**: Insert SWAPs to bring qubits adjacent
+2. **Look-ahead**: Consider future gates when choosing SWAPs
+3. **A* search**: Optimal but expensive
+4. **SABRE**: Swap-based Bidirectional heuristic search
+
+### Depth vs. SWAP Trade-off
+
+<Formula>
+$$\text{Total Error} \approx D \times \epsilon_{\text{decoherence}} + N_{\text{gate}} \times \epsilon_{\text{gate}}$$
+</Formula>
+
+Sometimes fewer SWAPs with more depth is worse than more SWAPs executed in parallel.
+
+## 7. Topology Optimization for Algorithms
+
+### Algorithm-Specific Requirements
+
+| Algorithm | Connectivity Pattern | Best Topology |
+|-----------|---------------------|---------------|
+| QFT | All-to-all cascading | All-to-all |
+| QAOA | Problem-dependent | Match problem graph |
+| VQE | Local interactions | 2D grid |
+| Grover | Global oracle | Any (oracle-dependent) |
+| Surface code | Nearest neighbor | 2D grid |
+
+### Matching Problem to Hardware
+
+<Example>
+**QAOA for MaxCut on 3-regular graph:**
+
+If the problem graph is 3-regular and the hardware is heavy-hex (also ~3-regular), a good mapping can achieve near-zero SWAP overhead.
+
+```python
+def assess_problem_hardware_match(problem_adj, hardware_adj):
+    """Check how well problem graph matches hardware."""
+    problem_edges = sum(len(v) for v in problem_adj.values()) // 2
+    hardware_edges = sum(len(v) for v in hardware_adj.values()) // 2
+
+    # Check if problem is subgraph of hardware
+    # (simplified check)
+    max_problem_degree = max(len(v) for v in problem_adj.values())
+    max_hardware_degree = max(len(v) for v in hardware_adj.values())
+
+    return {
+        'problem_edges': problem_edges,
+        'hardware_edges': hardware_edges,
+        'degree_compatible': max_problem_degree <= max_hardware_degree,
+        'size_compatible': len(problem_adj) <= len(hardware_adj)
+    }
+```
+</Example>
+
+## 8. Future Connectivity Trends
+
+### Dynamic Connectivity
+
+Emerging approaches to improve effective connectivity:
+- **Atom shuttling** (neutral atoms): Move qubits to interact
+- **Photonic links** (modular): Connect distant modules
+- **Tunable couplers** (superconducting): Switch connections on/off
+
+### 3D Architectures
+
+Moving beyond planar chips:
+- Multiple layers of qubits
+- Through-silicon vias for connections
+- Better connectivity with same footprint
+
+<Formula>
+$$\text{3D Grid Diameter} = 3 \times \sqrt[3]{n} - 3$$
+</Formula>
+
+vs. 2D:
+
+<Formula>
+$$\text{2D Grid Diameter} = 2 \times \sqrt{n} - 2$$
+</Formula>
+
+## 9. Summary
+
+Key takeaways on connectivity topologies:
+
+1. **Connectivity fundamentally limits** what circuits can efficiently execute
+2. **SWAP overhead** can dominate circuit depth for sparse topologies
+3. **Different platforms** offer different native connectivities
+4. **All-to-all** (trapped ions, reconfigurable atoms) minimizes routing
+5. **Sparse topologies** (heavy-hex) trade routing for fidelity
+6. **Mapping and routing** algorithms are critical for performance
+
+<Tip>
+When selecting quantum hardware for a specific application, analyze the interaction pattern of your algorithm and match it to hardware topology. A smaller machine with better connectivity match may outperform a larger machine with poor match.
+</Tip>
+
+## Further Reading
+
+- Li et al., "Tackling the Qubit Mapping Problem for NISQ-Era Quantum Devices" (2019)
+- Murali et al., "Noise-Adaptive Compiler Mappings for NISQ Computers" (2019)
+- Paler & Devitt, "An introduction to quantum circuit optimization" (2022)
+- Next lesson: Commercial Systems - comparing available quantum computers

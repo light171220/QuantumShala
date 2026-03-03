@@ -1,0 +1,594 @@
+---
+title: "Gradient Computation: Parameter-Shift Rules and Beyond"
+description: "Master quantum gradient computation techniques including the parameter-shift rule, stochastic gradient estimation, and hardware-efficient methods."
+duration: 75
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Derive and apply the parameter-shift rule for quantum gradients
+- Implement gradient computation for different gate types
+- Compare exact gradients with finite difference approximations
+- Apply stochastic gradient estimation for shot-efficient training
+- Implement simultaneous measurement strategies for gradient estimation
+- Analyze the cost-accuracy tradeoffs in quantum gradient methods
+
+## 1. The Quantum Gradient Problem
+
+Computing gradients of quantum expectation values is essential for variational algorithms. Given a parameterized state $|\psi(\theta)\rangle$ and observable $O$:
+
+<Formula>
+$$E(\theta) = \langle\psi(\theta)|O|\psi(\theta)\rangle$$
+</Formula>
+
+We need to compute:
+
+<Formula>
+$$\frac{\partial E}{\partial \theta} = \frac{\partial}{\partial \theta}\langle\psi(\theta)|O|\psi(\theta)\rangle$$
+</Formula>
+
+<Definition term="Quantum Gradient">
+The derivative of a quantum expectation value with respect to a circuit parameter. Unlike classical gradients, quantum gradients must be estimated through measurements and cannot be computed by direct differentiation.
+</Definition>
+
+### Challenges Unique to Quantum
+
+| Challenge | Classical | Quantum |
+|-----------|-----------|---------|
+| State access | Full state vector | Only via measurement |
+| Differentiation | Backpropagation | Parameter-shift or finite difference |
+| Noise | Negligible | Shot noise and hardware noise |
+| Cost | O(1) per gradient | O(shots) per component |
+
+## 2. The Parameter-Shift Rule
+
+The parameter-shift rule provides **exact** gradients using only circuit evaluations.
+
+<Definition term="Parameter-Shift Rule">
+For gates of the form $G(\theta) = e^{-i\theta P/2}$ where $P^2 = I$, the gradient is:
+$$\frac{\partial E}{\partial \theta} = \frac{E(\theta + s) - E(\theta - s)}{2\sin(s)}$$
+where $s$ is the shift parameter (typically $\pi/2$).
+</Definition>
+
+### Derivation
+
+For a gate $G(\theta) = e^{-i\theta P/2}$ with generator $P$ satisfying $P^2 = I$:
+
+<Formula>
+$$G(\theta) = \cos(\theta/2)I - i\sin(\theta/2)P$$
+</Formula>
+
+The expectation value becomes:
+
+<Formula>
+$$E(\theta) = A + B\cos\theta + C\sin\theta$$
+</Formula>
+
+for some constants $A, B, C$. Taking the derivative:
+
+<Formula>
+$$\frac{dE}{d\theta} = -B\sin\theta + C\cos\theta = \frac{E(\theta + \pi/2) - E(\theta - \pi/2)}{2}$$
+</Formula>
+
+```python
+import numpy as np
+from typing import Callable, Tuple, List
+from dataclasses import dataclass
+
+@dataclass
+class GateInfo:
+    """Information about a parameterized gate."""
+    name: str
+    generator_eigenvalues: List[float]
+    shift: float
+    coefficient: float
+
+# Standard gates and their parameter-shift rules
+GATE_RULES = {
+    'RX': GateInfo('RX', [-0.5, 0.5], np.pi/2, 0.5),
+    'RY': GateInfo('RY', [-0.5, 0.5], np.pi/2, 0.5),
+    'RZ': GateInfo('RZ', [-0.5, 0.5], np.pi/2, 0.5),
+    'CRX': GateInfo('CRX', [-0.5, 0.5], np.pi/2, 0.5),
+    'CRY': GateInfo('CRY', [-0.5, 0.5], np.pi/2, 0.5),
+    'CRZ': GateInfo('CRZ', [-0.5, 0.5], np.pi/2, 0.5),
+}
+
+def parameter_shift_gradient(
+    cost_function: Callable[[np.ndarray], float],
+    params: np.ndarray,
+    param_idx: int,
+    shift: float = np.pi/2
+) -> float:
+    """
+    Compute gradient using the parameter-shift rule.
+
+    Args:
+        cost_function: Function returning expectation value
+        params: Current parameter values
+        param_idx: Index of parameter to differentiate
+        shift: Shift value (pi/2 for standard gates)
+
+    Returns:
+        Gradient with respect to specified parameter
+    """
+    params_plus = params.copy()
+    params_plus[param_idx] += shift
+
+    params_minus = params.copy()
+    params_minus[param_idx] -= shift
+
+    E_plus = cost_function(params_plus)
+    E_minus = cost_function(params_minus)
+
+    gradient = (E_plus - E_minus) / (2 * np.sin(shift))
+
+    return gradient
+
+def compute_full_gradient(
+    cost_function: Callable[[np.ndarray], float],
+    params: np.ndarray,
+    shifts: np.ndarray = None
+) -> np.ndarray:
+    """
+    Compute full gradient vector using parameter-shift rule.
+
+    Args:
+        cost_function: Expectation value function
+        params: Current parameters
+        shifts: Per-parameter shift values (default: pi/2)
+
+    Returns:
+        Gradient vector
+    """
+    n_params = len(params)
+    if shifts is None:
+        shifts = np.full(n_params, np.pi/2)
+
+    gradient = np.zeros(n_params)
+
+    for i in range(n_params):
+        gradient[i] = parameter_shift_gradient(
+            cost_function, params, i, shifts[i]
+        )
+
+    return gradient
+```
+
+## 3. Generalized Parameter-Shift Rule
+
+For gates with generators having more than two distinct eigenvalues:
+
+<Definition term="Generalized Parameter-Shift Rule">
+For a generator with eigenvalues $\{\lambda_1, \ldots, \lambda_M\}$, the gradient can be computed using a linear combination of shifted evaluations:
+$$\frac{\partial E}{\partial \theta} = \sum_{\ell=1}^{M(M-1)/2} c_\ell [E(\theta + s_\ell) - E(\theta - s_\ell)]$$
+</Definition>
+
+```python
+def generalized_parameter_shift(
+    cost_function: Callable[[np.ndarray], float],
+    params: np.ndarray,
+    param_idx: int,
+    eigenvalues: List[float]
+) -> float:
+    """
+    Compute gradient using generalized parameter-shift rule.
+
+    Works for generators with arbitrary eigenvalue spectra.
+
+    Args:
+        cost_function: Expectation value function
+        params: Current parameters
+        param_idx: Index of parameter
+        eigenvalues: Eigenvalues of the generator
+
+    Returns:
+        Gradient value
+    """
+    # Get unique eigenvalue differences
+    eigenvalues = np.array(sorted(set(eigenvalues)))
+    n_eig = len(eigenvalues)
+
+    # For two eigenvalues, use standard rule
+    if n_eig == 2:
+        diff = eigenvalues[1] - eigenvalues[0]
+        shift = np.pi / (2 * diff) if diff != 0 else np.pi/2
+        return parameter_shift_gradient(cost_function, params, param_idx, shift)
+
+    # General case: solve linear system for coefficients
+    # Build Vandermonde-like matrix
+    diffs = []
+    for i in range(n_eig):
+        for j in range(i+1, n_eig):
+            diffs.append(eigenvalues[j] - eigenvalues[i])
+
+    n_terms = len(diffs)
+    gradient = 0.0
+
+    # Use linear combination of two-term shifts
+    for diff in diffs:
+        shift = np.pi / (2 * diff)
+        coeff = diff / sum(d for d in diffs)  # Simplified weighting
+
+        params_plus = params.copy()
+        params_plus[param_idx] += shift
+        params_minus = params.copy()
+        params_minus[param_idx] -= shift
+
+        gradient += coeff * (cost_function(params_plus) - cost_function(params_minus)) / (2 * np.sin(shift * diff))
+
+    return gradient
+```
+
+## 4. Finite Difference Methods
+
+When parameter-shift is not applicable, finite differences provide an alternative:
+
+<Formula>
+$$\frac{\partial E}{\partial \theta} \approx \frac{E(\theta + \epsilon) - E(\theta - \epsilon)}{2\epsilon}$$
+</Formula>
+
+```python
+def finite_difference_gradient(
+    cost_function: Callable[[np.ndarray], float],
+    params: np.ndarray,
+    param_idx: int,
+    epsilon: float = 1e-4
+) -> float:
+    """
+    Compute gradient using central finite differences.
+
+    Args:
+        cost_function: Function to differentiate
+        params: Current parameters
+        param_idx: Parameter index
+        epsilon: Step size
+
+    Returns:
+        Approximate gradient
+    """
+    params_plus = params.copy()
+    params_plus[param_idx] += epsilon
+
+    params_minus = params.copy()
+    params_minus[param_idx] -= epsilon
+
+    gradient = (cost_function(params_plus) - cost_function(params_minus)) / (2 * epsilon)
+
+    return gradient
+
+def compare_gradient_methods(
+    cost_function: Callable[[np.ndarray], float],
+    params: np.ndarray,
+    param_idx: int,
+    analytical_gradient: float = None
+) -> dict:
+    """
+    Compare gradient computation methods.
+
+    Args:
+        cost_function: Expectation value function
+        params: Current parameters
+        param_idx: Parameter to test
+        analytical_gradient: True gradient if known
+
+    Returns:
+        Comparison results
+    """
+    # Parameter-shift gradient
+    ps_grad = parameter_shift_gradient(cost_function, params, param_idx)
+
+    # Finite difference gradients with different step sizes
+    fd_grads = {}
+    for eps in [1e-2, 1e-4, 1e-6, 1e-8]:
+        fd_grads[eps] = finite_difference_gradient(
+            cost_function, params, param_idx, eps
+        )
+
+    results = {
+        'parameter_shift': ps_grad,
+        'finite_difference': fd_grads
+    }
+
+    if analytical_gradient is not None:
+        results['analytical'] = analytical_gradient
+        results['ps_error'] = abs(ps_grad - analytical_gradient)
+        results['fd_errors'] = {
+            eps: abs(fd - analytical_gradient)
+            for eps, fd in fd_grads.items()
+        }
+
+    return results
+```
+
+<Warning>
+Finite differences suffer from bias in the presence of shot noise. Small epsilon amplifies noise, while large epsilon introduces truncation error. Parameter-shift rule is generally preferred when applicable.
+</Warning>
+
+## 5. Shot-Efficient Gradient Estimation
+
+Gradient estimation requires many quantum circuit evaluations. Strategies to reduce shot overhead:
+
+### Stochastic Gradient Descent
+
+```python
+class StochasticGradientEstimator:
+    """
+    Estimate gradients using subset of parameters per iteration.
+    """
+
+    def __init__(
+        self,
+        batch_size: int = 1,
+        shots_per_term: int = 1000
+    ):
+        self.batch_size = batch_size
+        self.shots_per_term = shots_per_term
+
+    def estimate_gradient(
+        self,
+        cost_function: Callable[[np.ndarray], float],
+        params: np.ndarray
+    ) -> np.ndarray:
+        """
+        Estimate gradient using random parameter subset.
+
+        Returns unbiased gradient estimate.
+        """
+        n_params = len(params)
+        gradient = np.zeros(n_params)
+
+        # Randomly select parameters to update
+        indices = np.random.choice(
+            n_params,
+            size=min(self.batch_size, n_params),
+            replace=False
+        )
+
+        for idx in indices:
+            grad_component = parameter_shift_gradient(
+                cost_function, params, idx
+            )
+            # Scale by n_params/batch_size for unbiased estimate
+            gradient[idx] = grad_component * (n_params / self.batch_size)
+
+        return gradient
+```
+
+### Simultaneous Measurement
+
+```python
+class SimultaneousMeasurement:
+    """
+    Measure multiple Pauli terms simultaneously when they commute.
+    """
+
+    def __init__(self, hamiltonian_terms: List[Tuple[float, str]]):
+        """
+        Args:
+            hamiltonian_terms: List of (coefficient, pauli_string) tuples
+        """
+        self.terms = hamiltonian_terms
+        self.groups = self._group_commuting_terms()
+
+    def _commute(self, p1: str, p2: str) -> bool:
+        """Check if two Pauli strings commute."""
+        anticommute_count = 0
+        for c1, c2 in zip(p1, p2):
+            if c1 != 'I' and c2 != 'I' and c1 != c2:
+                anticommute_count += 1
+        return anticommute_count % 2 == 0
+
+    def _group_commuting_terms(self) -> List[List[int]]:
+        """Group terms into commuting sets."""
+        n_terms = len(self.terms)
+        groups = []
+        assigned = [False] * n_terms
+
+        for i in range(n_terms):
+            if assigned[i]:
+                continue
+
+            # Start new group
+            group = [i]
+            assigned[i] = True
+
+            for j in range(i + 1, n_terms):
+                if assigned[j]:
+                    continue
+
+                # Check if j commutes with all in group
+                _, pauli_j = self.terms[j]
+                if all(self._commute(self.terms[k][1], pauli_j) for k in group):
+                    group.append(j)
+                    assigned[j] = True
+
+            groups.append(group)
+
+        return groups
+
+    def num_measurement_groups(self) -> int:
+        """Return number of measurement circuits needed."""
+        return len(self.groups)
+
+    def estimate_expectation(
+        self,
+        circuit_executor: Callable[[str], float],
+        shots_per_group: int
+    ) -> float:
+        """
+        Estimate full Hamiltonian expectation value.
+
+        Args:
+            circuit_executor: Function that runs circuit and returns
+                             expectation for given Pauli string
+            shots_per_group: Shots per measurement group
+
+        Returns:
+            Total expectation value estimate
+        """
+        total = 0.0
+
+        for group in self.groups:
+            # Measure all terms in group together
+            for term_idx in group:
+                coeff, pauli = self.terms[term_idx]
+                exp_val = circuit_executor(pauli)
+                total += coeff * exp_val
+
+        return total
+```
+
+## 6. Higher-Order Derivatives
+
+For some optimization algorithms, we need second derivatives (Hessian).
+
+<Formula>
+$$\frac{\partial^2 E}{\partial \theta_i \partial \theta_j} = \frac{1}{4}\sum_{s_i,s_j=\pm} s_i s_j E(\theta_i + s_i\pi/2, \theta_j + s_j\pi/2)$$
+</Formula>
+
+```python
+def compute_hessian_element(
+    cost_function: Callable[[np.ndarray], float],
+    params: np.ndarray,
+    i: int,
+    j: int,
+    shift: float = np.pi/2
+) -> float:
+    """
+    Compute single Hessian element using parameter-shift rule.
+
+    For i != j, uses four circuit evaluations.
+    For i == j, uses two circuit evaluations.
+    """
+    if i == j:
+        # Diagonal element: second derivative
+        params_2plus = params.copy()
+        params_2plus[i] += 2 * shift
+
+        params_2minus = params.copy()
+        params_2minus[i] -= 2 * shift
+
+        E_2plus = cost_function(params_2plus)
+        E_2minus = cost_function(params_2minus)
+        E_0 = cost_function(params)
+
+        # Second derivative formula
+        return (E_2plus + E_2minus - 2 * E_0) / (4 * np.sin(shift)**2)
+
+    else:
+        # Off-diagonal element: mixed partial derivative
+        evaluations = []
+        for si in [1, -1]:
+            for sj in [1, -1]:
+                p = params.copy()
+                p[i] += si * shift
+                p[j] += sj * shift
+                evaluations.append((si * sj, cost_function(p)))
+
+        hessian_ij = sum(sign * val for sign, val in evaluations) / 4
+        return hessian_ij
+
+def compute_full_hessian(
+    cost_function: Callable[[np.ndarray], float],
+    params: np.ndarray
+) -> np.ndarray:
+    """
+    Compute full Hessian matrix.
+
+    Warning: Requires O(n^2) circuit evaluations!
+    """
+    n = len(params)
+    hessian = np.zeros((n, n))
+
+    for i in range(n):
+        for j in range(i, n):
+            h_ij = compute_hessian_element(cost_function, params, i, j)
+            hessian[i, j] = h_ij
+            hessian[j, i] = h_ij  # Symmetric
+
+    return hessian
+```
+
+## 7. Quantum Fisher Information
+
+The Quantum Fisher Information (QFI) matrix is essential for quantum natural gradient:
+
+<Formula>
+$$F_{ij} = 4\text{Re}\left[\langle\partial_i\psi|\partial_j\psi\rangle - \langle\partial_i\psi|\psi\rangle\langle\psi|\partial_j\psi\rangle\right]$$
+</Formula>
+
+```python
+def estimate_quantum_fisher_info(
+    state_function: Callable[[np.ndarray], np.ndarray],
+    params: np.ndarray,
+    epsilon: float = 1e-4
+) -> np.ndarray:
+    """
+    Estimate Quantum Fisher Information matrix.
+
+    Uses finite differences to approximate state derivatives.
+
+    Args:
+        state_function: Function returning state vector for params
+        params: Current parameters
+        epsilon: Finite difference step
+
+    Returns:
+        QFI matrix
+    """
+    n = len(params)
+    psi = state_function(params)
+
+    # Compute state derivatives
+    dpsi = []
+    for i in range(n):
+        params_plus = params.copy()
+        params_plus[i] += epsilon
+        params_minus = params.copy()
+        params_minus[i] -= epsilon
+
+        psi_plus = state_function(params_plus)
+        psi_minus = state_function(params_minus)
+
+        dpsi_i = (psi_plus - psi_minus) / (2 * epsilon)
+        dpsi.append(dpsi_i)
+
+    # Compute QFI matrix
+    F = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            # <dpsi_i|dpsi_j>
+            inner_ij = np.vdot(dpsi[i], dpsi[j])
+
+            # <dpsi_i|psi><psi|dpsi_j>
+            inner_i_psi = np.vdot(dpsi[i], psi)
+            inner_psi_j = np.vdot(psi, dpsi[j])
+
+            F[i, j] = 4 * np.real(inner_ij - inner_i_psi * inner_psi_j)
+
+    return F
+```
+
+## Summary
+
+In this lesson, you mastered quantum gradient computation:
+
+1. **Parameter-Shift Rule**: Exact gradients using shifted circuit evaluations
+2. **Generalized Rules**: Handling arbitrary generator eigenvalue spectra
+3. **Finite Differences**: Alternative when parameter-shift is unavailable
+4. **Shot Efficiency**: Stochastic estimation and simultaneous measurement
+5. **Higher-Order Derivatives**: Hessian computation for advanced optimization
+6. **Quantum Fisher Information**: Foundation for natural gradient methods
+
+<Tip>
+Always prefer parameter-shift over finite differences for quantum circuits - it provides exact gradients (up to shot noise) and is more robust to the noise inherent in quantum measurements.
+</Tip>
+
+## Further Reading
+
+- Next lesson: Noise Resilience Techniques
+- Related: Quantum Natural Gradient Descent
+- Application: Efficient VQE Training Strategies

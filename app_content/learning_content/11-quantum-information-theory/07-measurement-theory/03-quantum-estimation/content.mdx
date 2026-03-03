@@ -1,0 +1,551 @@
+---
+title: "Quantum Parameter Estimation: Precision Limits"
+description: "Explore the fundamental limits of estimating continuous parameters encoded in quantum states. Learn about the Cramer-Rao bound, optimal estimators, and how quantum mechanics enables enhanced precision in metrology."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Derive the classical and quantum Cramer-Rao bounds
+- Understand the role of the Fisher information in estimation theory
+- Implement maximum likelihood estimators for quantum parameters
+- Analyze the precision scaling in quantum metrology
+- Design optimal estimation protocols for phase estimation
+
+## 1. The Parameter Estimation Problem
+
+Parameter estimation is concerned with determining the value of an unknown continuous parameter $\theta$ that has been encoded into a quantum state $\rho_\theta$.
+
+<Definition term="Quantum Parameter Estimation">
+Given a quantum state $\rho_\theta$ that depends on an unknown parameter $\theta$, the goal is to estimate $\theta$ as precisely as possible by:
+1. Choosing an optimal measurement (POVM)
+2. Constructing an estimator from the measurement outcomes
+</Definition>
+
+Unlike state discrimination (discrete choices), estimation deals with continuous parameters - phases, temperatures, magnetic fields, etc.
+
+<Tip>
+Parameter estimation is the theoretical foundation of quantum metrology. Understanding these limits helps us design better sensors and measurement devices!
+</Tip>
+
+## 2. Classical Estimation Theory
+
+Before quantum estimation, we need the classical framework.
+
+### The Cramer-Rao Bound
+
+<Definition term="Classical Cramer-Rao Bound">
+For any unbiased estimator $\hat{\theta}$ of parameter $\theta$, the variance is lower bounded:
+
+$$\text{Var}(\hat{\theta}) \geq \frac{1}{n \cdot F(\theta)}$$
+
+where $n$ is the number of measurements and $F(\theta)$ is the **Fisher information**.
+</Definition>
+
+<Formula>
+**Classical Fisher Information:**
+
+For probability distribution $p(x|\theta)$:
+
+$$F(\theta) = \mathbb{E}\left[\left(\frac{\partial \ln p(x|\theta)}{\partial \theta}\right)^2\right] = -\mathbb{E}\left[\frac{\partial^2 \ln p(x|\theta)}{\partial \theta^2}\right]$$
+</Formula>
+
+```python
+import numpy as np
+from typing import Callable, Tuple
+from scipy.optimize import minimize_scalar
+
+def classical_fisher_information(prob_func: Callable[[float, float], float],
+                                  theta: float,
+                                  outcomes: np.ndarray,
+                                  delta: float = 1e-6) -> float:
+    """
+    Numerically compute classical Fisher information.
+
+    Args:
+        prob_func: Function p(x, theta) giving probability of outcome x
+        theta: Parameter value
+        outcomes: Possible measurement outcomes
+        delta: Step size for numerical derivative
+
+    Returns:
+        Fisher information F(theta)
+    """
+    fisher = 0
+
+    for x in outcomes:
+        p = prob_func(x, theta)
+        if p > 1e-15:
+            # Numerical derivative of log p
+            p_plus = prob_func(x, theta + delta)
+            p_minus = prob_func(x, theta - delta)
+
+            d_log_p = (np.log(p_plus) - np.log(p_minus)) / (2 * delta)
+            fisher += p * d_log_p**2
+
+    return fisher
+
+# Example: Estimating the bias of a coin
+def coin_prob(x: int, theta: float) -> float:
+    """P(heads) = theta"""
+    if x == 1:  # heads
+        return theta
+    else:  # tails
+        return 1 - theta
+
+theta_true = 0.3
+outcomes = np.array([0, 1])
+fisher_coin = classical_fisher_information(coin_prob, theta_true, outcomes)
+print(f"Fisher information for coin (theta={theta_true}): {fisher_coin:.4f}")
+print(f"Theoretical: 1/(theta*(1-theta)) = {1/(theta_true*(1-theta_true)):.4f}")
+```
+
+### Maximum Likelihood Estimation
+
+<Definition term="Maximum Likelihood Estimator (MLE)">
+Given observations $\{x_1, ..., x_n\}$, the MLE is:
+
+$$\hat{\theta}_{MLE} = \arg\max_\theta \prod_{i=1}^n p(x_i|\theta) = \arg\max_\theta \sum_{i=1}^n \ln p(x_i|\theta)$$
+</Definition>
+
+```python
+def maximum_likelihood_estimator(observations: np.ndarray,
+                                  log_likelihood: Callable[[np.ndarray, float], float],
+                                  theta_range: Tuple[float, float]) -> Tuple[float, float]:
+    """
+    Find MLE for given observations.
+
+    Args:
+        observations: Array of measurement outcomes
+        log_likelihood: Function computing log L(data|theta)
+        theta_range: (min, max) search range for theta
+
+    Returns:
+        (theta_mle, log_likelihood_max)
+    """
+    def neg_log_likelihood(theta):
+        return -log_likelihood(observations, theta)
+
+    result = minimize_scalar(neg_log_likelihood,
+                            bounds=theta_range,
+                            method='bounded')
+
+    return result.x, -result.fun
+
+# Example: MLE for coin bias
+np.random.seed(42)
+true_theta = 0.7
+n_flips = 100
+flips = np.random.binomial(1, true_theta, n_flips)
+
+def coin_log_likelihood(data: np.ndarray, theta: float) -> float:
+    n_heads = np.sum(data)
+    n_tails = len(data) - n_heads
+    # Avoid log(0)
+    theta = np.clip(theta, 1e-10, 1-1e-10)
+    return n_heads * np.log(theta) + n_tails * np.log(1 - theta)
+
+theta_mle, ll_max = maximum_likelihood_estimator(flips, coin_log_likelihood, (0.01, 0.99))
+print(f"True theta: {true_theta}")
+print(f"MLE estimate: {theta_mle:.4f}")
+print(f"Sample mean: {np.mean(flips):.4f}")
+```
+
+## 3. Quantum Estimation Framework
+
+In quantum estimation, we have additional freedom: choosing the measurement.
+
+### Quantum Fisher Information
+
+<Definition term="Quantum Fisher Information (QFI)">
+For a parametrized family of states $\rho_\theta$, the Quantum Fisher Information is:
+
+$$F_Q(\theta) = \text{Tr}(\rho_\theta L_\theta^2)$$
+
+where $L_\theta$ is the **Symmetric Logarithmic Derivative (SLD)** satisfying:
+
+$$\frac{\partial \rho_\theta}{\partial \theta} = \frac{1}{2}(L_\theta \rho_\theta + \rho_\theta L_\theta)$$
+</Definition>
+
+<Formula>
+**Quantum Cramer-Rao Bound:**
+
+For any measurement and unbiased estimator:
+
+$$\text{Var}(\hat{\theta}) \geq \frac{1}{n \cdot F_Q(\theta)}$$
+
+This bound is achievable in the limit of many measurements.
+</Formula>
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+def quantum_fisher_information(rho_theta: np.ndarray,
+                                drho_dtheta: np.ndarray) -> Tuple[float, np.ndarray]:
+    """
+    Compute Quantum Fisher Information and SLD.
+
+    Args:
+        rho_theta: Density matrix at parameter theta
+        drho_dtheta: Derivative of rho with respect to theta
+
+    Returns:
+        (QFI, SLD operator)
+    """
+    d = rho_theta.shape[0]
+
+    # Eigendecomposition of rho
+    eigenvalues, eigenvectors = np.linalg.eigh(rho_theta)
+
+    # Construct SLD in eigenbasis
+    L = np.zeros((d, d), dtype=complex)
+
+    for i in range(d):
+        for j in range(d):
+            vi = eigenvectors[:, i]
+            vj = eigenvectors[:, j]
+
+            # Matrix element of drho in eigenbasis
+            drho_ij = vi.conj() @ drho_dtheta @ vj
+
+            # SLD matrix element
+            if eigenvalues[i] + eigenvalues[j] > 1e-12:
+                L[i, j] = 2 * drho_ij / (eigenvalues[i] + eigenvalues[j])
+            else:
+                L[i, j] = 0
+
+    # Transform back to original basis
+    L_original = eigenvectors @ L @ eigenvectors.conj().T
+
+    # QFI = Tr(rho L^2)
+    L_squared = L_original @ L_original
+    qfi = np.real(np.trace(rho_theta @ L_squared))
+
+    return qfi, L_original
+
+# Example: Phase estimation on a qubit
+def phase_encoded_state(theta: float) -> np.ndarray:
+    """
+    State |ψ(θ)⟩ = (|0⟩ + e^{iθ}|1⟩)/√2
+    """
+    psi = np.array([1, np.exp(1j * theta)], dtype=complex) / np.sqrt(2)
+    return np.outer(psi, psi.conj())
+
+def phase_derivative(theta: float) -> np.ndarray:
+    """
+    Derivative of rho with respect to theta.
+    """
+    delta = 1e-8
+    rho_plus = phase_encoded_state(theta + delta)
+    rho_minus = phase_encoded_state(theta - delta)
+    return (rho_plus - rho_minus) / (2 * delta)
+
+theta = 0.3
+rho = phase_encoded_state(theta)
+drho = phase_derivative(theta)
+qfi, sld = quantum_fisher_information(rho, drho)
+
+print(f"Phase estimation QFI: {qfi:.6f}")
+print(f"Theoretical (for |+_θ⟩): 1.0")
+print(f"\nSLD operator:\n{np.round(sld, 4)}")
+```
+
+<Warning>
+The QFI depends only on the state and its parameter dependence, not on any particular measurement. It gives the ultimate precision limit achievable with optimal quantum measurements.
+</Warning>
+
+## 4. Pure State Estimation
+
+For pure states, the QFI has a simple form.
+
+<Formula>
+**QFI for Pure States:**
+
+For $|\psi_\theta\rangle$:
+
+$$F_Q(\theta) = 4\left(\langle\partial_\theta\psi|\partial_\theta\psi\rangle - |\langle\psi|\partial_\theta\psi\rangle|^2\right)$$
+
+This equals $4 \cdot \text{Var}(H)$ where $H$ is the generator of the parameter.
+</Formula>
+
+```python
+def qfi_pure_state(psi: np.ndarray, dpsi_dtheta: np.ndarray) -> float:
+    """
+    QFI for a pure state.
+
+    Args:
+        psi: State vector |ψ(θ)⟩
+        dpsi_dtheta: Derivative ∂|ψ⟩/∂θ
+
+    Returns:
+        Quantum Fisher Information
+    """
+    # Normalize
+    psi = psi / np.linalg.norm(psi)
+
+    # ⟨∂ψ|∂ψ⟩
+    term1 = np.real(np.vdot(dpsi_dtheta, dpsi_dtheta))
+
+    # |⟨ψ|∂ψ⟩|²
+    term2 = np.abs(np.vdot(psi, dpsi_dtheta))**2
+
+    return 4 * (term1 - term2)
+
+# Example: Mach-Zehnder interferometer phase estimation
+def mz_state(theta: float, N: int = 1) -> np.ndarray:
+    """
+    Output state of Mach-Zehnder with N photons.
+    Simplified: single photon |ψ⟩ = (|0⟩ + e^{iθ}|1⟩)/√2
+    """
+    psi = np.array([1, np.exp(1j * theta)], dtype=complex) / np.sqrt(2)
+    return psi
+
+def mz_derivative(theta: float, N: int = 1) -> np.ndarray:
+    """Derivative of MZ state"""
+    dpsi = np.array([0, 1j * np.exp(1j * theta)], dtype=complex) / np.sqrt(2)
+    return dpsi
+
+theta = 0.5
+psi = mz_state(theta)
+dpsi = mz_derivative(theta)
+qfi = qfi_pure_state(psi, dpsi)
+
+print(f"Mach-Zehnder QFI (single photon): {qfi:.4f}")
+print(f"Standard Quantum Limit: F_Q = 1")
+print(f"Optimal precision: Δθ ≥ 1/√(n·F_Q) = 1/√n")
+```
+
+## 5. The Standard Quantum Limit and Beyond
+
+### Standard Quantum Limit (SQL)
+
+<Definition term="Standard Quantum Limit">
+For $n$ independent probes (e.g., photons), the precision scales as:
+
+$$\Delta\theta \geq \frac{1}{\sqrt{n}}$$
+
+This is the **Standard Quantum Limit** or **shot noise limit**.
+</Definition>
+
+### Heisenberg Limit
+
+Using entangled probes can beat the SQL!
+
+<Definition term="Heisenberg Limit">
+With optimal entanglement, the precision can scale as:
+
+$$\Delta\theta \geq \frac{1}{n}$$
+
+This is the fundamental **Heisenberg Limit**.
+</Definition>
+
+```python
+import numpy as np
+
+def compare_precision_scaling():
+    """
+    Compare SQL and Heisenberg scaling.
+    """
+    n_values = np.array([1, 10, 100, 1000, 10000])
+
+    sql_precision = 1 / np.sqrt(n_values)  # Standard quantum limit
+    hl_precision = 1 / n_values            # Heisenberg limit
+
+    print("Precision Comparison: SQL vs Heisenberg Limit")
+    print("-" * 50)
+    print(f"{'n':>8} | {'SQL (1/√n)':>12} | {'HL (1/n)':>12} | {'Ratio':>8}")
+    print("-" * 50)
+
+    for n, sql, hl in zip(n_values, sql_precision, hl_precision):
+        ratio = sql / hl
+        print(f"{n:>8} | {sql:>12.6f} | {hl:>12.6f} | {ratio:>8.1f}")
+
+compare_precision_scaling()
+
+# NOON state example
+def noon_state_qfi(n: int) -> float:
+    """
+    QFI for NOON state |ψ⟩ = (|N,0⟩ + |0,N⟩)/√2
+    """
+    # The NOON state gives QFI = N² (Heisenberg scaling)
+    return n**2
+
+print(f"\nNOON state with N=10 photons:")
+print(f"  QFI = {noon_state_qfi(10)}")
+print(f"  Precision: Δθ ≥ 1/√QFI = 1/{np.sqrt(noon_state_qfi(10)):.0f}")
+print(f"  This is 10x better than SQL!")
+```
+
+## 6. Optimal Measurements
+
+The QFI is achieved by measuring in the eigenbasis of the SLD.
+
+```python
+def optimal_measurement_phase(theta: float) -> Tuple[np.ndarray, list]:
+    """
+    Construct optimal measurement for phase estimation.
+
+    Returns:
+        (SLD eigenbasis projectors, expected precisions)
+    """
+    # For |+_θ⟩ = (|0⟩ + e^{iθ}|1⟩)/√2
+    # The SLD is L = 2(|+_θ⟩⟨+_θ| - |-_θ⟩⟨-_θ|)
+    # where |-_θ⟩ = (|0⟩ - e^{iθ}|1⟩)/√2
+
+    plus_theta = np.array([1, np.exp(1j * theta)]) / np.sqrt(2)
+    minus_theta = np.array([1, -np.exp(1j * theta)]) / np.sqrt(2)
+
+    # Projectors
+    P_plus = np.outer(plus_theta, plus_theta.conj())
+    P_minus = np.outer(minus_theta, minus_theta.conj())
+
+    # SLD
+    L = 2 * (P_plus - P_minus)
+
+    # Verify QFI
+    rho = np.outer(plus_theta, plus_theta.conj())
+    qfi = np.real(np.trace(rho @ L @ L))
+
+    return [P_plus, P_minus], L, qfi
+
+projectors, sld, qfi = optimal_measurement_phase(0.3)
+print("Optimal measurement for phase estimation:")
+print(f"QFI = {qfi:.4f}")
+print(f"\nSLD operator:\n{np.round(sld, 4)}")
+print(f"\nMeasure in basis:")
+for i, P in enumerate(projectors):
+    print(f"  Projector {i}:\n{np.round(P, 4)}")
+```
+
+## 7. Practical Phase Estimation Protocol
+
+```python
+import numpy as np
+from scipy.stats import norm
+
+def simulate_phase_estimation(true_theta: float,
+                              n_measurements: int,
+                              measurement_type: str = 'optimal') -> dict:
+    """
+    Simulate quantum phase estimation.
+
+    Args:
+        true_theta: True phase value
+        n_measurements: Number of measurements
+        measurement_type: 'optimal', 'X', or 'Y' basis
+
+    Returns:
+        Dictionary with estimation results
+    """
+    # State: |+_θ⟩ = (|0⟩ + e^{iθ}|1⟩)/√2
+    psi = np.array([1, np.exp(1j * true_theta)]) / np.sqrt(2)
+
+    # Measurement bases
+    if measurement_type == 'optimal':
+        # Optimal: measure in {|+_θ⟩, |-_θ⟩} basis
+        # In practice, we don't know θ, so we use adaptive estimation
+        # Here we simulate X-basis as it's optimal at θ=0
+        M_plus = np.array([1, 1]) / np.sqrt(2)
+        M_minus = np.array([1, -1]) / np.sqrt(2)
+    elif measurement_type == 'X':
+        M_plus = np.array([1, 1]) / np.sqrt(2)
+        M_minus = np.array([1, -1]) / np.sqrt(2)
+    elif measurement_type == 'Y':
+        M_plus = np.array([1, 1j]) / np.sqrt(2)
+        M_minus = np.array([1, -1j]) / np.sqrt(2)
+    else:
+        raise ValueError(f"Unknown measurement type: {measurement_type}")
+
+    # Probabilities
+    p_plus = np.abs(np.vdot(M_plus, psi))**2
+    p_minus = np.abs(np.vdot(M_minus, psi))**2
+
+    # Simulate measurements
+    outcomes = np.random.binomial(1, p_plus, n_measurements)
+    n_plus = np.sum(outcomes)
+    n_minus = n_measurements - n_plus
+
+    # Estimate phase using maximum likelihood
+    # For X measurement: P(+) = (1 + cos(θ))/2
+    # MLE: cos(θ_est) = 2*(n_plus/n) - 1
+    freq_plus = n_plus / n_measurements
+
+    # Avoid domain errors
+    cos_theta_est = np.clip(2 * freq_plus - 1, -1, 1)
+    theta_est = np.arccos(cos_theta_est)
+
+    # Handle sign ambiguity (assume theta in [0, pi])
+    # For full range, need Y measurement too
+
+    # Fisher information for this measurement
+    # F = (dP/dθ)² / (P(1-P))
+    # For X: P = (1+cos(θ))/2, dP/dθ = -sin(θ)/2
+    sin_theta = np.sin(true_theta)
+    cos_theta = np.cos(true_theta)
+    P = (1 + cos_theta) / 2
+
+    if P > 0 and P < 1:
+        fisher = (sin_theta/2)**2 / (P * (1-P))
+    else:
+        fisher = 0
+
+    # Cramer-Rao bound
+    if fisher > 0:
+        crb = 1 / (n_measurements * fisher)
+    else:
+        crb = np.inf
+
+    return {
+        'true_theta': true_theta,
+        'estimated_theta': theta_est,
+        'error': np.abs(theta_est - true_theta),
+        'n_measurements': n_measurements,
+        'n_plus': n_plus,
+        'fisher_info': fisher,
+        'cramer_rao_bound': crb,
+        'measurement_type': measurement_type
+    }
+
+# Run simulation
+print("Phase Estimation Simulation")
+print("=" * 50)
+
+true_theta = 0.5
+for n in [10, 100, 1000]:
+    results = simulate_phase_estimation(true_theta, n, 'X')
+    print(f"\nn = {n} measurements:")
+    print(f"  True θ: {results['true_theta']:.4f}")
+    print(f"  Estimated θ: {results['estimated_theta']:.4f}")
+    print(f"  Error: {results['error']:.4f}")
+    print(f"  CRB: {np.sqrt(results['cramer_rao_bound']):.4f}")
+```
+
+## Summary
+
+In this lesson, you learned about quantum parameter estimation:
+
+1. **Classical Framework**: Fisher information quantifies estimation precision; Cramer-Rao bound limits variance
+
+2. **Quantum Extension**: Quantum Fisher Information (QFI) via the Symmetric Logarithmic Derivative
+
+3. **Quantum CRB**: $\text{Var}(\hat{\theta}) \geq 1/(n \cdot F_Q)$ - achievable with optimal measurements
+
+4. **Pure States**: $F_Q = 4(\langle\partial\psi|\partial\psi\rangle - |\langle\psi|\partial\psi\rangle|^2)$
+
+5. **Precision Scaling**: SQL gives $1/\sqrt{n}$, Heisenberg limit gives $1/n$ with entanglement
+
+6. **Optimal Measurement**: Measure in SLD eigenbasis to achieve the QFI
+
+<Tip>
+The quantum advantage in metrology comes from using entanglement and quantum correlations. While individual measurements still follow quantum statistics, clever state preparation can concentrate information about the parameter!
+</Tip>
+
+## Further Reading
+
+- Next lesson: Quantum Fisher Information (deeper mathematical treatment)
+- Related: Quantum Sensing (practical applications)
+- Application: Gravitational Wave Detection (LIGO uses quantum metrology!)

@@ -1,0 +1,605 @@
+---
+title: "The Lindblad Master Equation"
+description: "Learn the fundamental equation governing the dynamics of open quantum systems interacting with their environment."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Derive the Lindblad master equation from first principles
+- Identify and interpret Lindblad operators and their physical meaning
+- Solve the Lindblad equation for simple quantum systems
+- Calculate steady states of dissipative quantum evolution
+- Implement numerical simulations of Lindbladian dynamics
+
+## 1. From Closed to Open Systems
+
+In closed quantum systems, dynamics follow the von Neumann equation:
+
+<Formula>
+$$\frac{d\rho}{dt} = -\frac{i}{\hbar}[H, \rho]$$
+</Formula>
+
+But real quantum systems interact with their environment. We need a more general framework.
+
+<Definition term="Open Quantum System">
+An open quantum system is a quantum system that exchanges energy, information, or particles with its surrounding environment. The system's evolution is no longer unitary and requires the density matrix formalism.
+</Definition>
+
+**Why open systems matter:**
+- All real quantum computers experience noise
+- Atoms interact with electromagnetic vacuum
+- Quantum measurements involve environment coupling
+- Thermalization requires energy exchange
+
+## 2. The Lindblad Master Equation
+
+<Definition term="Lindblad Master Equation">
+The most general Markovian evolution of an open quantum system is given by:
+$$\frac{d\rho}{dt} = -\frac{i}{\hbar}[H, \rho] + \sum_k \gamma_k \left( L_k \rho L_k^\dagger - \frac{1}{2}\{L_k^\dagger L_k, \rho\} \right)$$
+where $H$ is the system Hamiltonian, $L_k$ are Lindblad (jump) operators, and $\gamma_k \geq 0$ are decay rates.
+</Definition>
+
+<Formula>
+The dissipator can be written compactly as:
+$$\mathcal{D}[L]\rho = L\rho L^\dagger - \frac{1}{2}\{L^\dagger L, \rho\}$$
+So the full equation becomes:
+$$\dot{\rho} = -\frac{i}{\hbar}[H, \rho] + \sum_k \gamma_k \mathcal{D}[L_k]\rho$$
+</Formula>
+
+**Key properties:**
+1. Preserves trace: $\text{Tr}(\dot{\rho}) = 0$
+2. Preserves positivity: eigenvalues stay non-negative
+3. Completely positive evolution
+4. Markovian (memoryless)
+
+<Example>
+```python
+import numpy as np
+from scipy.linalg import expm
+
+def lindblad_superoperator(H: np.ndarray, L_ops: list,
+                           gamma: list) -> np.ndarray:
+    """
+    Construct the Lindblad superoperator as a matrix.
+    Acts on vectorized density matrix: d(vec ρ)/dt = L vec(ρ)
+    """
+    dim = H.shape[0]
+    dim2 = dim * dim
+
+    # Identity
+    I = np.eye(dim, dtype=complex)
+
+    # Hamiltonian part: -i[H, ρ] = -i(H⊗I - I⊗H^T)ρ
+    L_H = -1j * (np.kron(H, I) - np.kron(I, H.T))
+
+    # Dissipator part
+    L_D = np.zeros((dim2, dim2), dtype=complex)
+
+    for L, g in zip(L_ops, gamma):
+        # L ρ L† term: (L* ⊗ L) vec(ρ)
+        L_D += g * np.kron(L.conj(), L)
+
+        # -1/2 {L†L, ρ} term
+        LdL = L.conj().T @ L
+        L_D -= 0.5 * g * (np.kron(LdL.T, I) + np.kron(I, LdL))
+
+    return L_H + L_D
+
+def evolve_lindblad(rho0: np.ndarray, H: np.ndarray,
+                    L_ops: list, gamma: list, t: float) -> np.ndarray:
+    """Evolve density matrix under Lindblad dynamics."""
+    L = lindblad_superoperator(H, L_ops, gamma)
+    dim = rho0.shape[0]
+
+    # Vectorize, evolve, reshape
+    rho_vec = rho0.flatten()
+    rho_t_vec = expm(L * t) @ rho_vec
+
+    return rho_t_vec.reshape((dim, dim))
+
+# Example: Qubit decay (T1 process)
+H = np.zeros((2, 2), dtype=complex)  # No Hamiltonian
+sigma_m = np.array([[0, 0], [1, 0]], dtype=complex)  # |0⟩⟨1|
+gamma1 = [1.0]  # Decay rate
+
+# Initial excited state |1⟩
+rho0 = np.array([[0, 0], [0, 1]], dtype=complex)
+
+print("Qubit decay (T1 process):")
+for t in [0, 0.5, 1.0, 2.0, 5.0]:
+    rho_t = evolve_lindblad(rho0, H, [sigma_m], gamma1, t)
+    pop_1 = np.real(rho_t[1, 1])
+    print(f"  t={t:.1f}: P(|1⟩) = {pop_1:.4f}, expected = {np.exp(-t):.4f}")
+```
+</Example>
+
+## 3. Physical Interpretation of Lindblad Operators
+
+Each Lindblad operator describes a specific decoherence channel.
+
+<Definition term="Jump Operator">
+A Lindblad operator $L_k$ describes a quantum jump process. When a jump occurs, the state transforms as:
+$$\rho \rightarrow \frac{L_k \rho L_k^\dagger}{\text{Tr}(L_k \rho L_k^\dagger)}$$
+</Definition>
+
+**Common Lindblad operators:**
+
+| Process | Operator | Physical Meaning |
+|---------|----------|------------------|
+| Amplitude damping | $L = \sqrt{\gamma}\sigma_-$ | Energy decay (T1) |
+| Phase damping | $L = \sqrt{\gamma}\sigma_z$ | Dephasing (T2) |
+| Depolarization | $L_x, L_y, L_z \propto \sigma_{x,y,z}$ | Random noise |
+| Heating | $L = \sqrt{\gamma}\sigma_+$ | Excitation from bath |
+
+<Example>
+```python
+import numpy as np
+
+def amplitude_damping_ops(gamma: float) -> tuple:
+    """Return Lindblad operator for amplitude damping."""
+    sigma_m = np.array([[0, 0], [1, 0]], dtype=complex)
+    return [sigma_m], [gamma]
+
+def phase_damping_ops(gamma: float) -> tuple:
+    """Return Lindblad operator for pure dephasing."""
+    sigma_z = np.array([[1, 0], [0, -1]], dtype=complex)
+    return [sigma_z], [gamma/2]  # Factor of 2 for standard convention
+
+def depolarizing_ops(gamma: float) -> tuple:
+    """Return Lindblad operators for depolarizing channel."""
+    sigma_x = np.array([[0, 1], [1, 0]], dtype=complex)
+    sigma_y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+    sigma_z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    rate = gamma / 4  # Divided among 3 channels
+    return [sigma_x, sigma_y, sigma_z], [rate, rate, rate]
+
+def thermal_ops(gamma: float, n_th: float) -> tuple:
+    """Return Lindblad operators for thermal bath coupling."""
+    sigma_m = np.array([[0, 0], [1, 0]], dtype=complex)
+    sigma_p = np.array([[0, 1], [0, 0]], dtype=complex)
+
+    # Decay and heating rates
+    gamma_down = gamma * (n_th + 1)  # Stimulated + spontaneous emission
+    gamma_up = gamma * n_th          # Absorption
+
+    return [sigma_m, sigma_p], [gamma_down, gamma_up]
+
+# Compare decoherence processes
+print("Decoherence comparison on |+⟩ state:")
+ket_plus = np.array([[1], [1]], dtype=complex) / np.sqrt(2)
+rho0 = ket_plus @ ket_plus.conj().T
+
+H = np.zeros((2, 2), dtype=complex)
+t = 1.0
+
+processes = [
+    ("Amplitude damping", amplitude_damping_ops(1.0)),
+    ("Phase damping", phase_damping_ops(1.0)),
+    ("Depolarizing", depolarizing_ops(1.0)),
+]
+
+for name, (L_ops, gamma) in processes:
+    rho_t = evolve_lindblad(rho0, H, L_ops, gamma, t)
+    coherence = np.abs(rho_t[0, 1])
+    purity = np.real(np.trace(rho_t @ rho_t))
+    print(f"  {name}: coherence = {coherence:.4f}, purity = {purity:.4f}")
+```
+</Example>
+
+## 4. Solving the Lindblad Equation
+
+For simple systems, analytical solutions exist.
+
+<Formula>
+**Two-level system with decay:**
+For a qubit with only amplitude damping ($L = \sqrt{\gamma}\sigma_-$):
+$$\rho_{00}(t) = 1 - \rho_{11}(0)e^{-\gamma t}$$
+$$\rho_{11}(t) = \rho_{11}(0)e^{-\gamma t}$$
+$$\rho_{01}(t) = \rho_{01}(0)e^{-\gamma t/2}$$
+</Formula>
+
+<Example>
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def analytical_T1_decay(rho0: np.ndarray, gamma: float,
+                        times: np.ndarray) -> np.ndarray:
+    """Analytical solution for amplitude damping."""
+    results = []
+
+    for t in times:
+        rho_t = np.zeros((2, 2), dtype=complex)
+
+        # Populations
+        rho_t[0, 0] = 1 - rho0[1, 1] * np.exp(-gamma * t)
+        rho_t[1, 1] = rho0[1, 1] * np.exp(-gamma * t)
+
+        # Coherences
+        rho_t[0, 1] = rho0[0, 1] * np.exp(-gamma * t / 2)
+        rho_t[1, 0] = rho0[1, 0] * np.exp(-gamma * t / 2)
+
+        results.append(rho_t)
+
+    return results
+
+def analytical_T2_dephasing(rho0: np.ndarray, gamma: float,
+                            times: np.ndarray) -> np.ndarray:
+    """Analytical solution for pure dephasing."""
+    results = []
+
+    for t in times:
+        rho_t = np.copy(rho0)
+
+        # Populations unchanged
+        # Coherences decay
+        rho_t[0, 1] *= np.exp(-gamma * t)
+        rho_t[1, 0] *= np.exp(-gamma * t)
+
+        results.append(rho_t)
+
+    return results
+
+# Compare analytical and numerical solutions
+gamma = 1.0
+times = np.linspace(0, 5, 50)
+
+# Superposition state
+theta = np.pi / 4
+ket = np.array([[np.cos(theta/2)], [np.sin(theta/2)]], dtype=complex)
+rho0 = ket @ ket.conj().T
+
+# T1 decay
+H = np.zeros((2, 2), dtype=complex)
+L_ops, gammas = amplitude_damping_ops(gamma)
+
+analytical = analytical_T1_decay(rho0, gamma, times)
+numerical = [evolve_lindblad(rho0, H, L_ops, gammas, t) for t in times]
+
+# Extract excited state population
+p1_analytical = [np.real(r[1,1]) for r in analytical]
+p1_numerical = [np.real(r[1,1]) for r in numerical]
+coherence_analytical = [np.abs(r[0,1]) for r in analytical]
+coherence_numerical = [np.abs(r[0,1]) for r in numerical]
+
+print("T1 Decay Validation:")
+print(f"  Max population error: {max(abs(np.array(p1_analytical) - np.array(p1_numerical))):.2e}")
+print(f"  Max coherence error: {max(abs(np.array(coherence_analytical) - np.array(coherence_numerical))):.2e}")
+```
+</Example>
+
+## 5. Steady States and Fixed Points
+
+<Definition term="Steady State">
+A steady state $\rho_{ss}$ satisfies $\dot{\rho}_{ss} = 0$, meaning:
+$$-\frac{i}{\hbar}[H, \rho_{ss}] + \sum_k \gamma_k \mathcal{D}[L_k]\rho_{ss} = 0$$
+</Definition>
+
+<Formula>
+Finding steady states is equivalent to finding the null space of the Lindbladian superoperator:
+$$\mathcal{L}|\rho_{ss}\rangle\rangle = 0$$
+where $|\rho\rangle\rangle$ denotes the vectorized density matrix.
+</Formula>
+
+<Example>
+```python
+import numpy as np
+from scipy.linalg import null_space
+
+def find_steady_state(H: np.ndarray, L_ops: list,
+                      gamma: list) -> np.ndarray:
+    """Find the steady state of Lindblad evolution."""
+    L = lindblad_superoperator(H, L_ops, gamma)
+    dim = H.shape[0]
+
+    # Find null space
+    ns = null_space(L)
+
+    if ns.shape[1] == 0:
+        raise ValueError("No steady state found")
+
+    # Take first null vector and reshape
+    rho_ss = ns[:, 0].reshape((dim, dim))
+
+    # Normalize trace to 1
+    rho_ss = rho_ss / np.trace(rho_ss)
+
+    # Make Hermitian (average with conjugate transpose)
+    rho_ss = (rho_ss + rho_ss.conj().T) / 2
+
+    return rho_ss
+
+def thermal_steady_state(omega: float, T: float, kB: float = 1.0) -> np.ndarray:
+    """Theoretical thermal state for two-level system."""
+    if T == 0:
+        return np.array([[1, 0], [0, 0]], dtype=complex)
+
+    beta = 1 / (kB * T)
+    Z = 1 + np.exp(-beta * omega)  # Partition function
+
+    p0 = 1 / Z
+    p1 = np.exp(-beta * omega) / Z
+
+    return np.diag([p0, p1]).astype(complex)
+
+# Example: Qubit coupled to thermal bath
+omega = 1.0  # Energy splitting
+gamma = 0.5  # Coupling strength
+
+# Hamiltonian
+H = omega * np.array([[0, 0], [0, 1]], dtype=complex)
+
+print("Steady states for different bath temperatures:")
+for T in [0.1, 0.5, 1.0, 2.0, 10.0]:
+    # Mean thermal occupation
+    n_th = 1 / (np.exp(omega / T) - 1) if T > 0 else 0
+
+    L_ops, gammas = thermal_ops(gamma, n_th)
+    rho_ss = find_steady_state(H, L_ops, gammas)
+    rho_thermal = thermal_steady_state(omega, T)
+
+    print(f"  T = {T:.1f}: P(|1⟩) = {np.real(rho_ss[1,1]):.4f}, "
+          f"theory = {np.real(rho_thermal[1,1]):.4f}")
+```
+</Example>
+
+## 6. The Lindbladian as a Superoperator
+
+<Definition term="Superoperator">
+A superoperator acts on operators (like density matrices) rather than vectors. The Lindbladian $\mathcal{L}$ is a superoperator that generates the evolution: $\rho(t) = e^{\mathcal{L}t}\rho(0)$.
+</Definition>
+
+<Formula>
+The Lindbladian superoperator in matrix form:
+$$\mathcal{L} = -i(H \otimes I - I \otimes H^T) + \sum_k \gamma_k \left( L_k^* \otimes L_k - \frac{1}{2}(L_k^\dagger L_k)^T \otimes I - \frac{1}{2} I \otimes L_k^\dagger L_k \right)$$
+</Formula>
+
+<Example>
+```python
+import numpy as np
+
+def analyze_lindbladian(H: np.ndarray, L_ops: list, gamma: list):
+    """Analyze properties of the Lindbladian superoperator."""
+    L = lindblad_superoperator(H, L_ops, gamma)
+
+    # Eigenvalue decomposition
+    eigenvalues, eigenvectors = np.linalg.eig(L)
+
+    # Sort by real part (decay rate)
+    idx = np.argsort(-np.real(eigenvalues))
+    eigenvalues = eigenvalues[idx]
+    eigenvectors = eigenvectors[:, idx]
+
+    print("Lindbladian eigenvalue analysis:")
+    print("-" * 50)
+
+    # Steady state corresponds to eigenvalue 0
+    ss_idx = np.argmin(np.abs(eigenvalues))
+    print(f"Steady state eigenvalue: {eigenvalues[ss_idx]:.6f}")
+
+    # Spectral gap (determines relaxation time)
+    nonzero_eigs = eigenvalues[np.abs(eigenvalues) > 1e-10]
+    if len(nonzero_eigs) > 0:
+        gap = -np.max(np.real(nonzero_eigs))
+        print(f"Spectral gap: {gap:.4f}")
+        print(f"Relaxation time: {1/gap:.4f}")
+
+    # Check for oscillatory modes
+    imag_parts = np.imag(eigenvalues[np.abs(eigenvalues) > 1e-10])
+    if np.any(np.abs(imag_parts) > 1e-10):
+        print(f"Oscillatory modes present (max freq: {np.max(np.abs(imag_parts)):.4f})")
+
+    return eigenvalues, eigenvectors
+
+# Analyze different systems
+print("=== Pure decay ===")
+H = np.zeros((2, 2), dtype=complex)
+L_ops, gamma = amplitude_damping_ops(1.0)
+analyze_lindbladian(H, L_ops, gamma)
+
+print("\n=== Decay with Hamiltonian ===")
+H = np.array([[0, 1], [1, 0]], dtype=complex)  # X rotation
+L_ops, gamma = amplitude_damping_ops(0.5)
+analyze_lindbladian(H, L_ops, gamma)
+
+print("\n=== Thermal equilibration ===")
+H = np.array([[0, 0], [0, 1]], dtype=complex)
+L_ops, gamma = thermal_ops(1.0, n_th=0.5)
+analyze_lindbladian(H, L_ops, gamma)
+```
+</Example>
+
+## 7. Numerical Methods for Lindblad Dynamics
+
+<Tip>
+For large systems, direct matrix exponentiation is expensive. Use numerical ODE solvers or Monte Carlo methods instead.
+</Tip>
+
+<Example>
+```python
+import numpy as np
+from scipy.integrate import solve_ivp
+
+def lindblad_rhs(t, rho_vec, H, L_ops, gamma):
+    """Right-hand side of Lindblad equation for ODE solver."""
+    dim = H.shape[0]
+    rho = rho_vec.reshape((dim, dim))
+
+    # Coherent evolution
+    drho = -1j * (H @ rho - rho @ H)
+
+    # Dissipation
+    for L, g in zip(L_ops, gamma):
+        LdL = L.conj().T @ L
+        drho += g * (L @ rho @ L.conj().T - 0.5 * (LdL @ rho + rho @ LdL))
+
+    return drho.flatten()
+
+def solve_lindblad_ode(rho0: np.ndarray, H: np.ndarray,
+                        L_ops: list, gamma: list,
+                        t_span: tuple, n_points: int = 100) -> tuple:
+    """Solve Lindblad equation using ODE integration."""
+    t_eval = np.linspace(t_span[0], t_span[1], n_points)
+
+    # Solve ODE
+    result = solve_ivp(
+        lindblad_rhs,
+        t_span,
+        rho0.flatten(),
+        t_eval=t_eval,
+        args=(H, L_ops, gamma),
+        method='RK45',
+        rtol=1e-8, atol=1e-10
+    )
+
+    # Reshape results
+    dim = rho0.shape[0]
+    rho_t = [result.y[:, i].reshape((dim, dim)) for i in range(len(t_eval))]
+
+    return result.t, rho_t
+
+# Example: Rabi oscillations with decay
+omega_R = 5.0  # Rabi frequency
+gamma_decay = 0.5  # Decay rate
+
+H = omega_R * np.array([[0, 1], [1, 0]], dtype=complex) / 2
+L_ops, gamma = amplitude_damping_ops(gamma_decay)
+
+# Start in ground state
+rho0 = np.array([[1, 0], [0, 0]], dtype=complex)
+
+times, rho_t = solve_lindblad_ode(rho0, H, L_ops, gamma, (0, 10), n_points=200)
+
+# Extract observables
+populations = np.array([np.real(r[1, 1]) for r in rho_t])
+coherences = np.array([np.abs(r[0, 1]) for r in rho_t])
+purities = np.array([np.real(np.trace(r @ r)) for r in rho_t])
+
+print("Damped Rabi oscillations:")
+print(f"  Initial purity: {purities[0]:.4f}")
+print(f"  Final purity: {purities[-1]:.4f}")
+print(f"  Final excited population: {populations[-1]:.4f}")
+print(f"  Theoretical steady state P(|1⟩): {0:.4f}")  # Pure decay → ground state
+```
+</Example>
+
+## 8. Physical Applications
+
+<Definition term="Quantum Optical Master Equation">
+For an atom interacting with the electromagnetic vacuum, the Lindblad equation describes spontaneous emission:
+$$\dot{\rho} = -i\omega_0[\sigma_z/2, \rho] + \gamma \mathcal{D}[\sigma_-]\rho$$
+where $\gamma$ is the spontaneous emission rate.
+</Definition>
+
+<Example>
+```python
+import numpy as np
+
+def cavity_qed_dynamics(n_photons: int, g: float, kappa: float,
+                        gamma: float, times: np.ndarray):
+    """
+    Jaynes-Cummings model with losses.
+
+    Parameters:
+    - n_photons: Max photon number in cavity
+    - g: Atom-cavity coupling
+    - kappa: Cavity decay rate
+    - gamma: Atom decay rate
+    """
+    dim_c = n_photons + 1  # Cavity dimension
+    dim_a = 2              # Atom dimension
+    dim = dim_c * dim_a
+
+    # Operators
+    I_c = np.eye(dim_c, dtype=complex)
+    I_a = np.eye(dim_a, dtype=complex)
+
+    # Cavity operators
+    a = np.diag(np.sqrt(np.arange(1, dim_c)), 1).astype(complex)
+
+    # Atom operators
+    sigma_m = np.array([[0, 0], [1, 0]], dtype=complex)
+    sigma_p = np.array([[0, 1], [0, 0]], dtype=complex)
+    sigma_z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    # Full space operators
+    a_full = np.kron(a, I_a)
+    sigma_m_full = np.kron(I_c, sigma_m)
+    sigma_p_full = np.kron(I_c, sigma_p)
+
+    # Jaynes-Cummings Hamiltonian (resonant)
+    H = g * (np.kron(a.T, sigma_m) + np.kron(a, sigma_p))
+
+    # Lindblad operators
+    L_cavity = np.sqrt(kappa) * a_full  # Cavity decay
+    L_atom = np.sqrt(gamma) * sigma_m_full  # Atom decay
+
+    L_ops = [L_cavity, L_atom]
+    gammas = [1.0, 1.0]  # Rates included in operators
+
+    # Initial state: atom excited, cavity vacuum
+    psi0_c = np.zeros((dim_c, 1), dtype=complex)
+    psi0_c[0] = 1  # Vacuum
+    psi0_a = np.array([[0], [1]], dtype=complex)  # Excited
+    psi0 = np.kron(psi0_c, psi0_a)
+    rho0 = psi0 @ psi0.conj().T
+
+    # Evolve
+    results = []
+    for t in times:
+        rho_t = evolve_lindblad(rho0, H, L_ops, gammas, t)
+
+        # Calculate observables
+        n_cavity = np.real(np.trace(rho_t @ (a_full.conj().T @ a_full)))
+        p_excited = np.real(np.trace(rho_t @ np.kron(I_c, sigma_p @ sigma_m)))
+
+        results.append({
+            'time': t,
+            'n_cavity': n_cavity,
+            'p_excited': p_excited,
+            'purity': np.real(np.trace(rho_t @ rho_t))
+        })
+
+    return results
+
+# Run simulation
+print("Cavity QED with losses:")
+n_max = 3
+g = 1.0
+kappa = 0.1  # Cavity decay
+gamma = 0.2  # Atom decay
+
+times = np.linspace(0, 10, 20)
+results = cavity_qed_dynamics(n_max, g, kappa, gamma, times)
+
+for r in results[::4]:
+    print(f"  t={r['time']:.1f}: <n>={r['n_cavity']:.3f}, "
+          f"P(e)={r['p_excited']:.3f}, purity={r['purity']:.3f}")
+```
+</Example>
+
+## Summary
+
+In this lesson, you learned about the Lindblad master equation:
+
+1. **Lindblad equation** is the most general Markovian evolution for open quantum systems
+2. **Lindblad operators** $L_k$ describe specific decoherence channels
+3. The **dissipator** $\mathcal{D}[L]\rho = L\rho L^\dagger - \frac{1}{2}\{L^\dagger L, \rho\}$ captures non-unitary dynamics
+4. **Steady states** satisfy $\mathcal{L}\rho_{ss} = 0$
+5. The **Lindbladian superoperator** generates the quantum dynamical semigroup
+6. **Numerical methods** include ODE solvers and matrix exponentiation
+
+<Warning>
+The Lindblad equation assumes Markovian dynamics (no memory effects). For non-Markovian systems, more general master equations are needed, which we'll cover in a later lesson.
+</Warning>
+
+## Further Reading
+
+- Next: Decoherence Models
+- Related: Quantum Channels, Density Matrices
+- Applications: Quantum Error Correction, Quantum Optics

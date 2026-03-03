@@ -302,10 +302,6 @@ export function createOptimizer(config: OptimizerConfig): Optimizer {
   }
 }
 
-export { SLSQPOptimizer, createSLSQPOptimizer } from './optimizers/SLSQP'
-export { LBFGSBOptimizer, createLBFGSBOptimizer } from './optimizers/LBFGSB'
-export { RotosolveOptimizer, FresnelOptimizer, QuantumNaturalGradient, createRotosolveOptimizer, createFresnelOptimizer, createQuantumNaturalGradient } from './optimizers/Rotosolve'
-
 export function optimize(
   initialParams: number[],
   costFunction: (params: number[]) => number,

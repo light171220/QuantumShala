@@ -65,17 +65,20 @@ export function useSimulator() {
   const runLambdaSimulation = useCallback(
     async (shots: number, tier: 'small' | 'medium' | 'large'): Promise<SimulationResult> => {
       const gates = circuit.gates.map((g) => ({
-        type: g.type,
+        name: g.type,
         qubits: g.qubits,
-        controlQubits: g.controlQubits,
-        parameters: g.parameters,
-        position: g.position,
+        params: g.parameters,
       }))
 
+      const circuitData = {
+        numQubits: circuit.numQubits,
+        gates: gates
+      }
+
       const mutationMap = {
-        small: 'runSimulationSmall',
-        medium: 'runSimulationMedium',
-        large: 'runSimulationLarge',
+        small: 'runSimulatorSmall',
+        medium: 'runSimulatorMedium',
+        large: 'runSimulatorLarge',
       }
 
       const mutationName = mutationMap[tier]
@@ -88,9 +91,9 @@ export function useSimulator() {
       const response = await mutation({
         circuitId: circuit.id,
         numQubits: circuit.numQubits,
-        gates: JSON.stringify(gates),
+        gates: JSON.stringify(circuitData),
         shots,
-        includeStateVector: circuit.numQubits <= 12,
+        measureQubits: Array.from({ length: circuit.numQubits }, (_, i) => i),
       })
 
       const data = extractResponseData(response)

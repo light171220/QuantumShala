@@ -1,0 +1,942 @@
+---
+title: "Reliability Engineering for Quantum Systems"
+description: "Master reliability patterns for quantum applications including fault tolerance, graceful degradation, and SLOs."
+duration: 60
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+- Design fault-tolerant quantum application architectures
+- Implement circuit breaker patterns for QPU failures
+- Define and monitor quantum-specific SLOs
+- Build graceful degradation strategies
+
+## 1. Reliability Challenges in Quantum Computing
+
+Quantum systems introduce unique reliability challenges beyond classical distributed systems:
+
+```
+QUANTUM RELIABILITY CHALLENGES:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Failure Modes:
+┌─────────────────────────────────────────────────────────────────┐
+│ HARDWARE FAILURES                                               │
+│ • Qubit decoherence (continuous degradation)                    │
+│ • Calibration drift (gradual accuracy loss)                     │
+│ • Physical qubit failure (discrete event)                       │
+│ • Cryogenic system issues (environmental)                       │
+├─────────────────────────────────────────────────────────────────┤
+│ SERVICE FAILURES                                                │
+│ • Queue timeouts (congestion)                                   │
+│ • Backend unavailability (maintenance)                          │
+│ • API rate limits (throttling)                                  │
+│ • Network partitions (connectivity)                             │
+├─────────────────────────────────────────────────────────────────┤
+│ RESULT FAILURES                                                 │
+│ • Low fidelity results (quality degradation)                    │
+│ • Statistical anomalies (rare events)                           │
+│ • Measurement errors (systematic bias)                          │
+└─────────────────────────────────────────────────────────────────┘
+
+Reliability Equation:
+  R_system = R_classical × R_quantum × R_network
+
+Where:
+  R_quantum = F_circuit × (1 - P_timeout) × (1 - P_backend_failure)
+```
+
+## 2. Service Level Objectives for Quantum
+
+```python
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Callable
+from enum import Enum
+from datetime import datetime, timedelta
+import statistics
+
+class SLOType(Enum):
+    """Types of SLO metrics."""
+    AVAILABILITY = "availability"
+    LATENCY = "latency"
+    QUALITY = "quality"
+    THROUGHPUT = "throughput"
+
+@dataclass
+class QuantumSLO:
+    """
+    Service Level Objective for quantum applications.
+    """
+    name: str
+    slo_type: SLOType
+    target: float
+    unit: str
+    measurement_window: timedelta
+    description: str
+
+    # For latency SLOs
+    percentile: Optional[float] = None  # e.g., 0.99 for P99
+
+@dataclass
+class SLOBudget:
+    """
+    Error budget tracking for an SLO.
+    """
+    slo: QuantumSLO
+    budget_period: timedelta
+    total_budget: float
+    consumed: float = 0.0
+    measurements: List[Dict] = field(default_factory=list)
+
+    @property
+    def remaining_budget(self) -> float:
+        """Remaining error budget."""
+        return max(0, self.total_budget - self.consumed)
+
+    @property
+    def budget_percentage_remaining(self) -> float:
+        """Percentage of budget remaining."""
+        return (self.remaining_budget / self.total_budget * 100) if self.total_budget > 0 else 0
+
+    def record_measurement(self, value: float, timestamp: datetime = None):
+        """Record a measurement against this SLO."""
+        if timestamp is None:
+            timestamp = datetime.now()
+
+        self.measurements.append({
+            'value': value,
+            'timestamp': timestamp,
+            'met_slo': self._check_slo_met(value)
+        })
+
+        if not self._check_slo_met(value):
+            self.consumed += 1
+
+    def _check_slo_met(self, value: float) -> bool:
+        """Check if measurement meets SLO."""
+        if self.slo.slo_type == SLOType.AVAILABILITY:
+            return value >= self.slo.target
+        elif self.slo.slo_type == SLOType.LATENCY:
+            return value <= self.slo.target
+        elif self.slo.slo_type == SLOType.QUALITY:
+            return value >= self.slo.target
+        elif self.slo.slo_type == SLOType.THROUGHPUT:
+            return value >= self.slo.target
+        return True
+
+
+class QuantumSLOManager:
+    """
+    Manages SLOs and error budgets for quantum applications.
+    """
+
+    def __init__(self, application_name: str):
+        self.application_name = application_name
+        self.slos: Dict[str, QuantumSLO] = {}
+        self.budgets: Dict[str, SLOBudget] = {}
+        self._initialize_default_slos()
+
+    def _initialize_default_slos(self):
+        """Set up default quantum SLOs."""
+
+        # Availability: 99.5% of jobs complete successfully
+        self.add_slo(QuantumSLO(
+            name="job_success_rate",
+            slo_type=SLOType.AVAILABILITY,
+            target=0.995,
+            unit="ratio",
+            measurement_window=timedelta(hours=1),
+            description="Percentage of quantum jobs that complete successfully"
+        ))
+
+        # Latency: P99 job completion < 10 minutes
+        self.add_slo(QuantumSLO(
+            name="job_latency_p99",
+            slo_type=SLOType.LATENCY,
+            target=600,  # seconds
+            unit="seconds",
+            measurement_window=timedelta(hours=1),
+            percentile=0.99,
+            description="99th percentile job completion time"
+        ))
+
+        # Quality: Circuit fidelity > 85%
+        self.add_slo(QuantumSLO(
+            name="circuit_fidelity",
+            slo_type=SLOType.QUALITY,
+            target=0.85,
+            unit="ratio",
+            measurement_window=timedelta(minutes=30),
+            description="Minimum circuit fidelity for production results"
+        ))
+
+        # Quality: Result consistency > 90%
+        self.add_slo(QuantumSLO(
+            name="result_consistency",
+            slo_type=SLOType.QUALITY,
+            target=0.90,
+            unit="ratio",
+            measurement_window=timedelta(hours=1),
+            description="Consistency of results across repeated executions"
+        ))
+
+        # Throughput: > 100 jobs/hour
+        self.add_slo(QuantumSLO(
+            name="job_throughput",
+            slo_type=SLOType.THROUGHPUT,
+            target=100,
+            unit="jobs/hour",
+            measurement_window=timedelta(hours=1),
+            description="Minimum job throughput capacity"
+        ))
+
+    def add_slo(self, slo: QuantumSLO, budget_period_days: int = 30):
+        """Add an SLO with associated error budget."""
+        self.slos[slo.name] = slo
+
+        # Calculate error budget
+        if slo.slo_type == SLOType.AVAILABILITY:
+            # For 99.5% availability, 0.5% is the error budget
+            error_rate = 1 - slo.target
+        else:
+            # For other types, use 5% as default budget
+            error_rate = 0.05
+
+        # Budget in number of allowed failures per period
+        measurements_per_period = (
+            timedelta(days=budget_period_days) / slo.measurement_window
+        )
+        total_budget = int(measurements_per_period * error_rate)
+
+        self.budgets[slo.name] = SLOBudget(
+            slo=slo,
+            budget_period=timedelta(days=budget_period_days),
+            total_budget=total_budget
+        )
+
+    def record_metric(self, slo_name: str, value: float):
+        """Record a metric measurement for an SLO."""
+        if slo_name in self.budgets:
+            self.budgets[slo_name].record_measurement(value)
+
+    def get_slo_status(self) -> Dict:
+        """Get current status of all SLOs."""
+        status = {}
+        for name, budget in self.budgets.items():
+            recent = budget.measurements[-100:] if budget.measurements else []
+            met_count = sum(1 for m in recent if m['met_slo'])
+
+            status[name] = {
+                'slo_target': budget.slo.target,
+                'current_performance': met_count / len(recent) if recent else 1.0,
+                'budget_remaining': budget.budget_percentage_remaining,
+                'measurements_count': len(recent),
+                'healthy': budget.budget_percentage_remaining > 20
+            }
+
+        return status
+
+    def should_slow_down(self, slo_name: str, threshold: float = 0.25) -> bool:
+        """
+        Check if we should slow down deployments to preserve error budget.
+
+        When budget drops below threshold, signal to slow deployments.
+        """
+        if slo_name not in self.budgets:
+            return False
+
+        return self.budgets[slo_name].budget_percentage_remaining < threshold * 100
+```
+
+## 3. Circuit Breaker Pattern
+
+```python
+from enum import Enum
+from threading import Lock
+import time
+
+class CircuitState(Enum):
+    """Circuit breaker states."""
+    CLOSED = "closed"      # Normal operation
+    OPEN = "open"          # Failing, reject requests
+    HALF_OPEN = "half_open"  # Testing if backend recovered
+
+@dataclass
+class CircuitBreakerConfig:
+    """Configuration for circuit breaker."""
+    failure_threshold: int = 5      # Failures to trigger open
+    success_threshold: int = 3      # Successes to close from half-open
+    timeout_seconds: int = 60       # Time in open state before half-open
+    half_open_max_calls: int = 3    # Max calls in half-open state
+
+class QuantumCircuitBreaker:
+    """
+    Circuit breaker for quantum backend calls.
+
+    Protects against cascading failures when backends are unhealthy.
+    """
+
+    def __init__(self, name: str, config: CircuitBreakerConfig = None):
+        self.name = name
+        self.config = config or CircuitBreakerConfig()
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        self.last_failure_time = None
+        self.half_open_calls = 0
+        self._lock = Lock()
+
+    def can_execute(self) -> bool:
+        """Check if request can proceed."""
+        with self._lock:
+            if self.state == CircuitState.CLOSED:
+                return True
+
+            if self.state == CircuitState.OPEN:
+                # Check if timeout has passed
+                if self.last_failure_time:
+                    elapsed = time.time() - self.last_failure_time
+                    if elapsed >= self.config.timeout_seconds:
+                        self._transition_to_half_open()
+                        return True
+                return False
+
+            if self.state == CircuitState.HALF_OPEN:
+                if self.half_open_calls < self.config.half_open_max_calls:
+                    self.half_open_calls += 1
+                    return True
+                return False
+
+        return False
+
+    def record_success(self):
+        """Record a successful call."""
+        with self._lock:
+            if self.state == CircuitState.HALF_OPEN:
+                self.success_count += 1
+                if self.success_count >= self.config.success_threshold:
+                    self._transition_to_closed()
+            elif self.state == CircuitState.CLOSED:
+                # Reset failure count on success
+                self.failure_count = 0
+
+    def record_failure(self):
+        """Record a failed call."""
+        with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
+
+            if self.state == CircuitState.HALF_OPEN:
+                self._transition_to_open()
+            elif self.state == CircuitState.CLOSED:
+                if self.failure_count >= self.config.failure_threshold:
+                    self._transition_to_open()
+
+    def _transition_to_open(self):
+        """Transition to open state."""
+        self.state = CircuitState.OPEN
+        self.success_count = 0
+        print(f"Circuit breaker {self.name}: OPEN (blocking requests)")
+
+    def _transition_to_half_open(self):
+        """Transition to half-open state."""
+        self.state = CircuitState.HALF_OPEN
+        self.half_open_calls = 0
+        self.success_count = 0
+        print(f"Circuit breaker {self.name}: HALF-OPEN (testing)")
+
+    def _transition_to_closed(self):
+        """Transition to closed state."""
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        print(f"Circuit breaker {self.name}: CLOSED (normal operation)")
+
+    def get_status(self) -> Dict:
+        """Get circuit breaker status."""
+        return {
+            'name': self.name,
+            'state': self.state.value,
+            'failure_count': self.failure_count,
+            'success_count': self.success_count,
+            'config': {
+                'failure_threshold': self.config.failure_threshold,
+                'timeout_seconds': self.config.timeout_seconds
+            }
+        }
+
+
+class QuantumBackendProtection:
+    """
+    Protection layer for quantum backend calls.
+
+    Combines circuit breakers with retry logic and fallbacks.
+    """
+
+    def __init__(self):
+        self.circuit_breakers: Dict[str, QuantumCircuitBreaker] = {}
+
+    def get_or_create_breaker(self, backend_name: str) -> QuantumCircuitBreaker:
+        """Get or create circuit breaker for a backend."""
+        if backend_name not in self.circuit_breakers:
+            self.circuit_breakers[backend_name] = QuantumCircuitBreaker(backend_name)
+        return self.circuit_breakers[backend_name]
+
+    def execute_with_protection(
+        self,
+        backend_name: str,
+        operation: Callable,
+        fallback: Optional[Callable] = None
+    ) -> Dict:
+        """
+        Execute operation with circuit breaker protection.
+        """
+        breaker = self.get_or_create_breaker(backend_name)
+
+        if not breaker.can_execute():
+            if fallback:
+                return {
+                    'success': True,
+                    'result': fallback(),
+                    'source': 'fallback',
+                    'reason': 'circuit_open'
+                }
+            return {
+                'success': False,
+                'error': 'Circuit breaker open',
+                'source': 'circuit_breaker'
+            }
+
+        try:
+            result = operation()
+            breaker.record_success()
+            return {
+                'success': True,
+                'result': result,
+                'source': 'primary'
+            }
+        except Exception as e:
+            breaker.record_failure()
+            if fallback:
+                return {
+                    'success': True,
+                    'result': fallback(),
+                    'source': 'fallback',
+                    'reason': str(e)
+                }
+            return {
+                'success': False,
+                'error': str(e),
+                'source': 'primary'
+            }
+```
+
+## 4. Retry Strategies
+
+```python
+import random
+import math
+
+class RetryStrategy:
+    """Base class for retry strategies."""
+
+    def get_delay(self, attempt: int) -> float:
+        """Get delay before next retry attempt."""
+        raise NotImplementedError
+
+    def should_retry(self, attempt: int, exception: Exception) -> bool:
+        """Determine if we should retry."""
+        raise NotImplementedError
+
+class ExponentialBackoff(RetryStrategy):
+    """
+    Exponential backoff with jitter.
+
+    delay = min(cap, base * 2^attempt) + random_jitter
+    """
+
+    def __init__(
+        self,
+        base_delay: float = 1.0,
+        max_delay: float = 60.0,
+        max_attempts: int = 5,
+        jitter: float = 0.1,
+        retryable_exceptions: List[type] = None
+    ):
+        self.base_delay = base_delay
+        self.max_delay = max_delay
+        self.max_attempts = max_attempts
+        self.jitter = jitter
+        self.retryable_exceptions = retryable_exceptions or [Exception]
+
+    def get_delay(self, attempt: int) -> float:
+        """Calculate delay with exponential backoff and jitter."""
+        exponential_delay = self.base_delay * (2 ** attempt)
+        capped_delay = min(exponential_delay, self.max_delay)
+
+        # Add jitter
+        jitter_range = capped_delay * self.jitter
+        jittered_delay = capped_delay + random.uniform(-jitter_range, jitter_range)
+
+        return max(0, jittered_delay)
+
+    def should_retry(self, attempt: int, exception: Exception) -> bool:
+        """Check if we should retry this exception."""
+        if attempt >= self.max_attempts:
+            return False
+
+        return any(isinstance(exception, exc_type) for exc_type in self.retryable_exceptions)
+
+class QuantumAwareRetry(RetryStrategy):
+    """
+    Retry strategy aware of quantum-specific failures.
+
+    Different handling for:
+    - Transient failures (retry quickly)
+    - Queue timeouts (wait longer)
+    - Calibration issues (switch backend)
+    - Hardware failures (no retry)
+    """
+
+    def __init__(self, max_attempts: int = 3):
+        self.max_attempts = max_attempts
+
+        # Define quantum-specific error categories
+        self.transient_errors = ['ConnectionError', 'Timeout', 'RateLimitError']
+        self.queue_errors = ['QueueTimeoutError', 'JobExpiredError']
+        self.calibration_errors = ['CalibrationError', 'FidelityTooLowError']
+        self.hardware_errors = ['QubitError', 'HardwareFailure']
+
+    def categorize_error(self, exception: Exception) -> str:
+        """Categorize the error type."""
+        error_name = type(exception).__name__
+
+        if error_name in self.transient_errors:
+            return 'transient'
+        elif error_name in self.queue_errors:
+            return 'queue'
+        elif error_name in self.calibration_errors:
+            return 'calibration'
+        elif error_name in self.hardware_errors:
+            return 'hardware'
+        else:
+            return 'unknown'
+
+    def get_delay(self, attempt: int, error_category: str = 'unknown') -> float:
+        """Get delay based on error category."""
+        delays = {
+            'transient': 2 ** attempt,           # Quick exponential backoff
+            'queue': 30 * (attempt + 1),         # Linear increase, start at 30s
+            'calibration': 60,                   # Fixed delay for calibration
+            'hardware': 0,                       # No retry for hardware
+            'unknown': 5 * (2 ** attempt)        # Conservative exponential
+        }
+        return delays.get(error_category, 10)
+
+    def should_retry(self, attempt: int, exception: Exception) -> bool:
+        """Determine if retry is appropriate."""
+        if attempt >= self.max_attempts:
+            return False
+
+        category = self.categorize_error(exception)
+
+        # Never retry hardware failures
+        if category == 'hardware':
+            return False
+
+        # Always retry transient errors
+        if category == 'transient':
+            return True
+
+        # Retry queue errors with reduced attempts
+        if category == 'queue':
+            return attempt < 2
+
+        # Retry calibration errors once (may need backend switch)
+        if category == 'calibration':
+            return attempt < 1
+
+        return attempt < 2
+
+    def get_recommendation(self, exception: Exception) -> Dict:
+        """Get recommendation for handling this error."""
+        category = self.categorize_error(exception)
+
+        recommendations = {
+            'transient': {
+                'action': 'retry',
+                'switch_backend': False,
+                'alert': False
+            },
+            'queue': {
+                'action': 'retry_with_different_backend',
+                'switch_backend': True,
+                'alert': False
+            },
+            'calibration': {
+                'action': 'switch_backend_and_retry',
+                'switch_backend': True,
+                'alert': True
+            },
+            'hardware': {
+                'action': 'fail_and_alert',
+                'switch_backend': True,
+                'alert': True
+            }
+        }
+
+        return recommendations.get(category, {'action': 'retry', 'switch_backend': False, 'alert': False})
+```
+
+## 5. Graceful Degradation
+
+```python
+class DegradationLevel(Enum):
+    """Service degradation levels."""
+    FULL = "full"              # All features available
+    REDUCED = "reduced"        # Some features disabled
+    MINIMAL = "minimal"        # Core functionality only
+    FALLBACK = "fallback"      # Classical fallback only
+    OFFLINE = "offline"        # Service unavailable
+
+@dataclass
+class DegradationRule:
+    """Rule for triggering degradation."""
+    name: str
+    trigger_condition: Callable[[], bool]
+    degradation_level: DegradationLevel
+    affected_features: List[str]
+    recovery_condition: Callable[[], bool]
+
+class GracefulDegradationManager:
+    """
+    Manages graceful degradation for quantum applications.
+
+    Automatically reduces functionality when resources are constrained
+    or errors exceed thresholds.
+    """
+
+    def __init__(self):
+        self.current_level = DegradationLevel.FULL
+        self.rules: List[DegradationRule] = []
+        self.feature_status: Dict[str, bool] = {}
+        self._setup_default_rules()
+
+    def _setup_default_rules(self):
+        """Set up default degradation rules."""
+
+        # Rule: High queue times -> Reduce non-critical jobs
+        self.rules.append(DegradationRule(
+            name="high_queue_degradation",
+            trigger_condition=lambda: False,  # Implement with actual metrics
+            degradation_level=DegradationLevel.REDUCED,
+            affected_features=['batch_optimization', 'exploratory_runs'],
+            recovery_condition=lambda: True
+        ))
+
+        # Rule: Low fidelity -> Use simulator fallback
+        self.rules.append(DegradationRule(
+            name="low_fidelity_degradation",
+            trigger_condition=lambda: False,
+            degradation_level=DegradationLevel.FALLBACK,
+            affected_features=['production_runs'],
+            recovery_condition=lambda: True
+        ))
+
+        # Rule: Backend unavailable -> Minimal mode
+        self.rules.append(DegradationRule(
+            name="backend_unavailable",
+            trigger_condition=lambda: False,
+            degradation_level=DegradationLevel.MINIMAL,
+            affected_features=['quantum_execution', 'real_time_results'],
+            recovery_condition=lambda: True
+        ))
+
+    def evaluate_degradation(self, metrics: Dict) -> DegradationLevel:
+        """Evaluate current conditions and determine degradation level."""
+        triggered_levels = []
+
+        for rule in self.rules:
+            if rule.trigger_condition():
+                triggered_levels.append(rule.degradation_level)
+                for feature in rule.affected_features:
+                    self.feature_status[feature] = False
+
+        if not triggered_levels:
+            self.current_level = DegradationLevel.FULL
+            # Enable all features
+            for feature in self.feature_status:
+                self.feature_status[feature] = True
+        else:
+            # Use most severe degradation level
+            severity_order = [
+                DegradationLevel.FULL,
+                DegradationLevel.REDUCED,
+                DegradationLevel.MINIMAL,
+                DegradationLevel.FALLBACK,
+                DegradationLevel.OFFLINE
+            ]
+            self.current_level = max(
+                triggered_levels,
+                key=lambda x: severity_order.index(x)
+            )
+
+        return self.current_level
+
+    def is_feature_available(self, feature: str) -> bool:
+        """Check if a feature is currently available."""
+        return self.feature_status.get(feature, True)
+
+    def get_available_capabilities(self) -> Dict:
+        """Get currently available capabilities."""
+        capabilities = {
+            DegradationLevel.FULL: {
+                'quantum_execution': True,
+                'error_mitigation': True,
+                'batch_optimization': True,
+                'real_time_results': True,
+                'exploratory_runs': True
+            },
+            DegradationLevel.REDUCED: {
+                'quantum_execution': True,
+                'error_mitigation': True,
+                'batch_optimization': False,
+                'real_time_results': True,
+                'exploratory_runs': False
+            },
+            DegradationLevel.MINIMAL: {
+                'quantum_execution': True,
+                'error_mitigation': False,
+                'batch_optimization': False,
+                'real_time_results': False,
+                'exploratory_runs': False
+            },
+            DegradationLevel.FALLBACK: {
+                'quantum_execution': False,
+                'error_mitigation': False,
+                'batch_optimization': False,
+                'real_time_results': True,
+                'exploratory_runs': False,
+                'classical_simulation': True
+            },
+            DegradationLevel.OFFLINE: {
+                'quantum_execution': False,
+                'error_mitigation': False,
+                'batch_optimization': False,
+                'real_time_results': False,
+                'exploratory_runs': False
+            }
+        }
+
+        return capabilities.get(self.current_level, capabilities[DegradationLevel.OFFLINE])
+
+
+class ClassicalFallbackExecutor:
+    """
+    Classical fallback executor for quantum circuits.
+
+    Provides approximate classical simulation when QPUs are unavailable.
+    """
+
+    def __init__(self, max_qubits: int = 20):
+        self.max_qubits = max_qubits
+
+    def can_simulate(self, num_qubits: int) -> bool:
+        """Check if circuit can be classically simulated."""
+        return num_qubits <= self.max_qubits
+
+    def execute_fallback(
+        self,
+        circuit_data: Dict,
+        shots: int
+    ) -> Dict:
+        """
+        Execute circuit using classical simulation.
+
+        Returns results with fallback indicator.
+        """
+        num_qubits = circuit_data.get('num_qubits', 0)
+
+        if not self.can_simulate(num_qubits):
+            return {
+                'success': False,
+                'error': f'Circuit too large for classical simulation ({num_qubits} > {self.max_qubits})',
+                'fallback_used': True
+            }
+
+        # Simulate execution (placeholder for actual simulator)
+        result = {
+            'success': True,
+            'counts': {'0' * num_qubits: shots // 2, '1' * num_qubits: shots // 2},
+            'fallback_used': True,
+            'simulator': 'classical_statevector',
+            'warning': 'Results from classical simulation - may differ from QPU'
+        }
+
+        return result
+```
+
+## 6. Health Checks and Probes
+
+```python
+@dataclass
+class HealthCheckResult:
+    """Result of a health check."""
+    check_name: str
+    healthy: bool
+    latency_ms: float
+    details: Dict
+    timestamp: datetime = field(default_factory=datetime.now)
+
+class QuantumHealthChecker:
+    """
+    Health checking system for quantum applications.
+
+    Provides liveness, readiness, and deep health probes.
+    """
+
+    def __init__(self, application_name: str):
+        self.application_name = application_name
+        self.checks: Dict[str, Callable[[], HealthCheckResult]] = {}
+        self._setup_default_checks()
+
+    def _setup_default_checks(self):
+        """Set up default health checks."""
+
+        def check_backend_connectivity():
+            start = time.time()
+            # Simulate backend ping
+            healthy = True  # Replace with actual check
+            latency = (time.time() - start) * 1000
+
+            return HealthCheckResult(
+                check_name="backend_connectivity",
+                healthy=healthy,
+                latency_ms=latency,
+                details={'backends_reachable': 3, 'backends_total': 3}
+            )
+
+        def check_job_processor():
+            start = time.time()
+            healthy = True  # Replace with actual check
+            latency = (time.time() - start) * 1000
+
+            return HealthCheckResult(
+                check_name="job_processor",
+                healthy=healthy,
+                latency_ms=latency,
+                details={'queue_depth': 5, 'processing_rate': 10}
+            )
+
+        def check_result_cache():
+            start = time.time()
+            healthy = True  # Replace with actual check
+            latency = (time.time() - start) * 1000
+
+            return HealthCheckResult(
+                check_name="result_cache",
+                healthy=healthy,
+                latency_ms=latency,
+                details={'hit_rate': 0.75, 'size': 1000}
+            )
+
+        self.checks['backend_connectivity'] = check_backend_connectivity
+        self.checks['job_processor'] = check_job_processor
+        self.checks['result_cache'] = check_result_cache
+
+    def liveness_probe(self) -> Dict:
+        """
+        Liveness probe - is the application running?
+
+        Quick check, should always pass if process is alive.
+        """
+        return {
+            'status': 'alive',
+            'application': self.application_name,
+            'timestamp': datetime.now().isoformat()
+        }
+
+    def readiness_probe(self) -> Dict:
+        """
+        Readiness probe - can the application handle requests?
+
+        Checks critical dependencies.
+        """
+        results = {}
+        overall_ready = True
+
+        for name, check_fn in self.checks.items():
+            try:
+                result = check_fn()
+                results[name] = {
+                    'healthy': result.healthy,
+                    'latency_ms': result.latency_ms
+                }
+                if not result.healthy:
+                    overall_ready = False
+            except Exception as e:
+                results[name] = {'healthy': False, 'error': str(e)}
+                overall_ready = False
+
+        return {
+            'ready': overall_ready,
+            'checks': results,
+            'timestamp': datetime.now().isoformat()
+        }
+
+    def deep_health_check(self) -> Dict:
+        """
+        Deep health check - comprehensive system status.
+
+        Includes all checks with full details.
+        """
+        results = {}
+
+        for name, check_fn in self.checks.items():
+            try:
+                result = check_fn()
+                results[name] = {
+                    'healthy': result.healthy,
+                    'latency_ms': result.latency_ms,
+                    'details': result.details,
+                    'timestamp': result.timestamp.isoformat()
+                }
+            except Exception as e:
+                results[name] = {
+                    'healthy': False,
+                    'error': str(e),
+                    'timestamp': datetime.now().isoformat()
+                }
+
+        healthy_count = sum(1 for r in results.values() if r.get('healthy', False))
+
+        return {
+            'application': self.application_name,
+            'overall_health': healthy_count == len(results),
+            'healthy_checks': healthy_count,
+            'total_checks': len(results),
+            'checks': results,
+            'timestamp': datetime.now().isoformat()
+        }
+```
+
+## Summary
+
+Reliability engineering for quantum systems requires:
+
+1. **Quantum-Specific SLOs**: Define targets for availability, latency, quality, and throughput
+2. **Error Budgets**: Track and manage acceptable failure rates
+3. **Circuit Breakers**: Protect against cascading failures from unhealthy backends
+4. **Smart Retry Strategies**: Quantum-aware retry logic that handles different failure types
+5. **Graceful Degradation**: Progressive feature reduction under stress
+6. **Health Probes**: Comprehensive health checking for operational visibility
+
+The key insight is that quantum reliability must account for probabilistic behavior, hardware drift, and the unique failure modes of quantum systems.
+
+## Further Reading
+
+- Google SRE Book: Implementing SLOs
+- Netflix Chaos Engineering Principles
+- AWS Well-Architected Reliability Pillar

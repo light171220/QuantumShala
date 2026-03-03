@@ -15,10 +15,22 @@ import type {
   ComparisonResult,
   ComparisonBackend,
 } from '@/types/simulator'
-import type { OptimizationResult, OptimizationPass } from '@/types/optimizer'
-import { DEFAULT_NOISE_CONFIG } from '@/lib/quantum/noise-simulator'
-import { DEFAULT_DEBUGGER_STATE } from '@/lib/quantum/debugger'
-import { DEFAULT_COMPARISON_CONFIG } from '@/lib/quantum/comparison'
+import type { OptimizationResult } from '@/types/optimizer'
+
+const DEFAULT_NOISE_CONFIG: NoiseConfig = {
+  enabled: false,
+  model: { type: 'depolarizing', errorRate: 0.001 },
+  preset: 'ideal',
+}
+
+const DEFAULT_COMPARISON_CONFIG: ComparisonConfig = {
+  backends: [
+    { id: 'browser_ideal', name: 'Browser (Ideal)', type: 'browser' },
+    { id: 'browser_noisy', name: 'Browser (Noisy)', type: 'browser_noisy', noiseConfig: { ...DEFAULT_NOISE_CONFIG, enabled: true } },
+  ],
+  shots: 1024,
+  includeStatistics: true,
+}
 
 interface SimulatorState {
   circuit: QuantumCircuit
@@ -524,6 +536,8 @@ export const useSimulatorStore = create<SimulatorState & SimulatorActions>()(
 function gateToQASM(gate: CircuitGate): string {
   const q = gate.qubits[0]
   const params = gate.parameters || []
+  const ctrl = gate.controlQubits?.[0] ?? gate.qubits[0]
+  const tgt = gate.qubits[gate.qubits.length - 1]
 
   switch (gate.type) {
     case 'H': return `h q[${q}];`
@@ -534,22 +548,38 @@ function gateToQASM(gate: CircuitGate): string {
     case 'T': return `t q[${q}];`
     case 'Sdg': return `sdg q[${q}];`
     case 'Tdg': return `tdg q[${q}];`
-    case 'Rx': return `rx(${params[0]}) q[${q}];`
-    case 'Ry': return `ry(${params[0]}) q[${q}];`
-    case 'Rz': return `rz(${params[0]}) q[${q}];`
-    case 'CNOT': return `cx q[${gate.controlQubits?.[0] || gate.qubits[0]}],q[${gate.qubits[gate.qubits.length - 1]}];`
-    case 'CZ': return `cz q[${gate.controlQubits?.[0] || gate.qubits[0]}],q[${gate.qubits[gate.qubits.length - 1]}];`
+    case 'Rx': return `rx(${params[0] ?? Math.PI / 2}) q[${q}];`
+    case 'Ry': return `ry(${params[0] ?? Math.PI / 2}) q[${q}];`
+    case 'Rz': return `rz(${params[0] ?? Math.PI / 2}) q[${q}];`
+    case 'U': return `u(${params[0] ?? 0},${params[1] ?? 0},${params[2] ?? 0}) q[${q}];`
+    case 'U1': return `u1(${params[0] ?? 0}) q[${q}];`
+    case 'U2': return `u2(${params[0] ?? 0},${params[1] ?? 0}) q[${q}];`
+    case 'U3': return `u3(${params[0] ?? 0},${params[1] ?? 0},${params[2] ?? 0}) q[${q}];`
+    case 'Phase': return `p(${params[0] ?? Math.PI / 4}) q[${q}];`
+    case 'CNOT':
+    case 'CX': return `cx q[${ctrl}],q[${tgt}];`
+    case 'CY': return `cy q[${ctrl}],q[${tgt}];`
+    case 'CZ': return `cz q[${ctrl}],q[${tgt}];`
+    case 'CRx': return `crx(${params[0] ?? Math.PI / 2}) q[${ctrl}],q[${tgt}];`
+    case 'CRy': return `cry(${params[0] ?? Math.PI / 2}) q[${ctrl}],q[${tgt}];`
+    case 'CRz': return `crz(${params[0] ?? Math.PI / 2}) q[${ctrl}],q[${tgt}];`
+    case 'CPhase': return `cp(${params[0] ?? Math.PI / 4}) q[${ctrl}],q[${tgt}];`
     case 'SWAP': return `swap q[${gate.qubits[0]}],q[${gate.qubits[1]}];`
+    case 'iSWAP': return `// iswap q[${gate.qubits[0]}],q[${gate.qubits[1]}]; (custom gate)`
     case 'Toffoli': return `ccx q[${gate.qubits[0]}],q[${gate.qubits[1]}],q[${gate.qubits[2]}];`
+    case 'Fredkin': return `cswap q[${gate.qubits[0]}],q[${gate.qubits[1]}],q[${gate.qubits[2]}];`
     case 'Barrier': return `barrier q;`
     case 'Reset': return `reset q[${q}];`
-    default: return ''
+    case 'Custom': return `// custom gate on q[${q}]`
+    default: return `// unknown gate: ${gate.type}`
   }
 }
 
 function gateToQiskit(gate: CircuitGate): string {
   const q = gate.qubits[0]
   const params = gate.parameters || []
+  const ctrl = gate.controlQubits?.[0] ?? gate.qubits[0]
+  const tgt = gate.qubits[gate.qubits.length - 1]
 
   switch (gate.type) {
     case 'H': return `qc.h(qr[${q}])`
@@ -560,15 +590,29 @@ function gateToQiskit(gate: CircuitGate): string {
     case 'T': return `qc.t(qr[${q}])`
     case 'Sdg': return `qc.sdg(qr[${q}])`
     case 'Tdg': return `qc.tdg(qr[${q}])`
-    case 'Rx': return `qc.rx(${params[0]}, qr[${q}])`
-    case 'Ry': return `qc.ry(${params[0]}, qr[${q}])`
-    case 'Rz': return `qc.rz(${params[0]}, qr[${q}])`
-    case 'CNOT': return `qc.cx(qr[${gate.controlQubits?.[0] || gate.qubits[0]}], qr[${gate.qubits[gate.qubits.length - 1]}])`
-    case 'CZ': return `qc.cz(qr[${gate.controlQubits?.[0] || gate.qubits[0]}], qr[${gate.qubits[gate.qubits.length - 1]}])`
+    case 'Rx': return `qc.rx(${params[0] ?? Math.PI / 2}, qr[${q}])`
+    case 'Ry': return `qc.ry(${params[0] ?? Math.PI / 2}, qr[${q}])`
+    case 'Rz': return `qc.rz(${params[0] ?? Math.PI / 2}, qr[${q}])`
+    case 'U': return `qc.u(${params[0] ?? 0}, ${params[1] ?? 0}, ${params[2] ?? 0}, qr[${q}])`
+    case 'U1': return `qc.p(${params[0] ?? 0}, qr[${q}])`
+    case 'U2': return `qc.u(np.pi/2, ${params[0] ?? 0}, ${params[1] ?? 0}, qr[${q}])`
+    case 'U3': return `qc.u(${params[0] ?? 0}, ${params[1] ?? 0}, ${params[2] ?? 0}, qr[${q}])`
+    case 'Phase': return `qc.p(${params[0] ?? Math.PI / 4}, qr[${q}])`
+    case 'CNOT':
+    case 'CX': return `qc.cx(qr[${ctrl}], qr[${tgt}])`
+    case 'CY': return `qc.cy(qr[${ctrl}], qr[${tgt}])`
+    case 'CZ': return `qc.cz(qr[${ctrl}], qr[${tgt}])`
+    case 'CRx': return `qc.crx(${params[0] ?? Math.PI / 2}, qr[${ctrl}], qr[${tgt}])`
+    case 'CRy': return `qc.cry(${params[0] ?? Math.PI / 2}, qr[${ctrl}], qr[${tgt}])`
+    case 'CRz': return `qc.crz(${params[0] ?? Math.PI / 2}, qr[${ctrl}], qr[${tgt}])`
+    case 'CPhase': return `qc.cp(${params[0] ?? Math.PI / 4}, qr[${ctrl}], qr[${tgt}])`
     case 'SWAP': return `qc.swap(qr[${gate.qubits[0]}], qr[${gate.qubits[1]}])`
+    case 'iSWAP': return `qc.iswap(qr[${gate.qubits[0]}], qr[${gate.qubits[1]}])`
     case 'Toffoli': return `qc.ccx(qr[${gate.qubits[0]}], qr[${gate.qubits[1]}], qr[${gate.qubits[2]}])`
+    case 'Fredkin': return `qc.cswap(qr[${gate.qubits[0]}], qr[${gate.qubits[1]}], qr[${gate.qubits[2]}])`
     case 'Barrier': return `qc.barrier()`
     case 'Reset': return `qc.reset(qr[${q}])`
-    default: return ''
+    case 'Custom': return `# custom gate on qr[${q}]`
+    default: return `# unknown gate: ${gate.type}`
   }
 }

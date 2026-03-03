@@ -1,0 +1,595 @@
+---
+title: "Simulation-Based Testing"
+description: "Comprehensive testing strategies using quantum simulators before hardware deployment."
+duration: 50
+difficulty: "intermediate"
+---
+
+## 1. The Role of Simulators in Testing
+
+Quantum simulators are essential for validating circuits before expensive hardware execution:
+
+```
+Development Workflow
+--------------------
+Write Code --> Simulate --> Test --> Deploy to Hardware
+
+Simulator Types:
+- Statevector: Exact amplitudes (2^n complex numbers)
+- Density Matrix: Mixed states, noise modeling (2^n x 2^n)
+- Stabilizer: Clifford circuits only (polynomial)
+- Tensor Network: Large sparse circuits
+```
+
+## 2. Statevector Simulation Testing
+
+```python
+import numpy as np
+from typing import List, Dict, Optional, Callable
+
+class StatevectorSimulator:
+    """Exact statevector simulator for testing."""
+
+    def __init__(self):
+        self.state: Optional[np.ndarray] = None
+        self.num_qubits: int = 0
+
+    def initialize(self, num_qubits: int, initial_state: str = "zero"):
+        """Initialize quantum state."""
+        self.num_qubits = num_qubits
+        dim = 2 ** num_qubits
+
+        if initial_state == "zero":
+            self.state = np.zeros(dim, dtype=complex)
+            self.state[0] = 1.0
+        elif initial_state == "plus":
+            self.state = np.ones(dim, dtype=complex) / np.sqrt(dim)
+        else:
+            self.state = np.zeros(dim, dtype=complex)
+            self.state[int(initial_state, 2)] = 1.0
+
+        return self
+
+    def apply_gate(self, matrix: np.ndarray, qubits: List[int]):
+        """Apply gate matrix to specified qubits."""
+        # Build full matrix using tensor products
+        full_matrix = self._build_full_matrix(matrix, qubits)
+        self.state = full_matrix @ self.state
+        return self
+
+    def _build_full_matrix(self, gate: np.ndarray, qubits: List[int]) -> np.ndarray:
+        """Expand gate to full Hilbert space."""
+        n = self.num_qubits
+        dim = 2 ** n
+
+        # For single-qubit gates
+        if len(qubits) == 1:
+            q = qubits[0]
+            matrices = []
+            for i in range(n):
+                if i == q:
+                    matrices.append(gate)
+                else:
+                    matrices.append(np.eye(2))
+
+            result = matrices[0]
+            for m in matrices[1:]:
+                result = np.kron(result, m)
+            return result
+
+        # For two-qubit gates (simplified)
+        return self._apply_two_qubit_gate(gate, qubits)
+
+    def _apply_two_qubit_gate(self, gate: np.ndarray, qubits: List[int]) -> np.ndarray:
+        """Apply two-qubit gate."""
+        n = self.num_qubits
+        dim = 2 ** n
+        result = np.zeros((dim, dim), dtype=complex)
+
+        q0, q1 = qubits
+        for i in range(dim):
+            for j in range(dim):
+                # Extract relevant bits
+                b0_i = (i >> (n - 1 - q0)) & 1
+                b1_i = (i >> (n - 1 - q1)) & 1
+                b0_j = (j >> (n - 1 - q0)) & 1
+                b1_j = (j >> (n - 1 - q1)) & 1
+
+                # Check if other bits match
+                mask = ~((1 << (n - 1 - q0)) | (1 << (n - 1 - q1)))
+                if (i & mask) == (j & mask):
+                    gate_i = b0_i * 2 + b1_i
+                    gate_j = b0_j * 2 + b1_j
+                    result[i, j] = gate[gate_i, gate_j]
+
+        return result
+
+    def get_probabilities(self) -> np.ndarray:
+        """Get measurement probabilities."""
+        return np.abs(self.state) ** 2
+
+    def get_state(self) -> np.ndarray:
+        """Get current statevector."""
+        return self.state.copy()
+
+    def measure_all(self, shots: int = 1024) -> Dict[str, int]:
+        """Sample measurements from probability distribution."""
+        probs = self.get_probabilities()
+        indices = np.random.choice(len(probs), size=shots, p=probs)
+        counts = {}
+        for idx in indices:
+            bitstring = format(idx, f'0{self.num_qubits}b')
+            counts[bitstring] = counts.get(bitstring, 0) + 1
+        return counts
+```
+
+## 3. Testing State Preparation
+
+```python
+class StatePreparationTests:
+    """Tests for quantum state preparation circuits."""
+
+    def __init__(self, simulator: StatevectorSimulator):
+        self.sim = simulator
+
+    def test_superposition(self, circuit_builder: Callable,
+                           expected_probs: Dict[str, float],
+                           tolerance: float = 1e-6) -> bool:
+        """Test that circuit creates expected superposition."""
+        # Build and run circuit
+        circuit = circuit_builder()
+        self.sim.initialize(circuit.num_qubits)
+
+        for gate, qubits in circuit.operations:
+            self.sim.apply_gate(gate, qubits)
+
+        probs = self.sim.get_probabilities()
+
+        # Validate probabilities
+        for bitstring, expected in expected_probs.items():
+            idx = int(bitstring, 2)
+            if abs(probs[idx] - expected) > tolerance:
+                print(f"FAIL: P({bitstring}) = {probs[idx]:.6f}, "
+                      f"expected {expected:.6f}")
+                return False
+
+        return True
+
+    def test_entanglement(self, circuit_builder: Callable) -> Dict[str, any]:
+        """Test entanglement properties of prepared state."""
+        circuit = circuit_builder()
+        self.sim.initialize(circuit.num_qubits)
+
+        for gate, qubits in circuit.operations:
+            self.sim.apply_gate(gate, qubits)
+
+        state = self.sim.get_state()
+        n = circuit.num_qubits
+
+        # Compute reduced density matrices
+        rho_full = np.outer(state, state.conj())
+
+        # Partial trace to get subsystem
+        dim_a = 2 ** (n // 2)
+        dim_b = 2 ** (n - n // 2)
+
+        rho_a = self._partial_trace(rho_full, dim_a, dim_b)
+
+        # Compute von Neumann entropy
+        eigenvalues = np.linalg.eigvalsh(rho_a)
+        eigenvalues = eigenvalues[eigenvalues > 1e-12]
+        entropy = -np.sum(eigenvalues * np.log2(eigenvalues))
+
+        return {
+            'is_entangled': entropy > 0.01,
+            'entanglement_entropy': entropy,
+            'max_entropy': n // 2  # Maximum for half partition
+        }
+
+    def _partial_trace(self, rho: np.ndarray, dim_a: int, dim_b: int) -> np.ndarray:
+        """Compute partial trace over subsystem B."""
+        rho_reshaped = rho.reshape(dim_a, dim_b, dim_a, dim_b)
+        return np.trace(rho_reshaped, axis1=1, axis2=3)
+```
+
+## 4. Noise Model Testing
+
+```python
+class NoiseModel:
+    """Noise model for realistic simulation testing."""
+
+    def __init__(self):
+        self.single_qubit_error = 0.001
+        self.two_qubit_error = 0.01
+        self.readout_error = 0.02
+        self.t1_time = 50e-6  # 50 microseconds
+        self.t2_time = 30e-6  # 30 microseconds
+        self.gate_time = 50e-9  # 50 nanoseconds
+
+    def depolarizing_channel(self, rho: np.ndarray,
+                             error_rate: float) -> np.ndarray:
+        """Apply depolarizing noise channel."""
+        n = int(np.log2(rho.shape[0]))
+        identity = np.eye(2**n) / (2**n)
+        return (1 - error_rate) * rho + error_rate * identity
+
+    def amplitude_damping(self, rho: np.ndarray,
+                          gamma: float) -> np.ndarray:
+        """Apply amplitude damping (T1 decay)."""
+        # Kraus operators for single qubit
+        K0 = np.array([[1, 0], [0, np.sqrt(1 - gamma)]])
+        K1 = np.array([[0, np.sqrt(gamma)], [0, 0]])
+
+        return K0 @ rho @ K0.conj().T + K1 @ rho @ K1.conj().T
+
+    def phase_damping(self, rho: np.ndarray,
+                      gamma: float) -> np.ndarray:
+        """Apply phase damping (T2 dephasing)."""
+        K0 = np.array([[1, 0], [0, np.sqrt(1 - gamma)]])
+        K1 = np.array([[0, 0], [0, np.sqrt(gamma)]])
+
+        return K0 @ rho @ K0.conj().T + K1 @ rho @ K1.conj().T
+
+    def apply_readout_error(self, counts: Dict[str, int],
+                            error_rate: float) -> Dict[str, int]:
+        """Apply measurement/readout errors."""
+        noisy_counts = {}
+        total = sum(counts.values())
+
+        for bitstring, count in counts.items():
+            # Probability of bit flip on each qubit
+            for _ in range(count):
+                noisy_bits = ""
+                for bit in bitstring:
+                    if np.random.random() < error_rate:
+                        noisy_bits += '1' if bit == '0' else '0'
+                    else:
+                        noisy_bits += bit
+                noisy_counts[noisy_bits] = noisy_counts.get(noisy_bits, 0) + 1
+
+        return noisy_counts
+
+
+class NoisySimulator:
+    """Density matrix simulator with noise."""
+
+    def __init__(self, noise_model: NoiseModel):
+        self.noise = noise_model
+        self.rho: Optional[np.ndarray] = None
+        self.num_qubits: int = 0
+
+    def initialize(self, num_qubits: int):
+        """Initialize to |0...0> state."""
+        self.num_qubits = num_qubits
+        dim = 2 ** num_qubits
+        self.rho = np.zeros((dim, dim), dtype=complex)
+        self.rho[0, 0] = 1.0
+        return self
+
+    def apply_noisy_gate(self, gate: np.ndarray, qubits: List[int]):
+        """Apply gate with noise."""
+        # Apply ideal gate
+        full_gate = self._expand_gate(gate, qubits)
+        self.rho = full_gate @ self.rho @ full_gate.conj().T
+
+        # Apply noise
+        if len(qubits) == 1:
+            error_rate = self.noise.single_qubit_error
+        else:
+            error_rate = self.noise.two_qubit_error
+
+        self.rho = self.noise.depolarizing_channel(self.rho, error_rate)
+        return self
+
+    def _expand_gate(self, gate: np.ndarray, qubits: List[int]) -> np.ndarray:
+        """Expand gate to full system."""
+        # Simplified single-qubit expansion
+        if len(qubits) == 1:
+            q = qubits[0]
+            result = np.eye(1)
+            for i in range(self.num_qubits):
+                if i == q:
+                    result = np.kron(result, gate)
+                else:
+                    result = np.kron(result, np.eye(2))
+            return result
+        return gate  # Placeholder for multi-qubit
+
+    def measure(self, shots: int = 1024) -> Dict[str, int]:
+        """Measure with readout errors."""
+        # Get ideal probabilities
+        probs = np.diag(self.rho).real
+
+        # Sample
+        indices = np.random.choice(len(probs), size=shots, p=probs)
+        counts = {}
+        for idx in indices:
+            bs = format(idx, f'0{self.num_qubits}b')
+            counts[bs] = counts.get(bs, 0) + 1
+
+        # Apply readout errors
+        return self.noise.apply_readout_error(counts, self.noise.readout_error)
+```
+
+## 5. Shot-Based Testing Strategies
+
+```python
+class ShotBasedTester:
+    """Statistical testing with finite shots."""
+
+    def __init__(self, simulator):
+        self.simulator = simulator
+
+    def estimate_required_shots(self, target_precision: float,
+                                confidence: float = 0.95) -> int:
+        """Estimate shots needed for target precision."""
+        # Using normal approximation for proportion
+        # Standard error = sqrt(p(1-p)/n)
+        # For worst case p=0.5: SE = 0.5/sqrt(n)
+        # Precision = z * SE
+
+        from scipy import stats
+        z = stats.norm.ppf((1 + confidence) / 2)
+
+        # n = (z / (2 * precision))^2
+        n = (z / (2 * target_precision)) ** 2
+        return int(np.ceil(n))
+
+    def run_with_confidence(self, circuit, expected_outcomes: Dict[str, float],
+                            confidence: float = 0.95) -> Dict[str, any]:
+        """Run test with confidence intervals."""
+        # Determine shots for 1% precision
+        shots = self.estimate_required_shots(0.01, confidence)
+
+        counts = self.simulator.measure_all(shots)
+        total = sum(counts.values())
+
+        from scipy import stats
+        z = stats.norm.ppf((1 + confidence) / 2)
+
+        results = {'passed': True, 'outcomes': {}}
+
+        for outcome, expected in expected_outcomes.items():
+            observed = counts.get(outcome, 0)
+            p_hat = observed / total
+
+            # Wilson score interval
+            denominator = 1 + z**2 / total
+            center = (p_hat + z**2 / (2 * total)) / denominator
+            margin = z * np.sqrt(p_hat * (1 - p_hat) / total +
+                                z**2 / (4 * total**2)) / denominator
+
+            ci_low = center - margin
+            ci_high = center + margin
+
+            # Check if expected is within confidence interval
+            within_ci = ci_low <= expected <= ci_high
+
+            results['outcomes'][outcome] = {
+                'observed': p_hat,
+                'expected': expected,
+                'ci_low': ci_low,
+                'ci_high': ci_high,
+                'within_ci': within_ci
+            }
+
+            if not within_ci:
+                results['passed'] = False
+
+        results['shots'] = shots
+        results['confidence'] = confidence
+        return results
+
+    def convergence_test(self, circuit, expected: Dict[str, float],
+                         shot_schedule: List[int]) -> List[Dict]:
+        """Test convergence as shots increase."""
+        results = []
+
+        for shots in shot_schedule:
+            counts = self.simulator.measure_all(shots)
+            total = sum(counts.values())
+
+            max_error = 0
+            for outcome, prob in expected.items():
+                observed = counts.get(outcome, 0) / total
+                error = abs(observed - prob)
+                max_error = max(max_error, error)
+
+            results.append({
+                'shots': shots,
+                'max_error': max_error,
+                'expected_error': 1 / np.sqrt(shots)  # Theoretical 1/sqrt(n)
+            })
+
+        return results
+```
+
+## 6. Comparing Simulator Results
+
+```python
+class SimulatorComparison:
+    """Compare results across different simulators."""
+
+    def __init__(self, simulators: Dict[str, any]):
+        self.simulators = simulators
+
+    def cross_validate(self, circuit_builder: Callable,
+                       shots: int = 10000) -> Dict[str, any]:
+        """Run same circuit on multiple simulators and compare."""
+        results = {}
+
+        for name, sim in self.simulators.items():
+            circuit = circuit_builder()
+            counts = sim.run(circuit, shots=shots)
+
+            total = sum(counts.values())
+            probs = {k: v/total for k, v in counts.items()}
+            results[name] = probs
+
+        # Compute pairwise distances
+        distances = {}
+        names = list(results.keys())
+
+        for i, name1 in enumerate(names):
+            for name2 in names[i+1:]:
+                dist = self._total_variation_distance(
+                    results[name1], results[name2]
+                )
+                distances[f"{name1}_vs_{name2}"] = dist
+
+        return {
+            'results': results,
+            'distances': distances,
+            'max_distance': max(distances.values()) if distances else 0
+        }
+
+    def _total_variation_distance(self, p: Dict[str, float],
+                                  q: Dict[str, float]) -> float:
+        """Compute total variation distance between distributions."""
+        all_keys = set(p.keys()) | set(q.keys())
+        return 0.5 * sum(abs(p.get(k, 0) - q.get(k, 0)) for k in all_keys)
+
+    def benchmark_performance(self, circuit_builder: Callable,
+                              qubit_range: range) -> Dict[str, List]:
+        """Benchmark simulator performance across qubit counts."""
+        import time
+
+        benchmarks = {name: [] for name in self.simulators}
+
+        for n_qubits in qubit_range:
+            circuit = circuit_builder(n_qubits)
+
+            for name, sim in self.simulators.items():
+                start = time.time()
+                try:
+                    sim.run(circuit, shots=1000)
+                    elapsed = time.time() - start
+                except MemoryError:
+                    elapsed = float('inf')
+
+                benchmarks[name].append({
+                    'qubits': n_qubits,
+                    'time': elapsed
+                })
+
+        return benchmarks
+```
+
+## 7. Result Validation Framework
+
+```python
+class ResultValidator:
+    """Validate quantum circuit results against specifications."""
+
+    def __init__(self, tolerance: float = 0.05):
+        self.tolerance = tolerance
+        self.validation_results: List[Dict] = []
+
+    def validate_probabilities(self, observed: Dict[str, int],
+                               expected: Dict[str, float]) -> bool:
+        """Validate observed counts match expected probabilities."""
+        total = sum(observed.values())
+
+        for outcome, exp_prob in expected.items():
+            obs_prob = observed.get(outcome, 0) / total
+            if abs(obs_prob - exp_prob) > self.tolerance:
+                self.validation_results.append({
+                    'test': 'probability',
+                    'outcome': outcome,
+                    'expected': exp_prob,
+                    'observed': obs_prob,
+                    'passed': False
+                })
+                return False
+
+        self.validation_results.append({
+            'test': 'probability',
+            'passed': True
+        })
+        return True
+
+    def validate_expectation_value(self, observed: Dict[str, int],
+                                   observable: Dict[str, float],
+                                   expected: float) -> bool:
+        """Validate expectation value of observable."""
+        total = sum(observed.values())
+
+        exp_val = 0
+        for outcome, count in observed.items():
+            prob = count / total
+            eigenvalue = observable.get(outcome, 0)
+            exp_val += prob * eigenvalue
+
+        passed = abs(exp_val - expected) < self.tolerance
+
+        self.validation_results.append({
+            'test': 'expectation_value',
+            'expected': expected,
+            'observed': exp_val,
+            'passed': passed
+        })
+
+        return passed
+
+    def validate_correlations(self, observed: Dict[str, int],
+                              qubit_pairs: List[tuple]) -> Dict[str, float]:
+        """Validate quantum correlations between qubit pairs."""
+        total = sum(observed.values())
+        correlations = {}
+
+        for q1, q2 in qubit_pairs:
+            # Count correlated outcomes
+            same = 0
+            diff = 0
+
+            for bitstring, count in observed.items():
+                b1 = bitstring[q1]
+                b2 = bitstring[q2]
+                if b1 == b2:
+                    same += count
+                else:
+                    diff += count
+
+            correlation = (same - diff) / total
+            correlations[f"q{q1}_q{q2}"] = correlation
+
+        return correlations
+
+    def generate_report(self) -> str:
+        """Generate validation report."""
+        report = ["=== Validation Report ===\n"]
+
+        passed = sum(1 for r in self.validation_results if r['passed'])
+        total = len(self.validation_results)
+
+        report.append(f"Tests Passed: {passed}/{total}\n")
+        report.append("-" * 30 + "\n")
+
+        for result in self.validation_results:
+            status = "PASS" if result['passed'] else "FAIL"
+            report.append(f"[{status}] {result['test']}")
+            if 'expected' in result:
+                report.append(f"  Expected: {result['expected']}")
+                report.append(f"  Observed: {result['observed']}")
+            report.append("")
+
+        return "\n".join(report)
+```
+
+## Summary
+
+Simulation-based testing provides:
+
+| Aspect | Benefit |
+|--------|---------|
+| **Statevector Testing** | Exact state verification, no sampling noise |
+| **Noisy Simulation** | Realistic hardware approximation |
+| **Shot-Based Testing** | Statistical validation framework |
+| **Cross-Validation** | Compare simulator implementations |
+| **Result Validation** | Structured verification pipeline |
+
+Key practices:
+1. Test with exact simulation first, then add noise
+2. Use appropriate shot counts for statistical significance
+3. Cross-validate across simulator backends
+4. Include realistic noise models for hardware preparation

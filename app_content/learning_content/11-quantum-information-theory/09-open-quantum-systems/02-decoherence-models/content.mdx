@@ -1,0 +1,617 @@
+---
+title: "Decoherence Models"
+description: "Explore the fundamental models of quantum decoherence including amplitude damping, phase damping, and depolarization."
+duration: 50
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the physics of T1 and T2 processes in qubits
+- Derive Kraus operators for common decoherence channels
+- Calculate decoherence rates from physical parameters
+- Model realistic noise in quantum systems
+- Connect microscopic models to phenomenological descriptions
+
+## 1. Introduction to Decoherence
+
+<Definition term="Decoherence">
+Decoherence is the process by which quantum superpositions lose their coherence due to interaction with the environment. It causes the transition from quantum to classical behavior without requiring measurement.
+</Definition>
+
+**Why decoherence matters:**
+- Limits quantum computation fidelity
+- Explains emergence of classical behavior
+- Determines qubit lifetimes (T1, T2)
+- Must be understood to design error correction
+
+## 2. T1 and T2 Times
+
+In NMR and quantum computing, decoherence is characterized by two timescales:
+
+<Definition term="T1 (Longitudinal Relaxation)">
+T1 is the characteristic time for energy exchange with the environment. It describes how quickly a qubit's excited state population decays to thermal equilibrium.
+$$P_1(t) = P_1^{eq} + (P_1(0) - P_1^{eq})e^{-t/T_1}$$
+</Definition>
+
+<Definition term="T2 (Transverse Relaxation)">
+T2 is the characteristic time for loss of phase coherence. It describes how quickly off-diagonal density matrix elements decay.
+$$\rho_{01}(t) = \rho_{01}(0)e^{-t/T_2}$$
+</Definition>
+
+<Formula>
+The fundamental constraint:
+$$T_2 \leq 2T_1$$
+Pure dephasing rate: $\frac{1}{T_2} = \frac{1}{2T_1} + \frac{1}{T_\phi}$
+where $T_\phi$ is the pure dephasing time.
+</Formula>
+
+<Example>
+```python
+import numpy as np
+
+def t1_t2_evolution(rho0: np.ndarray, T1: float, T2: float,
+                    times: np.ndarray) -> list:
+    """
+    Evolve density matrix with T1 and T2 decay.
+
+    Assuming zero-temperature bath (decays to |0⟩).
+    """
+    results = []
+
+    for t in times:
+        rho = np.zeros((2, 2), dtype=complex)
+
+        # Populations (T1 decay)
+        p1_0 = np.real(rho0[1, 1])
+        rho[1, 1] = p1_0 * np.exp(-t / T1)
+        rho[0, 0] = 1 - rho[1, 1]
+
+        # Coherences (T2 decay)
+        rho[0, 1] = rho0[0, 1] * np.exp(-t / T2)
+        rho[1, 0] = rho0[1, 0] * np.exp(-t / T2)
+
+        results.append(rho)
+
+    return results
+
+def verify_t2_constraint(T1: float, T2: float) -> bool:
+    """Check if T2 <= 2*T1 constraint is satisfied."""
+    return T2 <= 2 * T1 + 1e-10
+
+def pure_dephasing_rate(T1: float, T2: float) -> float:
+    """Calculate pure dephasing rate 1/T_phi."""
+    return 1/T2 - 1/(2*T1)
+
+# Example: Superconducting qubit parameters
+T1 = 100e-6  # 100 microseconds
+T2 = 80e-6   # 80 microseconds
+
+print("Superconducting qubit example:")
+print(f"T1 = {T1*1e6:.1f} us")
+print(f"T2 = {T2*1e6:.1f} us")
+print(f"T2 <= 2*T1: {verify_t2_constraint(T1, T2)}")
+print(f"Pure dephasing rate: {pure_dephasing_rate(T1, T2)/1e3:.2f} kHz")
+
+# Evolution of |+⟩ state
+times = np.linspace(0, 5*T2, 100)
+ket_plus = np.array([[1], [1]], dtype=complex) / np.sqrt(2)
+rho0 = ket_plus @ ket_plus.conj().T
+
+rhos = t1_t2_evolution(rho0, T1, T2, times)
+
+print("\nEvolution of |+⟩ state:")
+for i, t in enumerate([0, T2, 2*T2, 5*T2]):
+    idx = np.argmin(np.abs(times - t))
+    rho = rhos[idx]
+    print(f"  t = {t/T2:.1f}*T2: P(|1⟩) = {np.real(rho[1,1]):.4f}, "
+          f"|rho_01| = {np.abs(rho[0,1]):.4f}")
+```
+</Example>
+
+## 3. Amplitude Damping Channel
+
+<Definition term="Amplitude Damping">
+The amplitude damping channel describes spontaneous emission - the process by which an excited state decays to the ground state by emitting energy to the environment.
+</Definition>
+
+<Formula>
+**Kraus operators:**
+$$E_0 = \begin{pmatrix} 1 & 0 \\ 0 & \sqrt{1-\gamma} \end{pmatrix}, \quad
+E_1 = \begin{pmatrix} 0 & \sqrt{\gamma} \\ 0 & 0 \end{pmatrix}$$
+where $\gamma = 1 - e^{-t/T_1}$ is the damping probability.
+</Formula>
+
+<Example>
+```python
+import numpy as np
+
+def amplitude_damping_kraus(gamma: float) -> list:
+    """
+    Return Kraus operators for amplitude damping.
+    gamma = 1 - exp(-t/T1) is the damping probability.
+    """
+    E0 = np.array([[1, 0], [0, np.sqrt(1-gamma)]], dtype=complex)
+    E1 = np.array([[0, np.sqrt(gamma)], [0, 0]], dtype=complex)
+    return [E0, E1]
+
+def apply_channel(rho: np.ndarray, kraus_ops: list) -> np.ndarray:
+    """Apply quantum channel: rho -> sum_k E_k rho E_k^dag"""
+    result = np.zeros_like(rho)
+    for E in kraus_ops:
+        result += E @ rho @ E.conj().T
+    return result
+
+def verify_cptp(kraus_ops: list) -> dict:
+    """Verify complete positivity and trace preservation."""
+    dim = kraus_ops[0].shape[0]
+
+    # Check sum(E_k^dag E_k) = I
+    total = sum(E.conj().T @ E for E in kraus_ops)
+    trace_preserving = np.allclose(total, np.eye(dim))
+
+    return {
+        'trace_preserving': trace_preserving,
+        'sum_EdagE': total
+    }
+
+# Amplitude damping analysis
+print("Amplitude Damping Channel Analysis")
+print("=" * 50)
+
+for gamma in [0.0, 0.1, 0.5, 0.9, 1.0]:
+    kraus = amplitude_damping_kraus(gamma)
+    check = verify_cptp(kraus)
+
+    # Apply to |1⟩
+    rho1 = np.array([[0, 0], [0, 1]], dtype=complex)
+    rho_out = apply_channel(rho1, kraus)
+
+    # Apply to |+⟩
+    ket_plus = np.array([[1], [1]], dtype=complex) / np.sqrt(2)
+    rho_plus = ket_plus @ ket_plus.conj().T
+    rho_plus_out = apply_channel(rho_plus, kraus)
+
+    print(f"\ngamma = {gamma:.1f}:")
+    print(f"  CPTP: {check['trace_preserving']}")
+    print(f"  |1⟩ -> P(|0⟩) = {np.real(rho_out[0,0]):.4f}")
+    print(f"  |+⟩ -> coherence = {np.abs(rho_plus_out[0,1]):.4f}")
+    print(f"  |+⟩ -> purity = {np.real(np.trace(rho_plus_out @ rho_plus_out)):.4f}")
+
+# Relationship to T1
+print("\n" + "=" * 50)
+print("Relationship to T1:")
+T1 = 1.0  # normalized
+for t in [0, 0.1, 0.5, 1.0, 2.0]:
+    gamma = 1 - np.exp(-t / T1)
+    print(f"  t/T1 = {t:.1f}: gamma = {gamma:.4f}, P(|1⟩) = {1-gamma:.4f}")
+```
+</Example>
+
+## 4. Phase Damping (Dephasing) Channel
+
+<Definition term="Phase Damping">
+The phase damping channel describes pure dephasing - loss of coherence without energy exchange. It destroys quantum superpositions while preserving populations.
+</Definition>
+
+<Formula>
+**Kraus operators:**
+$$E_0 = \sqrt{1-\lambda}\, I, \quad E_1 = \sqrt{\lambda}\, |0\rangle\langle 0|, \quad E_2 = \sqrt{\lambda}\, |1\rangle\langle 1|$$
+Or equivalently: $E_0 = \sqrt{1-p}\, I$, $E_1 = \sqrt{p}\, \sigma_z$ with $p = (1-e^{-t/T_\phi})/2$.
+</Formula>
+
+<Example>
+```python
+import numpy as np
+
+def phase_damping_kraus(lambda_param: float) -> list:
+    """
+    Return Kraus operators for phase damping.
+    lambda_param is the dephasing probability.
+    """
+    E0 = np.sqrt(1 - lambda_param) * np.eye(2, dtype=complex)
+    E1 = np.sqrt(lambda_param) * np.array([[1, 0], [0, 0]], dtype=complex)
+    E2 = np.sqrt(lambda_param) * np.array([[0, 0], [0, 1]], dtype=complex)
+    return [E0, E1, E2]
+
+def phase_damping_kraus_v2(p: float) -> list:
+    """
+    Alternative Kraus representation using sigma_z.
+    """
+    sigma_z = np.array([[1, 0], [0, -1]], dtype=complex)
+    E0 = np.sqrt(1 - p) * np.eye(2, dtype=complex)
+    E1 = np.sqrt(p) * sigma_z
+    return [E0, E1]
+
+# Compare representations
+print("Phase Damping Channel Analysis")
+print("=" * 50)
+
+ket_plus = np.array([[1], [1]], dtype=complex) / np.sqrt(2)
+rho_plus = ket_plus @ ket_plus.conj().T
+
+for p in [0.0, 0.1, 0.3, 0.5, 1.0]:
+    # Original representation
+    kraus1 = phase_damping_kraus(p)
+    rho_out1 = apply_channel(rho_plus, kraus1)
+
+    # sigma_z representation (equivalent for pure dephasing)
+    kraus2 = phase_damping_kraus_v2(p/2)  # Different parameterization
+    rho_out2 = apply_channel(rho_plus, kraus2)
+
+    print(f"\np = {p:.1f}:")
+    print(f"  |+⟩ populations unchanged: P(|0⟩) = {np.real(rho_out1[0,0]):.4f}")
+    print(f"  Coherence |rho_01| = {np.abs(rho_out1[0,1]):.4f}")
+    print(f"  Purity = {np.real(np.trace(rho_out1 @ rho_out1)):.4f}")
+
+# Key difference from amplitude damping
+print("\n" + "=" * 50)
+print("Comparison: Amplitude vs Phase Damping on |1⟩")
+rho1 = np.array([[0, 0], [0, 1]], dtype=complex)
+
+for p in [0.3, 0.5, 0.7]:
+    # Amplitude damping
+    kraus_ad = amplitude_damping_kraus(p)
+    rho_ad = apply_channel(rho1, kraus_ad)
+
+    # Phase damping
+    kraus_pd = phase_damping_kraus(p)
+    rho_pd = apply_channel(rho1, kraus_pd)
+
+    print(f"\np = {p:.1f}:")
+    print(f"  Amplitude damping: P(|1⟩) = {np.real(rho_ad[1,1]):.4f}")
+    print(f"  Phase damping: P(|1⟩) = {np.real(rho_pd[1,1]):.4f}")
+```
+</Example>
+
+## 5. Depolarizing Channel
+
+<Definition term="Depolarizing Channel">
+The depolarizing channel describes symmetric noise that drives any state toward the maximally mixed state with probability p.
+$$\mathcal{E}(\rho) = (1-p)\rho + p\frac{I}{d}$$
+</Definition>
+
+<Formula>
+**Kraus operators for qubit depolarizing:**
+$$E_0 = \sqrt{1-\frac{3p}{4}}\, I, \quad E_1 = \sqrt{\frac{p}{4}}\, \sigma_x, \quad E_2 = \sqrt{\frac{p}{4}}\, \sigma_y, \quad E_3 = \sqrt{\frac{p}{4}}\, \sigma_z$$
+</Formula>
+
+<Example>
+```python
+import numpy as np
+
+def depolarizing_kraus(p: float) -> list:
+    """
+    Return Kraus operators for depolarizing channel.
+    p is the depolarizing probability.
+    """
+    sigma_x = np.array([[0, 1], [1, 0]], dtype=complex)
+    sigma_y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+    sigma_z = np.array([[1, 0], [0, -1]], dtype=complex)
+    I = np.eye(2, dtype=complex)
+
+    E0 = np.sqrt(1 - 3*p/4) * I
+    E1 = np.sqrt(p/4) * sigma_x
+    E2 = np.sqrt(p/4) * sigma_y
+    E3 = np.sqrt(p/4) * sigma_z
+
+    return [E0, E1, E2, E3]
+
+def depolarizing_direct(rho: np.ndarray, p: float) -> np.ndarray:
+    """
+    Apply depolarizing channel directly.
+    """
+    d = rho.shape[0]
+    return (1 - p) * rho + p * np.eye(d, dtype=complex) / d
+
+# Depolarizing channel analysis
+print("Depolarizing Channel Analysis")
+print("=" * 50)
+
+# Test on various pure states
+states = {
+    '|0⟩': np.array([[1, 0], [0, 0]], dtype=complex),
+    '|1⟩': np.array([[0, 0], [0, 1]], dtype=complex),
+    '|+⟩': np.array([[0.5, 0.5], [0.5, 0.5]], dtype=complex),
+}
+
+for p in [0.0, 0.25, 0.5, 0.75, 1.0]:
+    print(f"\np = {p:.2f}:")
+    kraus = depolarizing_kraus(p)
+
+    for name, rho0 in states.items():
+        rho_kraus = apply_channel(rho0, kraus)
+        rho_direct = depolarizing_direct(rho0, p)
+
+        # Verify equivalence
+        equiv = np.allclose(rho_kraus, rho_direct)
+        purity = np.real(np.trace(rho_kraus @ rho_kraus))
+
+        print(f"  {name}: purity = {purity:.4f}, methods match: {equiv}")
+
+# All states converge to I/2
+print("\n" + "=" * 50)
+print("All states converge to I/2 as p -> 1:")
+maximally_mixed = np.eye(2, dtype=complex) / 2
+for name, rho0 in states.items():
+    rho_out = depolarizing_direct(rho0, 0.99)
+    distance = np.linalg.norm(rho_out - maximally_mixed)
+    print(f"  {name}: ||rho_out - I/2|| = {distance:.4f}")
+```
+</Example>
+
+## 6. Generalized Amplitude Damping
+
+<Definition term="Generalized Amplitude Damping">
+The generalized amplitude damping channel describes thermalization to a finite-temperature bath. It includes both decay (emission) and excitation (absorption) processes.
+</Definition>
+
+<Formula>
+**Kraus operators:**
+$$E_0 = \sqrt{p}\begin{pmatrix} 1 & 0 \\ 0 & \sqrt{1-\gamma} \end{pmatrix}, \quad
+E_1 = \sqrt{p}\begin{pmatrix} 0 & \sqrt{\gamma} \\ 0 & 0 \end{pmatrix}$$
+$$E_2 = \sqrt{1-p}\begin{pmatrix} \sqrt{1-\gamma} & 0 \\ 0 & 1 \end{pmatrix}, \quad
+E_3 = \sqrt{1-p}\begin{pmatrix} 0 & 0 \\ \sqrt{\gamma} & 0 \end{pmatrix}$$
+where $p = 1/(1 + e^{-\omega/k_BT})$ is the thermal population and $\gamma$ is the damping probability.
+</Formula>
+
+<Example>
+```python
+import numpy as np
+
+def generalized_amplitude_damping_kraus(gamma: float, p: float) -> list:
+    """
+    Kraus operators for generalized amplitude damping.
+    gamma: damping probability
+    p: thermal ground state population
+    """
+    E0 = np.sqrt(p) * np.array([[1, 0], [0, np.sqrt(1-gamma)]], dtype=complex)
+    E1 = np.sqrt(p) * np.array([[0, np.sqrt(gamma)], [0, 0]], dtype=complex)
+    E2 = np.sqrt(1-p) * np.array([[np.sqrt(1-gamma), 0], [0, 1]], dtype=complex)
+    E3 = np.sqrt(1-p) * np.array([[0, 0], [np.sqrt(gamma), 0]], dtype=complex)
+
+    return [E0, E1, E2, E3]
+
+def thermal_population(omega: float, T: float, kB: float = 1.0) -> float:
+    """Calculate thermal ground state population."""
+    if T < 1e-10:
+        return 1.0
+    beta = 1 / (kB * T)
+    return 1 / (1 + np.exp(-beta * omega))
+
+# Thermalization analysis
+print("Generalized Amplitude Damping (Thermalization)")
+print("=" * 50)
+
+omega = 1.0  # Energy splitting
+
+# Start from ground state
+rho0_ground = np.array([[1, 0], [0, 0]], dtype=complex)
+# Start from excited state
+rho0_excited = np.array([[0, 0], [0, 1]], dtype=complex)
+
+print("\nEvolution at different temperatures:")
+for T in [0.0, 0.5, 1.0, 2.0, 10.0]:
+    p_thermal = thermal_population(omega, T)
+    p_excited_eq = 1 - p_thermal  # Equilibrium excited population
+
+    gamma = 0.8  # Near complete thermalization
+    kraus = generalized_amplitude_damping_kraus(gamma, p_thermal)
+
+    rho_from_ground = apply_channel(rho0_ground, kraus)
+    rho_from_excited = apply_channel(rho0_excited, kraus)
+
+    print(f"\nT = {T:.1f} (p_eq(|1⟩) = {p_excited_eq:.4f}):")
+    print(f"  From |0⟩: P(|1⟩) = {np.real(rho_from_ground[1,1]):.4f}")
+    print(f"  From |1⟩: P(|1⟩) = {np.real(rho_from_excited[1,1]):.4f}")
+
+# Convergence to thermal state
+print("\n" + "=" * 50)
+print("Convergence to thermal equilibrium (T=1.0):")
+T = 1.0
+p_thermal = thermal_population(omega, T)
+
+for gamma in [0.1, 0.3, 0.5, 0.7, 0.9, 0.99]:
+    kraus = generalized_amplitude_damping_kraus(gamma, p_thermal)
+
+    # Evolve both initial states
+    rho_g = apply_channel(rho0_ground, kraus)
+    rho_e = apply_channel(rho0_excited, kraus)
+
+    # Compare final states
+    distance = np.linalg.norm(rho_g - rho_e)
+    print(f"  gamma = {gamma:.2f}: ||rho_g - rho_e|| = {distance:.4f}")
+```
+</Example>
+
+## 7. Combined Decoherence Model
+
+Real qubits experience multiple decoherence channels simultaneously.
+
+<Example>
+```python
+import numpy as np
+
+def combined_decoherence(rho: np.ndarray, T1: float, T2: float,
+                         t: float, T: float = 0.0, omega: float = 1.0) -> np.ndarray:
+    """
+    Apply combined T1 and T2 decoherence.
+
+    Parameters:
+    - T1: Longitudinal relaxation time
+    - T2: Transverse relaxation time
+    - t: Evolution time
+    - T: Temperature (0 for zero-temperature limit)
+    - omega: Qubit frequency
+    """
+    # T1 process (generalized amplitude damping)
+    gamma_T1 = 1 - np.exp(-t / T1)
+    if T > 0:
+        p_thermal = thermal_population(omega, T)
+    else:
+        p_thermal = 1.0  # Zero temp -> ground state
+
+    # Apply T1
+    kraus_T1 = generalized_amplitude_damping_kraus(gamma_T1, p_thermal)
+    rho_after_T1 = apply_channel(rho, kraus_T1)
+
+    # Pure dephasing (T2 - T1 contribution)
+    T_phi = 1 / (1/T2 - 1/(2*T1)) if T2 < 2*T1 else np.inf
+    if T_phi < np.inf:
+        gamma_phi = 1 - np.exp(-t / T_phi)
+        kraus_phi = phase_damping_kraus(gamma_phi)
+        rho_out = apply_channel(rho_after_T1, kraus_phi)
+    else:
+        rho_out = rho_after_T1
+
+    return rho_out
+
+# Realistic qubit simulation
+print("Realistic Qubit Decoherence Simulation")
+print("=" * 50)
+
+# Typical superconducting qubit parameters
+T1 = 100  # microseconds (normalized)
+T2 = 80   # microseconds
+omega = 5.0  # GHz (normalized)
+T_bath = 0.02  # ~20 mK
+
+# Initial superposition
+ket = np.array([[1], [1]], dtype=complex) / np.sqrt(2)
+rho0 = ket @ ket.conj().T
+
+print(f"Parameters: T1={T1}, T2={T2}, T_bath={T_bath}")
+print(f"Initial state: |+⟩")
+print(f"Pure dephasing time T_phi = {1/(1/T2 - 1/(2*T1)):.1f}")
+
+print("\nTime evolution:")
+for t in [0, 10, 25, 50, 100, 200]:
+    rho_t = combined_decoherence(rho0, T1, T2, t, T_bath, omega)
+
+    p1 = np.real(rho_t[1, 1])
+    coherence = np.abs(rho_t[0, 1])
+    purity = np.real(np.trace(rho_t @ rho_t))
+
+    print(f"  t = {t:3d}: P(|1⟩) = {p1:.4f}, |rho_01| = {coherence:.4f}, "
+          f"purity = {purity:.4f}")
+
+# Compare T2-limited vs T1-limited regimes
+print("\n" + "=" * 50)
+print("Comparing decoherence regimes:")
+
+configs = [
+    ("T2-limited (T2 << 2*T1)", 100, 30),
+    ("T1-limited (T2 ≈ 2*T1)", 100, 190),
+    ("Balanced", 100, 80),
+]
+
+t = 50
+for name, T1, T2 in configs:
+    rho_t = combined_decoherence(rho0, T1, T2, t, T_bath, omega)
+    coherence = np.abs(rho_t[0, 1])
+    print(f"  {name}: T1={T1}, T2={T2}")
+    print(f"    Coherence at t={t}: {coherence:.4f}")
+```
+</Example>
+
+## 8. Bloch Sphere Visualization
+
+<Tip>
+Decoherence causes the Bloch vector to shrink. Amplitude damping pulls toward the north pole (|0⟩), while dephasing shrinks the xy-components.
+</Tip>
+
+<Example>
+```python
+import numpy as np
+
+def bloch_vector(rho: np.ndarray) -> np.ndarray:
+    """Extract Bloch vector from density matrix."""
+    X = np.array([[0, 1], [1, 0]], dtype=complex)
+    Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+    Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    return np.array([
+        np.real(np.trace(rho @ X)),
+        np.real(np.trace(rho @ Y)),
+        np.real(np.trace(rho @ Z))
+    ])
+
+def decoherence_trajectories():
+    """Compute Bloch sphere trajectories under different channels."""
+
+    # Initial state: |+⟩
+    ket_plus = np.array([[1], [1]], dtype=complex) / np.sqrt(2)
+    rho0 = ket_plus @ ket_plus.conj().T
+
+    trajectories = {}
+    gammas = np.linspace(0, 1, 50)
+
+    # Amplitude damping
+    traj_ad = []
+    for gamma in gammas:
+        kraus = amplitude_damping_kraus(gamma)
+        rho = apply_channel(rho0, kraus)
+        traj_ad.append(bloch_vector(rho))
+    trajectories['Amplitude Damping'] = np.array(traj_ad)
+
+    # Phase damping
+    traj_pd = []
+    for gamma in gammas:
+        kraus = phase_damping_kraus(gamma)
+        rho = apply_channel(rho0, kraus)
+        traj_pd.append(bloch_vector(rho))
+    trajectories['Phase Damping'] = np.array(traj_pd)
+
+    # Depolarizing
+    traj_dp = []
+    for p in gammas:
+        kraus = depolarizing_kraus(p)
+        rho = apply_channel(rho0, kraus)
+        traj_dp.append(bloch_vector(rho))
+    trajectories['Depolarizing'] = np.array(traj_dp)
+
+    return trajectories
+
+trajectories = decoherence_trajectories()
+
+print("Bloch Vector Trajectories for |+⟩ State")
+print("=" * 60)
+print("Initial: r = (1, 0, 0)")
+print("\nFinal positions:")
+
+for name, traj in trajectories.items():
+    r_final = traj[-1]
+    r_mag = np.linalg.norm(r_final)
+    print(f"  {name}:")
+    print(f"    r = ({r_final[0]:.3f}, {r_final[1]:.3f}, {r_final[2]:.3f})")
+    print(f"    |r| = {r_mag:.4f}")
+
+print("\nTrajectory characteristics:")
+print("  Amplitude Damping: moves toward north pole (|0⟩)")
+print("  Phase Damping: shrinks x,y; z unchanged")
+print("  Depolarizing: shrinks uniformly to center")
+```
+</Example>
+
+## Summary
+
+In this lesson, you learned about decoherence models:
+
+1. **T1 and T2 times** characterize energy decay and dephasing
+2. **Amplitude damping** models spontaneous emission (T1 process)
+3. **Phase damping** models pure dephasing without energy exchange
+4. **Depolarizing channel** represents symmetric noise
+5. **Generalized amplitude damping** includes thermal effects
+6. **Combined models** capture realistic qubit behavior
+
+<Warning>
+The relation T2 <= 2*T1 is fundamental. If your measurements violate this, check for systematic errors or non-Markovian effects.
+</Warning>
+
+## Further Reading
+
+- Previous: The Lindblad Master Equation
+- Next: Quantum Trajectories
+- Related: Quantum Error Correction, Noise Characterization

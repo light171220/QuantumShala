@@ -1,0 +1,1090 @@
+---
+title: "Disaster Recovery for Quantum Systems"
+description: "Learn to design and implement disaster recovery strategies for quantum applications."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+- Design disaster recovery plans for quantum applications
+- Implement backup and restore procedures for quantum workloads
+- Configure multi-region failover for quantum services
+- Test and validate recovery procedures
+
+## 1. Disaster Recovery Fundamentals
+
+Quantum applications require specialized disaster recovery approaches that account for their unique characteristics:
+
+```
+DISASTER RECOVERY FOR QUANTUM:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Key Metrics:
+┌─────────────────────────────────────────────────────────────────┐
+│ RTO (Recovery Time Objective)                                   │
+│ Maximum acceptable time to restore service                      │
+│ Quantum challenge: Backend availability is external             │
+├─────────────────────────────────────────────────────────────────┤
+│ RPO (Recovery Point Objective)                                  │
+│ Maximum acceptable data loss (time)                             │
+│ Quantum challenge: Job results may be non-reproducible          │
+├─────────────────────────────────────────────────────────────────┤
+│ MTTR (Mean Time To Recovery)                                    │
+│ Average time to restore from failure                            │
+│ Quantum challenge: Calibration and warm-up time                 │
+└─────────────────────────────────────────────────────────────────┘
+
+Disaster Scenarios:
+1. QPU provider outage (external dependency)
+2. Classical infrastructure failure (internal)
+3. Data corruption or loss
+4. Regional network partition
+5. Credential compromise
+6. Software deployment failure
+```
+
+## 2. Recovery Point and Time Objectives
+
+```python
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Callable
+from datetime import datetime, timedelta
+from enum import Enum
+import json
+import hashlib
+
+class DisasterSeverity(Enum):
+    """Disaster severity levels."""
+    LOW = "low"           # Minor degradation
+    MEDIUM = "medium"     # Partial outage
+    HIGH = "high"         # Major outage
+    CRITICAL = "critical" # Complete failure
+
+class RecoveryTier(Enum):
+    """Service recovery tiers with associated objectives."""
+    TIER_1 = "tier_1"  # Mission critical: RTO < 1h, RPO < 5m
+    TIER_2 = "tier_2"  # Business critical: RTO < 4h, RPO < 1h
+    TIER_3 = "tier_3"  # Important: RTO < 24h, RPO < 4h
+    TIER_4 = "tier_4"  # Standard: RTO < 72h, RPO < 24h
+
+@dataclass
+class RecoveryObjectives:
+    """Recovery objectives for a service."""
+    service_name: str
+    tier: RecoveryTier
+    rto_minutes: int
+    rpo_minutes: int
+    dependencies: List[str]
+    recovery_procedure: str
+    tested_at: Optional[datetime] = None
+    test_result: Optional[str] = None
+
+class DisasterRecoveryPlanner:
+    """
+    Plans and manages disaster recovery for quantum applications.
+    """
+
+    TIER_DEFAULTS = {
+        RecoveryTier.TIER_1: {'rto': 60, 'rpo': 5},
+        RecoveryTier.TIER_2: {'rto': 240, 'rpo': 60},
+        RecoveryTier.TIER_3: {'rto': 1440, 'rpo': 240},
+        RecoveryTier.TIER_4: {'rto': 4320, 'rpo': 1440}
+    }
+
+    def __init__(self, application_name: str):
+        self.application_name = application_name
+        self.services: Dict[str, RecoveryObjectives] = {}
+        self._setup_default_services()
+
+    def _setup_default_services(self):
+        """Configure default quantum service recovery objectives."""
+
+        # Core quantum execution - highest priority
+        self.services['quantum_executor'] = RecoveryObjectives(
+            service_name='quantum_executor',
+            tier=RecoveryTier.TIER_1,
+            rto_minutes=60,
+            rpo_minutes=5,
+            dependencies=['backend_router', 'result_store'],
+            recovery_procedure='quantum_executor_recovery'
+        )
+
+        # Result storage - critical for data integrity
+        self.services['result_store'] = RecoveryObjectives(
+            service_name='result_store',
+            tier=RecoveryTier.TIER_1,
+            rto_minutes=30,
+            rpo_minutes=0,  # No data loss acceptable
+            dependencies=['database', 'cache'],
+            recovery_procedure='result_store_recovery'
+        )
+
+        # Backend router - needed for job distribution
+        self.services['backend_router'] = RecoveryObjectives(
+            service_name='backend_router',
+            tier=RecoveryTier.TIER_2,
+            rto_minutes=120,
+            rpo_minutes=60,
+            dependencies=['backend_registry'],
+            recovery_procedure='router_recovery'
+        )
+
+        # Job queue - can rebuild from pending jobs
+        self.services['job_queue'] = RecoveryObjectives(
+            service_name='job_queue',
+            tier=RecoveryTier.TIER_2,
+            rto_minutes=180,
+            rpo_minutes=30,
+            dependencies=['database'],
+            recovery_procedure='queue_recovery'
+        )
+
+        # Circuit compiler - stateless, quick recovery
+        self.services['circuit_compiler'] = RecoveryObjectives(
+            service_name='circuit_compiler',
+            tier=RecoveryTier.TIER_3,
+            rto_minutes=240,
+            rpo_minutes=0,  # Stateless
+            dependencies=[],
+            recovery_procedure='compiler_recovery'
+        )
+
+    def calculate_overall_rto(self) -> Dict:
+        """Calculate overall RTO considering dependencies."""
+        # Build dependency graph and find critical path
+        visited = set()
+        max_rto = 0
+
+        def get_service_rto(service_name: str, depth: int = 0) -> int:
+            if service_name in visited or depth > 10:
+                return 0
+            visited.add(service_name)
+
+            if service_name not in self.services:
+                return 0
+
+            service = self.services[service_name]
+            dep_rto = max(
+                (get_service_rto(dep, depth + 1) for dep in service.dependencies),
+                default=0
+            )
+
+            return service.rto_minutes + dep_rto
+
+        service_rtos = {}
+        for name in self.services:
+            visited.clear()
+            service_rtos[name] = get_service_rto(name)
+
+        max_rto = max(service_rtos.values()) if service_rtos else 0
+
+        return {
+            'overall_rto_minutes': max_rto,
+            'overall_rto_hours': max_rto / 60,
+            'service_rtos': service_rtos,
+            'critical_path': max(service_rtos.items(), key=lambda x: x[1])[0] if service_rtos else None
+        }
+
+    def generate_dr_plan(self) -> Dict:
+        """Generate comprehensive disaster recovery plan."""
+        rto_analysis = self.calculate_overall_rto()
+
+        plan = {
+            'application': self.application_name,
+            'generated_at': datetime.now().isoformat(),
+            'summary': {
+                'total_services': len(self.services),
+                'tier_1_services': sum(1 for s in self.services.values() if s.tier == RecoveryTier.TIER_1),
+                'overall_rto': rto_analysis['overall_rto_hours'],
+                'critical_path': rto_analysis['critical_path']
+            },
+            'services': {},
+            'recovery_order': self._calculate_recovery_order(),
+            'contacts': {
+                'primary_oncall': 'oncall@example.com',
+                'escalation': 'escalation@example.com'
+            }
+        }
+
+        for name, service in self.services.items():
+            plan['services'][name] = {
+                'tier': service.tier.value,
+                'rto_minutes': service.rto_minutes,
+                'rpo_minutes': service.rpo_minutes,
+                'dependencies': service.dependencies,
+                'recovery_procedure': service.recovery_procedure,
+                'last_tested': service.tested_at.isoformat() if service.tested_at else None
+            }
+
+        return plan
+
+    def _calculate_recovery_order(self) -> List[str]:
+        """Calculate optimal recovery order based on dependencies."""
+        # Topological sort of services based on dependencies
+        order = []
+        visited = set()
+        temp_visited = set()
+
+        def visit(name: str):
+            if name in temp_visited:
+                return  # Cycle detected, skip
+            if name in visited:
+                return
+
+            temp_visited.add(name)
+
+            if name in self.services:
+                for dep in self.services[name].dependencies:
+                    visit(dep)
+
+            temp_visited.remove(name)
+            visited.add(name)
+            order.append(name)
+
+        for name in self.services:
+            visit(name)
+
+        return order
+```
+
+## 3. Backup and Restore Procedures
+
+```python
+from abc import ABC, abstractmethod
+import gzip
+from io import BytesIO
+
+class BackupType(Enum):
+    """Types of backups."""
+    FULL = "full"
+    INCREMENTAL = "incremental"
+    DIFFERENTIAL = "differential"
+    SNAPSHOT = "snapshot"
+
+@dataclass
+class BackupMetadata:
+    """Metadata for a backup."""
+    backup_id: str
+    backup_type: BackupType
+    created_at: datetime
+    size_bytes: int
+    checksum: str
+    source_service: str
+    parent_backup_id: Optional[str] = None
+    retention_days: int = 30
+
+class BackupStrategy(ABC):
+    """Abstract backup strategy."""
+
+    @abstractmethod
+    def backup(self, data: Dict) -> BackupMetadata:
+        """Create a backup."""
+        pass
+
+    @abstractmethod
+    def restore(self, backup_id: str) -> Dict:
+        """Restore from backup."""
+        pass
+
+class QuantumWorkloadBackup:
+    """
+    Backup system for quantum workloads.
+
+    Backs up:
+    - Circuit definitions
+    - Job configurations
+    - Results history
+    - Calibration data
+    - User configurations
+    """
+
+    def __init__(self, storage_backend: str = "local"):
+        self.storage_backend = storage_backend
+        self.backups: Dict[str, BackupMetadata] = {}
+        self.backup_data: Dict[str, bytes] = {}  # In-memory for demo
+
+    def backup_circuits(
+        self,
+        circuits: List[Dict],
+        backup_type: BackupType = BackupType.FULL
+    ) -> BackupMetadata:
+        """Backup circuit definitions."""
+        backup_id = f"circuits_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        # Serialize and compress
+        data_json = json.dumps(circuits, sort_keys=True)
+        compressed = gzip.compress(data_json.encode())
+
+        # Calculate checksum
+        checksum = hashlib.sha256(compressed).hexdigest()
+
+        metadata = BackupMetadata(
+            backup_id=backup_id,
+            backup_type=backup_type,
+            created_at=datetime.now(),
+            size_bytes=len(compressed),
+            checksum=checksum,
+            source_service="circuit_store"
+        )
+
+        self.backups[backup_id] = metadata
+        self.backup_data[backup_id] = compressed
+
+        return metadata
+
+    def backup_job_results(
+        self,
+        results: List[Dict],
+        last_backup_id: Optional[str] = None
+    ) -> BackupMetadata:
+        """Backup job results with incremental support."""
+        if last_backup_id and last_backup_id in self.backups:
+            backup_type = BackupType.INCREMENTAL
+        else:
+            backup_type = BackupType.FULL
+
+        backup_id = f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        # Include result metadata but optionally exclude large measurement data
+        backup_results = []
+        for result in results:
+            backup_result = {
+                'job_id': result.get('job_id'),
+                'circuit_id': result.get('circuit_id'),
+                'backend': result.get('backend'),
+                'status': result.get('status'),
+                'submitted_at': result.get('submitted_at'),
+                'completed_at': result.get('completed_at'),
+                'shots': result.get('shots'),
+                'counts_summary': self._summarize_counts(result.get('counts', {}))
+            }
+            backup_results.append(backup_result)
+
+        data_json = json.dumps(backup_results, sort_keys=True, default=str)
+        compressed = gzip.compress(data_json.encode())
+        checksum = hashlib.sha256(compressed).hexdigest()
+
+        metadata = BackupMetadata(
+            backup_id=backup_id,
+            backup_type=backup_type,
+            created_at=datetime.now(),
+            size_bytes=len(compressed),
+            checksum=checksum,
+            source_service="result_store",
+            parent_backup_id=last_backup_id
+        )
+
+        self.backups[backup_id] = metadata
+        self.backup_data[backup_id] = compressed
+
+        return metadata
+
+    def _summarize_counts(self, counts: Dict) -> Dict:
+        """Summarize measurement counts for backup."""
+        if not counts:
+            return {}
+
+        total = sum(counts.values())
+        return {
+            'total_shots': total,
+            'unique_outcomes': len(counts),
+            'top_outcomes': dict(sorted(counts.items(), key=lambda x: -x[1])[:10])
+        }
+
+    def restore_backup(self, backup_id: str) -> Dict:
+        """Restore data from backup."""
+        if backup_id not in self.backups:
+            raise ValueError(f"Backup {backup_id} not found")
+
+        metadata = self.backups[backup_id]
+        compressed = self.backup_data[backup_id]
+
+        # Verify checksum
+        actual_checksum = hashlib.sha256(compressed).hexdigest()
+        if actual_checksum != metadata.checksum:
+            raise ValueError("Backup checksum verification failed - data corrupted")
+
+        # Decompress and deserialize
+        decompressed = gzip.decompress(compressed)
+        data = json.loads(decompressed.decode())
+
+        return {
+            'backup_id': backup_id,
+            'restored_at': datetime.now().isoformat(),
+            'backup_type': metadata.backup_type.value,
+            'original_date': metadata.created_at.isoformat(),
+            'data': data
+        }
+
+    def list_backups(self, service: str = None) -> List[Dict]:
+        """List available backups."""
+        backups = []
+        for backup_id, metadata in self.backups.items():
+            if service and metadata.source_service != service:
+                continue
+
+            backups.append({
+                'backup_id': backup_id,
+                'type': metadata.backup_type.value,
+                'created_at': metadata.created_at.isoformat(),
+                'size_bytes': metadata.size_bytes,
+                'service': metadata.source_service
+            })
+
+        return sorted(backups, key=lambda x: x['created_at'], reverse=True)
+
+    def cleanup_old_backups(self, retention_days: int = 30) -> int:
+        """Remove backups older than retention period."""
+        cutoff = datetime.now() - timedelta(days=retention_days)
+        removed = 0
+
+        for backup_id in list(self.backups.keys()):
+            if self.backups[backup_id].created_at < cutoff:
+                del self.backups[backup_id]
+                del self.backup_data[backup_id]
+                removed += 1
+
+        return removed
+```
+
+## 4. Failover Mechanisms
+
+```python
+class FailoverState(Enum):
+    """Failover system states."""
+    NORMAL = "normal"          # Primary active
+    FAILING_OVER = "failing_over"  # Transition in progress
+    FAILED_OVER = "failed_over"    # Secondary active
+    RECOVERING = "recovering"      # Returning to primary
+
+@dataclass
+class FailoverTarget:
+    """A failover target configuration."""
+    name: str
+    endpoint: str
+    region: str
+    priority: int  # Lower = higher priority
+    health_check_url: str
+    is_active: bool = False
+    last_health_check: Optional[datetime] = None
+    health_status: str = "unknown"
+
+class QuantumFailoverManager:
+    """
+    Manages failover between quantum backend providers and regions.
+
+    Handles:
+    - Automatic failover on primary failure
+    - Manual failover for maintenance
+    - Failback to primary when recovered
+    - Health monitoring of all targets
+    """
+
+    def __init__(self):
+        self.state = FailoverState.NORMAL
+        self.targets: Dict[str, FailoverTarget] = {}
+        self.active_target: Optional[str] = None
+        self.failover_history: List[Dict] = []
+
+    def register_target(self, target: FailoverTarget):
+        """Register a failover target."""
+        self.targets[target.name] = target
+
+        # Set first target as active if none set
+        if self.active_target is None:
+            target.is_active = True
+            self.active_target = target.name
+
+    def check_health(self, target_name: str) -> bool:
+        """Check health of a failover target."""
+        if target_name not in self.targets:
+            return False
+
+        target = self.targets[target_name]
+
+        # Simulate health check (would be actual HTTP check in production)
+        is_healthy = True  # Placeholder
+
+        target.last_health_check = datetime.now()
+        target.health_status = "healthy" if is_healthy else "unhealthy"
+
+        return is_healthy
+
+    def check_all_targets(self) -> Dict[str, bool]:
+        """Check health of all targets."""
+        results = {}
+        for name in self.targets:
+            results[name] = self.check_health(name)
+        return results
+
+    def initiate_failover(self, reason: str, manual: bool = False) -> Dict:
+        """
+        Initiate failover to next available target.
+        """
+        if self.state == FailoverState.FAILING_OVER:
+            return {'success': False, 'error': 'Failover already in progress'}
+
+        current_target = self.active_target
+        self.state = FailoverState.FAILING_OVER
+
+        # Find next healthy target
+        sorted_targets = sorted(
+            self.targets.values(),
+            key=lambda t: t.priority
+        )
+
+        new_target = None
+        for target in sorted_targets:
+            if target.name != current_target:
+                if self.check_health(target.name):
+                    new_target = target
+                    break
+
+        if not new_target:
+            self.state = FailoverState.NORMAL
+            return {
+                'success': False,
+                'error': 'No healthy failover targets available'
+            }
+
+        # Execute failover
+        if self.active_target and self.active_target in self.targets:
+            self.targets[self.active_target].is_active = False
+
+        new_target.is_active = True
+        self.active_target = new_target.name
+        self.state = FailoverState.FAILED_OVER
+
+        # Record failover event
+        event = {
+            'timestamp': datetime.now().isoformat(),
+            'from_target': current_target,
+            'to_target': new_target.name,
+            'reason': reason,
+            'manual': manual
+        }
+        self.failover_history.append(event)
+
+        return {
+            'success': True,
+            'previous_target': current_target,
+            'new_target': new_target.name,
+            'event': event
+        }
+
+    def initiate_failback(self, target_name: str) -> Dict:
+        """
+        Failback to a specific target (typically primary).
+        """
+        if target_name not in self.targets:
+            return {'success': False, 'error': 'Target not found'}
+
+        if not self.check_health(target_name):
+            return {'success': False, 'error': 'Target is not healthy'}
+
+        self.state = FailoverState.RECOVERING
+
+        # Execute failback
+        previous = self.active_target
+        if previous and previous in self.targets:
+            self.targets[previous].is_active = False
+
+        self.targets[target_name].is_active = True
+        self.active_target = target_name
+        self.state = FailoverState.NORMAL
+
+        event = {
+            'timestamp': datetime.now().isoformat(),
+            'from_target': previous,
+            'to_target': target_name,
+            'reason': 'failback',
+            'manual': True
+        }
+        self.failover_history.append(event)
+
+        return {
+            'success': True,
+            'previous_target': previous,
+            'new_target': target_name
+        }
+
+    def get_status(self) -> Dict:
+        """Get current failover status."""
+        return {
+            'state': self.state.value,
+            'active_target': self.active_target,
+            'targets': {
+                name: {
+                    'region': t.region,
+                    'priority': t.priority,
+                    'is_active': t.is_active,
+                    'health_status': t.health_status,
+                    'last_check': t.last_health_check.isoformat() if t.last_health_check else None
+                }
+                for name, t in self.targets.items()
+            },
+            'recent_failovers': self.failover_history[-5:]
+        }
+
+
+class MultiRegionFailover:
+    """
+    Multi-region failover for quantum services.
+
+    Provides geographic redundancy and latency optimization.
+    """
+
+    def __init__(self):
+        self.regions: Dict[str, FailoverTarget] = {}
+        self.primary_region: Optional[str] = None
+        self.active_region: Optional[str] = None
+
+    def configure_region(
+        self,
+        region_id: str,
+        backends: List[str],
+        is_primary: bool = False
+    ):
+        """Configure a region for failover."""
+        target = FailoverTarget(
+            name=region_id,
+            endpoint=f"https://quantum-{region_id}.example.com",
+            region=region_id,
+            priority=0 if is_primary else 1,
+            health_check_url=f"https://quantum-{region_id}.example.com/health"
+        )
+
+        self.regions[region_id] = target
+
+        if is_primary:
+            self.primary_region = region_id
+            self.active_region = region_id
+            target.is_active = True
+
+    def get_nearest_healthy_region(self, user_region: str) -> Optional[str]:
+        """Find nearest healthy region for a user."""
+        # Simple distance model (would use actual latency in production)
+        region_distances = {
+            'us-east': {'us-east': 0, 'us-west': 50, 'eu-west': 100, 'ap-east': 150},
+            'us-west': {'us-east': 50, 'us-west': 0, 'eu-west': 120, 'ap-east': 80},
+            'eu-west': {'us-east': 100, 'us-west': 120, 'eu-west': 0, 'ap-east': 130},
+            'ap-east': {'us-east': 150, 'us-west': 80, 'eu-west': 130, 'ap-east': 0}
+        }
+
+        if user_region not in region_distances:
+            user_region = 'us-east'  # Default
+
+        distances = region_distances[user_region]
+        sorted_regions = sorted(distances.items(), key=lambda x: x[1])
+
+        for region_id, _ in sorted_regions:
+            if region_id in self.regions:
+                target = self.regions[region_id]
+                if target.health_status == "healthy":
+                    return region_id
+
+        return None
+```
+
+## 5. Recovery Testing
+
+```python
+@dataclass
+class RecoveryTest:
+    """Configuration for a recovery test."""
+    test_id: str
+    test_type: str  # "failover", "restore", "full_dr"
+    target_service: str
+    scheduled_at: datetime
+    executed_at: Optional[datetime] = None
+    duration_minutes: Optional[int] = None
+    success: Optional[bool] = None
+    findings: List[str] = field(default_factory=list)
+
+class DisasterRecoveryTester:
+    """
+    Tests disaster recovery procedures.
+
+    Implements:
+    - Scheduled DR tests
+    - Chaos engineering for quantum systems
+    - Recovery time measurement
+    - Findings documentation
+    """
+
+    def __init__(self, dr_planner: DisasterRecoveryPlanner):
+        self.dr_planner = dr_planner
+        self.tests: List[RecoveryTest] = []
+        self.test_history: List[Dict] = []
+
+    def schedule_test(
+        self,
+        test_type: str,
+        target_service: str,
+        scheduled_time: datetime
+    ) -> RecoveryTest:
+        """Schedule a recovery test."""
+        test = RecoveryTest(
+            test_id=f"dr_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            test_type=test_type,
+            target_service=target_service,
+            scheduled_at=scheduled_time
+        )
+        self.tests.append(test)
+        return test
+
+    def execute_failover_test(
+        self,
+        failover_manager: QuantumFailoverManager,
+        target_service: str,
+        simulate_failure: bool = True
+    ) -> Dict:
+        """
+        Execute a failover test.
+
+        Optionally simulates failure of primary target.
+        """
+        test_start = datetime.now()
+        findings = []
+
+        # Record initial state
+        initial_state = failover_manager.get_status()
+        initial_target = initial_state['active_target']
+
+        # Simulate failure if requested
+        if simulate_failure and initial_target:
+            failover_manager.targets[initial_target].health_status = "unhealthy"
+            findings.append(f"Simulated failure of {initial_target}")
+
+        # Trigger failover
+        failover_result = failover_manager.initiate_failover(
+            reason="DR test",
+            manual=False
+        )
+
+        failover_time = datetime.now()
+
+        # Verify new target is active
+        post_state = failover_manager.get_status()
+        new_target = post_state['active_target']
+
+        # Calculate metrics
+        failover_duration = (failover_time - test_start).total_seconds()
+
+        # Perform validation
+        validations = []
+
+        # Check new target is different from failed one
+        if simulate_failure:
+            if new_target != initial_target:
+                validations.append({'check': 'target_switched', 'passed': True})
+            else:
+                validations.append({'check': 'target_switched', 'passed': False})
+                findings.append("CRITICAL: Failover did not switch targets")
+
+        # Check new target is healthy
+        if failover_manager.check_health(new_target):
+            validations.append({'check': 'new_target_healthy', 'passed': True})
+        else:
+            validations.append({'check': 'new_target_healthy', 'passed': False})
+            findings.append("WARNING: New target health check failed")
+
+        # Restore original state
+        if simulate_failure and initial_target:
+            failover_manager.targets[initial_target].health_status = "healthy"
+            failover_manager.initiate_failback(initial_target)
+
+        # Record test result
+        result = {
+            'test_type': 'failover',
+            'target_service': target_service,
+            'executed_at': test_start.isoformat(),
+            'duration_seconds': failover_duration,
+            'success': all(v['passed'] for v in validations),
+            'initial_target': initial_target,
+            'failover_target': new_target,
+            'validations': validations,
+            'findings': findings
+        }
+
+        self.test_history.append(result)
+        return result
+
+    def execute_backup_restore_test(
+        self,
+        backup_system: QuantumWorkloadBackup,
+        test_data: Dict
+    ) -> Dict:
+        """Test backup and restore procedures."""
+        test_start = datetime.now()
+        findings = []
+
+        # Create test backup
+        metadata = backup_system.backup_circuits([test_data])
+        backup_time = datetime.now()
+
+        findings.append(f"Backup created: {metadata.backup_id}")
+
+        # Simulate data loss (in real test, would use separate environment)
+        # ...
+
+        # Restore from backup
+        restore_start = datetime.now()
+        restored = backup_system.restore_backup(metadata.backup_id)
+        restore_time = datetime.now()
+
+        # Validate restored data
+        restored_data = restored['data'][0] if restored['data'] else None
+
+        validations = []
+
+        if restored_data == test_data:
+            validations.append({'check': 'data_integrity', 'passed': True})
+        else:
+            validations.append({'check': 'data_integrity', 'passed': False})
+            findings.append("CRITICAL: Restored data does not match original")
+
+        # Calculate times
+        backup_duration = (backup_time - test_start).total_seconds()
+        restore_duration = (restore_time - restore_start).total_seconds()
+
+        result = {
+            'test_type': 'backup_restore',
+            'executed_at': test_start.isoformat(),
+            'backup_duration_seconds': backup_duration,
+            'restore_duration_seconds': restore_duration,
+            'backup_size_bytes': metadata.size_bytes,
+            'success': all(v['passed'] for v in validations),
+            'validations': validations,
+            'findings': findings
+        }
+
+        self.test_history.append(result)
+        return result
+
+    def generate_test_report(self) -> Dict:
+        """Generate comprehensive DR test report."""
+        if not self.test_history:
+            return {'message': 'No tests executed'}
+
+        total_tests = len(self.test_history)
+        passed_tests = sum(1 for t in self.test_history if t.get('success', False))
+
+        return {
+            'report_generated': datetime.now().isoformat(),
+            'summary': {
+                'total_tests': total_tests,
+                'passed': passed_tests,
+                'failed': total_tests - passed_tests,
+                'pass_rate': passed_tests / total_tests if total_tests > 0 else 0
+            },
+            'tests': self.test_history,
+            'recommendations': self._generate_recommendations()
+        }
+
+    def _generate_recommendations(self) -> List[str]:
+        """Generate recommendations based on test results."""
+        recommendations = []
+
+        # Check for failed tests
+        failed_tests = [t for t in self.test_history if not t.get('success', False)]
+        if failed_tests:
+            recommendations.append(
+                f"Address {len(failed_tests)} failed DR tests before next production deployment"
+            )
+
+        # Check test coverage
+        if not any(t['test_type'] == 'failover' for t in self.test_history):
+            recommendations.append("Schedule failover tests to validate backend redundancy")
+
+        if not any(t['test_type'] == 'backup_restore' for t in self.test_history):
+            recommendations.append("Execute backup/restore tests to validate data recovery")
+
+        return recommendations
+```
+
+## 6. Business Continuity Planning
+
+```python
+@dataclass
+class BCPScenario:
+    """Business continuity plan scenario."""
+    scenario_id: str
+    name: str
+    description: str
+    severity: DisasterSeverity
+    trigger_conditions: List[str]
+    response_procedures: List[str]
+    communication_plan: Dict
+    estimated_impact_hours: int
+
+class QuantumBusinessContinuityPlan:
+    """
+    Business continuity planning for quantum services.
+    """
+
+    def __init__(self, organization_name: str):
+        self.organization = organization_name
+        self.scenarios: Dict[str, BCPScenario] = {}
+        self.contacts: Dict[str, Dict] = {}
+        self._setup_default_scenarios()
+
+    def _setup_default_scenarios(self):
+        """Set up default BCP scenarios."""
+
+        self.scenarios['qpu_provider_outage'] = BCPScenario(
+            scenario_id='BCP-001',
+            name='QPU Provider Outage',
+            description='Primary quantum computing provider experiences extended outage',
+            severity=DisasterSeverity.HIGH,
+            trigger_conditions=[
+                'Provider status page shows major outage',
+                'API returns 503 for > 30 minutes',
+                'Multiple jobs fail with provider errors'
+            ],
+            response_procedures=[
+                '1. Verify outage is confirmed (check status page, try alternative endpoints)',
+                '2. Activate secondary provider failover',
+                '3. Notify affected users of degraded service',
+                '4. Enable simulator fallback for non-critical workloads',
+                '5. Monitor primary provider for recovery',
+                '6. Initiate failback when primary recovers'
+            ],
+            communication_plan={
+                'internal': ['engineering-team', 'leadership'],
+                'external': ['affected-customers'],
+                'templates': ['provider-outage-internal', 'provider-outage-external']
+            },
+            estimated_impact_hours=4
+        )
+
+        self.scenarios['data_center_failure'] = BCPScenario(
+            scenario_id='BCP-002',
+            name='Data Center Failure',
+            description='Primary data center hosting classical infrastructure fails',
+            severity=DisasterSeverity.CRITICAL,
+            trigger_conditions=[
+                'Data center monitoring shows complete failure',
+                'Network connectivity lost to primary region',
+                'Multiple services unreachable'
+            ],
+            response_procedures=[
+                '1. Confirm data center failure (not network issue)',
+                '2. Declare disaster and activate DR plan',
+                '3. Failover all services to secondary region',
+                '4. Restore data from backups if needed',
+                '5. Update DNS to point to secondary',
+                '6. Notify all stakeholders',
+                '7. Begin assessment of primary site'
+            ],
+            communication_plan={
+                'internal': ['all-hands', 'leadership', 'board'],
+                'external': ['all-customers', 'partners'],
+                'templates': ['major-outage-all']
+            },
+            estimated_impact_hours=8
+        )
+
+        self.scenarios['security_breach'] = BCPScenario(
+            scenario_id='BCP-003',
+            name='Security Breach',
+            description='Unauthorized access to quantum systems detected',
+            severity=DisasterSeverity.CRITICAL,
+            trigger_conditions=[
+                'Security monitoring detects unauthorized access',
+                'Unusual API access patterns detected',
+                'Credential compromise confirmed'
+            ],
+            response_procedures=[
+                '1. Isolate affected systems immediately',
+                '2. Revoke all potentially compromised credentials',
+                '3. Engage security incident response team',
+                '4. Preserve evidence for forensic analysis',
+                '5. Assess scope of breach',
+                '6. Notify affected parties per legal requirements',
+                '7. Implement additional controls',
+                '8. Conduct post-incident review'
+            ],
+            communication_plan={
+                'internal': ['security-team', 'leadership', 'legal'],
+                'external': ['affected-customers', 'regulators'],
+                'templates': ['security-incident']
+            },
+            estimated_impact_hours=24
+        )
+
+    def activate_scenario(self, scenario_id: str) -> Dict:
+        """Activate a BCP scenario."""
+        if scenario_id not in self.scenarios:
+            return {'success': False, 'error': 'Scenario not found'}
+
+        scenario = self.scenarios[scenario_id]
+
+        return {
+            'success': True,
+            'scenario': scenario.name,
+            'severity': scenario.severity.value,
+            'activated_at': datetime.now().isoformat(),
+            'response_procedures': scenario.response_procedures,
+            'communication_plan': scenario.communication_plan,
+            'estimated_resolution': f"{scenario.estimated_impact_hours} hours"
+        }
+
+    def generate_bcp_document(self) -> str:
+        """Generate BCP documentation."""
+        doc = f"""
+BUSINESS CONTINUITY PLAN
+{'='*60}
+Organization: {self.organization}
+Last Updated: {datetime.now().isoformat()}
+
+EXECUTIVE SUMMARY
+-----------------
+This document outlines business continuity procedures for quantum
+computing services. It covers {len(self.scenarios)} disaster scenarios
+with detailed response procedures.
+
+SCENARIOS
+---------
+"""
+        for scenario in self.scenarios.values():
+            doc += f"""
+{scenario.scenario_id}: {scenario.name}
+Severity: {scenario.severity.value.upper()}
+
+Description: {scenario.description}
+
+Trigger Conditions:
+"""
+            for condition in scenario.trigger_conditions:
+                doc += f"  - {condition}\n"
+
+            doc += "\nResponse Procedures:\n"
+            for procedure in scenario.response_procedures:
+                doc += f"  {procedure}\n"
+
+            doc += f"\nEstimated Impact: {scenario.estimated_impact_hours} hours\n"
+            doc += "-" * 40 + "\n"
+
+        return doc
+```
+
+## Summary
+
+Disaster recovery for quantum systems requires:
+
+1. **Recovery Objectives**: Define RTO/RPO for each service considering dependencies
+2. **Backup Procedures**: Regular backups of circuits, results, and configurations
+3. **Failover Mechanisms**: Automatic and manual failover across providers/regions
+4. **Recovery Testing**: Regular testing to validate DR procedures
+5. **Business Continuity**: Comprehensive plans for various disaster scenarios
+
+The unique challenge of quantum DR is balancing the need for specialized QPU access with the requirement for service continuity when that access is disrupted.
+
+## Further Reading
+
+- AWS Disaster Recovery Workloads
+- Google SRE: Managing Incidents
+- NIST Contingency Planning Guide

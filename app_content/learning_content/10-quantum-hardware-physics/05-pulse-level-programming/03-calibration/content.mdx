@@ -1,0 +1,630 @@
+---
+title: "Qubit Calibration Protocols"
+description: "Master the essential calibration experiments for superconducting qubits."
+duration: 60
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Design and analyze qubit spectroscopy experiments to find resonance frequencies
+- Implement Rabi calibration to determine pulse amplitudes for specific rotations
+- Use Ramsey experiments for precise frequency calibration and T2* measurement
+- Perform T1 measurements to characterize energy relaxation
+- Develop systematic calibration workflows for maintaining gate performance
+
+## 1. The Need for Calibration
+
+Quantum computers require precise control over qubit operations. However, several factors make calibration essential:
+
+<Definition term="Qubit Calibration">
+Qubit calibration is the systematic process of measuring qubit properties (frequencies, coherence times) and tuning control parameters (pulse amplitudes, phases, durations) to achieve high-fidelity quantum operations. Calibration must be performed regularly due to drift in qubit properties.
+</Definition>
+
+### Why Calibration is Essential
+
+1. **Fabrication variations**: Each qubit has slightly different parameters
+2. **Temporal drift**: Qubit frequencies and coherence times change over time
+3. **Temperature fluctuations**: Even millikelvin changes affect qubits
+4. **Two-level system (TLS) defects**: Randomly coupled environmental defects
+5. **Crosstalk**: Interactions between qubits and control lines
+
+### Calibration Hierarchy
+
+The standard calibration sequence follows a logical order:
+
+```
+1. Resonator spectroscopy → Find readout frequency
+2. Qubit spectroscopy → Find qubit frequency
+3. Rabi calibration → Determine π and π/2 pulse amplitudes
+4. Ramsey calibration → Fine-tune qubit frequency
+5. T1 measurement → Characterize energy relaxation
+6. T2/T2* measurement → Characterize dephasing
+7. DRAG calibration → Reduce leakage errors
+8. Gate verification → Confirm fidelity targets
+```
+
+## 2. Qubit Spectroscopy
+
+### Purpose
+
+Spectroscopy locates the qubit transition frequency by sweeping the drive frequency and looking for a response.
+
+### Protocol
+
+1. Prepare qubit in |0⟩ state
+2. Apply a long, low-power pulse at frequency $f_d$
+3. Measure the qubit state
+4. Repeat for different $f_d$ values
+5. Find the frequency with maximum excitation
+
+<Formula>
+$$P_1(f_d) \propto \frac{\Omega^2}{(\omega_q - \omega_d)^2 + \Omega^2 + (1/T_2)^2}$$
+</Formula>
+
+This Lorentzian profile peaks when $\omega_d = \omega_q$.
+
+<Example>
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+
+def lorentzian(f, f0, gamma, amplitude, offset):
+    """Lorentzian line shape for spectroscopy."""
+    return offset + amplitude * gamma**2 / ((f - f0)**2 + gamma**2)
+
+def simulate_spectroscopy(f_qubit_GHz: float, linewidth_MHz: float,
+                          f_range_GHz: tuple, n_points: int = 101) -> dict:
+    """
+    Simulate a qubit spectroscopy experiment.
+
+    Args:
+        f_qubit_GHz: True qubit frequency in GHz
+        linewidth_MHz: Spectroscopic linewidth (related to T2 and power)
+        f_range_GHz: (f_min, f_max) frequency range to sweep
+        n_points: Number of frequency points
+
+    Returns:
+        Dictionary with frequencies and measured populations
+    """
+    frequencies = np.linspace(f_range_GHz[0], f_range_GHz[1], n_points)
+    gamma = linewidth_MHz / 1000  # Convert to GHz
+
+    # Ideal signal
+    signal = lorentzian(frequencies, f_qubit_GHz, gamma, 0.8, 0.1)
+
+    # Add measurement noise
+    noise = 0.02 * np.random.randn(n_points)
+    signal_noisy = np.clip(signal + noise, 0, 1)
+
+    return {
+        'frequencies_GHz': frequencies,
+        'P1': signal_noisy,
+        'true_frequency': f_qubit_GHz
+    }
+
+def analyze_spectroscopy(frequencies_GHz: np.ndarray, P1: np.ndarray) -> dict:
+    """
+    Analyze spectroscopy data to extract qubit frequency.
+
+    Returns:
+        Dictionary with fitted frequency and uncertainty
+    """
+    # Initial guesses
+    f0_guess = frequencies_GHz[np.argmax(P1)]
+    gamma_guess = 0.01  # 10 MHz
+    amp_guess = P1.max() - P1.min()
+    offset_guess = P1.min()
+
+    try:
+        popt, pcov = curve_fit(
+            lorentzian, frequencies_GHz, P1,
+            p0=[f0_guess, gamma_guess, amp_guess, offset_guess],
+            bounds=([frequencies_GHz.min(), 0.001, 0, 0],
+                    [frequencies_GHz.max(), 0.1, 1, 1])
+        )
+        perr = np.sqrt(np.diag(pcov))
+
+        return {
+            'frequency_GHz': popt[0],
+            'uncertainty_MHz': perr[0] * 1000,
+            'linewidth_MHz': popt[1] * 1000,
+            'fit_params': popt
+        }
+    except:
+        return {
+            'frequency_GHz': f0_guess,
+            'uncertainty_MHz': np.nan,
+            'linewidth_MHz': np.nan
+        }
+
+# Example usage
+data = simulate_spectroscopy(f_qubit_GHz=5.123, linewidth_MHz=5,
+                             f_range_GHz=(5.0, 5.25))
+result = analyze_spectroscopy(data['frequencies_GHz'], data['P1'])
+
+print(f"True frequency: {data['true_frequency']:.6f} GHz")
+print(f"Fitted frequency: {result['frequency_GHz']:.6f} ± {result['uncertainty_MHz']:.3f} MHz")
+```
+</Example>
+
+<Tip>
+Use low drive power for spectroscopy to avoid power broadening the linewidth. The spectroscopic linewidth should be limited by T2 dephasing, not Rabi frequency.
+</Tip>
+
+## 3. Rabi Calibration
+
+### Purpose
+
+Rabi calibration determines the drive amplitude needed to achieve specific rotation angles (π/2 and π pulses).
+
+### Protocol
+
+1. Prepare qubit in |0⟩
+2. Apply a pulse with fixed amplitude A and varying duration t
+3. Measure the |1⟩ population
+4. Fit to extract the Rabi frequency Ω(A)
+5. Calculate pulse duration for π and π/2 rotations
+
+### Rabi Oscillation Model
+
+<Formula>
+$$P_1(t) = \frac{1}{2}\left(1 - \cos(\Omega t)e^{-t/T_{Rabi}}\right)$$
+</Formula>
+
+where $T_{Rabi}$ accounts for decay during the Rabi experiment.
+
+### Amplitude Calibration
+
+Once the Rabi frequency is known for a reference amplitude, we calibrate for specific gates:
+
+<Formula>
+$$t_\pi = \frac{\pi}{\Omega}, \quad t_{\pi/2} = \frac{\pi}{2\Omega}$$
+</Formula>
+
+Or equivalently, adjust amplitude for fixed duration:
+
+<Formula>
+$$A_\pi = A_{ref} \cdot \frac{\Omega_{target}}{\Omega_{ref}}$$
+</Formula>
+
+<Example>
+```python
+import numpy as np
+from scipy.optimize import curve_fit
+
+def rabi_model(t, Omega, T_decay, offset):
+    """Decaying Rabi oscillation model."""
+    return offset + 0.5 * (1 - np.cos(Omega * t) * np.exp(-t / T_decay))
+
+def calibrate_rabi(durations_ns: np.ndarray, P1: np.ndarray,
+                   guess_freq_MHz: float = 50) -> dict:
+    """
+    Analyze Rabi data to extract Rabi frequency.
+
+    Args:
+        durations_ns: Pulse durations in nanoseconds
+        P1: Measured |1⟩ populations
+        guess_freq_MHz: Initial guess for Rabi frequency
+
+    Returns:
+        Dictionary with Rabi frequency and gate times
+    """
+    durations_s = durations_ns * 1e-9
+
+    # Initial guesses
+    Omega_guess = 2 * np.pi * guess_freq_MHz * 1e6
+    T_guess = 10e-6  # 10 μs decay
+    offset_guess = 0.5
+
+    try:
+        popt, pcov = curve_fit(
+            rabi_model, durations_s, P1,
+            p0=[Omega_guess, T_guess, offset_guess],
+            bounds=([0, 1e-9, 0], [2*np.pi*500e6, 1e-3, 1])
+        )
+
+        Omega = popt[0]
+        T_decay = popt[1]
+
+        # Calculate gate times
+        t_pi = np.pi / Omega
+        t_pi_half = np.pi / (2 * Omega)
+
+        return {
+            'rabi_frequency_MHz': Omega / (2 * np.pi * 1e6),
+            'T_decay_us': T_decay * 1e6,
+            'pi_time_ns': t_pi * 1e9,
+            'pi_half_time_ns': t_pi_half * 1e9,
+            'fit_params': popt
+        }
+    except Exception as e:
+        print(f"Fitting failed: {e}")
+        return None
+
+# Simulate and analyze
+np.random.seed(42)
+durations = np.linspace(0, 200, 51)  # ns
+Omega_true = 2 * np.pi * 40e6  # 40 MHz
+T_decay_true = 5e-6
+
+P1_ideal = rabi_model(durations * 1e-9, Omega_true, T_decay_true, 0.5)
+P1_noisy = P1_ideal + 0.02 * np.random.randn(len(durations))
+
+result = calibrate_rabi(durations, P1_noisy)
+print(f"Rabi frequency: {result['rabi_frequency_MHz']:.2f} MHz")
+print(f"π pulse time: {result['pi_time_ns']:.2f} ns")
+print(f"π/2 pulse time: {result['pi_half_time_ns']:.2f} ns")
+```
+</Example>
+
+<Warning>
+Rabi calibration must be repeated whenever the drive amplitude changes. Also calibrate at the actual pulse amplitude you will use - nonlinearities in the electronics can cause Ω to vary non-linearly with amplitude.
+</Warning>
+
+## 4. Ramsey Calibration
+
+### Purpose
+
+Ramsey experiments provide precise frequency calibration and measure T2* (dephasing time including low-frequency noise).
+
+### Protocol
+
+1. Apply π/2 pulse (X90)
+2. Wait for time τ (free evolution)
+3. Apply second π/2 pulse (X90)
+4. Measure |1⟩ population
+5. Repeat for varying τ
+
+### Ramsey Signal
+
+<Formula>
+$$P_1(\tau) = \frac{1}{2}\left(1 - \cos(\Delta \cdot \tau)e^{-\tau/T_2^*}\right)$$
+</Formula>
+
+where Δ = ωq - ωd is the detuning between qubit and drive frequencies.
+
+### Artificial Detuning
+
+To avoid ambiguity between positive and negative detuning, intentionally detune by a known amount:
+
+<Formula>
+$$\Delta_{measured} = \Delta_{actual} + \Delta_{artificial}$$
+</Formula>
+
+<Example>
+```python
+def ramsey_model(tau, Delta, T2_star, amplitude, offset):
+    """Ramsey fringe model with decay."""
+    return offset + amplitude * np.cos(Delta * tau) * np.exp(-tau / T2_star)
+
+def calibrate_ramsey(tau_us: np.ndarray, P1: np.ndarray,
+                     artificial_detuning_MHz: float = 0) -> dict:
+    """
+    Analyze Ramsey data for frequency calibration.
+
+    Args:
+        tau_us: Wait times in microseconds
+        P1: Measured |1⟩ populations
+        artificial_detuning_MHz: Known artificial detuning added
+
+    Returns:
+        Dictionary with frequency detuning and T2*
+    """
+    tau_s = tau_us * 1e-6
+
+    # Estimate frequency from FFT
+    dt = tau_s[1] - tau_s[0]
+    fft = np.abs(np.fft.fft(P1 - P1.mean()))
+    freqs = np.fft.fftfreq(len(P1), dt)
+    pos = freqs > 0
+    Delta_guess = 2 * np.pi * freqs[pos][np.argmax(fft[pos])]
+
+    try:
+        popt, pcov = curve_fit(
+            ramsey_model, tau_s, P1,
+            p0=[Delta_guess, 5e-6, 0.5, 0.5],
+            bounds=([-2*np.pi*50e6, 0.1e-6, 0, 0],
+                    [2*np.pi*50e6, 1000e-6, 1, 1])
+        )
+
+        Delta_measured = popt[0] / (2 * np.pi * 1e6)  # MHz
+        Delta_actual = Delta_measured - artificial_detuning_MHz
+        T2_star = popt[1] * 1e6  # μs
+
+        return {
+            'detuning_MHz': Delta_actual,
+            'T2_star_us': T2_star,
+            'frequency_correction_MHz': -Delta_actual,
+            'fit_params': popt
+        }
+    except Exception as e:
+        print(f"Fitting failed: {e}")
+        return None
+
+# Example with artificial detuning
+tau = np.linspace(0, 10, 101)  # μs
+Delta_true = 2 * np.pi * 1.5e6  # 1.5 MHz detuning
+T2_star_true = 4e-6
+
+P1_ideal = ramsey_model(tau * 1e-6, Delta_true, T2_star_true, 0.4, 0.5)
+P1_noisy = P1_ideal + 0.02 * np.random.randn(len(tau))
+
+result = calibrate_ramsey(tau, P1_noisy)
+print(f"Measured detuning: {result['detuning_MHz']:.3f} MHz")
+print(f"Frequency correction: {result['frequency_correction_MHz']:.3f} MHz")
+print(f"T2*: {result['T2_star_us']:.2f} μs")
+```
+</Example>
+
+<Tip>
+For very long T2* times, the Ramsey fringes become difficult to resolve. Use artificial detuning (typically 0.5-2 MHz) to create visible oscillations even with slow decay.
+</Tip>
+
+## 5. T1 Measurement
+
+### Purpose
+
+T1 characterizes energy relaxation - how quickly an excited qubit decays to the ground state.
+
+### Protocol
+
+1. Prepare qubit in |1⟩ state (apply π pulse)
+2. Wait for time τ
+3. Measure |1⟩ population
+4. Repeat for varying τ
+5. Fit exponential decay
+
+### T1 Model
+
+<Formula>
+$$P_1(\tau) = P_1(0) \cdot e^{-\tau/T_1} + P_{eq}(1 - e^{-\tau/T_1})$$
+</Formula>
+
+where $P_{eq} \approx 0$ at dilution refrigerator temperatures (thermal excitation negligible).
+
+<Example>
+```python
+def t1_model(tau, T1, amplitude, offset):
+    """T1 decay model."""
+    return offset + amplitude * np.exp(-tau / T1)
+
+def measure_T1(tau_us: np.ndarray, P1: np.ndarray) -> dict:
+    """
+    Analyze T1 data.
+
+    Args:
+        tau_us: Wait times in microseconds
+        P1: Measured |1⟩ populations
+
+    Returns:
+        Dictionary with T1 and fit quality
+    """
+    tau_s = tau_us * 1e-6
+
+    # Initial guesses
+    T1_guess = tau_s[-1] / 3
+    amp_guess = P1[0] - P1[-1]
+    offset_guess = P1[-1]
+
+    try:
+        popt, pcov = curve_fit(
+            t1_model, tau_s, P1,
+            p0=[T1_guess, amp_guess, offset_guess],
+            bounds=([0.1e-6, 0, 0], [10000e-6, 1, 1])
+        )
+
+        T1 = popt[0] * 1e6  # Convert to μs
+        perr = np.sqrt(np.diag(pcov))
+        T1_err = perr[0] * 1e6
+
+        # Calculate fit quality
+        P1_fit = t1_model(tau_s, *popt)
+        residuals = P1 - P1_fit
+        R_squared = 1 - np.var(residuals) / np.var(P1)
+
+        return {
+            'T1_us': T1,
+            'T1_uncertainty_us': T1_err,
+            'R_squared': R_squared,
+            'initial_population': popt[1] + popt[2],
+            'thermal_population': popt[2]
+        }
+    except Exception as e:
+        print(f"Fitting failed: {e}")
+        return None
+
+# Simulate T1 measurement
+tau = np.linspace(0, 500, 51)  # μs
+T1_true = 80  # μs
+
+P1_ideal = t1_model(tau * 1e-6, T1_true * 1e-6, 0.95, 0.02)
+P1_noisy = P1_ideal + 0.02 * np.random.randn(len(tau))
+
+result = measure_T1(tau, P1_noisy)
+print(f"T1: {result['T1_us']:.1f} ± {result['T1_uncertainty_us']:.1f} μs")
+print(f"Fit quality (R²): {result['R_squared']:.4f}")
+```
+</Example>
+
+## 6. T2 and T2* Measurements
+
+### T2* (Ramsey Decay)
+
+T2* includes all dephasing sources, including low-frequency noise:
+
+<Formula>
+$$T_2^* = \frac{1}{\frac{1}{2T_1} + \frac{1}{T_\phi}}$$
+</Formula>
+
+where $T_\phi$ is pure dephasing time.
+
+### T2 (Echo Decay)
+
+A Hahn echo sequence refocuses low-frequency noise:
+
+1. Apply π/2 pulse
+2. Wait τ/2
+3. Apply π pulse (echo)
+4. Wait τ/2
+5. Apply π/2 pulse
+6. Measure
+
+The echo removes quasi-static frequency fluctuations, revealing the "intrinsic" T2:
+
+<Formula>
+$$T_2 \leq 2T_1$$
+</Formula>
+
+This is the fundamental limit set by energy relaxation.
+
+<Example>
+```python
+def hahn_echo_decay(tau, T2, amplitude, offset):
+    """Hahn echo decay model."""
+    return offset + amplitude * np.exp(-(tau / T2)**1)
+
+def measure_T2_echo(tau_us: np.ndarray, P1: np.ndarray,
+                    decay_exponent: float = 1.0) -> dict:
+    """
+    Analyze Hahn echo T2 data.
+
+    Args:
+        tau_us: Total wait times in microseconds
+        P1: Measured |1⟩ populations
+        decay_exponent: Exponent for stretched exponential (1=simple, 2=Gaussian)
+
+    Returns:
+        Dictionary with T2 and fit parameters
+    """
+    def echo_model(tau, T2, amp, offset):
+        return offset + amp * np.exp(-(tau / T2)**decay_exponent)
+
+    tau_s = tau_us * 1e-6
+
+    try:
+        popt, pcov = curve_fit(
+            echo_model, tau_s, P1,
+            p0=[50e-6, 0.5, 0.5],
+            bounds=([0.1e-6, 0, 0], [10000e-6, 1, 1])
+        )
+
+        T2 = popt[0] * 1e6
+
+        return {
+            'T2_us': T2,
+            'decay_exponent': decay_exponent,
+            'fit_params': popt
+        }
+    except Exception as e:
+        print(f"Fitting failed: {e}")
+        return None
+
+# Compare T2* and T2
+print("Typical coherence hierarchy:")
+print("  T2* < T2 ≤ 2×T1")
+print("  Example: T1=80 μs, T2=100 μs, T2*=40 μs")
+```
+</Example>
+
+## 7. Calibration Workflow
+
+### Automated Calibration Sequence
+
+```python
+class CalibrationWorkflow:
+    """
+    Systematic calibration workflow for a single qubit.
+    """
+
+    def __init__(self, qubit_id: int):
+        self.qubit_id = qubit_id
+        self.results = {}
+
+    def run_full_calibration(self):
+        """Execute complete calibration sequence."""
+
+        # Step 1: Rough frequency from spectroscopy
+        print("Step 1: Qubit spectroscopy...")
+        self.results['spectroscopy'] = self.run_spectroscopy()
+
+        # Step 2: Rabi calibration for π pulse
+        print("Step 2: Rabi calibration...")
+        self.results['rabi'] = self.run_rabi_calibration()
+
+        # Step 3: Fine frequency from Ramsey
+        print("Step 3: Ramsey frequency calibration...")
+        self.results['ramsey'] = self.run_ramsey_calibration()
+
+        # Update frequency based on Ramsey
+        self.update_drive_frequency()
+
+        # Step 4: T1 measurement
+        print("Step 4: T1 measurement...")
+        self.results['T1'] = self.measure_T1()
+
+        # Step 5: T2* measurement
+        print("Step 5: T2* measurement...")
+        self.results['T2_star'] = self.measure_T2_star()
+
+        # Step 6: Verify calibration
+        print("Step 6: Verification...")
+        self.results['verification'] = self.verify_calibration()
+
+        return self.results
+
+    def verify_calibration(self) -> dict:
+        """Verify calibration by measuring gate fidelities."""
+        # Measure X gate fidelity
+        # Prepare |0⟩, apply X, measure (should get ~1)
+        # Prepare |0⟩, apply X, X, measure (should get ~0)
+
+        fidelity_estimate = 0.999  # Placeholder
+
+        return {
+            'X_gate_fidelity': fidelity_estimate,
+            'calibration_valid': fidelity_estimate > 0.99
+        }
+```
+
+### Calibration Frequency
+
+Different parameters drift at different rates:
+
+| Parameter | Typical Drift | Recalibration Frequency |
+|-----------|---------------|------------------------|
+| Qubit frequency | MHz/hour | Every few hours |
+| π pulse amplitude | % per day | Daily |
+| T1, T2 | 10-50% per day | Daily |
+| Readout parameters | Slow | Weekly |
+| DRAG coefficient | Slow | Weekly |
+
+<Warning>
+Always validate calibration before running important experiments. A quick Ramsey check can verify that the qubit frequency hasn't drifted significantly.
+</Warning>
+
+## 8. Summary
+
+Calibration is fundamental to quantum computing:
+
+1. **Spectroscopy** finds the qubit frequency (rough)
+2. **Rabi calibration** determines pulse amplitudes for gates
+3. **Ramsey calibration** provides precise frequency tuning
+4. **T1 measurement** characterizes energy relaxation
+5. **T2/T2* measurements** characterize dephasing
+6. **Systematic workflows** ensure consistent calibration
+
+High-fidelity quantum operations require regular recalibration due to drift in qubit properties. Automated calibration routines are essential for scaling to many qubits.
+
+<Tip>
+In production quantum computers, calibration runs continuously in the background. Understanding these protocols helps you interpret system performance and troubleshoot issues.
+</Tip>
+
+## Further Reading
+
+- Qiskit Experiments documentation for calibration protocols
+- Gambetta et al., "Characterization of addressability by simultaneous randomized benchmarking" (2012)
+- Next lesson: DRAG Pulses - advanced techniques for reducing leakage errors

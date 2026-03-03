@@ -1,0 +1,485 @@
+---
+title: "HHL Algorithm: Quantum Linear System Solver"
+description: "Master the Harrow-Hassidim-Lloyd algorithm for solving linear systems with exponential quantum speedup, including phase estimation, controlled rotations, and complexity analysis."
+duration: 90
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Explain the HHL algorithm structure and its quantum speedup claims
+- Implement quantum phase estimation for eigenvalue extraction
+- Understand controlled rotation for amplitude encoding of solutions
+- Analyze the complexity and limitations of HHL
+- Identify when HHL provides quantum advantage over classical methods
+
+## 1. The Linear System Problem
+
+Linear systems $A\mathbf{x} = \mathbf{b}$ are ubiquitous in science and engineering. Classical solutions like Gaussian elimination scale as $O(N^3)$ for dense $N \times N$ matrices.
+
+<Definition term="HHL Algorithm">
+The Harrow-Hassidim-Lloyd (HHL) algorithm solves linear systems with complexity $O(\log(N) s^2 \kappa^2 / \epsilon)$, where $s$ is sparsity, $\kappa$ is condition number, and $\epsilon$ is precision. This is exponentially faster in $N$ than classical methods.
+</Definition>
+
+<Warning>
+HHL doesn't output the solution vector $\mathbf{x}$ directly. Instead, it prepares a quantum state $|x\rangle$ proportional to the solution, from which properties can be measured.
+</Warning>
+
+## 2. Problem Setup and Requirements
+
+For HHL to work, we need:
+
+1. **Hermitian matrix**: $A = A^\dagger$ (or embed non-Hermitian in larger Hermitian)
+2. **Efficient state preparation**: Load $|b\rangle = \sum_i b_i |i\rangle$
+3. **Efficient Hamiltonian simulation**: Implement $e^{iAt}$
+4. **Well-conditioned**: Small condition number $\kappa = \lambda_{\max}/\lambda_{\min}$
+
+<Formula>
+Given $A|x\rangle = |b\rangle$ where $A = \sum_j \lambda_j |u_j\rangle\langle u_j|$, the solution is:
+$$|x\rangle = A^{-1}|b\rangle = \sum_j \frac{1}{\lambda_j} \langle u_j|b\rangle |u_j\rangle$$
+</Formula>
+
+The key insight: if we can encode eigenvalues into amplitudes, we can invert them via controlled rotations.
+
+## 3. HHL Algorithm Structure
+
+The algorithm uses three quantum registers:
+
+1. **Clock register** (n qubits): Stores eigenvalue phases
+2. **Input register** (log N qubits): Stores $|b\rangle$ initially, $|x\rangle$ finally
+3. **Ancilla qubit**: Used for conditional rotation and measurement
+
+<Example>
+HHL Circuit Structure:
+
+```
+Clock:   |0⟩^n ─[H⊗n]─[C-U_A]─[QPE†]──────[C-Ry]──[QPE]─[H⊗n]─|0⟩^n
+                         │                   │
+Input:   |b⟩   ──────────●───────────────────│────────────────|x⟩
+                                             │
+Ancilla: |0⟩   ─────────────────────────────[Ry]─────────────|1⟩
+```
+</Example>
+
+### Step-by-Step Process
+
+1. **Phase Estimation**: Extract eigenvalues of $A$ into clock register
+2. **Controlled Rotation**: Rotate ancilla proportional to $1/\lambda_j$
+3. **Inverse Phase Estimation**: Uncompute clock register
+4. **Post-selection**: Measure ancilla in $|1\rangle$ to project onto solution
+
+## 4. Quantum Phase Estimation for HHL
+
+QPE extracts the eigenvalue $\lambda_j$ encoded as a phase $\theta_j = 2\pi\lambda_j t_0$:
+
+<Formula>
+$$\text{QPE}: |0\rangle^{\otimes n}|u_j\rangle \rightarrow |\tilde{\lambda}_j\rangle|u_j\rangle$$
+
+where $|\tilde{\lambda}_j\rangle$ is the n-bit binary representation of $\lambda_j / (2\pi/t_0)$.
+</Formula>
+
+```python
+import numpy as np
+from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
+from qiskit.circuit.library import QFT
+
+def create_hhl_qpe(n_clock: int, unitary_circuit: QuantumCircuit) -> QuantumCircuit:
+    """
+    Create QPE circuit for HHL algorithm.
+
+    Args:
+        n_clock: Number of clock qubits (determines precision)
+        unitary_circuit: Circuit implementing e^{iAt}
+
+    Returns:
+        QPE circuit for eigenvalue extraction
+    """
+    n_system = unitary_circuit.num_qubits
+
+    clock = QuantumRegister(n_clock, 'clock')
+    system = QuantumRegister(n_system, 'system')
+    qc = QuantumCircuit(clock, system)
+
+    # Hadamard on clock qubits
+    qc.h(clock)
+
+    # Controlled unitaries: C-U^(2^k)
+    for k in range(n_clock):
+        # Apply U^(2^k) controlled on clock[k]
+        power = 2 ** k
+        controlled_u = unitary_circuit.power(power).control(1)
+        qc.append(controlled_u, [clock[k]] + list(system))
+
+    # Inverse QFT on clock register
+    qc.append(QFT(n_clock, inverse=True), clock)
+
+    return qc
+```
+
+## 5. Eigenvalue Inversion via Controlled Rotation
+
+The key step: rotate ancilla by angle $\theta = \arcsin(C/\lambda)$:
+
+<Formula>
+$$R_y(\theta)|0\rangle = \sqrt{1-\frac{C^2}{\lambda^2}}|0\rangle + \frac{C}{\lambda}|1\rangle$$
+
+When we post-select on ancilla $|1\rangle$, the amplitude becomes proportional to $1/\lambda$.
+</Formula>
+
+```python
+def controlled_rotation_circuit(n_clock: int, C: float = 1.0) -> QuantumCircuit:
+    """
+    Create controlled rotation circuit for eigenvalue inversion.
+
+    The rotation angle is computed as arcsin(C/lambda) where lambda
+    is encoded in the clock register.
+
+    Args:
+        n_clock: Number of clock qubits
+        C: Scaling constant (must be <= min eigenvalue)
+
+    Returns:
+        Circuit implementing controlled rotations
+    """
+    clock = QuantumRegister(n_clock, 'clock')
+    ancilla = QuantumRegister(1, 'ancilla')
+    qc = QuantumCircuit(clock, ancilla)
+
+    # For each clock state |k⟩, rotate by arcsin(C * 2^n / k)
+    # This requires decomposition into controlled Ry gates
+
+    # Simplified version: controlled rotation based on clock bits
+    for k in range(n_clock):
+        # Angle for 2^k contribution to eigenvalue
+        lambda_contribution = 2 ** k
+        angle = 2 * np.arcsin(C / max(lambda_contribution, C))
+        qc.cry(angle, clock[k], ancilla[0])
+
+    return qc
+```
+
+## 6. Complete HHL Implementation
+
+Let's implement a simplified HHL for a 2x2 system:
+
+```python
+import numpy as np
+from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
+from qiskit.quantum_info import Operator, Statevector
+from qiskit_aer import AerSimulator
+
+def create_simple_hhl_2x2(A: np.ndarray, b: np.ndarray, n_clock: int = 3) -> QuantumCircuit:
+    """
+    Implement HHL for a 2x2 Hermitian matrix.
+
+    Args:
+        A: 2x2 Hermitian matrix
+        b: 2-element vector (normalized)
+        n_clock: Clock register size
+
+    Returns:
+        HHL quantum circuit
+    """
+    # Verify Hermitian
+    assert np.allclose(A, A.conj().T), "A must be Hermitian"
+
+    # Normalize b
+    b = b / np.linalg.norm(b)
+
+    # Get eigendecomposition
+    eigenvalues, eigenvectors = np.linalg.eigh(A)
+
+    # Create registers
+    clock = QuantumRegister(n_clock, 'clock')
+    system = QuantumRegister(1, 'system')  # 1 qubit for 2x2
+    ancilla = QuantumRegister(1, 'ancilla')
+    c_ancilla = ClassicalRegister(1, 'c_ancilla')
+
+    qc = QuantumCircuit(clock, system, ancilla, c_ancilla)
+
+    # Step 1: Prepare |b⟩
+    # For 2D, use rotation to prepare superposition
+    theta_b = 2 * np.arccos(b[0])
+    qc.ry(theta_b, system[0])
+
+    # Step 2: QPE
+    qc.h(clock)
+
+    # Controlled e^{iAt} operations
+    t = 2 * np.pi / max(abs(eigenvalues))  # Scaling factor
+    U = Operator(np.diag(np.exp(1j * eigenvalues * t)))
+
+    for k in range(n_clock):
+        power = 2 ** k
+        U_power = Operator(np.diag(np.exp(1j * eigenvalues * t * power)))
+        qc.append(U_power.to_instruction().control(1),
+                  [clock[k], system[0]])
+
+    # Inverse QFT (simplified for demonstration)
+    for i in range(n_clock // 2):
+        qc.swap(clock[i], clock[n_clock - 1 - i])
+    for i in range(n_clock):
+        qc.h(clock[i])
+        for j in range(i + 1, n_clock):
+            angle = -np.pi / (2 ** (j - i))
+            qc.cp(angle, clock[j], clock[i])
+
+    # Step 3: Controlled rotation for eigenvalue inversion
+    C = 0.5 * min(abs(eigenvalues))  # Ensure rotation is valid
+    for k in range(n_clock):
+        # Approximate controlled rotation
+        lambda_k = 2 ** k / (2 ** n_clock)  # Normalized eigenvalue
+        if lambda_k > 0:
+            angle = 2 * np.arcsin(min(C / lambda_k, 1.0))
+            qc.cry(angle, clock[k], ancilla[0])
+
+    # Step 4: Inverse QPE (uncompute)
+    # QFT
+    for i in range(n_clock - 1, -1, -1):
+        for j in range(n_clock - 1, i, -1):
+            angle = np.pi / (2 ** (j - i))
+            qc.cp(angle, clock[j], clock[i])
+        qc.h(clock[i])
+    for i in range(n_clock // 2):
+        qc.swap(clock[i], clock[n_clock - 1 - i])
+
+    # Inverse controlled unitaries
+    for k in range(n_clock - 1, -1, -1):
+        power = 2 ** k
+        U_power_inv = Operator(np.diag(np.exp(-1j * eigenvalues * t * power)))
+        qc.append(U_power_inv.to_instruction().control(1),
+                  [clock[k], system[0]])
+
+    qc.h(clock)
+
+    # Step 5: Measure ancilla
+    qc.measure(ancilla, c_ancilla)
+
+    return qc
+
+# Example: Solve Ax = b
+A = np.array([[1, 0], [0, 2]], dtype=float)
+b = np.array([1, 1], dtype=float) / np.sqrt(2)
+
+print("Solving Ax = b")
+print(f"A = \n{A}")
+print(f"b = {b}")
+
+# Classical solution
+x_classical = np.linalg.solve(A, b)
+print(f"\nClassical solution: x = {x_classical}")
+print(f"Normalized: |x⟩ = {x_classical / np.linalg.norm(x_classical)}")
+
+# Create HHL circuit
+hhl_circuit = create_simple_hhl_2x2(A, b)
+print(f"\nHHL circuit depth: {hhl_circuit.depth()}")
+print(f"Total gates: {hhl_circuit.size()}")
+```
+
+## 7. Analysis of Success Probability
+
+The success probability depends on post-selection of ancilla in $|1\rangle$:
+
+<Formula>
+$$P(\text{success}) = \sum_j |c_j|^2 \frac{C^2}{\lambda_j^2}$$
+
+where $c_j = \langle u_j|b\rangle$ are the expansion coefficients of $|b\rangle$ in eigenbasis.
+</Formula>
+
+<Warning>
+For ill-conditioned matrices (large $\kappa$), small eigenvalues dominate and success probability drops as $O(1/\kappa^2)$. Amplitude amplification can boost this but adds complexity.
+</Warning>
+
+```python
+def analyze_hhl_success_probability(A: np.ndarray, b: np.ndarray, C: float) -> dict:
+    """
+    Analyze success probability and solution quality for HHL.
+
+    Args:
+        A: Hermitian matrix
+        b: Right-hand side vector
+        C: Rotation scaling constant
+
+    Returns:
+        Dictionary with analysis results
+    """
+    eigenvalues, eigenvectors = np.linalg.eigh(A)
+    b_normalized = b / np.linalg.norm(b)
+
+    # Expansion coefficients
+    coeffs = eigenvectors.conj().T @ b_normalized
+
+    # Success probability
+    p_success = sum(abs(c)**2 * (C / lam)**2
+                    for c, lam in zip(coeffs, eigenvalues)
+                    if abs(lam) > 1e-10)
+
+    # Condition number
+    kappa = max(abs(eigenvalues)) / min(abs(eigenvalues))
+
+    # Theoretical solution (normalized)
+    x_exact = np.linalg.solve(A, b)
+    x_normalized = x_exact / np.linalg.norm(x_exact)
+
+    return {
+        'eigenvalues': eigenvalues,
+        'coefficients': coeffs,
+        'condition_number': kappa,
+        'success_probability': p_success,
+        'exact_solution': x_normalized,
+        'C_max': min(abs(eigenvalues))  # Maximum valid C
+    }
+
+# Analyze different matrices
+test_cases = [
+    ("Well-conditioned", np.array([[2, 0], [0, 1]])),
+    ("Moderate", np.array([[4, 0], [0, 1]])),
+    ("Ill-conditioned", np.array([[10, 0], [0, 1]])),
+]
+
+b = np.array([1, 1]) / np.sqrt(2)
+
+print("HHL Success Probability Analysis")
+print("=" * 50)
+for name, A in test_cases:
+    C = 0.5 * min(abs(np.linalg.eigvalsh(A)))
+    result = analyze_hhl_success_probability(A, b, C)
+    print(f"\n{name} (κ = {result['condition_number']:.1f}):")
+    print(f"  Eigenvalues: {result['eigenvalues']}")
+    print(f"  P(success) = {result['success_probability']:.4f}")
+    print(f"  Solution |x⟩ = {result['exact_solution']}")
+```
+
+## 8. Complexity Analysis
+
+<Definition term="HHL Complexity">
+Full complexity: $O(\log(N) s^2 \kappa^2 / \epsilon)$
+
+- $\log(N)$: From quantum parallelism over $N$-dimensional system
+- $s^2$: Sparsity factor for Hamiltonian simulation
+- $\kappa^2$: Condition number (from success probability)
+- $1/\epsilon$: Precision in eigenvalue estimation
+</Definition>
+
+### Comparison with Classical Methods
+
+| Algorithm | Time Complexity | Output |
+|-----------|----------------|--------|
+| Gaussian Elimination | $O(N^3)$ | Full vector $\mathbf{x}$ |
+| Conjugate Gradient | $O(Ns\kappa)$ | Full vector $\mathbf{x}$ |
+| **HHL** | $O(\log(N)s^2\kappa^2/\epsilon)$ | Quantum state $\|x\rangle$ |
+
+<Tip>
+The exponential speedup in $N$ comes with caveats:
+1. Output is a quantum state, not classical data
+2. Must efficiently prepare $|b\rangle$ (can be $O(N)$!)
+3. Must efficiently implement $e^{iAt}$
+4. Only advantageous for specific downstream tasks
+</Tip>
+
+## 9. When Does HHL Provide Advantage?
+
+HHL is useful when:
+
+1. **Large systems**: $N$ is exponentially large
+2. **Sparse matrices**: $s \ll N$
+3. **Good conditioning**: $\kappa = O(\text{poly}\log N)$
+4. **Downstream quantum**: Result used in further quantum computation
+5. **Sampling suffices**: Don't need full solution vector
+
+```python
+def hhl_advantage_analysis(N: int, s: int, kappa: float, epsilon: float = 0.01) -> dict:
+    """
+    Analyze when HHL provides quantum advantage.
+
+    Args:
+        N: System dimension
+        s: Sparsity (non-zeros per row)
+        kappa: Condition number
+        epsilon: Precision
+
+    Returns:
+        Complexity comparison
+    """
+    # Classical complexities
+    gaussian = N ** 3
+    cg_iterations = s * kappa  # Per iteration: O(N)
+    conjugate_gradient = N * cg_iterations
+
+    # HHL complexity (ignoring logarithmic factors)
+    hhl = np.log2(N) * s**2 * kappa**2 / epsilon
+
+    # Quantum advantage threshold
+    advantage = hhl < min(gaussian, conjugate_gradient)
+
+    return {
+        'N': N,
+        'gaussian': gaussian,
+        'conjugate_gradient': conjugate_gradient,
+        'hhl': hhl,
+        'quantum_advantage': advantage,
+        'speedup_over_gaussian': gaussian / hhl if hhl > 0 else float('inf'),
+        'speedup_over_cg': conjugate_gradient / hhl if hhl > 0 else float('inf')
+    }
+
+# Test scenarios
+print("HHL Quantum Advantage Analysis")
+print("=" * 60)
+
+scenarios = [
+    (1000, 10, 10),      # Small sparse, moderate condition
+    (10000, 10, 10),     # Medium sparse, moderate condition
+    (100000, 5, 5),      # Large sparse, well-conditioned
+    (100000, 100, 1000), # Large dense, ill-conditioned
+]
+
+for N, s, kappa in scenarios:
+    result = hhl_advantage_analysis(N, s, kappa)
+    print(f"\nN={N:,}, s={s}, κ={kappa}")
+    print(f"  Gaussian: {result['gaussian']:.2e}")
+    print(f"  CG: {result['conjugate_gradient']:.2e}")
+    print(f"  HHL: {result['hhl']:.2e}")
+    print(f"  Quantum advantage: {result['quantum_advantage']}")
+    if result['quantum_advantage']:
+        print(f"  Speedup: {result['speedup_over_gaussian']:.1f}x over Gaussian")
+```
+
+## 10. Limitations and Fine Print
+
+### The Input Problem
+
+<Warning>
+**State preparation bottleneck**: Loading classical data $\mathbf{b}$ into $|b\rangle$ typically costs $O(N)$, negating the quantum speedup. HHL is most useful when $|b\rangle$ is already quantum or efficiently preparable.
+</Warning>
+
+### The Output Problem
+
+HHL produces a quantum state $|x\rangle$, not classical vector $\mathbf{x}$:
+
+- Reading all amplitudes requires $O(N)$ measurements
+- Useful only if we need properties like $\langle x|M|x\rangle$ or sampling
+
+### Condition Number Dependence
+
+The $O(\kappa^2)$ dependence makes HHL impractical for ill-conditioned systems common in real applications.
+
+## Summary
+
+The HHL algorithm represents a landmark in quantum algorithms:
+
+1. **Structure**: QPE → Controlled Rotation → Inverse QPE → Post-selection
+2. **Complexity**: $O(\log N \cdot s^2 \kappa^2 / \epsilon)$ exponentially faster in $N$
+3. **Output**: Quantum state $|x\rangle$ proportional to solution
+4. **Requirements**: Hermitian A, efficient $|b\rangle$ prep, efficient $e^{iAt}$
+5. **Limitations**: Input/output problems, $\kappa$ dependence, post-selection overhead
+6. **Applications**: Quantum ML, solving PDEs, when downstream is quantum
+
+HHL opened the door to quantum linear algebra, inspiring a generation of algorithms for machine learning, optimization, and scientific computing.
+
+## Further Reading
+
+- Next lesson: Quantum Matrix Operations (multiplication, inversion techniques)
+- Related: Quantum Phase Estimation (detailed implementation)
+- Advanced: Quantum Singular Value Transformation (modern generalization)

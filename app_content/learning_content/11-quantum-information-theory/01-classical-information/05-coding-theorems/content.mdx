@@ -1,0 +1,321 @@
+---
+title: "Coding Theorems: Practical Error Correction"
+description: "Learn the fundamental coding theorems that bridge theory and practice, including linear codes, the Gilbert-Varshamov bound, and capacity-approaching codes."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand linear codes and their generator/parity-check matrices
+- Calculate the Hamming bound and Gilbert-Varshamov bound
+- Analyze the structure of capacity-approaching codes
+- Understand LDPC and Turbo code design principles
+- Connect classical coding to quantum error correction
+- Apply coding theory to practical communication systems
+
+## 1. Linear Codes
+
+<Definition term="Linear Code">
+An $[n, k, d]$ linear code $C$ over a field $\mathbb{F}$ is a $k$-dimensional subspace of $\mathbb{F}^n$ with minimum distance $d$, where:
+- $n$ = block length (codeword length)
+- $k$ = dimension (message bits)
+- $d$ = minimum Hamming distance between codewords
+</Definition>
+
+The **rate** of the code is $R = k/n$.
+
+### Generator and Parity-Check Matrices
+
+<Formula>
+$$\text{Generator: } G \in \mathbb{F}^{k \times n}, \quad C = \{xG : x \in \mathbb{F}^k\}$$
+$$\text{Parity-check: } H \in \mathbb{F}^{(n-k) \times n}, \quad HG^T = 0$$
+</Formula>
+
+```python
+import numpy as np
+
+class LinearCode:
+    def __init__(self, G):
+        """Initialize linear code with generator matrix G."""
+        self.G = np.array(G) % 2
+        self.k, self.n = self.G.shape
+        self.H = self._compute_parity_check()
+        self.d = self._compute_min_distance()
+
+    def _compute_parity_check(self):
+        """Compute parity-check matrix H."""
+        # For systematic form G = [I_k | P], H = [-P^T | I_{n-k}]
+        # In GF(2), -1 = 1
+        G = self.G
+        k, n = self.k, self.n
+
+        # Row reduce to systematic form
+        G_sys = G.copy()
+        for i in range(k):
+            # Find pivot
+            if G_sys[i, i] == 0:
+                for j in range(i+1, k):
+                    if G_sys[j, i] == 1:
+                        G_sys[[i, j]] = G_sys[[j, i]]
+                        break
+            # Eliminate
+            for j in range(k):
+                if j != i and G_sys[j, i] == 1:
+                    G_sys[j] = (G_sys[j] + G_sys[i]) % 2
+
+        P = G_sys[:, k:]  # Parity part
+        H = np.hstack([P.T, np.eye(n-k, dtype=int)])
+
+        return H % 2
+
+    def _compute_min_distance(self):
+        """Compute minimum distance by checking all codewords."""
+        min_weight = self.n + 1
+        for i in range(1, 2**self.k):
+            # Convert i to binary vector
+            msg = np.array([int(b) for b in format(i, f'0{self.k}b')])
+            codeword = self.encode(msg)
+            weight = np.sum(codeword)
+            min_weight = min(min_weight, weight)
+        return min_weight
+
+    def encode(self, message):
+        """Encode message using generator matrix."""
+        return (np.array(message) @ self.G) % 2
+
+    def syndrome(self, received):
+        """Calculate syndrome for error detection."""
+        return (self.H @ np.array(received)) % 2
+
+# Example: [7,4,3] Hamming code
+G_hamming = np.array([
+    [1, 0, 0, 0, 1, 1, 0],
+    [0, 1, 0, 0, 1, 0, 1],
+    [0, 0, 1, 0, 0, 1, 1],
+    [0, 0, 0, 1, 1, 1, 1]
+])
+
+code = LinearCode(G_hamming)
+print(f"[{code.n}, {code.k}, {code.d}] code")
+print(f"Rate: {code.k/code.n:.4f}")
+print(f"Generator matrix:\n{code.G}")
+print(f"Parity-check matrix:\n{code.H}")
+```
+
+## 2. Hamming Bound (Sphere Packing)
+
+<Definition term="Hamming Bound">
+For a code with minimum distance $d = 2t+1$ (correcting $t$ errors):
+
+$$|C| \leq \frac{q^n}{\sum_{i=0}^{t} \binom{n}{i}(q-1)^i}$$
+
+For binary codes: $2^k \leq \frac{2^n}{\sum_{i=0}^{t} \binom{n}{i}}$
+</Definition>
+
+**Interpretation**: The "spheres" of radius $t$ around each codeword cannot overlap.
+
+```python
+from math import comb
+import numpy as np
+
+def hamming_bound(n, d, q=2):
+    """
+    Calculate maximum number of codewords (Hamming bound).
+
+    Args:
+        n: Block length
+        d: Minimum distance
+        q: Alphabet size
+    """
+    t = (d - 1) // 2  # Error correction capability
+    sphere_size = sum(comb(n, i) * (q-1)**i for i in range(t+1))
+    max_codewords = q**n / sphere_size
+    max_k = np.floor(np.log2(max_codewords))
+    return int(max_codewords), int(max_k)
+
+print("Hamming Bound Examples:")
+for n, d in [(7, 3), (15, 3), (23, 7), (31, 7)]:
+    M, k = hamming_bound(n, d)
+    print(f"  [{n}, ?, {d}] code: k ≤ {k} (M ≤ {M})")
+```
+
+<Definition term="Perfect Code">
+A code meeting the Hamming bound with equality is called **perfect**. The spheres exactly cover the space with no gaps or overlaps.
+</Definition>
+
+Perfect binary codes:
+- Repetition codes $[n, 1, n]$ for odd $n$
+- Hamming codes $[2^r - 1, 2^r - 1 - r, 3]$
+- Golay code $[23, 12, 7]$
+
+## 3. Gilbert-Varshamov Bound
+
+<Definition term="Gilbert-Varshamov Bound">
+There exists a binary linear code with:
+
+$$\frac{k}{n} \geq 1 - H_2\left(\frac{d-1}{n}\right)$$
+
+where $H_2$ is the binary entropy function.
+</Definition>
+
+This is an **existence** bound - it says good codes exist.
+
+<Formula>
+$$R \geq 1 - H_2(\delta) \text{ where } \delta = \frac{d}{n}$$
+</Formula>
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def binary_entropy(p):
+    if p <= 0 or p >= 1:
+        return 0
+    return -p * np.log2(p) - (1-p) * np.log2(1-p)
+
+def gilbert_varshamov_rate(delta):
+    """GV bound on achievable rate for relative distance delta."""
+    return max(0, 1 - binary_entropy(delta))
+
+def hamming_rate_bound(delta):
+    """Hamming bound on achievable rate."""
+    # Approximate for large n
+    return max(0, 1 - binary_entropy(delta/2))
+
+# Plot bounds
+delta_values = np.linspace(0.001, 0.5, 100)
+gv_rates = [gilbert_varshamov_rate(d) for d in delta_values]
+hamming_rates = [hamming_rate_bound(d) for d in delta_values]
+
+plt.figure(figsize=(10, 6))
+plt.plot(delta_values, gv_rates, 'b-', linewidth=2, label='Gilbert-Varshamov (achievable)')
+plt.plot(delta_values, hamming_rates, 'r--', linewidth=2, label='Hamming (upper bound)')
+plt.xlabel('Relative Distance δ = d/n', fontsize=12)
+plt.ylabel('Rate R = k/n', fontsize=12)
+plt.title('Coding Theory Bounds', fontsize=14)
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.xlim(0, 0.5)
+plt.ylim(0, 1)
+plt.show()
+```
+
+## 4. Capacity-Approaching Codes
+
+Modern codes approach Shannon capacity:
+
+### LDPC Codes (Low-Density Parity-Check)
+
+<Definition term="LDPC Code">
+An LDPC code has a sparse parity-check matrix $H$. Decoding uses belief propagation on the Tanner graph representation.
+</Definition>
+
+Key properties:
+- $H$ has few 1s per row and column
+- Iterative decoding via message passing
+- Can approach capacity to within 0.01 dB
+
+### Turbo Codes
+
+<Definition term="Turbo Code">
+Turbo codes use two convolutional encoders with an interleaver. Decoding iterates between two soft-input soft-output (SISO) decoders.
+</Definition>
+
+```python
+# Simplified LDPC parity-check matrix construction
+def create_regular_ldpc(n, dv, dc):
+    """
+    Create a regular LDPC code parity-check matrix.
+
+    Args:
+        n: Block length
+        dv: Variable node degree (ones per column)
+        dc: Check node degree (ones per row)
+    """
+    # Number of check nodes
+    m = n * dv // dc
+
+    # Create base matrix with proper degrees
+    H = np.zeros((m, n), dtype=int)
+
+    # Simple regular construction
+    for j in range(n):
+        # Place dv ones in column j
+        rows = np.random.choice(m, dv, replace=False)
+        H[rows, j] = 1
+
+    # Adjust to satisfy degree constraints (simplified)
+    return H
+
+# Example
+n = 20
+dv, dc = 3, 6  # Rate ≈ 1 - dv/dc = 0.5
+H_ldpc = create_regular_ldpc(n, dv, dc)
+print(f"LDPC [{n}, ~{n - H_ldpc.shape[0]}]")
+print(f"Parity-check matrix density: {np.mean(H_ldpc):.3f}")
+print(f"Column weight (dv): {np.mean(H_ldpc.sum(axis=0)):.1f}")
+print(f"Row weight (dc): {np.mean(H_ldpc.sum(axis=1)):.1f}")
+```
+
+### Polar Codes
+
+<Definition term="Polar Code">
+Polar codes achieve capacity for symmetric channels. They use channel polarization: as block length increases, channels become either perfect or useless.
+</Definition>
+
+Polar codes are the first provably capacity-achieving codes with polynomial complexity!
+
+## 5. Connection to Quantum Codes
+
+Classical coding theory extends to quantum error correction:
+
+| Classical | Quantum |
+|-----------|---------|
+| Bit-flip errors | X errors (bit-flip) |
+| Parity checks | Stabilizer measurements |
+| Linear code $C$ | CSS code $[[n, k, d]]$ |
+| $Hc^T = 0$ | Stabilizer conditions |
+
+<Definition term="CSS Code">
+A CSS (Calderbank-Shor-Steane) code is constructed from two classical codes $C_1 \supset C_2$ satisfying $C_2^\perp \subseteq C_1$. It corrects both X and Z errors.
+</Definition>
+
+<Tip>
+The surface code, a leading candidate for fault-tolerant quantum computing, is a CSS code based on the repetition code structure on a 2D lattice.
+</Tip>
+
+## 6. Decoding Complexity
+
+| Code Type | Encoding | Decoding |
+|-----------|----------|----------|
+| General linear | $O(n^2)$ | $O(2^k)$ ML |
+| Hamming | $O(n)$ | $O(n)$ |
+| Reed-Solomon | $O(n \log n)$ | $O(n^2)$ |
+| LDPC | $O(n)$ | $O(n)$ per iteration |
+| Polar | $O(n \log n)$ | $O(n \log n)$ |
+
+<Warning>
+Maximum likelihood (ML) decoding is NP-hard for general linear codes. Practical codes are designed for efficient sub-optimal decoding that still performs well.
+</Warning>
+
+## Summary
+
+In this lesson, you learned about coding theorems:
+
+1. **Linear codes**: Defined by generator and parity-check matrices
+2. **Hamming bound**: Upper limit on code size (sphere packing)
+3. **Gilbert-Varshamov**: Existence of good codes
+4. **LDPC codes**: Sparse codes with iterative decoding
+5. **Polar codes**: First capacity-achieving codes with polynomial complexity
+6. **Quantum connection**: CSS codes from classical codes
+
+These concepts form the foundation for both practical communication systems and quantum error correction.
+
+## Further Reading
+
+- Next lesson: Rate-Distortion Theory (lossy compression)
+- Related: Quantum Error Correction (stabilizer codes)
+- Application: 5G NR uses LDPC and Polar codes

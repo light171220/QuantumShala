@@ -1,0 +1,800 @@
+---
+title: "Multi-Channel Synchronization and Timing"
+description: "Master the critical challenge of synchronizing multiple control channels in quantum systems."
+duration: 50
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Design clock distribution networks for picosecond-level synchronization
+- Implement trigger systems for deterministic pulse timing across channels
+- Analyze and minimize timing jitter in multi-channel control systems
+- Apply phase synchronization techniques for coherent multi-qubit gates
+- Scale synchronization architectures for large quantum processors
+
+## 1. Introduction to Synchronization Challenges
+
+Modern quantum processors require precise coordination among dozens to hundreds of control channels. Each qubit needs drive, readout, and potentially flux control, with timing synchronized to picosecond precision.
+
+<Definition term="Synchronization">
+In quantum control, synchronization refers to the precise alignment of signals across multiple channels so that pulses arrive at qubits with deterministic timing relationships. This includes both time alignment (when pulses occur) and phase coherence (the relative phase of carrier signals).
+</Definition>
+
+### Why Synchronization is Critical
+
+| Requirement | Tolerance | Consequence of Failure |
+|-------------|-----------|----------------------|
+| Two-qubit gate timing | < 1 ns | Gate error ~1% per ns |
+| Phase coherence | < 1 degree | Rotation axis error |
+| Readout timing | < 10 ns | Integration window misalignment |
+| Trigger alignment | < 100 ps | State preparation error |
+
+<Tip>
+A simple calculation: For a 5 GHz qubit, 1 degree of phase error corresponds to 0.56 ps of timing error. Achieving sub-degree phase coherence requires sub-picosecond timing stability.
+</Tip>
+
+## 2. Clock Distribution Architecture
+
+### Master Clock Design
+
+All timing in a quantum control system derives from a single master clock:
+
+<Formula>
+$$f_{master} = 10\text{ MHz} \text{ to } 1\text{ GHz}$$
+</Formula>
+
+**Master Clock Requirements:**
+- Ultra-low phase noise
+- Long-term stability (< 1 ppb drift)
+- Multiple synchronized outputs
+- Environmental isolation
+
+```python
+import numpy as np
+
+class MasterClockSpec:
+    """Specifications for quantum control master clock."""
+
+    def __init__(self, frequency: float, phase_noise_dBc_Hz: float,
+                 stability_ppb: float):
+        self.frequency = frequency  # Hz
+        self.phase_noise = phase_noise_dBc_Hz  # dBc/Hz at 1 kHz offset
+        self.stability = stability_ppb  # parts per billion
+
+    def timing_jitter(self, integration_bandwidth: float = 10e6) -> float:
+        """
+        Calculate RMS timing jitter from phase noise.
+
+        Args:
+            integration_bandwidth: Bandwidth for jitter integration (Hz)
+
+        Returns:
+            RMS jitter in seconds
+        """
+        # Simplified jitter calculation
+        # jitter_rms = sqrt(2 * L(f) * BW) / (2 * pi * f_carrier)
+        # where L(f) is SSB phase noise in linear units
+
+        L_linear = 10**(self.phase_noise / 10)
+        jitter_rms = np.sqrt(2 * L_linear * integration_bandwidth) / \
+                     (2 * np.pi * self.frequency)
+        return jitter_rms
+
+    def long_term_drift(self, time_hours: float) -> float:
+        """
+        Calculate worst-case frequency drift.
+
+        Returns:
+            Timing drift in seconds over measurement time
+        """
+        drift_fraction = self.stability * 1e-9 * time_hours * 3600
+        return drift_fraction
+
+# Example: High-quality reference clock
+clock = MasterClockSpec(
+    frequency=100e6,        # 100 MHz
+    phase_noise_dBc_Hz=-110,  # -110 dBc/Hz at 1 kHz offset
+    stability_ppb=0.1        # 0.1 ppb stability
+)
+
+jitter = clock.timing_jitter()
+print(f"RMS timing jitter: {jitter*1e12:.2f} ps")
+print(f"Drift over 1 hour: {clock.long_term_drift(1)*1e12:.2f} ps")
+```
+
+### Clock Distribution Tree
+
+Clocks are distributed hierarchically to minimize skew:
+
+```
+                    Master Clock
+                         |
+           +-------------+-------------+
+           |             |             |
+       PLL/Buffer    PLL/Buffer    PLL/Buffer
+           |             |             |
+      +----+----+   +----+----+   +----+----+
+      |    |    |   |    |    |   |    |    |
+     Ch1  Ch2  Ch3 Ch4  Ch5  Ch6 Ch7  Ch8  Ch9
+```
+
+**Design Principles:**
+1. Equal path lengths for matched delay
+2. Low-jitter PLL/buffers at each node
+3. Shielded transmission lines
+4. Temperature-controlled environment
+
+<Formula>
+$$\text{Skew}_{max} = \max_i |t_{path,i} - t_{path,ref}|$$
+</Formula>
+
+## 3. Timing Jitter Analysis
+
+### Jitter Sources
+
+Multiple sources contribute to timing uncertainty:
+
+| Source | Typical Contribution | Mitigation |
+|--------|---------------------|------------|
+| Phase noise | 1-10 ps | Better oscillator |
+| Power supply noise | 0.1-1 ps | Linear regulators |
+| Temperature variation | 1-100 ps/°C | Temperature control |
+| Cable length variation | 3.3 ps/mm | Matched cables |
+| Digital logic | 10-50 ps | Deterministic logic |
+
+### Jitter Measurement
+
+<Formula>
+$$\sigma_{total}^2 = \sigma_{master}^2 + \sigma_{distribution}^2 + \sigma_{local}^2$$
+</Formula>
+
+```python
+import numpy as np
+
+class JitterBudget:
+    """Calculate and track jitter budget for control system."""
+
+    def __init__(self):
+        self.sources = {}
+
+    def add_source(self, name: str, rms_jitter_ps: float,
+                   correlation: str = 'independent'):
+        """
+        Add a jitter source.
+
+        Args:
+            name: Source identifier
+            rms_jitter_ps: RMS jitter in picoseconds
+            correlation: 'independent', 'correlated', or 'anticorrelated'
+        """
+        self.sources[name] = {
+            'jitter_ps': rms_jitter_ps,
+            'correlation': correlation
+        }
+
+    def total_jitter(self) -> dict:
+        """
+        Calculate total jitter budget.
+
+        Returns:
+            Total RMS jitter and breakdown
+        """
+        independent_sum = 0
+        correlated_sum = 0
+
+        for name, spec in self.sources.items():
+            if spec['correlation'] == 'independent':
+                independent_sum += spec['jitter_ps']**2
+            elif spec['correlation'] == 'correlated':
+                correlated_sum += spec['jitter_ps']
+
+        # RSS for independent, linear for correlated
+        total_rss = np.sqrt(independent_sum)
+        total = np.sqrt(independent_sum) + correlated_sum
+
+        return {
+            'total_rms_ps': total,
+            'independent_rss_ps': total_rss,
+            'correlated_sum_ps': correlated_sum,
+            'sources': self.sources,
+            'dominant_source': max(self.sources.items(),
+                                   key=lambda x: x[1]['jitter_ps'])[0]
+        }
+
+    def margin_analysis(self, requirement_ps: float) -> dict:
+        """
+        Analyze margin against requirement.
+        """
+        total = self.total_jitter()['total_rms_ps']
+        margin = requirement_ps - total
+        margin_percent = margin / requirement_ps * 100
+
+        return {
+            'total_ps': total,
+            'requirement_ps': requirement_ps,
+            'margin_ps': margin,
+            'margin_percent': margin_percent,
+            'meets_requirement': margin > 0
+        }
+
+# Build jitter budget for a quantum control system
+budget = JitterBudget()
+
+budget.add_source('Master clock', 2.0)
+budget.add_source('PLL distribution', 1.5)
+budget.add_source('DAC clock path', 3.0)
+budget.add_source('Digital logic', 5.0)
+budget.add_source('Cable variation', 2.0)
+budget.add_source('Temperature drift', 1.0, correlation='correlated')
+
+result = budget.total_jitter()
+print(f"Total RMS jitter: {result['total_rms_ps']:.2f} ps")
+print(f"Dominant source: {result['dominant_source']}")
+
+# Check against 10 ps requirement
+margin = budget.margin_analysis(10.0)
+print(f"Meets 10 ps requirement: {margin['meets_requirement']}")
+print(f"Margin: {margin['margin_ps']:.2f} ps ({margin['margin_percent']:.1f}%)")
+```
+
+## 4. Trigger Systems
+
+### Hardware Triggers
+
+Triggers provide deterministic synchronization points:
+
+<Definition term="Trigger">
+A trigger is a precisely-timed digital signal that initiates coordinated actions across multiple control channels. Triggers can start experiments, synchronize measurements, or reset timing counters.
+</Definition>
+
+**Trigger Distribution:**
+- Low-jitter differential signaling (LVDS, LVPECL)
+- Equal-length matched cables
+- Termination resistors to prevent reflections
+
+```python
+import numpy as np
+from typing import Dict, List
+
+class TriggerSystem:
+    """Manage triggers for multi-channel synchronization."""
+
+    def __init__(self, n_channels: int, trigger_rate_hz: float = 10e3):
+        self.n_channels = n_channels
+        self.trigger_rate = trigger_rate_hz
+        self.channel_delays = np.zeros(n_channels)
+        self.cable_lengths_m = np.zeros(n_channels)
+
+    def set_cable_lengths(self, lengths_m: np.ndarray):
+        """Set cable lengths for each channel."""
+        self.cable_lengths_m = lengths_m
+        # Propagation delay: ~5 ns/m for typical coax
+        propagation_ns_per_m = 5.0
+        self.channel_delays = lengths_m * propagation_ns_per_m
+
+    def calculate_skew(self) -> Dict:
+        """Calculate timing skew across channels."""
+        min_delay = np.min(self.channel_delays)
+        max_delay = np.max(self.channel_delays)
+        skew = max_delay - min_delay
+
+        # Corrections needed to align all channels
+        corrections = max_delay - self.channel_delays
+
+        return {
+            'skew_ns': skew,
+            'min_delay_ns': min_delay,
+            'max_delay_ns': max_delay,
+            'corrections_ns': corrections,
+            'worst_channels': (np.argmin(self.channel_delays),
+                              np.argmax(self.channel_delays))
+        }
+
+    def apply_digital_delays(self, sample_rate: float) -> Dict:
+        """
+        Calculate digital delay adjustments.
+
+        Args:
+            sample_rate: DAC sample rate in Hz
+
+        Returns:
+            Integer sample delays for each channel
+        """
+        skew_analysis = self.calculate_skew()
+        corrections_ns = skew_analysis['corrections_ns']
+
+        # Convert to samples
+        sample_period_ns = 1e9 / sample_rate
+        sample_delays = np.round(corrections_ns / sample_period_ns).astype(int)
+
+        # Residual timing error after digital correction
+        residual_ns = corrections_ns - sample_delays * sample_period_ns
+
+        return {
+            'sample_delays': sample_delays,
+            'residual_error_ns': residual_ns,
+            'max_residual_ns': np.max(np.abs(residual_ns)),
+            'sample_period_ns': sample_period_ns
+        }
+
+# Example: 8-channel system with varying cable lengths
+trigger_sys = TriggerSystem(n_channels=8)
+
+# Set cable lengths (slightly different due to routing)
+cable_lengths = np.array([1.0, 1.02, 0.98, 1.05, 1.01, 0.99, 1.03, 0.97])  # meters
+trigger_sys.set_cable_lengths(cable_lengths)
+
+# Analyze skew
+skew = trigger_sys.calculate_skew()
+print(f"Trigger skew: {skew['skew_ns']:.2f} ns")
+print(f"Worst channels: {skew['worst_channels']}")
+
+# Apply digital correction at 1 GSPS
+correction = trigger_sys.apply_digital_delays(1e9)
+print(f"Sample delays: {correction['sample_delays']}")
+print(f"Max residual error: {correction['max_residual_ns']:.3f} ns")
+```
+
+### Software Triggers
+
+For less time-critical synchronization, software triggers coordinate operations:
+
+```python
+from dataclasses import dataclass
+from typing import List, Callable
+from enum import Enum
+
+class TriggerType(Enum):
+    HARDWARE = "hardware"
+    SOFTWARE = "software"
+    CONDITIONAL = "conditional"
+
+@dataclass
+class TriggerEvent:
+    timestamp_ns: int
+    trigger_type: TriggerType
+    source_channel: int
+    destinations: List[int]
+    condition: str = None
+
+class SoftwareTriggerManager:
+    """Manage software trigger events."""
+
+    def __init__(self):
+        self.events: List[TriggerEvent] = []
+        self.time_ns = 0
+
+    def schedule_trigger(self, delay_ns: int, destinations: List[int],
+                         trigger_type: TriggerType = TriggerType.SOFTWARE,
+                         condition: str = None):
+        """Schedule a trigger event."""
+        event = TriggerEvent(
+            timestamp_ns=self.time_ns + delay_ns,
+            trigger_type=trigger_type,
+            source_channel=0,
+            destinations=destinations,
+            condition=condition
+        )
+        self.events.append(event)
+        return event
+
+    def get_timeline(self) -> List[TriggerEvent]:
+        """Get sorted timeline of trigger events."""
+        return sorted(self.events, key=lambda e: e.timestamp_ns)
+
+# Example usage
+mgr = SoftwareTriggerManager()
+mgr.schedule_trigger(0, [0, 1, 2, 3], TriggerType.HARDWARE)  # Start trigger
+mgr.schedule_trigger(1000, [4], TriggerType.SOFTWARE)  # Readout trigger
+mgr.schedule_trigger(2000, [0, 1, 2, 3], TriggerType.CONDITIONAL, "reset")
+
+timeline = mgr.get_timeline()
+for event in timeline:
+    print(f"t={event.timestamp_ns} ns: {event.trigger_type.value} -> {event.destinations}")
+```
+
+## 5. Phase Synchronization
+
+### Phase-Locked Loops (PLLs)
+
+PLLs maintain phase coherence between channels:
+
+<Formula>
+$$\phi_{out}(t) = \phi_{ref}(t) + \phi_{offset}$$
+</Formula>
+
+<Definition term="Phase-Locked Loop">
+A PLL is a feedback system that synchronizes the phase of an output signal to a reference signal. In quantum control, PLLs ensure that all local oscillators maintain a fixed phase relationship to the master clock.
+</Definition>
+
+### Coherent Multi-Channel Operation
+
+For multi-qubit gates, carrier phases must be coherent:
+
+<Formula>
+$$\phi_{total} = \phi_1 - \phi_2 = \text{constant}$$
+</Formula>
+
+**Phase Coherence Requirements:**
+
+| Operation | Phase Tolerance | Equivalent Time |
+|-----------|-----------------|-----------------|
+| Single-qubit X gate | < 1° | < 0.56 ps at 5 GHz |
+| Two-qubit CZ | < 0.5° | < 0.28 ps at 5 GHz |
+| Phase-sensitive readout | < 5° | < 2.8 ps at 5 GHz |
+
+```python
+import numpy as np
+
+class PhaseCoherenceAnalyzer:
+    """Analyze phase coherence in multi-channel systems."""
+
+    def __init__(self, carrier_frequency: float):
+        self.carrier_freq = carrier_frequency
+        self.channels = {}
+
+    def add_channel(self, channel_id: int, pll_bandwidth: float,
+                    phase_noise_dBc_Hz: float):
+        """Add a channel with its PLL specifications."""
+        self.channels[channel_id] = {
+            'pll_bandwidth': pll_bandwidth,
+            'phase_noise': phase_noise_dBc_Hz
+        }
+
+    def calculate_phase_error(self, channel1: int, channel2: int,
+                               integration_time: float = 1e-6) -> Dict:
+        """
+        Calculate relative phase error between two channels.
+
+        Args:
+            channel1, channel2: Channel IDs
+            integration_time: Measurement integration time
+
+        Returns:
+            Phase error analysis
+        """
+        ch1 = self.channels[channel1]
+        ch2 = self.channels[channel2]
+
+        # Simplified model: uncorrelated phase noise adds in quadrature
+        # Then integrates over measurement time
+
+        pn1_linear = 10**(ch1['phase_noise']/10)
+        pn2_linear = 10**(ch2['phase_noise']/10)
+
+        # RMS phase error (radians)
+        # Approximate: phi_rms = sqrt(2 * L(f) * BW)
+        bw1 = ch1['pll_bandwidth']
+        bw2 = ch2['pll_bandwidth']
+
+        phase_var_1 = 2 * pn1_linear * bw1
+        phase_var_2 = 2 * pn2_linear * bw2
+
+        # Relative phase error
+        relative_phase_var = phase_var_1 + phase_var_2
+        phase_error_rad = np.sqrt(relative_phase_var)
+        phase_error_deg = np.degrees(phase_error_rad)
+
+        # Convert to timing
+        timing_error_ps = phase_error_rad / (2 * np.pi * self.carrier_freq) * 1e12
+
+        return {
+            'phase_error_rad': phase_error_rad,
+            'phase_error_deg': phase_error_deg,
+            'timing_error_ps': timing_error_ps,
+            'channels': (channel1, channel2)
+        }
+
+    def check_gate_requirements(self, channel_pairs: List[tuple],
+                                 requirement_deg: float = 1.0) -> Dict:
+        """Check if channel pairs meet phase coherence requirements."""
+        results = []
+        all_pass = True
+
+        for ch1, ch2 in channel_pairs:
+            error = self.calculate_phase_error(ch1, ch2)
+            passes = error['phase_error_deg'] < requirement_deg
+            if not passes:
+                all_pass = False
+
+            results.append({
+                'channels': (ch1, ch2),
+                'error_deg': error['phase_error_deg'],
+                'passes': passes
+            })
+
+        return {
+            'all_pass': all_pass,
+            'requirement_deg': requirement_deg,
+            'results': results
+        }
+
+# Example: 4-channel system
+analyzer = PhaseCoherenceAnalyzer(carrier_frequency=5e9)
+
+for ch in range(4):
+    analyzer.add_channel(ch, pll_bandwidth=1e6, phase_noise_dBc_Hz=-110)
+
+# Check coherence between adjacent channels
+pairs = [(0, 1), (1, 2), (2, 3), (0, 3)]
+coherence = analyzer.check_gate_requirements(pairs, requirement_deg=1.0)
+
+print(f"All channels pass: {coherence['all_pass']}")
+for r in coherence['results']:
+    status = "PASS" if r['passes'] else "FAIL"
+    print(f"  Ch{r['channels'][0]}-Ch{r['channels'][1]}: "
+          f"{r['error_deg']:.3f}° [{status}]")
+```
+
+## 6. Scaling to Large Systems
+
+### Hierarchical Synchronization
+
+For large quantum processors, synchronization must scale:
+
+```
+                     System Clock
+                          |
+        +-----------------+-----------------+
+        |                 |                 |
+    Module 1          Module 2          Module 3
+        |                 |                 |
+   +----+----+       +----+----+       +----+----+
+   |    |    |       |    |    |       |    |    |
+  Ch1  Ch2  Ch3     Ch4  Ch5  Ch6     Ch7  Ch8  Ch9
+```
+
+**Scaling Considerations:**
+
+1. **Intra-module timing**: < 1 ns (shared PLL)
+2. **Inter-module timing**: < 10 ns (calibrated)
+3. **System-wide**: < 100 ns (periodic resync)
+
+### Calibration Procedures
+
+<Example>
+System-wide timing calibration:
+
+```python
+import numpy as np
+from typing import Dict, List
+
+class TimingCalibrationSystem:
+    """Calibrate timing across a large quantum control system."""
+
+    def __init__(self, n_modules: int, channels_per_module: int):
+        self.n_modules = n_modules
+        self.channels_per_module = channels_per_module
+        self.total_channels = n_modules * channels_per_module
+
+        # Calibration data
+        self.channel_delays = np.zeros(self.total_channels)
+        self.channel_phases = np.zeros(self.total_channels)
+        self.module_delays = np.zeros(n_modules)
+
+    def measure_loopback_delay(self, channel: int) -> float:
+        """
+        Measure delay using loopback (simulated).
+
+        In real systems, this would measure actual signal round-trip.
+        """
+        # Simulated measurement with some random variation
+        base_delay = 10.0  # ns
+        module = channel // self.channels_per_module
+        channel_in_module = channel % self.channels_per_module
+
+        # Module adds systematic delay
+        module_delay = module * 2.0 + np.random.randn() * 0.1
+
+        # Channel has random variation
+        channel_delay = channel_in_module * 0.1 + np.random.randn() * 0.05
+
+        return base_delay + module_delay + channel_delay
+
+    def calibrate_all_channels(self) -> Dict:
+        """Run full calibration procedure."""
+        # Step 1: Measure all channel delays
+        for ch in range(self.total_channels):
+            self.channel_delays[ch] = self.measure_loopback_delay(ch)
+
+        # Step 2: Calculate module average delays
+        for m in range(self.n_modules):
+            start = m * self.channels_per_module
+            end = start + self.channels_per_module
+            self.module_delays[m] = np.mean(self.channel_delays[start:end])
+
+        # Step 3: Calculate corrections
+        max_delay = np.max(self.channel_delays)
+        corrections = max_delay - self.channel_delays
+
+        # Step 4: Statistics
+        skew = np.max(self.channel_delays) - np.min(self.channel_delays)
+        std = np.std(self.channel_delays)
+
+        return {
+            'delays': self.channel_delays.copy(),
+            'corrections': corrections,
+            'module_delays': self.module_delays.copy(),
+            'skew_ns': skew,
+            'std_ns': std,
+            'max_correction_ns': np.max(corrections)
+        }
+
+    def verify_calibration(self, target_precision_ns: float = 0.1) -> Dict:
+        """Verify calibration meets requirements."""
+        # Apply corrections and measure residual
+        corrected = self.channel_delays + (np.max(self.channel_delays) -
+                                           self.channel_delays)
+        residual = np.std(corrected)
+
+        # In reality, there would be measurement uncertainty
+        measurement_uncertainty = 0.05  # ns
+        total_uncertainty = np.sqrt(residual**2 + measurement_uncertainty**2)
+
+        return {
+            'residual_std_ns': residual,
+            'total_uncertainty_ns': total_uncertainty,
+            'meets_target': total_uncertainty < target_precision_ns,
+            'target_ns': target_precision_ns
+        }
+
+# Calibrate a 10-module, 4-channel-per-module system
+cal_system = TimingCalibrationSystem(n_modules=10, channels_per_module=4)
+
+print("Running full timing calibration...")
+cal_result = cal_system.calibrate_all_channels()
+
+print(f"\nCalibration Results:")
+print(f"  Total channels: {cal_system.total_channels}")
+print(f"  Skew (before correction): {cal_result['skew_ns']:.2f} ns")
+print(f"  Standard deviation: {cal_result['std_ns']:.2f} ns")
+print(f"  Max correction needed: {cal_result['max_correction_ns']:.2f} ns")
+
+# Verify
+verification = cal_system.verify_calibration(target_precision_ns=0.1)
+print(f"\nVerification:")
+print(f"  Meets 100 ps target: {verification['meets_target']}")
+print(f"  Total uncertainty: {verification['total_uncertainty_ns']*1000:.1f} ps")
+```
+</Example>
+
+## 7. Practical Implementation
+
+### Timing Closure Checklist
+
+Before operating a quantum control system:
+
+1. **Clock verification**
+   - Master clock phase noise meets spec
+   - All PLLs locked
+   - No clock glitches
+
+2. **Trigger alignment**
+   - All channels receive triggers
+   - Skew measured and corrected
+   - Jitter within budget
+
+3. **Phase coherence**
+   - LO phases calibrated
+   - Phase drift rate measured
+   - Recalibration interval determined
+
+4. **Digital synchronization**
+   - FPGA timing closure achieved
+   - Sample-accurate playback verified
+   - Deterministic latency confirmed
+
+### Monitoring and Diagnostics
+
+Real-time monitoring catches synchronization problems:
+
+```python
+import numpy as np
+from datetime import datetime
+from typing import Dict, List
+
+class SynchronizationMonitor:
+    """Monitor timing synchronization in real-time."""
+
+    def __init__(self, n_channels: int, alert_threshold_ps: float = 10.0):
+        self.n_channels = n_channels
+        self.threshold = alert_threshold_ps
+        self.history = []
+        self.alerts = []
+
+    def record_measurement(self, channel_times_ps: np.ndarray):
+        """Record a timing measurement."""
+        timestamp = datetime.now()
+        skew = np.max(channel_times_ps) - np.min(channel_times_ps)
+        std = np.std(channel_times_ps)
+
+        measurement = {
+            'timestamp': timestamp,
+            'channel_times': channel_times_ps.copy(),
+            'skew_ps': skew,
+            'std_ps': std
+        }
+        self.history.append(measurement)
+
+        # Check for alerts
+        if skew > self.threshold:
+            alert = {
+                'timestamp': timestamp,
+                'type': 'skew_exceeded',
+                'value_ps': skew,
+                'threshold_ps': self.threshold
+            }
+            self.alerts.append(alert)
+            return alert
+
+        return None
+
+    def get_statistics(self, n_recent: int = 100) -> Dict:
+        """Get statistics from recent measurements."""
+        recent = self.history[-n_recent:]
+        if not recent:
+            return {'error': 'No measurements recorded'}
+
+        skews = [m['skew_ps'] for m in recent]
+        stds = [m['std_ps'] for m in recent]
+
+        return {
+            'n_measurements': len(recent),
+            'mean_skew_ps': np.mean(skews),
+            'max_skew_ps': np.max(skews),
+            'mean_std_ps': np.mean(stds),
+            'n_alerts': len([a for a in self.alerts
+                           if a['timestamp'] >= recent[0]['timestamp']]),
+            'trend': 'stable' if np.std(skews) < 1.0 else 'varying'
+        }
+
+# Simulate monitoring
+monitor = SynchronizationMonitor(n_channels=8, alert_threshold_ps=10.0)
+
+# Simulate some measurements
+np.random.seed(42)
+for _ in range(50):
+    # Normal operation: ~5 ps skew
+    times = np.random.randn(8) * 2.0 + np.arange(8) * 0.5
+    alert = monitor.record_measurement(times)
+    if alert:
+        print(f"ALERT: {alert['type']}, skew={alert['value_ps']:.1f} ps")
+
+# Add one problematic measurement
+bad_times = np.random.randn(8) * 2.0 + np.arange(8) * 0.5
+bad_times[3] += 15.0  # Channel 3 drifted
+alert = monitor.record_measurement(bad_times)
+if alert:
+    print(f"ALERT: {alert['type']}, skew={alert['value_ps']:.1f} ps")
+
+# Get statistics
+stats = monitor.get_statistics()
+print(f"\nStatistics (last 100 measurements):")
+print(f"  Mean skew: {stats['mean_skew_ps']:.2f} ps")
+print(f"  Max skew: {stats['max_skew_ps']:.2f} ps")
+print(f"  Alerts: {stats['n_alerts']}")
+print(f"  Trend: {stats['trend']}")
+```
+
+## 8. Summary
+
+Multi-channel synchronization is the foundation of scalable quantum computing:
+
+1. **Clock distribution**: Master clock with hierarchical distribution tree
+2. **Jitter budgeting**: Track all sources, ensure RSS total meets requirements
+3. **Trigger systems**: Hardware triggers for deterministic timing
+4. **Phase coherence**: PLLs maintain carrier phase relationships
+5. **Scaling**: Hierarchical architecture for large systems
+6. **Monitoring**: Continuous verification of timing integrity
+
+Without precise synchronization, multi-qubit gates and quantum error correction cannot achieve the fidelities needed for useful quantum computation.
+
+## Further Reading
+
+- Review papers on quantum control system engineering
+- IEEE standards for precision timing distribution
+- Vendor documentation for quantum control electronics
+- Module summary: Quantum Hardware Control Systems complete!

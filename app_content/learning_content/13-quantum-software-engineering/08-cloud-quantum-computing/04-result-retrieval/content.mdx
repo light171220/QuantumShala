@@ -1,0 +1,614 @@
+---
+title: "Quantum Result Retrieval and Processing"
+description: "Master quantum result retrieval, parsing, and statistical analysis."
+duration: 50
+difficulty: "intermediate"
+---
+
+## 1. Result Data Structures
+
+Quantum results contain measurement statistics and metadata that require careful parsing.
+
+```
+Quantum Result Structure
+════════════════════════
+
+┌────────────────────────────────────────────────────────────────┐
+│                      QUANTUM JOB RESULT                        │
+├────────────────────────────────────────────────────────────────┤
+│  Metadata                                                      │
+│  ├── job_id: "ibm_job_abc123"                                 │
+│  ├── backend: "ibm_brisbane"                                  │
+│  ├── shots: 4096                                              │
+│  ├── execution_time: 2.34s                                    │
+│  └── timestamp: "2025-01-15T10:30:00Z"                        │
+├────────────────────────────────────────────────────────────────┤
+│  Counts (aggregated)                                          │
+│  ├── "00": 2048                                               │
+│  ├── "11": 2000                                               │
+│  ├── "01": 24                                                 │
+│  └── "10": 24                                                 │
+├────────────────────────────────────────────────────────────────┤
+│  Memory (individual shots) [optional]                          │
+│  └── ["00", "11", "00", "11", "00", "01", ...]               │
+├────────────────────────────────────────────────────────────────┤
+│  Quasi-probabilities (error-mitigated) [optional]             │
+│  ├── "00": 0.501                                              │
+│  └── "11": 0.499                                              │
+└────────────────────────────────────────────────────────────────┘
+```
+
+## 2. Result Retrieval
+
+```python
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any, Union
+from datetime import datetime
+import json
+import numpy as np
+
+@dataclass
+class MeasurementCounts:
+    """Measurement counts from quantum execution."""
+    counts: Dict[str, int]
+    shots: int
+    num_qubits: int
+
+    def get_probabilities(self) -> Dict[str, float]:
+        """Convert counts to probabilities."""
+        return {k: v / self.shots for k, v in self.counts.items()}
+
+    def get_expectation_value(self, observable: str = "Z") -> float:
+        """Calculate expectation value for observable."""
+        if observable == "Z":
+            # Z expectation: P(0) - P(1) for single qubit
+            # For multi-qubit: sum of parities
+            total = 0.0
+            for bitstring, count in self.counts.items():
+                parity = (-1) ** bitstring.count('1')
+                total += parity * count
+            return total / self.shots
+        raise NotImplementedError(f"Observable {observable} not implemented")
+
+    def marginalize(self, qubits: List[int]) -> 'MeasurementCounts':
+        """Marginalize over specified qubits."""
+        new_counts: Dict[str, int] = {}
+        for bitstring, count in self.counts.items():
+            # Keep only specified qubits
+            new_bits = ''.join(bitstring[q] for q in qubits)
+            new_counts[new_bits] = new_counts.get(new_bits, 0) + count
+        return MeasurementCounts(
+            counts=new_counts,
+            shots=self.shots,
+            num_qubits=len(qubits)
+        )
+
+@dataclass
+class QuantumResult:
+    """Complete quantum job result."""
+    job_id: str
+    backend: str
+    status: str
+    counts: Optional[MeasurementCounts] = None
+    memory: Optional[List[str]] = None
+    quasi_probs: Optional[Dict[str, float]] = None
+    execution_time_ms: Optional[float] = None
+    timestamp: Optional[datetime] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    error: Optional[str] = None
+
+class ResultRetriever:
+    """Retrieve results from quantum providers."""
+
+    def __init__(self, provider: str):
+        self.provider = provider
+
+    def get_result(self, job_id: str,
+                   include_memory: bool = False) -> QuantumResult:
+        """Retrieve result for completed job."""
+        # Simulated result retrieval
+        raw_result = self._fetch_from_provider(job_id)
+        return self._parse_result(raw_result, include_memory)
+
+    def _fetch_from_provider(self, job_id: str) -> Dict:
+        """Fetch raw result from provider API."""
+        # Simulated API response
+        return {
+            "job_id": job_id,
+            "backend": "ibm_brisbane",
+            "status": "COMPLETED",
+            "results": [{
+                "shots": 4096,
+                "data": {
+                    "counts": {"0x0": 2048, "0x3": 2000, "0x1": 24, "0x2": 24},
+                    "memory": None
+                },
+                "header": {"n_qubits": 2}
+            }],
+            "execution_time_ms": 2340,
+            "timestamp": "2025-01-15T10:30:00Z"
+        }
+
+    def _parse_result(self, raw: Dict,
+                      include_memory: bool) -> QuantumResult:
+        """Parse provider-specific result format."""
+        result_data = raw["results"][0]
+
+        # Convert hex counts to binary strings
+        counts = self._convert_counts(
+            result_data["data"]["counts"],
+            result_data["header"]["n_qubits"]
+        )
+
+        measurement = MeasurementCounts(
+            counts=counts,
+            shots=result_data["shots"],
+            num_qubits=result_data["header"]["n_qubits"]
+        )
+
+        return QuantumResult(
+            job_id=raw["job_id"],
+            backend=raw["backend"],
+            status=raw["status"],
+            counts=measurement,
+            memory=result_data["data"].get("memory") if include_memory else None,
+            execution_time_ms=raw.get("execution_time_ms"),
+            timestamp=datetime.fromisoformat(raw["timestamp"].replace("Z", "+00:00")),
+            metadata={"provider": self.provider}
+        )
+
+    def _convert_counts(self, hex_counts: Dict[str, int],
+                        num_qubits: int) -> Dict[str, int]:
+        """Convert hex count keys to binary strings."""
+        binary_counts = {}
+        for hex_key, count in hex_counts.items():
+            # Convert "0x3" -> "11" (for 2 qubits)
+            int_val = int(hex_key, 16)
+            binary_key = format(int_val, f'0{num_qubits}b')
+            binary_counts[binary_key] = count
+        return binary_counts
+
+# Example usage
+retriever = ResultRetriever("ibm")
+result = retriever.get_result("ibm_job_abc123")
+print(f"Job: {result.job_id}")
+print(f"Counts: {result.counts.counts}")
+print(f"Probabilities: {result.counts.get_probabilities()}")
+```
+
+## 3. Statistical Analysis
+
+```python
+from scipy import stats
+import math
+
+class ResultAnalyzer:
+    """Statistical analysis of quantum results."""
+
+    def __init__(self, result: QuantumResult):
+        self.result = result
+        self.counts = result.counts
+
+    def calculate_statistics(self) -> Dict[str, Any]:
+        """Calculate comprehensive statistics."""
+        probs = self.counts.get_probabilities()
+
+        # Shannon entropy
+        entropy = -sum(
+            p * math.log2(p) if p > 0 else 0
+            for p in probs.values()
+        )
+
+        # Most likely outcome
+        max_outcome = max(probs.items(), key=lambda x: x[1])
+
+        return {
+            "entropy_bits": entropy,
+            "max_entropy_bits": math.log2(2 ** self.counts.num_qubits),
+            "most_likely_outcome": max_outcome[0],
+            "most_likely_probability": max_outcome[1],
+            "num_unique_outcomes": len(self.counts.counts),
+            "total_possible_outcomes": 2 ** self.counts.num_qubits
+        }
+
+    def confidence_interval(self, outcome: str,
+                           confidence: float = 0.95) -> tuple:
+        """Calculate confidence interval for outcome probability."""
+        count = self.counts.counts.get(outcome, 0)
+        n = self.counts.shots
+
+        # Wilson score interval for binomial proportion
+        z = stats.norm.ppf((1 + confidence) / 2)
+        p_hat = count / n
+
+        denominator = 1 + z**2 / n
+        center = (p_hat + z**2 / (2*n)) / denominator
+        margin = z * math.sqrt((p_hat * (1 - p_hat) + z**2 / (4*n)) / n) / denominator
+
+        return (max(0, center - margin), min(1, center + margin))
+
+    def compare_distributions(self, expected: Dict[str, float]) -> Dict:
+        """Compare measured vs expected distribution."""
+        observed = self.counts.get_probabilities()
+
+        # Chi-squared test
+        observed_counts = []
+        expected_counts = []
+
+        all_outcomes = set(observed.keys()) | set(expected.keys())
+        for outcome in all_outcomes:
+            observed_counts.append(self.counts.counts.get(outcome, 0))
+            expected_counts.append(expected.get(outcome, 0) * self.counts.shots)
+
+        chi2, p_value = stats.chisquare(observed_counts, expected_counts)
+
+        # Total variation distance
+        tvd = 0.5 * sum(
+            abs(observed.get(k, 0) - expected.get(k, 0))
+            for k in all_outcomes
+        )
+
+        # Fidelity (classical)
+        fidelity = sum(
+            math.sqrt(observed.get(k, 0) * expected.get(k, 0))
+            for k in all_outcomes
+        ) ** 2
+
+        return {
+            "chi_squared": chi2,
+            "p_value": p_value,
+            "total_variation_distance": tvd,
+            "classical_fidelity": fidelity,
+            "statistically_significant": p_value < 0.05
+        }
+
+    def estimate_required_shots(self, target_precision: float = 0.01) -> int:
+        """Estimate shots needed for target precision."""
+        # For binomial distribution: n >= (z^2 * p * (1-p)) / precision^2
+        z = 1.96  # 95% confidence
+        p = 0.5   # Maximum variance case
+        return int(math.ceil((z**2 * p * (1-p)) / (target_precision**2)))
+
+# Example analysis
+analyzer = ResultAnalyzer(result)
+stats_result = analyzer.calculate_statistics()
+print(f"\nStatistics:")
+print(f"  Entropy: {stats_result['entropy_bits']:.3f} bits")
+print(f"  Most likely: {stats_result['most_likely_outcome']}")
+
+# Bell state expected
+expected_bell = {"00": 0.5, "11": 0.5}
+comparison = analyzer.compare_distributions(expected_bell)
+print(f"\nComparison to ideal Bell state:")
+print(f"  TVD: {comparison['total_variation_distance']:.4f}")
+print(f"  Fidelity: {comparison['classical_fidelity']:.4f}")
+```
+
+## 4. Result Caching
+
+```python
+import hashlib
+import pickle
+from pathlib import Path
+from typing import Callable
+import time
+
+class ResultCache:
+    """Cache quantum results to avoid redundant retrievals."""
+
+    def __init__(self, cache_dir: str = ".quantum_cache",
+                 ttl_seconds: int = 86400):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(exist_ok=True)
+        self.ttl = ttl_seconds
+        self._memory_cache: Dict[str, tuple] = {}
+
+    def _get_cache_key(self, job_id: str, params: Dict) -> str:
+        """Generate cache key from job ID and parameters."""
+        content = f"{job_id}:{json.dumps(params, sort_keys=True)}"
+        return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+    def get(self, job_id: str, params: Optional[Dict] = None) -> Optional[QuantumResult]:
+        """Retrieve cached result if available and valid."""
+        params = params or {}
+        key = self._get_cache_key(job_id, params)
+
+        # Check memory cache first
+        if key in self._memory_cache:
+            result, timestamp = self._memory_cache[key]
+            if time.time() - timestamp < self.ttl:
+                return result
+
+        # Check disk cache
+        cache_file = self.cache_dir / f"{key}.pkl"
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'rb') as f:
+                    data = pickle.load(f)
+                if time.time() - data['timestamp'] < self.ttl:
+                    # Promote to memory cache
+                    self._memory_cache[key] = (data['result'], data['timestamp'])
+                    return data['result']
+            except Exception:
+                cache_file.unlink()  # Remove corrupted cache
+
+        return None
+
+    def set(self, job_id: str, result: QuantumResult,
+            params: Optional[Dict] = None) -> None:
+        """Store result in cache."""
+        params = params or {}
+        key = self._get_cache_key(job_id, params)
+        timestamp = time.time()
+
+        # Store in memory
+        self._memory_cache[key] = (result, timestamp)
+
+        # Store on disk
+        cache_file = self.cache_dir / f"{key}.pkl"
+        with open(cache_file, 'wb') as f:
+            pickle.dump({'result': result, 'timestamp': timestamp}, f)
+
+    def invalidate(self, job_id: str, params: Optional[Dict] = None) -> None:
+        """Remove cached result."""
+        params = params or {}
+        key = self._get_cache_key(job_id, params)
+
+        self._memory_cache.pop(key, None)
+        cache_file = self.cache_dir / f"{key}.pkl"
+        if cache_file.exists():
+            cache_file.unlink()
+
+    def clear_expired(self) -> int:
+        """Remove all expired cache entries."""
+        removed = 0
+        now = time.time()
+
+        # Clear expired memory cache
+        expired_keys = [
+            k for k, (_, ts) in self._memory_cache.items()
+            if now - ts >= self.ttl
+        ]
+        for key in expired_keys:
+            del self._memory_cache[key]
+            removed += 1
+
+        # Clear expired disk cache
+        for cache_file in self.cache_dir.glob("*.pkl"):
+            try:
+                with open(cache_file, 'rb') as f:
+                    data = pickle.load(f)
+                if now - data['timestamp'] >= self.ttl:
+                    cache_file.unlink()
+                    removed += 1
+            except Exception:
+                cache_file.unlink()
+                removed += 1
+
+        return removed
+
+def cached_retrieval(cache: ResultCache):
+    """Decorator for cached result retrieval."""
+    def decorator(func: Callable):
+        def wrapper(job_id: str, *args, **kwargs) -> QuantumResult:
+            # Try cache first
+            cached = cache.get(job_id, kwargs)
+            if cached:
+                print(f"Cache hit for {job_id}")
+                return cached
+
+            # Retrieve from provider
+            result = func(job_id, *args, **kwargs)
+
+            # Cache the result
+            cache.set(job_id, result, kwargs)
+            return result
+        return wrapper
+    return decorator
+
+# Example with caching
+cache = ResultCache(ttl_seconds=3600)
+
+@cached_retrieval(cache)
+def get_result_cached(job_id: str, include_memory: bool = False) -> QuantumResult:
+    """Retrieve result with caching."""
+    retriever = ResultRetriever("ibm")
+    return retriever.get_result(job_id, include_memory)
+
+print("\nResult caching configured")
+```
+
+## 5. Batch Result Processing
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+from typing import Iterator
+
+class BatchResultProcessor:
+    """Process multiple quantum results efficiently."""
+
+    def __init__(self, retriever: ResultRetriever,
+                 max_workers: int = 4):
+        self.retriever = retriever
+        self.max_workers = max_workers
+
+    def retrieve_batch(self, job_ids: List[str],
+                       include_memory: bool = False) -> Dict[str, QuantumResult]:
+        """Retrieve multiple results in parallel."""
+        results = {}
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_job = {
+                executor.submit(
+                    self.retriever.get_result, job_id, include_memory
+                ): job_id
+                for job_id in job_ids
+            }
+
+            for future in future_to_job:
+                job_id = future_to_job[future]
+                try:
+                    results[job_id] = future.result()
+                except Exception as e:
+                    results[job_id] = QuantumResult(
+                        job_id=job_id,
+                        backend="unknown",
+                        status="ERROR",
+                        error=str(e)
+                    )
+
+        return results
+
+    def aggregate_counts(self, results: List[QuantumResult]) -> MeasurementCounts:
+        """Aggregate counts from multiple results."""
+        if not results:
+            raise ValueError("No results to aggregate")
+
+        total_counts: Dict[str, int] = {}
+        total_shots = 0
+        num_qubits = results[0].counts.num_qubits
+
+        for result in results:
+            if result.counts:
+                for outcome, count in result.counts.counts.items():
+                    total_counts[outcome] = total_counts.get(outcome, 0) + count
+                total_shots += result.counts.shots
+
+        return MeasurementCounts(
+            counts=total_counts,
+            shots=total_shots,
+            num_qubits=num_qubits
+        )
+
+    def stream_results(self, job_ids: List[str],
+                       poll_interval: float = 5.0) -> Iterator[QuantumResult]:
+        """Stream results as they become available."""
+        pending = set(job_ids)
+        completed = set()
+
+        while pending:
+            for job_id in list(pending):
+                try:
+                    result = self.retriever.get_result(job_id)
+                    if result.status == "COMPLETED":
+                        pending.remove(job_id)
+                        completed.add(job_id)
+                        yield result
+                    elif result.status in ["FAILED", "CANCELLED"]:
+                        pending.remove(job_id)
+                        yield result
+                except Exception:
+                    pass  # Job not ready yet
+
+            if pending:
+                time.sleep(poll_interval)
+
+    def compute_expectation_values(self,
+                                   results: List[QuantumResult],
+                                   observables: List[str]) -> Dict[str, float]:
+        """Compute expectation values across results."""
+        aggregated = self.aggregate_counts(results)
+        return {
+            obs: aggregated.get_expectation_value(obs)
+            for obs in observables
+        }
+
+# Example batch processing
+batch_processor = BatchResultProcessor(retriever)
+print("\nBatch processor ready")
+```
+
+## 6. Error-Mitigated Results
+
+```python
+class MitigatedResultProcessor:
+    """Process error-mitigated quantum results."""
+
+    def __init__(self):
+        self._calibration_data: Dict[str, np.ndarray] = {}
+
+    def apply_readout_mitigation(self,
+                                  counts: MeasurementCounts,
+                                  calibration_matrix: np.ndarray) -> Dict[str, float]:
+        """Apply readout error mitigation using calibration matrix."""
+        n_states = 2 ** counts.num_qubits
+
+        # Create probability vector
+        prob_vector = np.zeros(n_states)
+        for bitstring, count in counts.counts.items():
+            idx = int(bitstring, 2)
+            prob_vector[idx] = count / counts.shots
+
+        # Apply inverse calibration matrix
+        try:
+            inv_matrix = np.linalg.pinv(calibration_matrix)
+            mitigated_probs = inv_matrix @ prob_vector
+        except np.linalg.LinAlgError:
+            # Fallback to regularized inversion
+            mitigated_probs = np.linalg.lstsq(
+                calibration_matrix, prob_vector, rcond=None
+            )[0]
+
+        # Normalize and handle negative probabilities
+        mitigated_probs = np.maximum(mitigated_probs, 0)
+        mitigated_probs /= mitigated_probs.sum()
+
+        # Convert back to dictionary
+        result = {}
+        for i, prob in enumerate(mitigated_probs):
+            if prob > 1e-10:
+                bitstring = format(i, f'0{counts.num_qubits}b')
+                result[bitstring] = float(prob)
+
+        return result
+
+    def process_quasi_probabilities(self,
+                                    quasi_probs: Dict[str, float]) -> Dict[str, float]:
+        """Process quasi-probabilities to valid probabilities."""
+        # Quasi-probabilities can be negative due to error mitigation
+        # Apply nearest valid probability distribution
+
+        # Simple approach: clip and renormalize
+        clipped = {k: max(0, v) for k, v in quasi_probs.items()}
+        total = sum(clipped.values())
+
+        if total > 0:
+            return {k: v / total for k, v in clipped.items()}
+        else:
+            # All negative - return uniform
+            n_states = len(quasi_probs)
+            return {k: 1/n_states for k in quasi_probs}
+
+    def estimate_mitigation_overhead(self,
+                                     original_counts: MeasurementCounts,
+                                     mitigated_probs: Dict[str, float]) -> Dict:
+        """Estimate the overhead from error mitigation."""
+        original_probs = original_counts.get_probabilities()
+
+        # Calculate how much probabilities changed
+        total_change = sum(
+            abs(mitigated_probs.get(k, 0) - original_probs.get(k, 0))
+            for k in set(original_probs) | set(mitigated_probs)
+        ) / 2
+
+        return {
+            "total_probability_change": total_change,
+            "mitigation_applied": total_change > 0.01,
+            "reliability": 1 - total_change
+        }
+
+mitigated_processor = MitigatedResultProcessor()
+print("Mitigation processor ready")
+```
+
+## Summary
+
+Effective result processing involves:
+
+1. **Retrieval**: Parse provider-specific result formats
+2. **Statistics**: Calculate probabilities, expectation values, confidence intervals
+3. **Caching**: Avoid redundant API calls with smart caching
+4. **Batch Processing**: Handle multiple results efficiently
+5. **Error Mitigation**: Process quasi-probabilities and apply calibration
+
+Proper result handling is essential for extracting meaningful insights from quantum computations.

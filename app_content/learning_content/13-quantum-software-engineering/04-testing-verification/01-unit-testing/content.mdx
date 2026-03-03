@@ -1,0 +1,283 @@
+---
+title: "Unit Testing Quantum Programs"
+description: "Strategies for testing quantum circuits and algorithms."
+duration: 50
+difficulty: "intermediate"
+---
+
+## 1. Challenges of Quantum Testing
+
+Quantum programs present unique testing challenges:
+
+```
+Classical Testing          Quantum Testing
+-----------------          ---------------
+Deterministic output  -->  Probabilistic output
+Direct state access   -->  Measurement collapse
+Reproducible runs     -->  Statistical validation
+```
+
+## 2. Test Architecture for Quantum Code
+
+```python
+from dataclasses import dataclass
+from typing import List, Dict, Callable
+import numpy as np
+
+@dataclass
+class QuantumTestCase:
+    """Test case for quantum circuits."""
+    name: str
+    circuit_builder: Callable
+    expected_outcomes: Dict[str, float]
+    tolerance: float = 0.05
+    shots: int = 1000
+
+class QuantumTestRunner:
+    """Runner for quantum test cases."""
+
+    def __init__(self, backend):
+        self.backend = backend
+        self.results: List[Dict] = []
+
+    def run_test(self, test: QuantumTestCase) -> bool:
+        """Run a single quantum test case."""
+        circuit = test.circuit_builder()
+        counts = self.backend.execute(circuit, shots=test.shots)
+
+        # Normalize counts to probabilities
+        total = sum(counts.values())
+        measured = {k: v/total for k, v in counts.items()}
+
+        # Statistical validation
+        passed = True
+        for outcome, expected_prob in test.expected_outcomes.items():
+            actual_prob = measured.get(outcome, 0.0)
+            if abs(actual_prob - expected_prob) > test.tolerance:
+                passed = False
+                break
+
+        self.results.append({
+            'name': test.name,
+            'passed': passed,
+            'expected': test.expected_outcomes,
+            'measured': measured
+        })
+        return passed
+
+    def run_all(self, tests: List[QuantumTestCase]) -> Dict:
+        """Run all tests and return summary."""
+        passed = sum(1 for t in tests if self.run_test(t))
+        return {
+            'total': len(tests),
+            'passed': passed,
+            'failed': len(tests) - passed,
+            'results': self.results
+        }
+```
+
+## 3. Unit Test Patterns
+
+### Pattern 1: State Preparation Tests
+
+```python
+def test_hadamard_creates_superposition():
+    """Test H gate creates equal superposition."""
+    def build_circuit():
+        qc = QuantumCircuit(1)
+        qc.h(0)
+        qc.measure_all()
+        return qc
+
+    test = QuantumTestCase(
+        name="Hadamard superposition",
+        circuit_builder=build_circuit,
+        expected_outcomes={'0': 0.5, '1': 0.5},
+        tolerance=0.05,
+        shots=2000
+    )
+    return test
+
+def test_bell_state_preparation():
+    """Test Bell state |00> + |11>."""
+    def build_circuit():
+        qc = QuantumCircuit(2)
+        qc.h(0)
+        qc.cx(0, 1)
+        qc.measure_all()
+        return qc
+
+    test = QuantumTestCase(
+        name="Bell state",
+        circuit_builder=build_circuit,
+        expected_outcomes={'00': 0.5, '11': 0.5},
+        tolerance=0.05
+    )
+    return test
+```
+
+### Pattern 2: Statevector Assertions
+
+```python
+class StatevectorAssertions:
+    """Assertions using statevector simulation."""
+
+    @staticmethod
+    def assert_state_equals(circuit, expected_state: np.ndarray, atol=1e-6):
+        """Assert circuit produces expected statevector."""
+        simulator = StatevectorSimulator()
+        actual = simulator.run(circuit)
+
+        # Account for global phase
+        if np.abs(actual[0]) > 1e-10:
+            phase = expected_state[0] / actual[0]
+            actual = actual * phase
+
+        np.testing.assert_allclose(actual, expected_state, atol=atol)
+
+    @staticmethod
+    def assert_probability(circuit, bitstring: str, expected: float, atol=0.01):
+        """Assert measurement probability for a bitstring."""
+        simulator = StatevectorSimulator()
+        state = simulator.run(circuit)
+
+        index = int(bitstring, 2)
+        actual_prob = np.abs(state[index])**2
+
+        assert abs(actual_prob - expected) < atol, \
+            f"P({bitstring}) = {actual_prob:.4f}, expected {expected:.4f}"
+```
+
+### Pattern 3: Mock Backends
+
+```python
+class MockQuantumBackend:
+    """Mock backend for testing without real execution."""
+
+    def __init__(self, predetermined_results: Dict[str, int] = None):
+        self.predetermined_results = predetermined_results or {}
+        self.executed_circuits: List = []
+
+    def execute(self, circuit, shots=1024) -> Dict[str, int]:
+        """Mock execution returning predetermined results."""
+        self.executed_circuits.append(circuit)
+
+        if self.predetermined_results:
+            return self.predetermined_results
+
+        # Default: return uniform distribution
+        n_qubits = circuit.num_qubits
+        outcomes = [format(i, f'0{n_qubits}b') for i in range(2**n_qubits)]
+        per_outcome = shots // len(outcomes)
+        return {o: per_outcome for o in outcomes}
+
+# Usage in tests
+def test_vqe_optimizer_calls_backend():
+    """Test VQE makes correct number of backend calls."""
+    mock = MockQuantumBackend({'00': 500, '11': 500})
+    vqe = VQE(backend=mock)
+
+    vqe.run(iterations=10)
+
+    assert len(mock.executed_circuits) == 10
+```
+
+## 4. Statistical Testing Framework
+
+```python
+from scipy import stats
+
+class StatisticalTestValidator:
+    """Validate quantum results statistically."""
+
+    @staticmethod
+    def chi_squared_test(observed: Dict[str, int],
+                        expected_probs: Dict[str, float],
+                        significance: float = 0.05) -> bool:
+        """Chi-squared goodness of fit test."""
+        total = sum(observed.values())
+
+        outcomes = list(expected_probs.keys())
+        obs = [observed.get(o, 0) for o in outcomes]
+        exp = [expected_probs[o] * total for o in outcomes]
+
+        chi2, p_value = stats.chisquare(obs, exp)
+
+        return p_value > significance
+
+    @staticmethod
+    def binomial_confidence_interval(successes: int, trials: int,
+                                     confidence: float = 0.95) -> tuple:
+        """Compute confidence interval for probability estimate."""
+        return stats.binom.interval(confidence, trials, successes/trials)
+```
+
+## 5. pytest Integration
+
+```python
+import pytest
+
+class QuantumTestFixtures:
+    """Pytest fixtures for quantum testing."""
+
+    @pytest.fixture
+    def simulator(self):
+        """Provide statevector simulator."""
+        return StatevectorSimulator()
+
+    @pytest.fixture
+    def noisy_simulator(self):
+        """Provide noisy simulator."""
+        return NoisySimulator(error_rate=0.01)
+
+    @pytest.fixture
+    def mock_backend(self):
+        """Provide mock backend."""
+        return MockQuantumBackend()
+
+# Test class using fixtures
+class TestBellState:
+    """Tests for Bell state preparation."""
+
+    def test_entanglement_correlation(self, simulator):
+        """Test measurement correlation in Bell state."""
+        qc = QuantumCircuit(2)
+        qc.h(0)
+        qc.cx(0, 1)
+
+        state = simulator.run(qc)
+
+        # Only |00> and |11> should have amplitude
+        assert np.abs(state[0])**2 > 0.49  # |00>
+        assert np.abs(state[3])**2 > 0.49  # |11>
+        assert np.abs(state[1])**2 < 0.01  # |01>
+        assert np.abs(state[2])**2 < 0.01  # |10>
+```
+
+## 6. Testing Parameterized Circuits
+
+```python
+@pytest.mark.parametrize("theta,expected_prob_0", [
+    (0, 1.0),           # RY(0)|0> = |0>
+    (np.pi, 0.0),       # RY(pi)|0> = |1>
+    (np.pi/2, 0.5),     # RY(pi/2)|0> = equal superposition
+])
+def test_ry_gate_rotation(theta, expected_prob_0, simulator):
+    """Test RY gate produces correct rotation."""
+    qc = QuantumCircuit(1)
+    qc.ry(theta, 0)
+
+    state = simulator.run(qc)
+    prob_0 = np.abs(state[0])**2
+
+    assert abs(prob_0 - expected_prob_0) < 0.01
+```
+
+## Summary
+
+Unit testing quantum programs requires:
+1. **Statistical validation** for probabilistic outputs
+2. **Statevector assertions** for exact verification
+3. **Mock backends** for isolation testing
+4. **Parameterized tests** for rotation angles
+5. **Chi-squared tests** for distribution validation

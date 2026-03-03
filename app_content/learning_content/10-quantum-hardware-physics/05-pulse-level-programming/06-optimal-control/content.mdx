@@ -1,0 +1,519 @@
+---
+title: "Optimal Control for Quantum Gates"
+description: "Learn numerical optimization techniques for designing high-fidelity quantum gate pulses."
+duration: 60
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Explain the principles of optimal control theory applied to quantum systems
+- Implement the GRAPE algorithm for gradient-based pulse optimization
+- Design cost functions that capture fidelity, leakage, and robustness requirements
+- Apply constraints for hardware limitations in pulse optimization
+- Compare analytical and numerical approaches to pulse design
+
+## 1. Introduction to Optimal Control
+
+Analytical pulse designs like Gaussian and DRAG provide excellent starting points, but they are based on simplified models. Optimal control uses numerical optimization to find pulses that maximize performance on more realistic system models.
+
+<Definition term="Quantum Optimal Control">
+Quantum optimal control is the use of numerical optimization techniques to design time-dependent control fields (pulses) that implement desired quantum operations with maximum fidelity. It accounts for system-specific constraints and imperfections that analytical methods cannot easily address.
+</Definition>
+
+### Why Optimal Control?
+
+1. **Beyond analytical limits**: Account for higher-order effects, multi-level dynamics
+2. **System-specific optimization**: Tailor pulses to individual qubits
+3. **Constraint handling**: Enforce amplitude limits, bandwidth restrictions
+4. **Robustness**: Design pulses resilient to parameter uncertainties
+5. **Multi-objective optimization**: Balance fidelity, speed, and other metrics
+
+### The Control Problem
+
+Given:
+- Initial state or gate to implement
+- System Hamiltonian H₀
+- Control Hamiltonians H₁, H₂, ... (corresponding to control fields)
+- Constraints (amplitude limits, bandwidth)
+
+Find:
+- Control pulses u₁(t), u₂(t), ... that maximize gate fidelity
+
+<Formula>
+$$\hat{H}(t) = \hat{H}_0 + \sum_k u_k(t)\hat{H}_k$$
+</Formula>
+
+## 2. Cost Functions for Gate Optimization
+
+### Gate Fidelity
+
+The primary objective is maximizing the fidelity between the implemented unitary U and the target unitary U_target:
+
+<Formula>
+$$F = \frac{1}{d^2}\left|\text{Tr}(U_{target}^\dagger U)\right|^2$$
+</Formula>
+
+where d is the Hilbert space dimension.
+
+For optimization, we minimize the infidelity:
+
+<Formula>
+$$\mathcal{J}_{fidelity} = 1 - F = 1 - \frac{1}{d^2}\left|\text{Tr}(U_{target}^\dagger U)\right|^2$$
+</Formula>
+
+### Leakage Penalty
+
+Add a term to penalize population outside the computational subspace:
+
+<Formula>
+$$\mathcal{J}_{leakage} = \lambda_{leak} \sum_i P_{leak,i}$$
+</Formula>
+
+where $P_{leak,i}$ is the leakage probability for computational basis state i.
+
+### Control Penalties
+
+Penalize undesirable pulse characteristics:
+
+**Amplitude penalty** (smooth amplitude):
+<Formula>
+$$\mathcal{J}_{amp} = \lambda_{amp} \int_0^T |u(t)|^2 dt$$
+</Formula>
+
+**Bandwidth penalty** (limit high frequencies):
+<Formula>
+$$\mathcal{J}_{bw} = \lambda_{bw} \int |\tilde{u}(\omega)|^2 \omega^2 d\omega$$
+</Formula>
+
+**Smoothness penalty** (limit rapid changes):
+<Formula>
+$$\mathcal{J}_{smooth} = \lambda_{smooth} \int_0^T \left|\frac{du}{dt}\right|^2 dt$$
+</Formula>
+
+### Total Cost Function
+
+<Formula>
+$$\mathcal{J}_{total} = \mathcal{J}_{fidelity} + \mathcal{J}_{leakage} + \mathcal{J}_{amp} + \mathcal{J}_{smooth}$$
+</Formula>
+
+<Tip>
+The weights λ determine the tradeoff between objectives. Start with λ_fidelity = 1 and small values for other terms, then adjust based on the results.
+</Tip>
+
+## 3. The GRAPE Algorithm
+
+GRAPE (GRadient Ascent Pulse Engineering) is the most widely used algorithm for quantum optimal control.
+
+<Definition term="GRAPE Algorithm">
+GRAPE is a gradient-based optimization algorithm that iteratively improves control pulses. It discretizes time into steps, computes the gradient of the fidelity with respect to each pulse amplitude, and updates the pulses using gradient ascent.
+</Definition>
+
+### Discretization
+
+Divide the gate time T into N timesteps of duration Δt:
+
+<Formula>
+$$u_k(t) \rightarrow u_k^{(j)}, \quad j = 1, ..., N$$
+</Formula>
+
+The propagator for each timestep is:
+
+<Formula>
+$$U_j = \exp\left(-i\left(\hat{H}_0 + \sum_k u_k^{(j)}\hat{H}_k\right)\Delta t\right)$$
+</Formula>
+
+Total propagator:
+
+<Formula>
+$$U = U_N U_{N-1} \cdots U_2 U_1$$
+</Formula>
+
+### Gradient Computation
+
+The gradient of the fidelity with respect to control amplitude at timestep j:
+
+<Formula>
+$$\frac{\partial F}{\partial u_k^{(j)}} = -\frac{2}{d^2}\text{Re}\left[\text{Tr}(U_{target}^\dagger P_j)\text{Tr}(Q_j^\dagger (-i\hat{H}_k\Delta t) U_j)\right]$$
+</Formula>
+
+where:
+- $P_j = U_N \cdots U_{j+1}$ (forward propagator from j+1 to N)
+- $Q_j = U_j \cdots U_1$ (forward propagator from 1 to j)
+
+### Algorithm Steps
+
+```
+1. Initialize pulses u_k^(j) (e.g., Gaussian DRAG)
+2. For each iteration:
+   a. Forward propagation: compute U_1, U_2, ..., U_N
+   b. Compute fidelity F
+   c. Backward propagation: compute gradients
+   d. Update pulses: u_k^(j) += α × ∂F/∂u_k^(j)
+   e. Apply constraints (amplitude limits, smoothing)
+3. Repeat until convergence
+```
+
+<Example>
+```python
+import numpy as np
+from scipy.linalg import expm
+
+class GRAPEOptimizer:
+    """
+    Simple GRAPE optimizer for single-qubit gates.
+    """
+
+    def __init__(self, H0, H_controls, target_unitary, n_timesteps, gate_time):
+        """
+        Args:
+            H0: Drift Hamiltonian
+            H_controls: List of control Hamiltonians
+            target_unitary: Target gate unitary
+            n_timesteps: Number of time discretization steps
+            gate_time: Total gate time
+        """
+        self.H0 = H0
+        self.H_controls = H_controls
+        self.U_target = target_unitary
+        self.n_steps = n_timesteps
+        self.dt = gate_time / n_timesteps
+        self.dim = H0.shape[0]
+
+    def propagator(self, controls):
+        """Compute total propagator for given controls."""
+        U = np.eye(self.dim, dtype=complex)
+
+        for j in range(self.n_steps):
+            H = self.H0.copy()
+            for k, Hk in enumerate(self.H_controls):
+                H += controls[k, j] * Hk
+
+            U_step = expm(-1j * H * self.dt)
+            U = U_step @ U
+
+        return U
+
+    def fidelity(self, U):
+        """Compute gate fidelity."""
+        overlap = np.trace(self.U_target.conj().T @ U)
+        return np.abs(overlap)**2 / self.dim**2
+
+    def gradient(self, controls):
+        """Compute gradient using forward-backward propagation."""
+        n_controls = len(self.H_controls)
+        grad = np.zeros((n_controls, self.n_steps))
+
+        # Forward propagation - store all propagators
+        U_forward = [np.eye(self.dim, dtype=complex)]
+        for j in range(self.n_steps):
+            H = self.H0.copy()
+            for k, Hk in enumerate(self.H_controls):
+                H += controls[k, j] * Hk
+            U_step = expm(-1j * H * self.dt)
+            U_forward.append(U_step @ U_forward[-1])
+
+        # Backward propagation
+        U_backward = [np.eye(self.dim, dtype=complex)]
+        for j in range(self.n_steps - 1, -1, -1):
+            H = self.H0.copy()
+            for k, Hk in enumerate(self.H_controls):
+                H += controls[k, j] * Hk
+            U_step = expm(-1j * H * self.dt)
+            U_backward.insert(0, U_backward[0] @ U_step)
+
+        # Compute gradients
+        U_total = U_forward[-1]
+        overlap = np.trace(self.U_target.conj().T @ U_total)
+
+        for j in range(self.n_steps):
+            P = U_backward[j+1]  # Propagator from j+1 to end
+            Q = U_forward[j]     # Propagator from start to j
+
+            for k, Hk in enumerate(self.H_controls):
+                # Derivative of U_j with respect to control
+                H = self.H0.copy()
+                for kk, Hkk in enumerate(self.H_controls):
+                    H += controls[kk, j] * Hkk
+                U_j = expm(-1j * H * self.dt)
+
+                dU = -1j * self.dt * Hk @ U_j  # Approximate derivative
+
+                grad[k, j] = (2 / self.dim**2) * np.real(
+                    np.conj(overlap) * np.trace(self.U_target.conj().T @ P @ dU @ Q)
+                )
+
+        return grad
+
+    def optimize(self, initial_controls, n_iterations=100, learning_rate=0.1,
+                 amp_limit=None):
+        """Run GRAPE optimization."""
+        controls = initial_controls.copy()
+        history = {'fidelity': [], 'infidelity': []}
+
+        for iteration in range(n_iterations):
+            U = self.propagator(controls)
+            fid = self.fidelity(U)
+            history['fidelity'].append(fid)
+            history['infidelity'].append(1 - fid)
+
+            if iteration % 20 == 0:
+                print(f"Iteration {iteration}: Fidelity = {fid:.6f}")
+
+            # Compute gradient
+            grad = self.gradient(controls)
+
+            # Update controls
+            controls += learning_rate * grad
+
+            # Apply amplitude constraints
+            if amp_limit is not None:
+                controls = np.clip(controls, -amp_limit, amp_limit)
+
+        return controls, history
+```
+</Example>
+
+## 4. Advanced Optimization Techniques
+
+### Krotov's Method
+
+An alternative to GRAPE that updates pulses one timestep at a time:
+
+<Formula>
+$$u_k^{(j),new} = u_k^{(j),old} + \frac{1}{\lambda}\text{Im}\left[\langle\chi_j|\hat{H}_k|\psi_j\rangle\right]$$
+</Formula>
+
+Advantages:
+- Guaranteed monotonic improvement
+- Can handle state-to-state transfers easily
+- Good for constrained optimization
+
+### CRAB (Chopped Random Basis)
+
+Parameterize controls in a truncated basis:
+
+<Formula>
+$$u(t) = u_0(t)\left(1 + \sum_{n=1}^{N_c}(a_n\cos(\omega_n t) + b_n\sin(\omega_n t))\right)$$
+</Formula>
+
+Advantages:
+- Fewer parameters to optimize
+- Built-in bandwidth limitation
+- Works with derivative-free optimizers
+
+### Reinforcement Learning
+
+Use neural networks to learn optimal control policies:
+- Train on simulated environments
+- Can generalize to new conditions
+- Handles complex constraints naturally
+
+## 5. Constraints and Regularization
+
+### Amplitude Constraints
+
+Hard limits on control amplitudes:
+
+<Formula>
+$$|u_k(t)| \leq u_{max}$$
+</Formula>
+
+Implemented by clipping after each update or using constrained optimization.
+
+### Bandwidth Constraints
+
+Limit pulse bandwidth to avoid exciting unwanted transitions:
+
+**Method 1**: Low-pass filter after each update
+**Method 2**: Parameterize in frequency domain with cutoff
+**Method 3**: Smoothness penalty in cost function
+
+### Robustness
+
+Design pulses that work despite parameter uncertainties:
+
+**Ensemble optimization**: Optimize average fidelity over parameter distribution:
+
+<Formula>
+$$\mathcal{J}_{robust} = \int P(\theta) (1 - F(\theta)) d\theta$$
+</Formula>
+
+**Derivative-based**: Include sensitivity to parameters in cost function
+
+<Warning>
+Robust pulses are typically longer and have lower peak fidelity than non-robust pulses. The tradeoff depends on the actual parameter uncertainty in your system.
+</Warning>
+
+## 6. Practical Implementation
+
+### Initialization
+
+Good initialization speeds up convergence:
+
+1. **Analytical pulses**: Start from Gaussian DRAG
+2. **Random**: Multiple random starts to avoid local minima
+3. **Previous solutions**: Warm start from similar problems
+
+### Convergence Criteria
+
+Stop optimization when:
+- Target fidelity reached
+- Gradient magnitude below threshold
+- Maximum iterations exceeded
+- No improvement for N iterations
+
+### Post-Processing
+
+After optimization:
+1. Apply final smoothing/filtering
+2. Verify constraints are satisfied
+3. Simulate with higher accuracy model
+4. Validate experimentally
+
+<Example>
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Example: Optimize X gate on a 3-level transmon
+
+# System parameters (in units where hbar = 1)
+omega_q = 0  # In rotating frame
+alpha = -0.2  # Anharmonicity (negative for transmon)
+
+# Drift Hamiltonian (3-level)
+H0 = np.diag([0, omega_q, 2*omega_q + alpha])
+
+# Control Hamiltonian (drive couples levels)
+H_drive_x = np.array([
+    [0, 1, 0],
+    [1, 0, np.sqrt(2)],
+    [0, np.sqrt(2), 0]
+], dtype=complex) / 2
+
+H_drive_y = np.array([
+    [0, -1j, 0],
+    [1j, 0, -1j*np.sqrt(2)],
+    [0, 1j*np.sqrt(2), 0]
+], dtype=complex) / 2
+
+# Target: X gate in computational subspace
+X_target = np.array([
+    [0, 1, 0],
+    [1, 0, 0],
+    [0, 0, 1]  # |2⟩ unchanged
+], dtype=complex)
+
+# Optimization parameters
+n_timesteps = 50
+gate_time = 20.0  # arbitrary units
+dt = gate_time / n_timesteps
+
+# Initialize with Gaussian pulse
+t = np.linspace(0, gate_time, n_timesteps)
+sigma = gate_time / 6
+initial_I = 0.15 * np.exp(-0.5 * ((t - gate_time/2) / sigma)**2)
+initial_Q = np.zeros(n_timesteps)
+
+initial_controls = np.array([initial_I, initial_Q])
+
+# Create optimizer and run
+optimizer = GRAPEOptimizer(
+    H0=H0,
+    H_controls=[H_drive_x, H_drive_y],
+    target_unitary=X_target,
+    n_timesteps=n_timesteps,
+    gate_time=gate_time
+)
+
+optimized_controls, history = optimizer.optimize(
+    initial_controls,
+    n_iterations=200,
+    learning_rate=0.5,
+    amp_limit=0.3
+)
+
+# Plot results
+fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+
+# Convergence
+axes[0, 0].semilogy(history['infidelity'])
+axes[0, 0].set_xlabel('Iteration')
+axes[0, 0].set_ylabel('Infidelity')
+axes[0, 0].set_title('Optimization Convergence')
+axes[0, 0].grid(True, alpha=0.3)
+
+# Initial vs optimized pulses
+axes[0, 1].plot(t, initial_controls[0], 'b--', label='Initial I')
+axes[0, 1].plot(t, optimized_controls[0], 'b-', label='Optimized I')
+axes[0, 1].plot(t, optimized_controls[1], 'r-', label='Optimized Q')
+axes[0, 1].set_xlabel('Time')
+axes[0, 1].set_ylabel('Amplitude')
+axes[0, 1].set_title('Pulse Shapes')
+axes[0, 1].legend()
+axes[0, 1].grid(True, alpha=0.3)
+
+# Verify final fidelity
+U_final = optimizer.propagator(optimized_controls)
+final_fidelity = optimizer.fidelity(U_final)
+print(f"Final fidelity: {final_fidelity:.6f}")
+print(f"Final infidelity: {1-final_fidelity:.2e}")
+```
+</Example>
+
+## 7. Applications
+
+### Single-Qubit Gates
+
+Optimal control can achieve:
+- **Faster gates** at same fidelity
+- **Higher fidelity** at same duration
+- **Reduced leakage** through active cancellation
+
+### Two-Qubit Gates
+
+Optimize CR pulses or other entangling gates:
+- Account for crosstalk explicitly
+- Minimize leakage on both qubits
+- Optimize echo timing
+
+### State Preparation
+
+Prepare specific states from thermal equilibrium:
+- Ground state cooling pulses
+- Arbitrary state initialization
+- Multi-qubit entangled states
+
+### Measurement
+
+Optimize readout pulses:
+- Maximize state discrimination
+- Minimize measurement-induced transitions
+- Optimize for speed vs accuracy
+
+## 8. Summary
+
+Optimal control provides powerful tools for pulse design:
+
+1. **Cost functions** encode multiple objectives (fidelity, leakage, smoothness)
+2. **GRAPE algorithm** uses gradients for efficient optimization
+3. **Constraints** enforce hardware limitations
+4. **Robustness** can be built into the optimization
+5. **Initialization** from analytical pulses improves convergence
+6. **Validation** on realistic models and experiments is essential
+
+Optimal control is increasingly important as quantum processors push toward fault-tolerant operation, where every fraction of a percent in gate fidelity matters.
+
+<Tip>
+Start with analytical pulses (Gaussian DRAG) and use optimal control for the final refinement. This hybrid approach combines physical insight with numerical precision.
+</Tip>
+
+## Further Reading
+
+- Khaneja et al., "Optimal control of coupled spin dynamics" (2005) - Original GRAPE paper
+- de Fouquieres et al., "Second order gradient ascent pulse engineering" (2011)
+- Machnes et al., "Comparing, optimizing, and benchmarking quantum-control algorithms" (2018)
+- Qiskit Dynamics documentation for practical implementations

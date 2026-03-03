@@ -1,0 +1,358 @@
+---
+title: "Circuit Equivalence Checking"
+description: "Methods for verifying circuit equivalence."
+duration: 55
+difficulty: "intermediate"
+---
+
+## 1. Why Equivalence Checking Matters
+
+Circuit equivalence verification is critical for:
+
+```
+Optimization Validation     Transpilation Correctness
+        |                           |
+   Original                    Original
+       |                           |
+   Optimized    === check ===  Hardware-mapped
+       |                           |
+  Same unitary?             Same unitary?
+```
+
+## 2. Unitary Matrix Comparison
+
+```python
+import numpy as np
+from typing import Tuple
+
+class CircuitToUnitary:
+    """Convert quantum circuits to unitary matrices."""
+
+    # Single-qubit gate matrices
+    GATES = {
+        'I': np.array([[1, 0], [0, 1]], dtype=complex),
+        'X': np.array([[0, 1], [1, 0]], dtype=complex),
+        'Y': np.array([[0, -1j], [1j, 0]], dtype=complex),
+        'Z': np.array([[1, 0], [0, -1]], dtype=complex),
+        'H': np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2),
+        'S': np.array([[1, 0], [0, 1j]], dtype=complex),
+        'T': np.array([[1, 0], [0, np.exp(1j*np.pi/4)]], dtype=complex),
+    }
+
+    @staticmethod
+    def rx(theta: float) -> np.ndarray:
+        """RX rotation matrix."""
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        return np.array([[c, -1j*s], [-1j*s, c]], dtype=complex)
+
+    @staticmethod
+    def ry(theta: float) -> np.ndarray:
+        """RY rotation matrix."""
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        return np.array([[c, -s], [s, c]], dtype=complex)
+
+    @staticmethod
+    def rz(theta: float) -> np.ndarray:
+        """RZ rotation matrix."""
+        return np.array([
+            [np.exp(-1j*theta/2), 0],
+            [0, np.exp(1j*theta/2)]
+        ], dtype=complex)
+
+    @staticmethod
+    def cnot() -> np.ndarray:
+        """CNOT gate matrix (control=0, target=1)."""
+        return np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 0, 1],
+            [0, 0, 1, 0]
+        ], dtype=complex)
+
+    def circuit_unitary(self, gates: list, n_qubits: int) -> np.ndarray:
+        """Compute full unitary for circuit."""
+        dim = 2**n_qubits
+        U = np.eye(dim, dtype=complex)
+
+        for gate in gates:
+            gate_matrix = self._expand_gate(gate, n_qubits)
+            U = gate_matrix @ U
+
+        return U
+
+    def _expand_gate(self, gate: dict, n_qubits: int) -> np.ndarray:
+        """Expand gate to full system."""
+        name = gate['name']
+        qubits = gate['qubits']
+        params = gate.get('params', [])
+
+        if name == 'CX':
+            return self._expand_cnot(qubits[0], qubits[1], n_qubits)
+
+        # Single-qubit gate
+        if name in self.GATES:
+            matrix = self.GATES[name]
+        elif name == 'RX':
+            matrix = self.rx(params[0])
+        elif name == 'RY':
+            matrix = self.ry(params[0])
+        elif name == 'RZ':
+            matrix = self.rz(params[0])
+        else:
+            raise ValueError(f"Unknown gate: {name}")
+
+        return self._single_qubit_expand(matrix, qubits[0], n_qubits)
+
+    def _single_qubit_expand(self, gate: np.ndarray, qubit: int, n_qubits: int) -> np.ndarray:
+        """Expand single-qubit gate to n-qubit system."""
+        result = np.array([[1]], dtype=complex)
+        for i in range(n_qubits):
+            if i == qubit:
+                result = np.kron(result, gate)
+            else:
+                result = np.kron(result, self.GATES['I'])
+        return result
+
+    def _expand_cnot(self, control: int, target: int, n_qubits: int) -> np.ndarray:
+        """Expand CNOT to n-qubit system."""
+        dim = 2**n_qubits
+        result = np.zeros((dim, dim), dtype=complex)
+
+        for i in range(dim):
+            bits = format(i, f'0{n_qubits}b')
+            if bits[control] == '0':
+                result[i, i] = 1
+            else:
+                # Flip target bit
+                new_bits = list(bits)
+                new_bits[target] = '1' if bits[target] == '0' else '0'
+                j = int(''.join(new_bits), 2)
+                result[j, i] = 1
+
+        return result
+```
+
+## 3. Equivalence Up to Global Phase
+
+```python
+class EquivalenceChecker:
+    """Check circuit equivalence."""
+
+    def __init__(self, tolerance: float = 1e-10):
+        self.tolerance = tolerance
+        self.converter = CircuitToUnitary()
+
+    def are_equivalent(self, circuit1: list, circuit2: list,
+                       n_qubits: int) -> Tuple[bool, float]:
+        """
+        Check if two circuits are equivalent up to global phase.
+
+        Returns: (is_equivalent, distance)
+        """
+        U1 = self.converter.circuit_unitary(circuit1, n_qubits)
+        U2 = self.converter.circuit_unitary(circuit2, n_qubits)
+
+        return self._unitary_equivalent(U1, U2)
+
+    def _unitary_equivalent(self, U1: np.ndarray, U2: np.ndarray) -> Tuple[bool, float]:
+        """Check unitary equivalence up to global phase."""
+        # Compute U1^dag @ U2 - should be e^(i*phi) * I
+        product = U1.conj().T @ U2
+
+        # Extract potential global phase from (0,0) element
+        if np.abs(product[0, 0]) < self.tolerance:
+            return False, float('inf')
+
+        phase = product[0, 0]
+        normalized = product / phase
+
+        # Check if result is identity
+        identity = np.eye(len(U1), dtype=complex)
+        distance = np.linalg.norm(normalized - identity)
+
+        return distance < self.tolerance, distance
+
+    def verify_optimization(self, original: list, optimized: list,
+                           n_qubits: int) -> dict:
+        """Verify an optimization preserves circuit behavior."""
+        equiv, dist = self.are_equivalent(original, optimized, n_qubits)
+
+        return {
+            'equivalent': equiv,
+            'distance': dist,
+            'original_gates': len(original),
+            'optimized_gates': len(optimized),
+            'reduction': len(original) - len(optimized)
+        }
+```
+
+## 4. Simulation-Based Equivalence
+
+```python
+class SimulationEquivalenceChecker:
+    """Check equivalence via simulation on test inputs."""
+
+    def __init__(self, n_samples: int = 100, tolerance: float = 1e-6):
+        self.n_samples = n_samples
+        self.tolerance = tolerance
+
+    def check_equivalence(self, circuit1, circuit2, n_qubits: int) -> Tuple[bool, list]:
+        """
+        Check equivalence by comparing outputs on random inputs.
+
+        More scalable than unitary comparison for large circuits.
+        """
+        converter = CircuitToUnitary()
+        U1 = converter.circuit_unitary(circuit1, n_qubits)
+        U2 = converter.circuit_unitary(circuit2, n_qubits)
+
+        failures = []
+
+        for i in range(self.n_samples):
+            # Random input state
+            state = self._random_state(n_qubits)
+
+            out1 = U1 @ state
+            out2 = U2 @ state
+
+            # Check if outputs match (up to global phase)
+            if not self._states_equivalent(out1, out2):
+                failures.append({
+                    'input': state,
+                    'output1': out1,
+                    'output2': out2
+                })
+
+        return len(failures) == 0, failures
+
+    def _random_state(self, n_qubits: int) -> np.ndarray:
+        """Generate random normalized state."""
+        dim = 2**n_qubits
+        real = np.random.randn(dim)
+        imag = np.random.randn(dim)
+        state = real + 1j * imag
+        return state / np.linalg.norm(state)
+
+    def _states_equivalent(self, s1: np.ndarray, s2: np.ndarray) -> bool:
+        """Check if states are equivalent up to global phase."""
+        # Find first non-zero element for phase reference
+        for i in range(len(s1)):
+            if np.abs(s1[i]) > self.tolerance:
+                phase = s2[i] / s1[i]
+                normalized = s2 / phase
+                return np.allclose(s1, normalized, atol=self.tolerance)
+        return np.allclose(s1, s2, atol=self.tolerance)
+```
+
+## 5. Decision Diagram Methods
+
+```python
+class DDEquivalenceChecker:
+    """
+    Decision diagram based equivalence checking.
+
+    More memory-efficient for structured circuits.
+    """
+
+    def __init__(self):
+        self.nodes = {}
+        self.edges = {}
+
+    def build_dd(self, circuit: list, n_qubits: int) -> int:
+        """
+        Build decision diagram representation.
+
+        Returns: root node ID
+        """
+        # Simplified DD construction
+        # Real implementation would use QMDD or similar
+        converter = CircuitToUnitary()
+        unitary = converter.circuit_unitary(circuit, n_qubits)
+
+        # Create canonical representation
+        root = self._matrix_to_dd(unitary, 0, n_qubits)
+        return root
+
+    def _matrix_to_dd(self, matrix: np.ndarray, level: int, max_level: int) -> int:
+        """Recursively build DD from matrix."""
+        # Terminal case
+        if level == max_level:
+            # Store complex value as terminal
+            node_id = len(self.nodes)
+            self.nodes[node_id] = {'type': 'terminal', 'value': matrix[0, 0]}
+            return node_id
+
+        # Decompose matrix into quadrants
+        half = len(matrix) // 2
+        quadrants = [
+            matrix[:half, :half],
+            matrix[:half, half:],
+            matrix[half:, :half],
+            matrix[half:, half:]
+        ]
+
+        children = [self._matrix_to_dd(q, level + 1, max_level) for q in quadrants]
+
+        # Check for redundancy (all children same)
+        if len(set(children)) == 1:
+            return children[0]
+
+        node_id = len(self.nodes)
+        self.nodes[node_id] = {'type': 'internal', 'level': level, 'children': children}
+        return node_id
+
+    def dd_equivalent(self, root1: int, root2: int) -> bool:
+        """Check if two DDs are equivalent."""
+        return self._nodes_equal(root1, root2, {})
+
+    def _nodes_equal(self, n1: int, n2: int, cache: dict) -> bool:
+        """Recursive node equality check."""
+        key = (n1, n2)
+        if key in cache:
+            return cache[key]
+
+        node1 = self.nodes[n1]
+        node2 = self.nodes[n2]
+
+        if node1['type'] != node2['type']:
+            result = False
+        elif node1['type'] == 'terminal':
+            result = np.isclose(node1['value'], node2['value'])
+        else:
+            result = all(
+                self._nodes_equal(c1, c2, cache)
+                for c1, c2 in zip(node1['children'], node2['children'])
+            )
+
+        cache[key] = result
+        return result
+```
+
+## 6. Practical Usage
+
+```python
+# Example: Verify H-Z-H = X optimization
+original = [
+    {'name': 'H', 'qubits': [0]},
+    {'name': 'Z', 'qubits': [0]},
+    {'name': 'H', 'qubits': [0]}
+]
+
+optimized = [
+    {'name': 'X', 'qubits': [0]}
+]
+
+checker = EquivalenceChecker()
+result = checker.verify_optimization(original, optimized, n_qubits=1)
+
+print(f"Equivalent: {result['equivalent']}")
+print(f"Gate reduction: {result['reduction']}")
+```
+
+## Summary
+
+Circuit equivalence checking methods:
+1. **Unitary comparison**: Exact but exponential in qubits
+2. **Global phase handling**: U1^dag @ U2 = e^(i*phi) * I
+3. **Simulation-based**: Sample random inputs for scalability
+4. **Decision diagrams**: Memory-efficient for structured circuits

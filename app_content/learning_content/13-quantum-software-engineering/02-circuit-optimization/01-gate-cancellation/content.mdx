@@ -1,0 +1,419 @@
+---
+title: "Gate Cancellation and Inverse Removal"
+description: "Master techniques for identifying and eliminating redundant gates through inverse detection and self-inverse cancellation."
+duration: 55
+difficulty: "intermediate"
+---
+
+## 1. Understanding Gate Cancellation
+
+Gate cancellation is a fundamental optimization technique that identifies and removes redundant operations in quantum circuits. When a gate and its inverse appear consecutively (or can be made adjacent through commutation), they cancel to the identity operation.
+
+### Why Gate Cancellation Matters
+
+Every gate introduces potential errors on real quantum hardware. Cancellation reduces:
+- **Gate count**: Fewer operations means fewer error sources
+- **Circuit depth**: Shorter execution time reduces decoherence effects
+- **Compilation overhead**: Simpler circuits transpile more efficiently
+
+```python
+from dataclasses import dataclass
+from typing import List, Tuple, Optional, Set
+import math
+
+@dataclass(frozen=True)
+class Gate:
+    """Immutable gate representation for optimization."""
+    name: str
+    qubits: Tuple[int, ...]
+    params: Tuple[float, ...] = ()
+
+    def __repr__(self) -> str:
+        if self.params:
+            param_str = f"({', '.join(f'{p:.4f}' for p in self.params)})"
+            return f"{self.name}{param_str}@{self.qubits}"
+        return f"{self.name}@{self.qubits}"
+```
+
+## 2. Self-Inverse Gates
+
+Many quantum gates are Hermitian operators, meaning they are their own inverse: $G^2 = I$.
+
+### Common Self-Inverse Gates
+
+| Gate | Matrix | Property |
+|------|--------|----------|
+| X (Pauli-X) | $\begin{pmatrix} 0 & 1 \\ 1 & 0 \end{pmatrix}$ | $X^2 = I$ |
+| Y (Pauli-Y) | $\begin{pmatrix} 0 & -i \\ i & 0 \end{pmatrix}$ | $Y^2 = I$ |
+| Z (Pauli-Z) | $\begin{pmatrix} 1 & 0 \\ 0 & -1 \end{pmatrix}$ | $Z^2 = I$ |
+| H (Hadamard) | $\frac{1}{\sqrt{2}}\begin{pmatrix} 1 & 1 \\ 1 & -1 \end{pmatrix}$ | $H^2 = I$ |
+| CNOT | 4x4 controlled-X | $\text{CNOT}^2 = I$ |
+| CZ | 4x4 controlled-Z | $\text{CZ}^2 = I$ |
+| SWAP | 4x4 exchange | $\text{SWAP}^2 = I$ |
+
+```python
+# Set of gates that are their own inverse
+SELF_INVERSE_GATES: Set[str] = {
+    'X', 'Y', 'Z', 'H',           # Single-qubit Hermitian
+    'CX', 'CNOT', 'CY', 'CZ',     # Controlled Paulis
+    'SWAP', 'ISWAP',               # Exchange gates
+    'CCX', 'CCNOT', 'TOFFOLI',    # Multi-controlled
+    'CSWAP', 'FREDKIN'            # Controlled SWAP
+}
+
+def is_self_inverse(gate: Gate) -> bool:
+    """Check if a gate is its own inverse."""
+    return gate.name.upper() in SELF_INVERSE_GATES
+
+
+def cancel_self_inverse(gates: List[Gate]) -> List[Gate]:
+    """
+    Cancel consecutive identical self-inverse gates.
+
+    Algorithm: Single-pass stack-based cancellation.
+    Time complexity: O(n) where n is gate count.
+    """
+    result: List[Gate] = []
+
+    for gate in gates:
+        if (result and
+            is_self_inverse(gate) and
+            result[-1].name == gate.name and
+            result[-1].qubits == gate.qubits):
+            # Gates cancel - remove previous
+            result.pop()
+        else:
+            result.append(gate)
+
+    return result
+
+
+# Example usage
+circuit = [
+    Gate('H', (0,)),
+    Gate('H', (0,)),      # Cancels with previous
+    Gate('X', (1,)),
+    Gate('CX', (0, 1)),
+    Gate('CX', (0, 1)),   # Cancels with previous
+    Gate('X', (1,)),      # Cancels with earlier X
+]
+
+optimized = cancel_self_inverse(circuit)
+print(f"Original: {len(circuit)} gates -> Optimized: {len(optimized)} gates")
+# Output: Original: 6 gates -> Optimized: 0 gates (after iterative)
+```
+
+## 3. Inverse Gate Pairs
+
+Some gates have distinct inverses that must be explicitly matched.
+
+### Named Inverse Pairs
+
+```python
+# Mapping from gate to its inverse
+INVERSE_PAIRS = {
+    'S': 'SDG', 'SDG': 'S',           # S-gate pair
+    'T': 'TDG', 'TDG': 'T',           # T-gate pair
+    'SX': 'SXDG', 'SXDG': 'SX',       # sqrt(X) pair
+    'P': 'P',                          # Phase (with -angle)
+    'RX': 'RX', 'RY': 'RY', 'RZ': 'RZ', # Rotations (with -angle)
+    'U1': 'U1', 'U2': 'U2', 'U3': 'U3', # IBM basis (with params)
+    'CRX': 'CRX', 'CRY': 'CRY', 'CRZ': 'CRZ',  # Controlled rotations
+}
+
+
+def get_inverse_name(gate_name: str) -> Optional[str]:
+    """Get the name of the inverse gate."""
+    return INVERSE_PAIRS.get(gate_name.upper())
+
+
+def are_inverse_gates(g1: Gate, g2: Gate, tolerance: float = 1e-10) -> bool:
+    """
+    Determine if two gates are inverses of each other.
+
+    Handles:
+    - Self-inverse gates (X, H, etc.)
+    - Named pairs (S/Sdg, T/Tdg)
+    - Parameterized gates with opposite parameters
+    """
+    # Must act on same qubits
+    if g1.qubits != g2.qubits:
+        return False
+
+    name1, name2 = g1.name.upper(), g2.name.upper()
+
+    # Case 1: Self-inverse gates
+    if name1 in SELF_INVERSE_GATES and name1 == name2:
+        return g1.params == g2.params  # Parameters must match
+
+    # Case 2: Named inverse pairs (non-parameterized)
+    if name1 in INVERSE_PAIRS:
+        inverse_name = INVERSE_PAIRS[name1]
+        if inverse_name == name2 and not g1.params and not g2.params:
+            return True
+
+    # Case 3: Rotation gates with opposite angles
+    rotation_gates = {'RX', 'RY', 'RZ', 'P', 'U1', 'CRX', 'CRY', 'CRZ'}
+    if name1 in rotation_gates and name1 == name2:
+        if len(g1.params) == len(g2.params) == 1:
+            angle_sum = g1.params[0] + g2.params[0]
+            # Check if angles sum to zero (mod 2pi for periodicity)
+            if abs(angle_sum) < tolerance:
+                return True
+            if abs(abs(angle_sum) - 2 * math.pi) < tolerance:
+                return True
+
+    # Case 4: U3 gates with inverse parameters
+    if name1 == 'U3' and name2 == 'U3':
+        if len(g1.params) == len(g2.params) == 3:
+            # U3(theta, phi, lambda)^-1 = U3(-theta, -lambda, -phi)
+            theta1, phi1, lam1 = g1.params
+            theta2, phi2, lam2 = g2.params
+            if (abs(theta1 + theta2) < tolerance and
+                abs(phi1 + lam2) < tolerance and
+                abs(lam1 + phi2) < tolerance):
+                return True
+
+    return False
+```
+
+## 4. Multi-Pass Cancellation Algorithm
+
+Single-pass cancellation may miss opportunities when inverse gates are separated by intervening operations. An iterative approach discovers more cancellations.
+
+```python
+def cancel_inverse_pairs(gates: List[Gate]) -> List[Gate]:
+    """
+    Single-pass cancellation of inverse gate pairs.
+    """
+    result: List[Gate] = []
+
+    for gate in gates:
+        if result and are_inverse_gates(result[-1], gate):
+            result.pop()
+        else:
+            result.append(gate)
+
+    return result
+
+
+def iterative_cancellation(
+    gates: List[Gate],
+    max_iterations: int = 100
+) -> Tuple[List[Gate], int]:
+    """
+    Iteratively apply cancellation until convergence.
+
+    Returns:
+        Tuple of (optimized gates, number of iterations)
+    """
+    current = gates
+    iterations = 0
+
+    for i in range(max_iterations):
+        optimized = cancel_inverse_pairs(current)
+        iterations = i + 1
+
+        if len(optimized) == len(current):
+            break  # No more cancellations possible
+
+        current = optimized
+
+    return current, iterations
+
+
+# Example showing iterative discovery
+circuit = [
+    Gate('H', (0,)),
+    Gate('X', (1,)),
+    Gate('X', (1,)),     # Immediate cancellation
+    Gate('H', (0,)),     # Now adjacent after X cancellation
+    Gate('T', (0,)),
+    Gate('S', (0,)),
+    Gate('SDG', (0,)),   # Cancels S
+    Gate('TDG', (0,)),   # Now adjacent, cancels T
+]
+
+result, iters = iterative_cancellation(circuit)
+print(f"Reduced from {len(circuit)} to {len(result)} gates in {iters} iterations")
+```
+
+## 5. Commutation-Aware Cancellation
+
+Gates that commute can be reordered to enable more cancellations.
+
+```python
+def gates_commute(g1: Gate, g2: Gate) -> bool:
+    """
+    Check if two gates commute.
+
+    Gates commute if:
+    - They act on disjoint qubits
+    - They are diagonal in the same basis
+    - One is a controlled version of a gate that commutes with the other's target
+    """
+    # Disjoint qubits always commute
+    qubits1 = set(g1.qubits)
+    qubits2 = set(g2.qubits)
+
+    if not qubits1.intersection(qubits2):
+        return True
+
+    # Same gate type on same qubits always commutes with itself
+    if g1.name == g2.name and g1.qubits == g2.qubits:
+        return True
+
+    # Diagonal gates (Z, S, T, RZ, P, CZ) commute with each other
+    diagonal_gates = {'Z', 'S', 'SDG', 'T', 'TDG', 'RZ', 'P', 'U1', 'CZ'}
+    if g1.name.upper() in diagonal_gates and g2.name.upper() in diagonal_gates:
+        if qubits1 == qubits2:  # Same qubit(s)
+            return True
+
+    # Z-type gates commute with controlled gates where they act on control
+    z_type = {'Z', 'S', 'SDG', 'T', 'TDG', 'RZ', 'P'}
+    controlled = {'CX', 'CY', 'CZ', 'CNOT', 'CRX', 'CRY', 'CRZ'}
+
+    if g1.name.upper() in z_type and g2.name.upper() in controlled:
+        if len(g2.qubits) >= 2 and g1.qubits[0] == g2.qubits[0]:
+            return True  # g1 acts only on control qubit
+
+    if g2.name.upper() in z_type and g1.name.upper() in controlled:
+        if len(g1.qubits) >= 2 and g2.qubits[0] == g1.qubits[0]:
+            return True
+
+    return False
+
+
+def commutation_aware_cancellation(gates: List[Gate]) -> List[Gate]:
+    """
+    Cancel gates by moving commuting operations.
+
+    Uses bubble-sort style reordering with commutation checks.
+    """
+    gates = list(gates)  # Copy
+    changed = True
+
+    while changed:
+        changed = False
+
+        i = 0
+        while i < len(gates) - 1:
+            # Try to cancel gates[i] with later gates
+            j = i + 1
+
+            while j < len(gates):
+                if are_inverse_gates(gates[i], gates[j]):
+                    # Check if we can commute all intermediate gates
+                    can_commute = all(
+                        gates_commute(gates[i], gates[k])
+                        for k in range(i + 1, j)
+                    )
+
+                    if can_commute:
+                        # Remove both gates
+                        gates.pop(j)
+                        gates.pop(i)
+                        changed = True
+                        break
+
+                # Can we commute past gates[j]?
+                if not gates_commute(gates[i], gates[j]):
+                    break
+
+                j += 1
+            else:
+                i += 1
+
+            if changed:
+                break
+
+    return gates
+```
+
+## 6. Complete Gate Cancellation Pass
+
+```python
+class GateCancellationPass:
+    """
+    Production-ready gate cancellation optimization pass.
+
+    Combines multiple strategies:
+    1. Immediate inverse cancellation
+    2. Iterative multi-pass cancellation
+    3. Commutation-aware reordering
+    """
+
+    def __init__(
+        self,
+        use_commutation: bool = True,
+        max_iterations: int = 100,
+        tolerance: float = 1e-10
+    ):
+        self.use_commutation = use_commutation
+        self.max_iterations = max_iterations
+        self.tolerance = tolerance
+        self.stats = {
+            'original_count': 0,
+            'final_count': 0,
+            'gates_cancelled': 0,
+            'iterations': 0
+        }
+
+    def run(self, gates: List[Gate]) -> List[Gate]:
+        """Execute the cancellation pass."""
+        self.stats['original_count'] = len(gates)
+
+        if self.use_commutation:
+            result = commutation_aware_cancellation(gates)
+            self.stats['iterations'] = 1
+        else:
+            result, iters = iterative_cancellation(gates, self.max_iterations)
+            self.stats['iterations'] = iters
+
+        self.stats['final_count'] = len(result)
+        self.stats['gates_cancelled'] = len(gates) - len(result)
+
+        return result
+
+    def report(self) -> str:
+        """Generate optimization report."""
+        reduction = self.stats['gates_cancelled'] / max(1, self.stats['original_count'])
+        return (
+            f"Gate Cancellation Report:\n"
+            f"  Original gates: {self.stats['original_count']}\n"
+            f"  Final gates: {self.stats['final_count']}\n"
+            f"  Gates cancelled: {self.stats['gates_cancelled']}\n"
+            f"  Reduction: {reduction:.1%}\n"
+            f"  Iterations: {self.stats['iterations']}"
+        )
+
+
+# Usage example
+optimizer = GateCancellationPass(use_commutation=True)
+
+test_circuit = [
+    Gate('H', (0,)),
+    Gate('CX', (0, 1)),
+    Gate('T', (1,)),
+    Gate('TDG', (1,)),
+    Gate('CX', (0, 1)),
+    Gate('H', (0,)),
+]
+
+optimized = optimizer.run(test_circuit)
+print(optimizer.report())
+```
+
+## Summary
+
+Gate cancellation is a foundational optimization:
+
+1. **Self-inverse gates**: H, X, Y, Z, CNOT, SWAP cancel with themselves
+2. **Inverse pairs**: S/Sdg, T/Tdg, RX(theta)/RX(-theta)
+3. **Multi-pass**: Iterative cancellation discovers cascading opportunities
+4. **Commutation**: Reordering enables cancellations across non-adjacent gates
+
+Best practices:
+- Apply cancellation early in the optimization pipeline
+- Use commutation-aware variants for deeper optimization
+- Track metrics to verify optimization effectiveness

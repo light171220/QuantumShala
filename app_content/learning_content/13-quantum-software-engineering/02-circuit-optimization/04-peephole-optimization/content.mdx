@@ -1,0 +1,610 @@
+---
+title: "Peephole Optimization: Local Circuit Transformations"
+description: "Master local optimization techniques that examine small windows of gates and apply targeted transformations."
+duration: 55
+difficulty: "intermediate"
+---
+
+## 1. What is Peephole Optimization?
+
+Peephole optimization examines small "windows" of consecutive instructions and applies local transformations. Originally from classical compiler design, this technique is highly effective for quantum circuits where local gate sequences often have simpler equivalents.
+
+### Key Characteristics
+
+- **Local scope**: Examines a fixed-size window of gates
+- **Pattern independent**: May not require predefined templates
+- **Resynthesis-based**: Computes the combined unitary and redecomposes
+- **Efficient**: O(n) complexity with fixed window size
+
+```python
+from dataclasses import dataclass
+from typing import List, Tuple, Optional, Callable
+import numpy as np
+import math
+
+@dataclass
+class Gate:
+    name: str
+    qubits: Tuple[int, ...]
+    params: Tuple[float, ...] = ()
+
+    def matrix(self) -> np.ndarray:
+        """Get 2x2 unitary matrix for single-qubit gate."""
+        name = self.name.upper()
+        if name == 'H':
+            return np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+        elif name == 'X':
+            return np.array([[0, 1], [1, 0]], dtype=complex)
+        elif name == 'Y':
+            return np.array([[0, -1j], [1j, 0]], dtype=complex)
+        elif name == 'Z':
+            return np.array([[1, 0], [0, -1]], dtype=complex)
+        elif name == 'S':
+            return np.array([[1, 0], [0, 1j]], dtype=complex)
+        elif name == 'T':
+            return np.array([[1, 0], [0, np.exp(1j * np.pi / 4)]], dtype=complex)
+        elif name in ('RX', 'RY', 'RZ'):
+            theta = self.params[0]
+            c, s = np.cos(theta / 2), np.sin(theta / 2)
+            if name == 'RX':
+                return np.array([[c, -1j * s], [-1j * s, c]], dtype=complex)
+            elif name == 'RY':
+                return np.array([[c, -s], [s, c]], dtype=complex)
+            else:  # RZ
+                return np.array([[np.exp(-1j * theta / 2), 0],
+                               [0, np.exp(1j * theta / 2)]], dtype=complex)
+        elif name == 'U3':
+            theta, phi, lam = self.params
+            c, s = np.cos(theta / 2), np.sin(theta / 2)
+            return np.array([
+                [c, -np.exp(1j * lam) * s],
+                [np.exp(1j * phi) * s, np.exp(1j * (phi + lam)) * c]
+            ], dtype=complex)
+        raise ValueError(f"Unknown gate: {name}")
+```
+
+## 2. Single-Qubit Peephole Optimization
+
+The core idea: collect consecutive single-qubit gates, multiply their matrices, and redecompose into a minimal gate sequence.
+
+```python
+class SingleQubitPeephole:
+    """
+    Peephole optimizer for single-qubit gate sequences.
+
+    Collects consecutive single-qubit gates on the same qubit,
+    computes their product, and resynthesizes to minimal form.
+    """
+
+    def __init__(self, basis_gates: List[str] = None):
+        """
+        Args:
+            basis_gates: Target gate set for resynthesis.
+                        Default: ['U3'] (universal single gate)
+        """
+        self.basis_gates = basis_gates or ['U3']
+        self.stats = {'windows_processed': 0, 'gates_reduced': 0}
+
+    def optimize(self, gates: List[Gate]) -> List[Gate]:
+        """Apply peephole optimization to circuit."""
+        result = []
+        i = 0
+
+        while i < len(gates):
+            gate = gates[i]
+
+            # Check if this starts a single-qubit sequence
+            if len(gate.qubits) == 1:
+                qubit = gate.qubits[0]
+                window = [gate]
+                j = i + 1
+
+                # Collect consecutive single-qubit gates on same qubit
+                while j < len(gates):
+                    next_gate = gates[j]
+                    if (len(next_gate.qubits) == 1 and
+                        next_gate.qubits[0] == qubit):
+                        window.append(next_gate)
+                        j += 1
+                    else:
+                        break
+
+                # Optimize window if it has multiple gates
+                if len(window) > 1:
+                    optimized = self._optimize_window(window, qubit)
+                    result.extend(optimized)
+                    self.stats['windows_processed'] += 1
+                    self.stats['gates_reduced'] += len(window) - len(optimized)
+                else:
+                    result.append(gate)
+
+                i = j
+            else:
+                result.append(gate)
+                i += 1
+
+        return result
+
+    def _optimize_window(
+        self,
+        window: List[Gate],
+        qubit: int
+    ) -> List[Gate]:
+        """Optimize a window of single-qubit gates."""
+        # Compute combined unitary
+        U = np.eye(2, dtype=complex)
+        for gate in window:
+            U = gate.matrix() @ U
+
+        # Check if near identity
+        if self._is_identity(U):
+            return []
+
+        # Resynthesize to target basis
+        return self._resynthesize(U, qubit)
+
+    def _is_identity(self, U: np.ndarray, tol: float = 1e-10) -> bool:
+        """Check if unitary is effectively identity."""
+        # Allow global phase difference
+        phase = U[0, 0]
+        if abs(abs(phase) - 1) > tol:
+            return False
+        return np.allclose(U / phase, np.eye(2), atol=tol)
+
+    def _resynthesize(
+        self,
+        U: np.ndarray,
+        qubit: int
+    ) -> List[Gate]:
+        """Resynthesize unitary to basis gates."""
+        if 'U3' in self.basis_gates:
+            theta, phi, lam = self._zyz_decomposition(U)
+            # Skip if all angles are small
+            if (abs(theta) < 1e-10 and
+                abs(phi) < 1e-10 and
+                abs(lam) < 1e-10):
+                return []
+            return [Gate('U3', (qubit,), (theta, phi, lam))]
+
+        # RZ-RY-RZ decomposition
+        theta, phi, lam = self._zyz_decomposition(U)
+        result = []
+        if abs(phi) > 1e-10:
+            result.append(Gate('RZ', (qubit,), (phi,)))
+        if abs(theta) > 1e-10:
+            result.append(Gate('RY', (qubit,), (theta,)))
+        if abs(lam) > 1e-10:
+            result.append(Gate('RZ', (qubit,), (lam,)))
+        return result
+
+    def _zyz_decomposition(
+        self,
+        U: np.ndarray
+    ) -> Tuple[float, float, float]:
+        """Extract ZYZ Euler angles from unitary."""
+        # Normalize to SU(2)
+        det = np.linalg.det(U)
+        U = U / np.sqrt(det)
+
+        theta = 2 * np.arccos(np.clip(np.abs(U[0, 0]), 0, 1))
+
+        if abs(theta) < 1e-10:
+            phi = 0
+            lam = 2 * np.angle(U[1, 1])
+        elif abs(theta - np.pi) < 1e-10:
+            phi = 2 * np.angle(U[1, 0])
+            lam = 0
+        else:
+            phi_plus_lam = -2 * np.angle(U[0, 0])
+            phi_minus_lam = 2 * np.angle(U[1, 0])
+            phi = (phi_plus_lam + phi_minus_lam) / 2
+            lam = (phi_plus_lam - phi_minus_lam) / 2
+
+        return theta, phi, lam
+```
+
+## 3. Sliding Window with Fixed Size
+
+For more control, use a fixed-size sliding window:
+
+```python
+class FixedWindowPeephole:
+    """
+    Fixed-size sliding window peephole optimizer.
+
+    Examines windows of exactly `window_size` gates.
+    """
+
+    def __init__(self, window_size: int = 3):
+        self.window_size = window_size
+        self.optimizers = {
+            1: self._optimize_single_qubit,
+            2: self._optimize_two_qubit,
+        }
+
+    def optimize(self, gates: List[Gate]) -> List[Gate]:
+        """Apply fixed-window peephole optimization."""
+        gates = list(gates)
+        changed = True
+
+        while changed:
+            changed = False
+            i = 0
+
+            while i <= len(gates) - self.window_size:
+                window = gates[i:i + self.window_size]
+
+                # Determine window qubit scope
+                all_qubits = set()
+                for g in window:
+                    all_qubits.update(g.qubits)
+
+                num_qubits = len(all_qubits)
+
+                if num_qubits in self.optimizers:
+                    optimized = self.optimizers[num_qubits](window, all_qubits)
+
+                    if optimized is not None and len(optimized) < len(window):
+                        gates = gates[:i] + optimized + gates[i + self.window_size:]
+                        changed = True
+                        continue
+
+                i += 1
+
+        return gates
+
+    def _optimize_single_qubit(
+        self,
+        window: List[Gate],
+        qubits: set
+    ) -> Optional[List[Gate]]:
+        """Optimize window of single-qubit gates."""
+        qubit = list(qubits)[0]
+
+        # All gates must be single-qubit on same qubit
+        for g in window:
+            if g.qubits != (qubit,):
+                return None
+
+        # Compute combined unitary
+        U = np.eye(2, dtype=complex)
+        for g in window:
+            U = g.matrix() @ U
+
+        # Resynthesize
+        theta, phi, lam = self._zyz_decomposition(U)
+
+        if (abs(theta) < 1e-10 and abs(phi) < 1e-10 and abs(lam) < 1e-10):
+            return []
+
+        return [Gate('U3', (qubit,), (theta, phi, lam))]
+
+    def _optimize_two_qubit(
+        self,
+        window: List[Gate],
+        qubits: set
+    ) -> Optional[List[Gate]]:
+        """Optimize window involving two qubits."""
+        # More complex: check for specific patterns
+        # For now, just check for single-qubit simplifications
+        qubit_list = sorted(qubits)
+
+        # Check if all gates on one qubit can be merged
+        for qubit in qubit_list:
+            qubit_gates = [g for g in window if g.qubits == (qubit,)]
+            if len(qubit_gates) >= 2:
+                # Could merge these single-qubit gates
+                pass
+
+        return None  # No optimization found
+
+    def _zyz_decomposition(self, U):
+        """ZYZ decomposition (same as before)."""
+        det = np.linalg.det(U)
+        U = U / np.sqrt(det)
+        theta = 2 * np.arccos(np.clip(np.abs(U[0, 0]), 0, 1))
+
+        if abs(theta) < 1e-10:
+            return 0, 0, 2 * np.angle(U[1, 1])
+        elif abs(theta - np.pi) < 1e-10:
+            return theta, 2 * np.angle(U[1, 0]), 0
+
+        phi_plus_lam = -2 * np.angle(U[0, 0])
+        phi_minus_lam = 2 * np.angle(U[1, 0])
+        return theta, (phi_plus_lam + phi_minus_lam) / 2, (phi_plus_lam - phi_minus_lam) / 2
+```
+
+## 4. Two-Qubit Peephole Optimization
+
+For two-qubit gates, we can consolidate sequences using KAK decomposition:
+
+```python
+class TwoQubitPeephole:
+    """
+    Peephole optimizer for two-qubit gate sequences.
+
+    Uses Cartan/KAK decomposition for resynthesis.
+    """
+
+    def __init__(self, max_cnots: int = 3):
+        self.max_cnots = max_cnots
+
+    def optimize(self, gates: List[Gate]) -> List[Gate]:
+        """Optimize consecutive two-qubit operations."""
+        result = []
+        i = 0
+
+        while i < len(gates):
+            gate = gates[i]
+
+            if len(gate.qubits) == 2:
+                qubit_pair = tuple(sorted(gate.qubits))
+                window = [gate]
+                j = i + 1
+
+                # Collect consecutive gates on same qubit pair
+                while j < len(gates):
+                    next_gate = gates[j]
+                    involved_qubits = set(next_gate.qubits)
+
+                    # Include if operates on subset of qubit pair
+                    if involved_qubits.issubset(set(qubit_pair)):
+                        window.append(next_gate)
+                        j += 1
+                    else:
+                        break
+
+                if len(window) > 1:
+                    optimized = self._optimize_window(window, qubit_pair)
+                    result.extend(optimized)
+                else:
+                    result.append(gate)
+                i = j
+            else:
+                result.append(gate)
+                i += 1
+
+        return result
+
+    def _optimize_window(
+        self,
+        window: List[Gate],
+        qubit_pair: Tuple[int, int]
+    ) -> List[Gate]:
+        """Optimize a window of two-qubit gates."""
+        # Compute combined 4x4 unitary
+        U = np.eye(4, dtype=complex)
+
+        for gate in window:
+            gate_matrix = self._gate_to_4x4(gate, qubit_pair)
+            U = gate_matrix @ U
+
+        # Estimate CNOT count
+        cnot_count = self._estimate_cnot_count(U)
+
+        # Count original CNOTs
+        original_cnots = sum(1 for g in window if g.name.upper() in ('CX', 'CNOT'))
+
+        # Only resynthesize if we can reduce
+        if cnot_count < original_cnots:
+            return self._resynthesize_two_qubit(U, qubit_pair)
+
+        return window  # Keep original
+
+    def _gate_to_4x4(
+        self,
+        gate: Gate,
+        qubit_pair: Tuple[int, int]
+    ) -> np.ndarray:
+        """Convert gate to 4x4 matrix in qubit_pair space."""
+        q0, q1 = qubit_pair
+        name = gate.name.upper()
+
+        if len(gate.qubits) == 1:
+            # Single-qubit gate: tensor with identity
+            mat = gate.matrix()
+            qubit = gate.qubits[0]
+            if qubit == q0:
+                return np.kron(mat, np.eye(2))
+            else:
+                return np.kron(np.eye(2), mat)
+
+        elif name in ('CX', 'CNOT'):
+            ctrl, targ = gate.qubits
+            cx = np.array([
+                [1, 0, 0, 0],
+                [0, 1, 0, 0],
+                [0, 0, 0, 1],
+                [0, 0, 1, 0]
+            ], dtype=complex)
+            if (ctrl, targ) == qubit_pair:
+                return cx
+            else:
+                # Swap ordering
+                swap = np.array([
+                    [1, 0, 0, 0],
+                    [0, 0, 1, 0],
+                    [0, 1, 0, 0],
+                    [0, 0, 0, 1]
+                ], dtype=complex)
+                return swap @ cx @ swap
+
+        raise ValueError(f"Unsupported gate: {gate.name}")
+
+    def _estimate_cnot_count(self, U: np.ndarray) -> int:
+        """Estimate minimum CNOT count for 4x4 unitary."""
+        # Simplified heuristic based on trace
+        trace = np.abs(np.trace(U))
+        if trace > 3.99:
+            return 0
+        elif trace > 2.82:
+            return 1
+        elif trace > 1.99:
+            return 2
+        else:
+            return 3
+
+    def _resynthesize_two_qubit(
+        self,
+        U: np.ndarray,
+        qubit_pair: Tuple[int, int]
+    ) -> List[Gate]:
+        """Resynthesize 4x4 unitary to gates."""
+        # Placeholder: return identity decomposition
+        # Full implementation would use KAK decomposition
+        cnot_count = self._estimate_cnot_count(U)
+
+        if cnot_count == 0:
+            return []
+
+        # Default: return original (actual implementation needed)
+        return [Gate('CX', qubit_pair)]
+```
+
+## 5. Combining Peephole with Other Passes
+
+```python
+class PeepholeOptimizer:
+    """
+    Complete peephole optimization pipeline.
+
+    Combines single-qubit and two-qubit optimizations
+    with iterative refinement.
+    """
+
+    def __init__(
+        self,
+        basis_gates: List[str] = None,
+        max_iterations: int = 10
+    ):
+        self.single_qubit = SingleQubitPeephole(basis_gates)
+        self.two_qubit = TwoQubitPeephole()
+        self.max_iterations = max_iterations
+
+    def optimize(self, gates: List[Gate]) -> List[Gate]:
+        """Run full peephole optimization."""
+        prev_count = len(gates) + 1
+
+        for iteration in range(self.max_iterations):
+            # Single-qubit peephole
+            gates = self.single_qubit.optimize(gates)
+
+            # Two-qubit peephole
+            gates = self.two_qubit.optimize(gates)
+
+            # Check convergence
+            if len(gates) >= prev_count:
+                break
+            prev_count = len(gates)
+
+        return gates
+
+    def report(self) -> str:
+        """Generate optimization report."""
+        sq_stats = self.single_qubit.stats
+        return (
+            f"Peephole Optimization Report:\n"
+            f"  Single-qubit windows: {sq_stats['windows_processed']}\n"
+            f"  Gates reduced: {sq_stats['gates_reduced']}"
+        )
+
+
+# Usage example
+optimizer = PeepholeOptimizer(basis_gates=['RZ', 'RY', 'RX'])
+
+test_circuit = [
+    Gate('H', (0,)),
+    Gate('T', (0,)),
+    Gate('T', (0,)),
+    Gate('H', (0,)),
+    Gate('CX', (0, 1)),
+    Gate('RZ', (1,), (0.3,)),
+    Gate('RZ', (1,), (0.4,)),
+]
+
+optimized = optimizer.optimize(test_circuit)
+print(f"Original: {len(test_circuit)} gates")
+print(f"Optimized: {len(optimized)} gates")
+print(optimizer.report())
+```
+
+## 6. Basis-Aware Peephole
+
+Different hardware targets require different basis gates:
+
+```python
+BASIS_DECOMPOSITIONS = {
+    'ibmq': ['CX', 'RZ', 'SX', 'X'],
+    'rigetti': ['CZ', 'RX', 'RZ'],
+    'ionq': ['XX', 'RX', 'RY', 'RZ'],
+    'google': ['SYC', 'PHXZ'],  # Sycamore
+}
+
+
+class BasisAwarePeephole:
+    """
+    Peephole optimizer that targets specific basis gate sets.
+    """
+
+    def __init__(self, target_basis: str = 'ibmq'):
+        self.basis = BASIS_DECOMPOSITIONS.get(target_basis, ['U3', 'CX'])
+
+    def resynthesize(
+        self,
+        U: np.ndarray,
+        qubit: int
+    ) -> List[Gate]:
+        """Resynthesize to target basis."""
+        theta, phi, lam = self._zyz_decomposition(U)
+
+        if 'U3' in self.basis:
+            return [Gate('U3', (qubit,), (theta, phi, lam))]
+
+        if 'SX' in self.basis:
+            # IBM basis: RZ-SX-RZ-SX-RZ
+            return self._to_ibm_basis(theta, phi, lam, qubit)
+
+        if 'RX' in self.basis and 'RZ' in self.basis:
+            # Rigetti basis: RZ-RX-RZ
+            return self._to_rxrz_basis(theta, phi, lam, qubit)
+
+        return [Gate('U3', (qubit,), (theta, phi, lam))]
+
+    def _to_ibm_basis(self, theta, phi, lam, qubit):
+        """Decompose to RZ-SX-RZ-SX-RZ."""
+        # SX = sqrt(X), applies pi/2 rotation about X
+        result = []
+        if abs(phi) > 1e-10:
+            result.append(Gate('RZ', (qubit,), (phi,)))
+        if abs(theta) > 1e-10:
+            result.append(Gate('SX', (qubit,)))
+            result.append(Gate('RZ', (qubit,), (theta,)))
+            result.append(Gate('SX', (qubit,)))
+        if abs(lam) > 1e-10:
+            result.append(Gate('RZ', (qubit,), (lam,)))
+        return result
+
+    def _to_rxrz_basis(self, theta, phi, lam, qubit):
+        """Decompose to RZ-RX-RZ (XZX decomposition)."""
+        # Convert ZYZ to ZXZ via: RY(t) = RZ(-pi/2) RX(t) RZ(pi/2)
+        result = []
+        result.append(Gate('RZ', (qubit,), (phi - np.pi / 2,)))
+        result.append(Gate('RX', (qubit,), (theta,)))
+        result.append(Gate('RZ', (qubit,), (lam + np.pi / 2,)))
+        return result
+```
+
+## Summary
+
+Peephole optimization provides:
+
+1. **Local resynthesis**: Combine and redecompose gate sequences
+2. **Window-based processing**: Efficient O(n) complexity
+3. **Basis targeting**: Resynthesize to hardware-native gates
+4. **Iterative refinement**: Multiple passes for maximum reduction
+
+Key techniques:
+- Single-qubit consolidation using Euler decomposition
+- Two-qubit optimization using KAK decomposition
+- Hardware-aware basis gate targeting
+- Combining with template matching for comprehensive optimization

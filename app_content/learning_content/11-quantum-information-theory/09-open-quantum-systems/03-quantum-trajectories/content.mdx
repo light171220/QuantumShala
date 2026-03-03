@@ -1,0 +1,690 @@
+---
+title: "Quantum Trajectories and Unravellings"
+description: "Learn about stochastic descriptions of open quantum system dynamics through quantum trajectories and Monte Carlo wave function methods."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the concept of quantum trajectories as stochastic unravellings
+- Implement the quantum jump Monte Carlo method
+- Calculate ensemble averages to recover master equation dynamics
+- Distinguish between different unravelling schemes
+- Apply quantum trajectory methods to simulate open system dynamics
+
+## 1. Motivation: Beyond the Master Equation
+
+The Lindblad master equation describes the average evolution of an open quantum system. But what about individual realizations?
+
+<Definition term="Quantum Trajectory">
+A quantum trajectory is a stochastic realization of open system dynamics for a single system. The ensemble average of many trajectories recovers the master equation evolution.
+</Definition>
+
+**Why use quantum trajectories?**
+- Computationally efficient for large Hilbert spaces
+- Natural description of continuous measurement
+- Provides insight into individual system behavior
+- Enables efficient Monte Carlo simulation
+
+## 2. The Quantum Jump Method
+
+<Definition term="Quantum Jump Unravelling">
+In the quantum jump picture, the system evolves under a non-Hermitian effective Hamiltonian punctuated by discrete "jumps" associated with Lindblad operators.
+</Definition>
+
+<Formula>
+**Effective Hamiltonian:**
+$$H_{\text{eff}} = H - \frac{i\hbar}{2}\sum_k \gamma_k L_k^\dagger L_k$$
+
+**No-jump evolution:**
+$$|\psi(t+dt)\rangle = \frac{(1 - iH_{\text{eff}}dt/\hbar)|\psi(t)\rangle}{\|...\|}$$
+
+**Jump probability in time dt:**
+$$dp_k = \gamma_k dt \langle\psi|L_k^\dagger L_k|\psi\rangle$$
+
+**State after jump k:**
+$$|\psi\rangle \rightarrow \frac{L_k|\psi\rangle}{\|L_k|\psi\rangle\|}$$
+</Formula>
+
+<Example>
+```python
+import numpy as np
+
+def quantum_jump_step(psi: np.ndarray, H: np.ndarray,
+                      L_ops: list, gamma: list, dt: float) -> tuple:
+    """
+    Single step of quantum jump evolution.
+
+    Returns: (new_psi, jumped, which_jump)
+    """
+    # Effective Hamiltonian
+    H_eff = H.copy()
+    for L, g in zip(L_ops, gamma):
+        H_eff -= 0.5j * g * (L.conj().T @ L)
+
+    # Calculate jump probabilities
+    dp_total = 0
+    dp_list = []
+    for L, g in zip(L_ops, gamma):
+        dp = g * dt * np.real(psi.conj().T @ (L.conj().T @ L) @ psi)[0, 0]
+        dp_list.append(dp)
+        dp_total += dp
+
+    # Random number for jump decision
+    r = np.random.random()
+
+    if r < dp_total:
+        # Jump occurs - determine which one
+        cumsum = 0
+        for k, dp in enumerate(dp_list):
+            cumsum += dp
+            if r < cumsum:
+                # Jump with operator L_k
+                psi_new = L_ops[k] @ psi
+                psi_new = psi_new / np.linalg.norm(psi_new)
+                return psi_new, True, k
+
+    # No jump - non-unitary evolution
+    psi_new = (np.eye(len(psi)) - 1j * H_eff * dt) @ psi
+    psi_new = psi_new / np.linalg.norm(psi_new)
+    return psi_new, False, None
+
+def run_trajectory(psi0: np.ndarray, H: np.ndarray, L_ops: list,
+                   gamma: list, times: np.ndarray) -> dict:
+    """Run a single quantum trajectory."""
+    dt = times[1] - times[0]
+    psi = psi0.copy()
+
+    states = [psi.copy()]
+    jumps = []
+
+    for i, t in enumerate(times[:-1]):
+        psi, jumped, which = quantum_jump_step(psi, H, L_ops, gamma, dt)
+        states.append(psi.copy())
+        if jumped:
+            jumps.append((t, which))
+
+    return {'states': states, 'jumps': jumps, 'times': times}
+
+# Example: Spontaneous emission
+H = np.zeros((2, 2), dtype=complex)
+sigma_m = np.array([[0, 0], [1, 0]], dtype=complex)
+L_ops = [sigma_m]
+gamma = [1.0]
+
+# Initial excited state
+psi0 = np.array([[0], [1]], dtype=complex)
+
+times = np.linspace(0, 5, 500)
+
+# Run single trajectory
+np.random.seed(42)
+traj = run_trajectory(psi0, H, L_ops, gamma, times)
+
+print("Single quantum trajectory:")
+print(f"Number of jumps: {len(traj['jumps'])}")
+for t, k in traj['jumps'][:5]:
+    print(f"  Jump at t = {t:.3f}")
+
+# Extract excited state probability
+p_excited = [np.abs(psi[1, 0])**2 for psi in traj['states']]
+print(f"\nInitial P(|1⟩): {p_excited[0]:.4f}")
+print(f"Final P(|1⟩): {p_excited[-1]:.4f}")
+```
+</Example>
+
+## 3. Ensemble Averaging
+
+<Tip>
+The power of quantum trajectories lies in ensemble averaging: the average over many trajectories recovers the exact master equation solution.
+</Tip>
+
+<Formula>
+$$\rho(t) = \mathbb{E}[|\psi(t)\rangle\langle\psi(t)|] = \frac{1}{N}\sum_{n=1}^N |\psi_n(t)\rangle\langle\psi_n(t)|$$
+</Formula>
+
+<Example>
+```python
+import numpy as np
+
+def ensemble_average(psi0: np.ndarray, H: np.ndarray, L_ops: list,
+                     gamma: list, times: np.ndarray, n_trajectories: int) -> list:
+    """
+    Run many trajectories and compute ensemble average.
+    """
+    dim = len(psi0)
+    n_times = len(times)
+
+    # Accumulate density matrices
+    rho_sum = [np.zeros((dim, dim), dtype=complex) for _ in range(n_times)]
+
+    for n in range(n_trajectories):
+        traj = run_trajectory(psi0, H, L_ops, gamma, times)
+        for i, psi in enumerate(traj['states']):
+            rho_sum[i] += psi @ psi.conj().T
+
+    # Average
+    rho_avg = [rho / n_trajectories for rho in rho_sum]
+    return rho_avg
+
+def lindblad_exact(rho0: np.ndarray, H: np.ndarray, L_ops: list,
+                   gamma: list, t: float) -> np.ndarray:
+    """Exact Lindblad evolution using superoperator."""
+    from scipy.linalg import expm
+
+    dim = rho0.shape[0]
+    I = np.eye(dim, dtype=complex)
+
+    # Build Lindbladian
+    L_H = -1j * (np.kron(H, I) - np.kron(I, H.T))
+    L_D = np.zeros((dim**2, dim**2), dtype=complex)
+
+    for L, g in zip(L_ops, gamma):
+        L_D += g * np.kron(L.conj(), L)
+        LdL = L.conj().T @ L
+        L_D -= 0.5 * g * (np.kron(LdL.T, I) + np.kron(I, LdL))
+
+    L_total = L_H + L_D
+    rho_vec = expm(L_total * t) @ rho0.flatten()
+    return rho_vec.reshape((dim, dim))
+
+# Compare Monte Carlo to exact solution
+H = np.zeros((2, 2), dtype=complex)
+sigma_m = np.array([[0, 0], [1, 0]], dtype=complex)
+L_ops = [sigma_m]
+gamma = [1.0]
+
+psi0 = np.array([[0], [1]], dtype=complex)
+rho0 = psi0 @ psi0.conj().T
+
+times = np.linspace(0, 3, 100)
+
+print("Comparing Monte Carlo to exact Lindblad:")
+print(f"{'N_traj':<10} {'Max Error':<15} {'Avg Error':<15}")
+
+for n_traj in [10, 100, 500, 2000]:
+    np.random.seed(0)
+    rho_mc = ensemble_average(psi0, H, L_ops, gamma, times, n_traj)
+
+    errors = []
+    for i, t in enumerate(times):
+        rho_exact = lindblad_exact(rho0, H, L_ops, gamma, t)
+        error = np.linalg.norm(rho_mc[i] - rho_exact)
+        errors.append(error)
+
+    print(f"{n_traj:<10} {max(errors):<15.6f} {np.mean(errors):<15.6f}")
+```
+</Example>
+
+## 4. Jump Statistics and Waiting Times
+
+<Definition term="Waiting Time Distribution">
+The waiting time between quantum jumps follows an exponential distribution when the system is in a stationary state. The rate depends on the jump operators and the current state.
+</Definition>
+
+<Formula>
+For a system in state $|\psi\rangle$, the total jump rate is:
+$$\Gamma(t) = \sum_k \gamma_k \langle\psi(t)|L_k^\dagger L_k|\psi(t)\rangle$$
+The waiting time distribution is: $P(\tau) = \Gamma e^{-\Gamma\tau}$
+</Formula>
+
+<Example>
+```python
+import numpy as np
+
+def collect_jump_statistics(psi0: np.ndarray, H: np.ndarray, L_ops: list,
+                            gamma: list, t_max: float, n_trajectories: int) -> dict:
+    """
+    Collect statistics on quantum jumps.
+    """
+    times = np.linspace(0, t_max, int(t_max * 100))
+
+    all_jump_times = []
+    all_waiting_times = []
+    total_jumps = 0
+
+    for _ in range(n_trajectories):
+        traj = run_trajectory(psi0, H, L_ops, gamma, times)
+        jump_times = [t for t, _ in traj['jumps']]
+        all_jump_times.extend(jump_times)
+        total_jumps += len(jump_times)
+
+        # Calculate waiting times
+        if len(jump_times) > 1:
+            waiting = np.diff(jump_times)
+            all_waiting_times.extend(waiting)
+
+    return {
+        'jump_times': np.array(all_jump_times),
+        'waiting_times': np.array(all_waiting_times),
+        'total_jumps': total_jumps,
+        'mean_jumps': total_jumps / n_trajectories
+    }
+
+# Analyze jump statistics for decaying qubit
+H = np.zeros((2, 2), dtype=complex)
+sigma_m = np.array([[0, 0], [1, 0]], dtype=complex)
+L_ops = [sigma_m]
+gamma_val = 1.0
+gamma = [gamma_val]
+
+psi0 = np.array([[0], [1]], dtype=complex)
+
+np.random.seed(42)
+stats = collect_jump_statistics(psi0, H, L_ops, gamma, t_max=10, n_trajectories=1000)
+
+print("Jump Statistics for Decaying Qubit:")
+print(f"Total jumps observed: {stats['total_jumps']}")
+print(f"Mean jumps per trajectory: {stats['mean_jumps']:.2f}")
+print(f"Expected (for |1⟩ → |0⟩): 1.0")
+
+if len(stats['waiting_times']) > 0:
+    mean_waiting = np.mean(stats['waiting_times'])
+    print(f"\nMean waiting time: {mean_waiting:.4f}")
+    print(f"Expected (1/gamma): {1/gamma_val:.4f}")
+
+# Jump time distribution
+print(f"\nJump time distribution:")
+bins = np.linspace(0, 5, 11)
+hist, _ = np.histogram(stats['jump_times'], bins=bins)
+for i in range(len(bins)-1):
+    print(f"  t in [{bins[i]:.1f}, {bins[i+1]:.1f}): {hist[i]} jumps")
+```
+</Example>
+
+## 5. Different Unravellings
+
+<Definition term="Unravelling">
+An unravelling is a specific way of decomposing master equation dynamics into stochastic trajectories. Different unravellings correspond to different measurement schemes on the environment.
+</Definition>
+
+**Common unravellings:**
+1. **Quantum jumps**: Discrete jumps with photon counting
+2. **Quantum diffusion**: Continuous evolution with homodyne detection
+3. **Heterodyne detection**: Complex-valued diffusion
+
+<Formula>
+**Quantum diffusion (homodyne) unravelling:**
+$$d|\psi\rangle = \left[-\frac{i}{\hbar}H_{eff}dt + \sum_k \sqrt{\gamma_k}(L_k - \langle L_k\rangle)dW_k\right]|\psi\rangle$$
+where $dW_k$ are independent Wiener increments with $\mathbb{E}[dW] = 0$, $\mathbb{E}[dW^2] = dt$.
+</Formula>
+
+<Example>
+```python
+import numpy as np
+
+def quantum_diffusion_step(psi: np.ndarray, H: np.ndarray,
+                           L_ops: list, gamma: list, dt: float) -> np.ndarray:
+    """
+    Single step of quantum diffusion (homodyne) evolution.
+    """
+    # Effective Hamiltonian
+    H_eff = H.copy()
+    for L, g in zip(L_ops, gamma):
+        H_eff -= 0.5j * g * (L.conj().T @ L)
+
+    # Deterministic part
+    dpsi = -1j * H_eff @ psi * dt
+
+    # Stochastic part (Wiener increments)
+    for L, g in zip(L_ops, gamma):
+        # Expectation value
+        L_exp = (psi.conj().T @ L @ psi)[0, 0]
+        # Wiener increment
+        dW = np.random.normal(0, np.sqrt(dt))
+        dpsi += np.sqrt(g) * (L - L_exp * np.eye(len(psi))) @ psi * dW
+
+    psi_new = psi + dpsi
+    psi_new = psi_new / np.linalg.norm(psi_new)
+    return psi_new
+
+def run_diffusion_trajectory(psi0: np.ndarray, H: np.ndarray, L_ops: list,
+                              gamma: list, times: np.ndarray) -> dict:
+    """Run a quantum diffusion trajectory."""
+    dt = times[1] - times[0]
+    psi = psi0.copy()
+
+    states = [psi.copy()]
+    measurements = []  # Homodyne current
+
+    for i, t in enumerate(times[:-1]):
+        # Record homodyne measurement
+        for L, g in zip(L_ops, gamma):
+            L_exp = np.real((psi.conj().T @ (L + L.conj().T) @ psi)[0, 0])
+            measurements.append(L_exp)
+
+        psi = quantum_diffusion_step(psi, H, L_ops, gamma, dt)
+        states.append(psi.copy())
+
+    return {'states': states, 'measurements': measurements, 'times': times}
+
+# Compare jump and diffusion unravellings
+H = np.zeros((2, 2), dtype=complex)
+sigma_m = np.array([[0, 0], [1, 0]], dtype=complex)
+L_ops = [sigma_m]
+gamma = [1.0]
+
+psi0 = np.array([[0], [1]], dtype=complex)
+times = np.linspace(0, 3, 300)
+
+print("Comparing Unravelling Methods:")
+print("=" * 50)
+
+# Single trajectories
+np.random.seed(42)
+traj_jump = run_trajectory(psi0, H, L_ops, gamma, times)
+np.random.seed(42)
+traj_diff = run_diffusion_trajectory(psi0, H, L_ops, gamma, times)
+
+# Compare at specific times
+print("\nSingle trajectory comparison (P(|1⟩)):")
+for t_idx in [0, 50, 100, 200, 299]:
+    p_jump = np.abs(traj_jump['states'][t_idx][1, 0])**2
+    p_diff = np.abs(traj_diff['states'][t_idx][1, 0])**2
+    print(f"  t = {times[t_idx]:.2f}: Jump = {p_jump:.4f}, Diffusion = {p_diff:.4f}")
+
+# Ensemble comparison
+print("\nEnsemble averages (100 trajectories):")
+n_traj = 100
+rho0 = psi0 @ psi0.conj().T
+
+for t_idx in [50, 150, 299]:
+    t = times[t_idx]
+
+    # Jump ensemble
+    p_jump_list = []
+    for _ in range(n_traj):
+        traj = run_trajectory(psi0, H, L_ops, gamma, times)
+        p_jump_list.append(np.abs(traj['states'][t_idx][1, 0])**2)
+
+    # Diffusion ensemble
+    p_diff_list = []
+    for _ in range(n_traj):
+        traj = run_diffusion_trajectory(psi0, H, L_ops, gamma, times)
+        p_diff_list.append(np.abs(traj['states'][t_idx][1, 0])**2)
+
+    # Exact
+    rho_exact = lindblad_exact(rho0, H, L_ops, gamma, t)
+    p_exact = np.real(rho_exact[1, 1])
+
+    print(f"\n  t = {t:.2f}:")
+    print(f"    Jump avg: {np.mean(p_jump_list):.4f} +/- {np.std(p_jump_list):.4f}")
+    print(f"    Diff avg: {np.mean(p_diff_list):.4f} +/- {np.std(p_diff_list):.4f}")
+    print(f"    Exact: {p_exact:.4f}")
+```
+</Example>
+
+## 6. Efficient Monte Carlo Simulation
+
+<Tip>
+For large Hilbert spaces, quantum trajectory methods can be exponentially more efficient than direct master equation integration because they work with pure states instead of density matrices.
+</Tip>
+
+<Example>
+```python
+import numpy as np
+import time
+
+def benchmark_methods(dim: int, n_times: int = 100):
+    """
+    Compare computational cost of trajectory vs master equation.
+    """
+    # Random Hamiltonian and jump operator
+    H = np.random.randn(dim, dim) + 1j * np.random.randn(dim, dim)
+    H = (H + H.conj().T) / 2  # Make Hermitian
+
+    L = np.random.randn(dim, dim) + 1j * np.random.randn(dim, dim)
+    L = L / np.linalg.norm(L)  # Normalize
+
+    L_ops = [L]
+    gamma = [0.1]
+
+    # Random initial state
+    psi0 = np.random.randn(dim, 1) + 1j * np.random.randn(dim, 1)
+    psi0 = psi0 / np.linalg.norm(psi0)
+    rho0 = psi0 @ psi0.conj().T
+
+    times = np.linspace(0, 1, n_times)
+
+    # Time trajectory method
+    start = time.time()
+    traj = run_trajectory(psi0, H, L_ops, gamma, times)
+    time_traj = time.time() - start
+
+    # Time master equation (if feasible)
+    if dim <= 32:
+        start = time.time()
+        rho_final = lindblad_exact(rho0, H, L_ops, gamma, times[-1])
+        time_master = time.time() - start
+    else:
+        time_master = np.inf
+
+    return {
+        'dim': dim,
+        'state_size': dim,
+        'density_matrix_size': dim * dim,
+        'time_trajectory': time_traj,
+        'time_master': time_master,
+        'speedup': time_master / time_traj if time_master < np.inf else np.inf
+    }
+
+print("Computational Scaling Comparison")
+print("=" * 60)
+print(f"{'Dim':<8} {'State':<10} {'DM':<10} {'Traj (s)':<12} {'Master (s)':<12} {'Speedup':<10}")
+
+for dim in [4, 8, 16, 32]:
+    result = benchmark_methods(dim)
+    print(f"{result['dim']:<8} {result['state_size']:<10} "
+          f"{result['density_matrix_size']:<10} "
+          f"{result['time_trajectory']:<12.4f} "
+          f"{result['time_master']:<12.4f} "
+          f"{result['speedup']:<10.1f}")
+
+print("\nNote: Trajectory method scales as O(d^2) per step,")
+print("      Master equation scales as O(d^4) for superoperator.")
+```
+</Example>
+
+## 7. Physical Interpretation
+
+<Definition term="Continuous Measurement">
+Quantum trajectories correspond to conditioning the system state on continuous measurement of the environment. Different unravellings correspond to different measurement schemes.
+</Definition>
+
+**Physical correspondence:**
+- **Quantum jumps** ↔ Photon counting (click detectors)
+- **Homodyne diffusion** ↔ Homodyne detection (interferometry)
+- **Heterodyne diffusion** ↔ Heterodyne detection (phase-sensitive)
+
+<Example>
+```python
+import numpy as np
+
+def simulate_photon_detection(psi0: np.ndarray, H: np.ndarray,
+                               L_ops: list, gamma: list,
+                               times: np.ndarray) -> dict:
+    """
+    Simulate a photon counting experiment.
+    Returns click times and system state.
+    """
+    traj = run_trajectory(psi0, H, L_ops, gamma, times)
+
+    return {
+        'click_times': [t for t, _ in traj['jumps']],
+        'final_state': traj['states'][-1],
+        'trajectory': traj
+    }
+
+def conditional_state_given_clicks(click_times: list, psi0: np.ndarray,
+                                    H: np.ndarray, L_ops: list, gamma: list,
+                                    t_final: float) -> np.ndarray:
+    """
+    Calculate the conditional state given observed clicks.
+    """
+    dt = 0.001
+    times = np.arange(0, t_final, dt)
+    psi = psi0.copy()
+
+    click_idx = 0
+    for t in times:
+        if click_idx < len(click_times) and t >= click_times[click_idx]:
+            # Jump occurred
+            L = L_ops[0]
+            psi = L @ psi
+            psi = psi / np.linalg.norm(psi)
+            click_idx += 1
+        else:
+            # No-jump evolution
+            H_eff = H.copy()
+            for L, g in zip(L_ops, gamma):
+                H_eff -= 0.5j * g * (L.conj().T @ L)
+            psi = (np.eye(len(psi)) - 1j * H_eff * dt) @ psi
+            psi = psi / np.linalg.norm(psi)
+
+    return psi
+
+# Simulate photon detection experiment
+print("Photon Detection Simulation")
+print("=" * 50)
+
+H = np.zeros((2, 2), dtype=complex)
+sigma_m = np.array([[0, 0], [1, 0]], dtype=complex)
+L_ops = [sigma_m]
+gamma = [1.0]
+
+psi0 = np.array([[0], [1]], dtype=complex)
+times = np.linspace(0, 5, 1000)
+
+# Run several experiments
+print("\nSimulated experiments (starting from |1⟩):")
+for exp in range(5):
+    np.random.seed(exp)
+    result = simulate_photon_detection(psi0, H, L_ops, gamma, times)
+    n_clicks = len(result['click_times'])
+    if n_clicks > 0:
+        first_click = result['click_times'][0]
+    else:
+        first_click = None
+
+    final_p1 = np.abs(result['final_state'][1, 0])**2
+    print(f"  Exp {exp+1}: {n_clicks} click(s), first at t = {first_click}, "
+          f"final P(|1⟩) = {final_p1:.4f}")
+
+# Conditional state analysis
+print("\nConditional state given no clicks until time t:")
+H_eff = H - 0.5j * gamma[0] * (sigma_m.conj().T @ sigma_m)
+for t in [0.5, 1.0, 2.0, 3.0]:
+    # No-click evolution
+    from scipy.linalg import expm
+    U_eff = expm(-1j * H_eff * t)
+    psi_no_click = U_eff @ psi0
+    psi_no_click = psi_no_click / np.linalg.norm(psi_no_click)
+    p1 = np.abs(psi_no_click[1, 0])**2
+    print(f"  t = {t:.1f}: P(|1⟩ | no click) = {p1:.4f}")
+```
+</Example>
+
+## 8. Applications
+
+Quantum trajectories are essential for:
+- **Quantum feedback control**: Real-time state estimation
+- **Quantum error correction**: Syndrome extraction simulation
+- **Cavity QED**: Photon emission and detection
+- **Ion traps**: Quantum jump spectroscopy
+
+<Example>
+```python
+import numpy as np
+
+def quantum_feedback_simulation(psi0: np.ndarray, times: np.ndarray,
+                                 gamma: float, feedback_strength: float):
+    """
+    Simulate quantum feedback to stabilize excited state.
+
+    When decay is detected, apply a pi pulse to re-excite.
+    """
+    H = np.zeros((2, 2), dtype=complex)
+    sigma_m = np.array([[0, 0], [1, 0]], dtype=complex)
+    sigma_x = np.array([[0, 1], [1, 0]], dtype=complex)
+
+    L_ops = [sigma_m]
+    gamma_list = [gamma]
+
+    dt = times[1] - times[0]
+    psi = psi0.copy()
+
+    p_excited = [np.abs(psi[1, 0])**2]
+    feedback_events = []
+
+    for i, t in enumerate(times[:-1]):
+        psi_new, jumped, which = quantum_jump_step(psi, H, L_ops, gamma_list, dt)
+
+        if jumped:
+            # Decay detected! Apply feedback (pi pulse)
+            psi_new = sigma_x @ psi_new
+            psi_new = psi_new / np.linalg.norm(psi_new)
+            feedback_events.append(t)
+
+        psi = psi_new
+        p_excited.append(np.abs(psi[1, 0])**2)
+
+    return {
+        'p_excited': p_excited,
+        'feedback_events': feedback_events,
+        'times': times
+    }
+
+# Compare with and without feedback
+gamma = 1.0
+times = np.linspace(0, 10, 1000)
+psi0 = np.array([[0], [1]], dtype=complex)
+
+print("Quantum Feedback Control Simulation")
+print("=" * 50)
+
+# Without feedback
+np.random.seed(42)
+traj_no_fb = run_trajectory(psi0, np.zeros((2,2), dtype=complex),
+                            [np.array([[0,0],[1,0]], dtype=complex)],
+                            [gamma], times)
+p_no_fb = [np.abs(psi[1,0])**2 for psi in traj_no_fb['states']]
+
+# With feedback
+np.random.seed(42)
+result_fb = quantum_feedback_simulation(psi0, times, gamma, 1.0)
+
+print(f"\nWithout feedback:")
+print(f"  Jumps: {len(traj_no_fb['jumps'])}")
+print(f"  Average P(|1⟩): {np.mean(p_no_fb):.4f}")
+print(f"  Final P(|1⟩): {p_no_fb[-1]:.4f}")
+
+print(f"\nWith feedback:")
+print(f"  Feedback events: {len(result_fb['feedback_events'])}")
+print(f"  Average P(|1⟩): {np.mean(result_fb['p_excited']):.4f}")
+print(f"  Final P(|1⟩): {result_fb['p_excited'][-1]:.4f}")
+```
+</Example>
+
+## Summary
+
+In this lesson, you learned about quantum trajectories:
+
+1. **Quantum trajectories** are stochastic realizations of open system dynamics
+2. **Quantum jump method**: Evolution under $H_{eff}$ with discrete jumps
+3. **Ensemble average** recovers the master equation solution
+4. **Different unravellings** correspond to different measurement schemes
+5. **Computational advantage** for large Hilbert spaces
+6. **Physical interpretation**: Continuous measurement of environment
+
+<Warning>
+Individual trajectories depend on the choice of unravelling and have physical meaning only when related to a specific measurement scheme.
+</Warning>
+
+## Further Reading
+
+- Previous: Decoherence Models
+- Next: Non-Markovian Dynamics
+- Related: Quantum Measurement, Quantum Feedback Control

@@ -22,12 +22,16 @@ import {
   BarChart3,
   XCircle,
   ExternalLink,
+  ChevronRight,
+  Lightbulb,
+  Target,
 } from 'lucide-react'
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs'
 import { Badge } from '@/components/ui/Badge'
 import { Progress } from '@/components/ui/Progress'
+import { Modal } from '@/components/ui/Modal'
 import { KeyViewer } from '@/components/pqc/KeyViewer'
 import { BenchmarkChart } from '@/components/pqc/BenchmarkChart'
 import { MLKEM, type MLKEMKeyPair } from '@/lib/pqc/kem/ml-kem'
@@ -131,6 +135,64 @@ const ATTACK_TARGETS = [
   { id: 'aes-256', name: 'AES-256', bits: 256, type: 'symmetric' as const },
 ]
 
+const PQC_GUIDE_SECTIONS = [
+  {
+    icon: Key,
+    title: 'Cryptographic Sandbox',
+    color: 'from-green-500 to-emerald-500',
+    description: 'Generate and test post-quantum cryptographic keys interactively.',
+    features: [
+      'ML-KEM (Kyber): Key encapsulation for secure key exchange',
+      'ML-DSA (Dilithium): Digital signatures for authentication',
+      'Multiple security levels (NIST Levels 1-5)',
+      'Real key generation, encapsulation, and signing operations',
+    ]
+  },
+  {
+    icon: AlertTriangle,
+    title: 'Attack Simulator',
+    color: 'from-red-500 to-orange-500',
+    description: 'Visualize how quantum computers threaten classical cryptography.',
+    features: [
+      "Shor's algorithm: Breaks RSA and ECC in polynomial time",
+      "Grover's algorithm: Reduces symmetric key security by half",
+      'Resource estimates for breaking different key sizes',
+      'Timeline projections for cryptographically relevant quantum computers',
+    ]
+  },
+  {
+    icon: FileCheck,
+    title: 'Migration Checklist',
+    color: 'from-blue-500 to-cyan-500',
+    description: 'Track your organization\'s progress toward quantum-safe cryptography.',
+    features: [
+      'Cryptographic inventory assessment',
+      'Hybrid classical + PQC deployment strategy',
+      'TLS 1.3 with post-quantum key exchange',
+      'HSM and PKI migration planning',
+    ]
+  },
+  {
+    icon: BarChart3,
+    title: 'Benchmarks',
+    color: 'from-purple-500 to-pink-500',
+    description: 'Measure real performance of post-quantum algorithms in your browser.',
+    features: [
+      'Key generation speed for all variants',
+      'Encapsulation/decapsulation timing',
+      'Signature creation and verification performance',
+      'Comparison with classical cryptography overhead',
+    ]
+  },
+]
+
+const PQC_QUICK_START = [
+  { step: 1, text: 'Select a post-quantum algorithm (ML-KEM or ML-DSA)' },
+  { step: 2, text: 'Click "Generate Keys" to create a key pair' },
+  { step: 3, text: 'For KEM: Encapsulate to create shared secret' },
+  { step: 4, text: 'For DSA: Sign a message and verify the signature' },
+]
+
 const MIGRATION_CHECKLIST = [
   { id: 'inventory', name: 'Cryptographic Inventory', description: 'Catalog all crypto assets', status: 'pending' },
   { id: 'risk', name: 'Risk Assessment', description: 'Evaluate quantum threat timeline', status: 'pending' },
@@ -170,6 +232,7 @@ export default function PQCLabPage() {
 
   const [checklist, setChecklist] = useState(MIGRATION_CHECKLIST)
   const [benchmarkResults, setBenchmarkResults] = useState<{ algorithm: string; variant: string; operation: 'keygen' | 'encaps' | 'decaps' | 'sign' | 'verify'; timeMs: number; iterations: number }[]>([])
+  const [showGuide, setShowGuide] = useState(false)
 
   const handleGenerateKeys = useCallback(async () => {
     setIsGenerating(true)
@@ -372,8 +435,13 @@ export default function PQCLabPage() {
         </div>
         <div className="flex items-center gap-2">
           <Badge variant="success" size="sm">FIPS Standards</Badge>
-          <Button variant="secondary" leftIcon={<BookOpen className="w-4 h-4" />} size="sm">
-            <span className="hidden sm:inline">Docs</span>
+          <Button
+            variant="secondary"
+            leftIcon={<BookOpen className="w-4 h-4" />}
+            size="sm"
+            onClick={() => setShowGuide(true)}
+          >
+            <span className="hidden sm:inline">Guide</span>
           </Button>
         </div>
       </div>
@@ -868,6 +936,94 @@ export default function PQCLabPage() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      <Modal
+        isOpen={showGuide}
+        onClose={() => setShowGuide(false)}
+        title="PQC Lab Guide"
+        description="Learn about post-quantum cryptography and quantum-safe algorithms"
+        size="full"
+        variant="neumorph"
+      >
+        <div className="space-y-6 max-h-[60vh] overflow-y-auto pr-2">
+          <div className="bg-gradient-to-r from-green-500/10 to-emerald-500/10 border border-green-500/20 rounded-xl p-4">
+            <h3 className="text-white font-semibold mb-3 flex items-center gap-2">
+              <Zap className="w-5 h-5 text-green-400" />
+              Quick Start
+            </h3>
+            <div className="space-y-2">
+              {PQC_QUICK_START.map(({ step, text }) => (
+                <div key={step} className="flex items-center gap-3">
+                  <div className="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center text-xs font-bold text-green-400">
+                    {step}
+                  </div>
+                  <span className="text-sm text-slate-300">{text}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {PQC_GUIDE_SECTIONS.map((section) => (
+              <div
+                key={section.title}
+                className="bg-neumorph-darker rounded-xl p-4 border border-white/5"
+              >
+                <div className="flex items-start gap-3 mb-3">
+                  <div className={`w-10 h-10 rounded-lg bg-gradient-to-br ${section.color} flex items-center justify-center flex-shrink-0`}>
+                    <section.icon className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <h4 className="text-white font-semibold">{section.title}</h4>
+                    <p className="text-xs text-slate-400 mt-0.5">{section.description}</p>
+                  </div>
+                </div>
+                <ul className="space-y-1.5">
+                  {section.features.map((feature, idx) => (
+                    <li key={idx} className="flex items-start gap-2 text-xs text-slate-300">
+                      <ChevronRight className="w-3 h-3 text-slate-500 mt-0.5 flex-shrink-0" />
+                      <span>{feature}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+
+          <div className="bg-neumorph-darker rounded-xl p-4 border border-white/5">
+            <h3 className="text-white font-semibold mb-2 flex items-center gap-2">
+              <Lightbulb className="w-4 h-4 text-yellow-400" />
+              Why Post-Quantum Cryptography?
+            </h3>
+            <p className="text-sm text-slate-300 leading-relaxed">
+              <span className="text-green-400 font-medium">Post-Quantum Cryptography (PQC)</span> refers to cryptographic algorithms that are secure against attacks by quantum computers. Shor's algorithm can break RSA and ECC, which protect most of today's internet. NIST has standardized ML-KEM (FIPS 203) and ML-DSA (FIPS 204) as quantum-resistant replacements.
+            </p>
+            <div className="mt-3 flex items-center gap-4 text-xs">
+              <div className="flex items-center gap-1.5">
+                <Target className="w-4 h-4 text-blue-400" />
+                <span className="text-slate-400">Start migrating now: "Harvest now, decrypt later" attacks</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-neumorph-darker rounded-xl p-4 border border-white/5">
+            <h3 className="text-white font-semibold mb-2 flex items-center gap-2">
+              <Shield className="w-4 h-4 text-green-400" />
+              NIST Standards
+            </h3>
+            <div className="grid grid-cols-2 gap-3 mt-3">
+              <div className="p-3 rounded-lg bg-neumorph-base border border-white/5">
+                <div className="text-green-400 font-semibold text-sm">FIPS 203</div>
+                <div className="text-xs text-slate-400">ML-KEM (Kyber) - Key Encapsulation</div>
+              </div>
+              <div className="p-3 rounded-lg bg-neumorph-base border border-white/5">
+                <div className="text-blue-400 font-semibold text-sm">FIPS 204</div>
+                <div className="text-xs text-slate-400">ML-DSA (Dilithium) - Digital Signatures</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }

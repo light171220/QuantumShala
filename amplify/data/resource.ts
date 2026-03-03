@@ -1,19 +1,23 @@
 import { a, defineData, type ClientSchema } from '@aws-amplify/backend'
 import { postConfirmation } from '../auth/post-confirmation/resource'
-import { runSimulation } from '../functions/run-simulation/resource'
-import { runSimulationSmall } from '../functions/run-simulation-small/resource'
-import { runSimulationMedium } from '../functions/run-simulation-medium/resource'
-import { runSimulationLarge } from '../functions/run-simulation-large/resource'
-import { runVqe } from '../functions/run-vqe/resource'
-import { runVqeLarge } from '../functions/run-vqe-large/resource'
-import { submitQuiz } from '../functions/submit-quiz/resource'
-import { awardAchievement } from '../functions/award-achievement/resource'
-import { generateCertificate } from '../functions/generate-certificate/resource'
-import { updateStreak } from '../functions/update-streak/resource'
-import { updateLeaderboard } from '../functions/update-leaderboard/resource'
+import { vqeSmall } from '../functions/vqe/vqe-small/resource'
+import { vqeMedium } from '../functions/vqe/vqe-medium/resource'
+import { vqeLarge } from '../functions/vqe/vqe-large/resource'
+import { vqeAdapt } from '../functions/vqe/vqe-adapt/resource'
+import { simulatorSmall } from '../functions/simulators/simulator-small/resource'
+import { simulatorMedium } from '../functions/simulators/simulator-medium/resource'
+import { simulatorLarge } from '../functions/simulators/simulator-large/resource'
 import { ragIndexer } from '../functions/rag-indexer/resource'
 import { ragQuery } from '../functions/rag-query/resource'
 import { aiTutor } from '../functions/ai-tutor/resource'
+import { paperProcessor } from '../functions/research/paper-processor/resource'
+import { paperSearch } from '../functions/research/paper-search/resource'
+import { paperSummarizer } from '../functions/research/paper-summarizer/resource'
+import { paperInsights } from '../functions/research/paper-insights/resource'
+import { qmlEngine } from '../functions/qml/qml-engine/resource'
+import { examProctoring } from '../functions/certification/exam-proctoring/resource'
+import { certificateGenerator } from '../functions/certification/certificate-generator/resource'
+import { hardwareSimulator } from '../functions/virtual-lab/hardware-simulator/resource'
 
 const schema = a.schema({
   UserProfile: a
@@ -235,7 +239,7 @@ const schema = a.schema({
       id: a.id().required(),
       circuitId: a.id().required(),
       shots: a.integer().required(),
-      backend: a.enum(['browser', 'lambda_small', 'lambda_medium', 'lambda_large', 'clifford', 'tensor_network', 'circuit_cutting', 'cloud', 'ibm', 'aws_braket']),
+      backend: a.enum(['simulator_small', 'simulator_medium', 'simulator_large', 'clifford', 'tensor_network', 'circuit_cutting', 'cloud', 'ibm', 'aws_braket']),
       optimization: a.integer().default(1),
       status: a.enum(['pending', 'running', 'completed', 'failed']),
       results: a.json(),
@@ -366,6 +370,125 @@ const schema = a.schema({
     .authorization((allow) => [
       allow.owner(),
       allow.guest().to(['read']),
+    ]),
+
+  Certification: a
+    .model({
+      id: a.id().required(),
+      userId: a.id().required(),
+      tier: a.enum(['associate', 'professional', 'expert']),
+      name: a.string().required(),
+      issuedAt: a.datetime().required(),
+      expiresAt: a.datetime(),
+      certificateUrl: a.string(),
+      score: a.float().required(),
+      trackId: a.string().required(),
+      credentialId: a.string().required(),
+      verificationUrl: a.string(),
+      skills: a.string().array(),
+      examAttemptId: a.string(),
+      status: a.enum(['active', 'expired', 'revoked']),
+    })
+    .secondaryIndexes((index) => [
+      index('userId'),
+      index('trackId'),
+      index('credentialId'),
+      index('tier'),
+    ])
+    .authorization((allow) => [
+      allow.owner(),
+      allow.authenticated().to(['read']),
+      allow.guest().to(['read']),
+    ]),
+
+  Exam: a
+    .model({
+      id: a.id().required(),
+      certificationTier: a.enum(['associate', 'professional', 'expert']),
+      title: a.string().required(),
+      description: a.string(),
+      duration: a.integer().required(),
+      passingScore: a.integer().required(),
+      questions: a.json().required(),
+      trackId: a.string().required(),
+      totalQuestions: a.integer().required(),
+      maxAttempts: a.integer().default(3),
+      cooldownHours: a.integer().default(24),
+      shuffleQuestions: a.boolean().default(true),
+      shuffleOptions: a.boolean().default(true),
+      showResults: a.boolean().default(true),
+      showCorrectAnswers: a.boolean().default(false),
+      prerequisites: a.string().array(),
+      topics: a.string().array(),
+      difficulty: a.enum(['beginner', 'intermediate', 'advanced', 'expert']),
+      isPublished: a.boolean().default(false),
+      totalAttempts: a.integer().default(0),
+      passRate: a.float(),
+      averageScore: a.float(),
+      createdAt: a.datetime().required(),
+      updatedAt: a.datetime().required(),
+    })
+    .secondaryIndexes((index) => [
+      index('certificationTier'),
+      index('trackId'),
+    ])
+    .authorization((allow) => [
+      allow.authenticated().to(['read']),
+      allow.groups(['admin']).to(['create', 'update', 'delete']),
+    ]),
+
+  ExamAttempt: a
+    .model({
+      id: a.id().required(),
+      userId: a.id().required(),
+      examId: a.id().required(),
+      startedAt: a.datetime().required(),
+      completedAt: a.datetime(),
+      score: a.float(),
+      maxScore: a.float(),
+      percentageScore: a.float(),
+      passed: a.boolean(),
+      answers: a.json(),
+      breakdown: a.json(),
+      topicScores: a.json(),
+      timeSpentSeconds: a.integer(),
+      status: a.enum(['in_progress', 'submitted', 'expired', 'cancelled']),
+      sessionId: a.string(),
+      certificationId: a.string(),
+      attemptNumber: a.integer().default(1),
+      ipAddress: a.string(),
+      userAgent: a.string(),
+    })
+    .secondaryIndexes((index) => [
+      index('userId'),
+      index('examId'),
+      index('status'),
+    ])
+    .authorization((allow) => [
+      allow.owner(),
+      allow.groups(['admin']).to(['read']),
+    ]),
+
+  CertificationBadge: a
+    .model({
+      id: a.id().required(),
+      certificationId: a.id().required(),
+      badgeType: a.enum(['completion', 'excellence', 'speedrun', 'perfect_score', 'first_attempt', 'streak', 'mentor', 'contributor']),
+      name: a.string().required(),
+      description: a.string(),
+      imageUrl: a.string(),
+      metadata: a.json(),
+      earnedAt: a.datetime().required(),
+      isDisplayed: a.boolean().default(true),
+      displayOrder: a.integer().default(0),
+    })
+    .secondaryIndexes((index) => [
+      index('certificationId'),
+      index('badgeType'),
+    ])
+    .authorization((allow) => [
+      allow.owner(),
+      allow.authenticated().to(['read']),
     ]),
 
   Track: a
@@ -547,6 +670,89 @@ const schema = a.schema({
     ])
     .authorization((allow) => [allow.owner()]),
 
+  ResearchPaper: a
+    .model({
+      id: a.id().required(),
+      title: a.string().required(),
+      authors: a.string().array().required(),
+      abstract: a.string(),
+      doi: a.string(),
+      arxivId: a.string(),
+      pdfKey: a.string().required(),
+      fullTextKey: a.string(),
+      pageCount: a.integer(),
+      wordCount: a.integer(),
+      keywords: a.string().array(),
+      summary: a.string(),
+      summaryBullets: a.string().array(),
+      quantumAlgorithms: a.string().array(),
+      hamiltonians: a.string().array(),
+      circuitDescriptions: a.string().array(),
+      collectionIds: a.string().array(),
+      tags: a.string().array(),
+      rating: a.integer(),
+      readStatus: a.enum(['unread', 'reading', 'read']),
+      processingStatus: a.enum(['pending', 'processing', 'completed', 'failed']),
+      processingError: a.string(),
+      publishedDate: a.string(),
+      journal: a.string(),
+      venue: a.string(),
+      citationCount: a.integer(),
+      createdAt: a.datetime().required(),
+      updatedAt: a.datetime().required(),
+    })
+    .secondaryIndexes((index) => [
+      index('doi'),
+      index('arxivId'),
+      index('processingStatus'),
+    ])
+    .authorization((allow) => [allow.owner()]),
+
+  PaperCollection: a
+    .model({
+      id: a.id().required(),
+      name: a.string().required(),
+      description: a.string(),
+      color: a.string().required(),
+      icon: a.string().required(),
+      paperCount: a.integer().default(0),
+      createdAt: a.datetime().required(),
+      updatedAt: a.datetime().required(),
+    })
+    .authorization((allow) => [allow.owner()]),
+
+  SearchIndex: a
+    .model({
+      id: a.id().required(),
+      indexType: a.enum(['bm25', 'tfidf', 'combined']),
+      documentCount: a.integer().default(0),
+      vocabularySize: a.integer().default(0),
+      indexKey: a.string().required(),
+      lastUpdated: a.datetime(),
+      createdAt: a.datetime().required(),
+    })
+    .secondaryIndexes((index) => [
+      index('indexType'),
+    ])
+    .authorization((allow) => [allow.owner()]),
+
+  PaperCitation: a
+    .model({
+      id: a.id().required(),
+      sourcePaperId: a.string().required(),
+      targetDoi: a.string(),
+      targetTitle: a.string().required(),
+      targetAuthors: a.string().array(),
+      citationContext: a.string(),
+      citationPosition: a.integer(),
+      createdAt: a.datetime().required(),
+    })
+    .secondaryIndexes((index) => [
+      index('sourcePaperId'),
+      index('targetDoi'),
+    ])
+    .authorization((allow) => [allow.owner()]),
+
   aiTutor: a
     .mutation()
     .arguments({
@@ -565,112 +771,155 @@ const schema = a.schema({
     .authorization((allow) => [allow.authenticated()])
     .handler(a.handler.function(aiTutor)),
 
-  runSimulation: a
+  runSimulatorSmall: a
     .mutation()
     .arguments({
-      circuitId: a.string().required(),
+      circuitId: a.string(),
       numQubits: a.integer().required(),
       gates: a.json().required(),
-      shots: a.integer().required(),
-      includeStateVector: a.boolean(),
+      shots: a.integer(),
+      seed: a.integer(),
+      measureQubits: a.integer().array(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.authenticated()])
-    .handler(a.handler.function(runSimulation)),
+    .handler(a.handler.function(simulatorSmall)),
 
-  runSimulationSmall: a
+  runSimulatorMedium: a
     .mutation()
     .arguments({
-      circuitId: a.string().required(),
+      circuitId: a.string(),
       numQubits: a.integer().required(),
       gates: a.json().required(),
-      shots: a.integer().required(),
-      includeStateVector: a.boolean(),
+      shots: a.integer(),
+      seed: a.integer(),
+      measureQubits: a.integer().array(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.authenticated()])
-    .handler(a.handler.function(runSimulationSmall)),
+    .handler(a.handler.function(simulatorMedium)),
 
-  runSimulationMedium: a
+  runSimulatorLarge: a
     .mutation()
     .arguments({
-      circuitId: a.string().required(),
+      circuitId: a.string(),
       numQubits: a.integer().required(),
       gates: a.json().required(),
-      shots: a.integer().required(),
-      includeStateVector: a.boolean(),
+      shots: a.integer(),
+      seed: a.integer(),
+      measureQubits: a.integer().array(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.authenticated()])
-    .handler(a.handler.function(runSimulationMedium)),
+    .handler(a.handler.function(simulatorLarge)),
 
-  runSimulationLarge: a
+  runVqeSmall: a
     .mutation()
     .arguments({
-      circuitId: a.string().required(),
+      moleculeId: a.string().required(),
+      moleculeName: a.string(),
       numQubits: a.integer().required(),
-      gates: a.json().required(),
-      shots: a.integer().required(),
-      includeStateVector: a.boolean(),
+      numElectrons: a.integer().required(),
+      hamiltonian: a.json(),
+      basisSet: a.enum(['sto_3g', 'basis_6_31g', 'cc_pvdz']),
+      qubitMapping: a.enum(['jordan_wigner', 'bravyi_kitaev', 'parity']),
+      ansatzType: a.enum(['hea', 'uccsd', 'k_upccgsd', 'symmetry_preserved']),
+      ansatzLayers: a.integer(),
+      entanglement: a.enum(['linear', 'circular', 'full', 'pairwise', 'sca']),
+      optimizerType: a.enum(['cobyla', 'nelder_mead', 'powell', 'adam', 'sgd', 'lbfgsb', 'slsqp', 'spsa', 'qn_spsa', 'qng', 'rotosolve']),
+      maxIterations: a.integer(),
+      tolerance: a.float(),
+      learningRate: a.float(),
+      zneEnabled: a.boolean(),
+      zneScaleFactors: a.float().array(),
+      readoutMitigationEnabled: a.boolean(),
+      symmetryEnabled: a.boolean(),
+      shots: a.integer(),
+      useCache: a.boolean(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.authenticated()])
-    .handler(a.handler.function(runSimulationLarge)),
+    .handler(a.handler.function(vqeSmall)),
 
-  submitQuiz: a
+  runVqeMedium: a
     .mutation()
     .arguments({
-      userId: a.string().required(),
-      lessonId: a.string().required(),
-      trackId: a.string().required(),
-      moduleId: a.string().required(),
-      answers: a.json().required(),
-      timeSpentSeconds: a.integer().required(),
+      moleculeId: a.string().required(),
+      moleculeName: a.string(),
+      numQubits: a.integer().required(),
+      numElectrons: a.integer().required(),
+      hamiltonian: a.json(),
+      basisSet: a.enum(['sto_3g', 'basis_6_31g', 'cc_pvdz']),
+      qubitMapping: a.enum(['jordan_wigner', 'bravyi_kitaev', 'parity']),
+      ansatzType: a.enum(['hea', 'uccsd', 'k_upccgsd', 'symmetry_preserved']),
+      ansatzLayers: a.integer(),
+      entanglement: a.enum(['linear', 'circular', 'full', 'pairwise', 'sca']),
+      optimizerType: a.enum(['cobyla', 'nelder_mead', 'powell', 'adam', 'sgd', 'lbfgsb', 'slsqp', 'spsa', 'qn_spsa', 'qng', 'rotosolve']),
+      maxIterations: a.integer(),
+      tolerance: a.float(),
+      learningRate: a.float(),
+      zneEnabled: a.boolean(),
+      zneScaleFactors: a.float().array(),
+      readoutMitigationEnabled: a.boolean(),
+      symmetryEnabled: a.boolean(),
+      shots: a.integer(),
+      useCache: a.boolean(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.authenticated()])
-    .handler(a.handler.function(submitQuiz)),
+    .handler(a.handler.function(vqeMedium)),
 
-  checkAchievements: a
+  runVqeLarge: a
     .mutation()
     .arguments({
-      userId: a.string().required(),
-      trigger: a.string().required(),
-      value: a.integer(),
+      moleculeId: a.string().required(),
+      moleculeName: a.string(),
+      numQubits: a.integer().required(),
+      numElectrons: a.integer().required(),
+      hamiltonian: a.json(),
+      basisSet: a.enum(['sto_3g', 'basis_6_31g', 'cc_pvdz']),
+      qubitMapping: a.enum(['jordan_wigner', 'bravyi_kitaev', 'parity']),
+      ansatzType: a.enum(['hea', 'uccsd', 'k_upccgsd', 'symmetry_preserved']),
+      ansatzLayers: a.integer(),
+      entanglement: a.enum(['linear', 'circular', 'full', 'pairwise', 'sca']),
+      optimizerType: a.enum(['cobyla', 'nelder_mead', 'powell', 'adam', 'sgd', 'lbfgsb', 'slsqp', 'spsa', 'qn_spsa', 'qng', 'rotosolve']),
+      maxIterations: a.integer(),
+      tolerance: a.float(),
+      learningRate: a.float(),
+      zneEnabled: a.boolean(),
+      zneScaleFactors: a.float().array(),
+      readoutMitigationEnabled: a.boolean(),
+      symmetryEnabled: a.boolean(),
+      shots: a.integer(),
+      useCache: a.boolean(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.authenticated()])
-    .handler(a.handler.function(awardAchievement)),
+    .handler(a.handler.function(vqeLarge)),
 
-  generateCertificate: a
+  runVqeAdapt: a
     .mutation()
     .arguments({
-      userId: a.string().required(),
-      trackId: a.string().required(),
-      recipientName: a.string().required(),
+      moleculeId: a.string().required(),
+      moleculeName: a.string(),
+      numQubits: a.integer().required(),
+      numElectrons: a.integer().required(),
+      hamiltonian: a.json(),
+      basisSet: a.enum(['sto_3g', 'basis_6_31g', 'cc_pvdz']),
+      qubitMapping: a.enum(['jordan_wigner', 'bravyi_kitaev', 'parity']),
+      ansatzType: a.enum(['adapt', 'qubit_adapt']),
+      gradientThreshold: a.float(),
+      maxOperators: a.integer(),
+      optimizerType: a.enum(['cobyla', 'nelder_mead', 'powell', 'adam', 'sgd', 'lbfgsb', 'slsqp', 'spsa', 'qn_spsa', 'qng', 'rotosolve']),
+      maxIterations: a.integer(),
+      tolerance: a.float(),
+      learningRate: a.float(),
+      shots: a.integer(),
+      useCache: a.boolean(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.authenticated()])
-    .handler(a.handler.function(generateCertificate)),
-
-  updateStreak: a
-    .mutation()
-    .arguments({
-      userId: a.string().required(),
-      activityType: a.enum(['lesson', 'quiz', 'circuit', 'login']),
-    })
-    .returns(a.json())
-    .authorization((allow) => [allow.authenticated()])
-    .handler(a.handler.function(updateStreak)),
-
-  refreshLeaderboard: a
-    .mutation()
-    .arguments({
-      period: a.string(),
-    })
-    .returns(a.json())
-    .authorization((allow) => [allow.groups(['admin'])])
-    .handler(a.handler.function(updateLeaderboard)),
+    .handler(a.handler.function(vqeAdapt)),
 
   ragQuery: a
     .mutation()
@@ -698,64 +947,145 @@ const schema = a.schema({
     .authorization((allow) => [allow.groups(['admin'])])
     .handler(a.handler.function(ragIndexer)),
 
-  runVqe: a
+  processPaper: a
     .mutation()
     .arguments({
-      moleculeId: a.string().required(),
-      moleculeName: a.string(),
-      numQubits: a.integer().required(),
-      numElectrons: a.integer().required(),
-      hamiltonianTerms: a.json().required(),
-      exactEnergy: a.float().required(),
-      hartreeFockEnergy: a.float().required(),
-      ansatzType: a.enum(['hea', 'uccsd', 'adapt', 'qubit_adapt']),
-      numLayers: a.integer(),
-      optimizerType: a.enum(['cobyla', 'spsa', 'adam', 'slsqp']),
-      maxIterations: a.integer(),
-      tolerance: a.float(),
-      shots: a.integer(),
+      paperId: a.string().required(),
+      pdfKey: a.string().required(),
+      options: a.json(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.authenticated()])
-    .handler(a.handler.function(runVqe)),
+    .handler(a.handler.function(paperProcessor)),
 
-  runVqeLarge: a
+  searchPapers: a
     .mutation()
     .arguments({
-      moleculeId: a.string().required(),
-      moleculeName: a.string(),
-      numQubits: a.integer().required(),
-      numElectrons: a.integer().required(),
-      hamiltonianTerms: a.json().required(),
-      exactEnergy: a.float().required(),
-      hartreeFockEnergy: a.float().required(),
-      ansatzType: a.enum(['hea', 'uccsd', 'adapt', 'qubit_adapt']),
-      numLayers: a.integer(),
-      optimizerType: a.enum(['cobyla', 'spsa', 'adam', 'slsqp']),
-      maxIterations: a.integer(),
-      tolerance: a.float(),
-      shots: a.integer(),
+      query: a.string().required(),
+      filters: a.json(),
+      sortBy: a.enum(['relevance', 'date', 'citations', 'title']),
+      sortOrder: a.enum(['asc', 'desc']),
+      limit: a.integer(),
+      offset: a.integer(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.authenticated()])
-    .handler(a.handler.function(runVqeLarge)),
+    .handler(a.handler.function(paperSearch)),
+
+  summarizePaper: a
+    .mutation()
+    .arguments({
+      paperId: a.string().required(),
+      fullTextKey: a.string().required(),
+      options: a.json(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.authenticated()])
+    .handler(a.handler.function(paperSummarizer)),
+
+  extractInsights: a
+    .mutation()
+    .arguments({
+      paperId: a.string().required(),
+      fullTextKey: a.string().required(),
+      extractKeywords: a.boolean(),
+      extractQuantum: a.boolean(),
+      extractCitations: a.boolean(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.authenticated()])
+    .handler(a.handler.function(paperInsights)),
+
+  runQml: a
+    .mutation()
+    .arguments({
+      algorithm: a.string().required(),
+      numQubits: a.integer().required(),
+      datasetId: a.string(),
+      customData: a.json(),
+      trainTestSplit: a.float(),
+      encoderType: a.string(),
+      encoderConfig: a.json(),
+      ansatzType: a.string(),
+      ansatzConfig: a.json(),
+      optimizerType: a.string(),
+      optimizerConfig: a.json(),
+      kernelType: a.string(),
+      kernelConfig: a.json(),
+      qaoaConfig: a.json(),
+      qrlConfig: a.json(),
+      qtransformerConfig: a.json(),
+      qgnnConfig: a.json(),
+      qreservoirConfig: a.json(),
+      qautoencoderConfig: a.json(),
+      qvaeConfig: a.json(),
+      analysisOptions: a.json(),
+      shots: a.integer(),
+      seed: a.integer(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.authenticated()])
+    .handler(a.handler.function(qmlEngine)),
+
+  examProctor: a
+    .mutation()
+    .arguments({
+      action: a.enum(['start_exam', 'submit_exam', 'get_session', 'cancel_session']),
+      startExamInput: a.json(),
+      submitExamInput: a.json(),
+      sessionId: a.string(),
+      userId: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.authenticated()])
+    .handler(a.handler.function(examProctoring)),
+
+  generateCertificate: a
+    .mutation()
+    .arguments({
+      action: a.enum(['generate', 'verify', 'download']),
+      certificateData: a.json(),
+      certificationId: a.string(),
+      credentialId: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.authenticated()])
+    .handler(a.handler.function(certificateGenerator)),
+
+  simulateHardware: a
+    .mutation()
+    .arguments({
+      action: a.enum(['t1_measurement', 't2_measurement', 'randomized_benchmarking', 'full_characterization', 'gate_calibration']),
+      numQubits: a.integer(),
+      qubitIds: a.integer().array(),
+      gateTypes: a.string().array(),
+      config: a.json(),
+      seed: a.integer(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.authenticated()])
+    .handler(a.handler.function(hardwareSimulator)),
 })
   .authorization((allow) => [
     allow.resource(postConfirmation),
-    allow.resource(runSimulation),
-    allow.resource(runSimulationSmall),
-    allow.resource(runSimulationMedium),
-    allow.resource(runSimulationLarge),
-    allow.resource(runVqe),
-    allow.resource(runVqeLarge),
-    allow.resource(submitQuiz),
-    allow.resource(awardAchievement),
-    allow.resource(generateCertificate),
-    allow.resource(updateStreak),
-    allow.resource(updateLeaderboard),
+    allow.resource(vqeSmall),
+    allow.resource(vqeMedium),
+    allow.resource(vqeLarge),
+    allow.resource(vqeAdapt),
+    allow.resource(simulatorSmall),
+    allow.resource(simulatorMedium),
+    allow.resource(simulatorLarge),
     allow.resource(ragIndexer),
     allow.resource(ragQuery),
     allow.resource(aiTutor),
+    allow.resource(paperProcessor),
+    allow.resource(paperSearch),
+    allow.resource(paperSummarizer),
+    allow.resource(paperInsights),
+    allow.resource(qmlEngine),
+    allow.resource(examProctoring),
+    allow.resource(certificateGenerator),
+    allow.resource(hardwareSimulator),
   ])
 
 export type Schema = ClientSchema<typeof schema>

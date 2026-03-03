@@ -427,9 +427,9 @@ export const ANSATZ_DESCRIPTIONS: Record<AnsatzType, { name: string; description
     name: 'UCCSD',
     description: 'Unitary Coupled Cluster Singles and Doubles. Chemistry-inspired ansatz that captures electron correlation. More accurate but deeper circuits.'
   },
-  adaptive: {
-    name: 'ADAPT-VQE',
-    description: 'Adaptive ansatz that grows dynamically based on gradient information. Balances accuracy and circuit depth.'
+  k_upccgsd: {
+    name: 'k-UpCCGSD',
+    description: 'k-fold Unitary Paired Coupled Cluster with Generalized Singles and Doubles. Compact ansatz for strongly correlated systems.'
   },
   adapt: {
     name: 'ADAPT-VQE',

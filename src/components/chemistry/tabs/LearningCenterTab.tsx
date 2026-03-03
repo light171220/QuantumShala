@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   BookOpen,
@@ -9,32 +9,34 @@ import {
   Lock,
   Star,
   ArrowRight,
+  ArrowLeft,
   Clock,
   Target,
   Zap,
   Award,
-  FlaskConical,
   Atom,
-  Factory,
+  FileText,
+  Loader2,
+  AlertCircle,
+  ChevronRight,
 } from 'lucide-react'
 import { Card } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import { Progress } from '@/components/ui/Progress'
+import {
+  getChemistryIndex,
+  getTutorial,
+  getGuide,
+  getReference,
+  type ChemistryIndex,
+  type ContentSummary,
+  type TutorialContent,
+  type GuideContent,
+  type ReferenceContent,
+} from '@/services/chemistryContent'
 
-type LearningSection = 'tutorials' | 'challenges' | 'cases'
-
-interface Tutorial {
-  id: string
-  title: string
-  description: string
-  duration: string
-  difficulty: 'beginner' | 'intermediate' | 'advanced'
-  progress: number
-  completed: boolean
-  locked: boolean
-  topics: string[]
-}
+type LearningSection = 'tutorials' | 'guides' | 'references' | 'challenges' | 'cases'
 
 interface Challenge {
   id: string
@@ -60,64 +62,6 @@ interface CaseStudy {
   learnings: string[]
 }
 
-const TUTORIALS: Tutorial[] = [
-  {
-    id: 'intro-vqe',
-    title: 'Introduction to VQE',
-    description: 'Learn the basics of the Variational Quantum Eigensolver algorithm',
-    duration: '15 min',
-    difficulty: 'beginner',
-    progress: 100,
-    completed: true,
-    locked: false,
-    topics: ['Variational principle', 'Ansatz circuits', 'Classical optimization']
-  },
-  {
-    id: 'hamiltonians',
-    title: 'Molecular Hamiltonians',
-    description: 'Understanding how molecules are represented in quantum computers',
-    duration: '20 min',
-    difficulty: 'beginner',
-    progress: 60,
-    completed: false,
-    locked: false,
-    topics: ['Second quantization', 'Jordan-Wigner transform', 'Pauli strings']
-  },
-  {
-    id: 'ansatze',
-    title: 'Ansatz Design',
-    description: 'Explore different ansatz architectures for chemistry',
-    duration: '25 min',
-    difficulty: 'intermediate',
-    progress: 0,
-    completed: false,
-    locked: false,
-    topics: ['HEA', 'UCCSD', 'ADAPT-VQE', 'Hardware efficiency']
-  },
-  {
-    id: 'optimization',
-    title: 'Classical Optimizers',
-    description: 'Deep dive into optimization strategies for VQE',
-    duration: '20 min',
-    difficulty: 'intermediate',
-    progress: 0,
-    completed: false,
-    locked: true,
-    topics: ['COBYLA', 'SPSA', 'Adam', 'Gradient estimation']
-  },
-  {
-    id: 'error-mitigation',
-    title: 'Error Mitigation',
-    description: 'Techniques to improve results on noisy hardware',
-    duration: '30 min',
-    difficulty: 'advanced',
-    progress: 0,
-    completed: false,
-    locked: true,
-    topics: ['Zero-noise extrapolation', 'Readout mitigation', 'Noise models']
-  },
-]
-
 const CHALLENGES: Challenge[] = [
   {
     id: 'h2-ground-state',
@@ -125,7 +69,7 @@ const CHALLENGES: Challenge[] = [
     description: 'Find the ground state energy of hydrogen molecule within chemical accuracy',
     points: 100,
     difficulty: 'easy',
-    completed: true,
+    completed: false,
     locked: false,
     moleculeRequired: 'h2',
     accuracyTarget: 1.0
@@ -235,33 +179,264 @@ const CASE_STUDIES: CaseStudy[] = [
   },
 ]
 
+function ContentViewer({
+  content,
+  onBack,
+  type
+}: {
+  content: TutorialContent | GuideContent | ReferenceContent
+  onBack: () => void
+  type: 'tutorial' | 'guide' | 'reference'
+}) {
+  const [currentSection, setCurrentSection] = useState(0)
+
+  const sections = content.sections || []
+  const section = sections[currentSection]
+
+  const renderMarkdown = (text: string) => {
+    return text
+      .split('\n')
+      .map((line, i) => {
+        if (line.startsWith('**') && line.endsWith('**')) {
+          return <h4 key={i} className="font-bold text-white mt-4 mb-2">{line.slice(2, -2)}</h4>
+        }
+        if (line.startsWith('```')) {
+          return null
+        }
+        if (line.startsWith('|')) {
+          return <div key={i} className="font-mono text-xs text-slate-400 bg-black/20 px-2 py-0.5">{line}</div>
+        }
+        if (line.startsWith('- ')) {
+          return (
+            <div key={i} className="flex items-start gap-2 ml-2">
+              <ChevronRight className="w-3 h-3 text-orange-400 mt-1 flex-shrink-0" />
+              <span className="text-slate-300 text-sm">{line.slice(2)}</span>
+            </div>
+          )
+        }
+        if (line.match(/^\d+\./)) {
+          return (
+            <div key={i} className="flex items-start gap-2 ml-2">
+              <span className="text-orange-400 font-mono text-sm">{line.match(/^\d+/)?.[0]}.</span>
+              <span className="text-slate-300 text-sm">{line.replace(/^\d+\.\s*/, '')}</span>
+            </div>
+          )
+        }
+        const formatted = line
+          .replace(/\*\*([^*]+)\*\*/g, '<strong class="text-white">$1</strong>')
+          .replace(/`([^`]+)`/g, '<code class="bg-black/30 px-1 py-0.5 rounded text-orange-300 text-xs">$1</code>')
+        return <p key={i} className="text-slate-300 text-sm leading-relaxed" dangerouslySetInnerHTML={{ __html: formatted }} />
+      })
+  }
+
+  return (
+    <Card variant="neumorph" className="p-6">
+      <button
+        onClick={onBack}
+        className="text-sm text-slate-400 hover:text-white mb-4 flex items-center gap-1"
+      >
+        <ArrowLeft className="w-4 h-4" />
+        Back to {type === 'tutorial' ? 'Tutorials' : type === 'guide' ? 'Guides' : 'References'}
+      </button>
+
+      <div className="mb-6">
+        <div className="flex items-center gap-2 mb-2">
+          {'difficulty' in content && (
+            <Badge
+              variant={content.difficulty === 'beginner' ? 'success' : content.difficulty === 'intermediate' ? 'warning' : 'danger'}
+              size="sm"
+            >
+              {content.difficulty}
+            </Badge>
+          )}
+          {'estimatedMinutes' in content && (
+            <span className="text-xs text-slate-500 flex items-center gap-1">
+              <Clock className="w-3 h-3" />
+              {content.estimatedMinutes} min
+            </span>
+          )}
+        </div>
+        <h2 className="text-2xl font-bold text-white mb-2">{content.title}</h2>
+        <p className="text-slate-400">{content.description}</p>
+      </div>
+
+      {'learningObjectives' in content && content.learningObjectives && (
+        <div className="mb-6 bg-green-500/10 border border-green-500/20 rounded-lg p-4">
+          <h3 className="font-semibold text-green-400 mb-2 flex items-center gap-2">
+            <Target className="w-4 h-4" />
+            Learning Objectives
+          </h3>
+          <ul className="space-y-1">
+            {content.learningObjectives.map((obj, i) => (
+              <li key={i} className="flex items-start gap-2 text-sm text-slate-300">
+                <CheckCircle className="w-4 h-4 text-green-400 mt-0.5 flex-shrink-0" />
+                {obj}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="flex gap-2 mb-6 overflow-x-auto pb-2">
+        {sections.map((s, i) => (
+          <button
+            key={s.id}
+            onClick={() => setCurrentSection(i)}
+            className={`px-3 py-1.5 rounded-lg text-sm whitespace-nowrap transition-all ${
+              currentSection === i
+                ? 'bg-orange-500 text-white'
+                : 'bg-neumorph-darker text-slate-400 hover:text-white'
+            }`}
+          >
+            {i + 1}. {s.title}
+          </button>
+        ))}
+      </div>
+
+      {section && (
+        <div className="bg-neumorph-darker rounded-lg p-6">
+          <h3 className="text-xl font-bold text-white mb-4">{section.title}</h3>
+          <div className="space-y-2">
+            {renderMarkdown(section.content)}
+          </div>
+        </div>
+      )}
+
+      <div className="flex justify-between mt-6">
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => setCurrentSection(Math.max(0, currentSection - 1))}
+          disabled={currentSection === 0}
+          leftIcon={<ArrowLeft className="w-4 h-4" />}
+        >
+          Previous
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={() => setCurrentSection(Math.min(sections.length - 1, currentSection + 1))}
+          disabled={currentSection === sections.length - 1}
+          rightIcon={<ArrowRight className="w-4 h-4" />}
+        >
+          Next
+        </Button>
+      </div>
+    </Card>
+  )
+}
+
 export function LearningCenterTab() {
   const [activeSection, setActiveSection] = useState<LearningSection>('tutorials')
   const [selectedCaseStudy, setSelectedCaseStudy] = useState<CaseStudy | null>(null)
+  const [index, setIndex] = useState<ChemistryIndex | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [selectedContent, setSelectedContent] = useState<{
+    type: 'tutorial' | 'guide' | 'reference'
+    content: TutorialContent | GuideContent | ReferenceContent
+  } | null>(null)
+  const [loadingContent, setLoadingContent] = useState(false)
+
+  useEffect(() => {
+    async function loadIndex() {
+      try {
+        setLoading(true)
+        setError(null)
+        const data = await getChemistryIndex()
+        if (data) {
+          setIndex(data)
+        } else {
+          setError('Failed to load content index')
+        }
+      } catch (err) {
+        setError('Failed to load content')
+        console.error(err)
+      } finally {
+        setLoading(false)
+      }
+    }
+    loadIndex()
+  }, [])
+
+  const handleSelectTutorial = async (item: ContentSummary) => {
+    setLoadingContent(true)
+    const content = await getTutorial(item.id)
+    if (content) {
+      setSelectedContent({ type: 'tutorial', content })
+    }
+    setLoadingContent(false)
+  }
+
+  const handleSelectGuide = async (item: ContentSummary) => {
+    setLoadingContent(true)
+    const content = await getGuide(item.id)
+    if (content) {
+      setSelectedContent({ type: 'guide', content })
+    }
+    setLoadingContent(false)
+  }
+
+  const handleSelectReference = async (item: ContentSummary) => {
+    setLoadingContent(true)
+    const content = await getReference(item.id)
+    if (content) {
+      setSelectedContent({ type: 'reference', content })
+    }
+    setLoadingContent(false)
+  }
 
   const totalPoints = useMemo(() =>
     CHALLENGES.filter(c => c.completed).reduce((sum, c) => sum + c.points, 0),
     []
   )
 
-  const completedTutorials = useMemo(() =>
-    TUTORIALS.filter(t => t.completed).length,
-    []
-  )
-
   const sections = [
-    { id: 'tutorials', name: 'Tutorials', icon: <BookOpen className="w-4 h-4" />, count: `${completedTutorials}/${TUTORIALS.length}` },
+    { id: 'tutorials', name: 'Tutorials', icon: <BookOpen className="w-4 h-4" />, count: index?.tutorials?.length || 0 },
+    { id: 'guides', name: 'Guides', icon: <FileText className="w-4 h-4" />, count: index?.guides?.length || 0 },
+    { id: 'references', name: 'References', icon: <Lightbulb className="w-4 h-4" />, count: index?.reference?.length || 0 },
     { id: 'challenges', name: 'Challenges', icon: <Trophy className="w-4 h-4" />, count: `${totalPoints} pts` },
-    { id: 'cases', name: 'Case Studies', icon: <Lightbulb className="w-4 h-4" />, count: CASE_STUDIES.length.toString() },
+    { id: 'cases', name: 'Case Studies', icon: <Award className="w-4 h-4" />, count: CASE_STUDIES.length },
   ]
 
   const difficultyColors = {
-    beginner: 'text-green-400',
-    intermediate: 'text-yellow-400',
-    advanced: 'text-red-400',
+    beginner: 'text-green-400 bg-green-500/20',
+    intermediate: 'text-yellow-400 bg-yellow-500/20',
+    advanced: 'text-red-400 bg-red-500/20',
     easy: 'text-green-400',
     medium: 'text-yellow-400',
     hard: 'text-red-400',
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <Loader2 className="w-8 h-8 animate-spin text-orange-400" />
+        <span className="ml-3 text-slate-400">Loading learning content...</span>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12">
+        <AlertCircle className="w-12 h-12 text-red-400 mb-4" />
+        <p className="text-slate-400 mb-4">{error}</p>
+        <Button variant="secondary" onClick={() => window.location.reload()}>
+          Retry
+        </Button>
+      </div>
+    )
+  }
+
+  if (selectedContent) {
+    return (
+      <ContentViewer
+        content={selectedContent.content}
+        type={selectedContent.type}
+        onBack={() => setSelectedContent(null)}
+      />
+    )
   }
 
   return (
@@ -280,18 +455,18 @@ export function LearningCenterTab() {
           </div>
           <div className="flex items-center gap-2 bg-neumorph-darker px-4 py-2 rounded-lg">
             <Star className="w-5 h-5 text-orange-400" />
-            <span className="font-semibold text-white">{completedTutorials}</span>
-            <span className="text-sm text-slate-400">completed</span>
+            <span className="font-semibold text-white">{index?.tutorials?.length || 0}</span>
+            <span className="text-sm text-slate-400">tutorials</span>
           </div>
         </div>
       </div>
 
-      <div className="flex gap-2">
+      <div className="flex gap-2 overflow-x-auto pb-2">
         {sections.map(section => (
           <button
             key={section.id}
             onClick={() => setActiveSection(section.id as LearningSection)}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all whitespace-nowrap ${
               activeSection === section.id
                 ? 'bg-orange-500 text-white'
                 : 'bg-neumorph-base shadow-neumorph-sm border border-white/[0.02] text-slate-400 hover:text-white'
@@ -304,8 +479,15 @@ export function LearningCenterTab() {
         ))}
       </div>
 
+      {loadingContent && (
+        <div className="flex items-center justify-center py-8">
+          <Loader2 className="w-6 h-6 animate-spin text-orange-400" />
+          <span className="ml-2 text-slate-400">Loading content...</span>
+        </div>
+      )}
+
       <AnimatePresence mode="wait">
-        {activeSection === 'tutorials' && (
+        {activeSection === 'tutorials' && !loadingContent && (
           <motion.div
             key="tutorials"
             initial={{ opacity: 0, y: 20 }}
@@ -313,60 +495,107 @@ export function LearningCenterTab() {
             exit={{ opacity: 0, y: -20 }}
             className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
           >
-            {TUTORIALS.map(tutorial => (
-              <Card key={tutorial.id} variant="neumorph" className="p-4 relative overflow-hidden">
-                {tutorial.locked && (
-                  <div className="absolute inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-10">
-                    <div className="text-center">
-                      <Lock className="w-8 h-8 text-slate-400 mx-auto mb-2" />
-                      <p className="text-sm text-slate-400">Complete previous tutorials</p>
-                    </div>
-                  </div>
-                )}
-
+            {index?.tutorials?.map(tutorial => (
+              <Card key={tutorial.id} variant="neumorph" className="p-4">
                 <div className="flex items-start justify-between mb-3">
                   <div className="flex items-center gap-2">
-                    <div className={`px-2 py-1 rounded text-xs font-medium ${difficultyColors[tutorial.difficulty]}`}>
-                      {tutorial.difficulty}
-                    </div>
-                    <div className="flex items-center gap-1 text-xs text-slate-500">
-                      <Clock className="w-3 h-3" />
-                      {tutorial.duration}
-                    </div>
+                    {tutorial.difficulty && (
+                      <div className={`px-2 py-1 rounded text-xs font-medium ${difficultyColors[tutorial.difficulty]}`}>
+                        {tutorial.difficulty}
+                      </div>
+                    )}
+                    {tutorial.estimatedMinutes && (
+                      <div className="flex items-center gap-1 text-xs text-slate-500">
+                        <Clock className="w-3 h-3" />
+                        {tutorial.estimatedMinutes} min
+                      </div>
+                    )}
                   </div>
-                  {tutorial.completed && (
-                    <CheckCircle className="w-5 h-5 text-green-400" />
-                  )}
                 </div>
 
                 <h3 className="font-semibold text-white mb-2">{tutorial.title}</h3>
-                <p className="text-sm text-slate-400 mb-3">{tutorial.description}</p>
-
-                <div className="flex flex-wrap gap-1 mb-3">
-                  {tutorial.topics.map(topic => (
-                    <Badge key={topic} variant="secondary" size="sm">{topic}</Badge>
-                  ))}
-                </div>
-
-                {tutorial.progress > 0 && tutorial.progress < 100 && (
-                  <div className="mb-3">
-                    <div className="flex justify-between text-xs mb-1">
-                      <span className="text-slate-500">Progress</span>
-                      <span className="text-orange-400">{tutorial.progress}%</span>
-                    </div>
-                    <Progress value={tutorial.progress} variant="warning" size="sm" />
-                  </div>
-                )}
+                <p className="text-sm text-slate-400 mb-4 line-clamp-2">{tutorial.description}</p>
 
                 <Button
-                  variant={tutorial.completed ? 'secondary' : 'primary'}
+                  variant="primary"
                   size="sm"
                   className="w-full"
-                  leftIcon={tutorial.completed ? <CheckCircle className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                  disabled={tutorial.locked}
+                  leftIcon={<Play className="w-4 h-4" />}
+                  onClick={() => handleSelectTutorial(tutorial)}
                 >
-                  {tutorial.completed ? 'Review' : tutorial.progress > 0 ? 'Continue' : 'Start'}
+                  Start Tutorial
                 </Button>
+              </Card>
+            ))}
+          </motion.div>
+        )}
+
+        {activeSection === 'guides' && !loadingContent && (
+          <motion.div
+            key="guides"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="grid grid-cols-1 md:grid-cols-2 gap-4"
+          >
+            {index?.guides?.map(guide => (
+              <Card key={guide.id} variant="neumorph" className="p-4">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center flex-shrink-0">
+                    <FileText className="w-5 h-5 text-white" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <h3 className="font-semibold text-white">{guide.title}</h3>
+                      {guide.difficulty && (
+                        <Badge variant={guide.difficulty === 'beginner' ? 'success' : guide.difficulty === 'intermediate' ? 'warning' : 'danger'} size="sm">
+                          {guide.difficulty}
+                        </Badge>
+                      )}
+                    </div>
+                    <p className="text-sm text-slate-400 mb-3">{guide.description}</p>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => handleSelectGuide(guide)}
+                      rightIcon={<ArrowRight className="w-4 h-4" />}
+                    >
+                      Read Guide
+                    </Button>
+                  </div>
+                </div>
+              </Card>
+            ))}
+          </motion.div>
+        )}
+
+        {activeSection === 'references' && !loadingContent && (
+          <motion.div
+            key="references"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="grid grid-cols-1 md:grid-cols-2 gap-4"
+          >
+            {index?.reference?.map(ref => (
+              <Card key={ref.id} variant="neumorph" className="p-4">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-cyan-500 flex items-center justify-center flex-shrink-0">
+                    <Lightbulb className="w-5 h-5 text-white" />
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-white mb-1">{ref.title}</h3>
+                    <p className="text-sm text-slate-400 mb-3">{ref.description}</p>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => handleSelectReference(ref)}
+                      rightIcon={<ArrowRight className="w-4 h-4" />}
+                    >
+                      View Reference
+                    </Button>
+                  </div>
+                </div>
               </Card>
             ))}
           </motion.div>
@@ -496,7 +725,8 @@ export function LearningCenterTab() {
                 onClick={() => setSelectedCaseStudy(null)}
                 className="text-sm text-slate-400 hover:text-white mb-4 flex items-center gap-1"
               >
-                ← Back to Case Studies
+                <ArrowLeft className="w-4 h-4" />
+                Back to Case Studies
               </button>
 
               <div className="flex items-start gap-6 mb-6">

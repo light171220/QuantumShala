@@ -1,5 +1,4 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
-import { motion } from 'framer-motion'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import {
   Search,
   Loader2,
@@ -10,8 +9,6 @@ import {
   Database,
   Filter,
   Zap,
-  Info,
-  CheckCircle,
   Pill,
   Brain,
   Apple,
@@ -23,30 +20,26 @@ import {
 import { Card } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
-import { Input } from '@/components/ui/Input'
 import { MoleculeViewer3D } from '@/components/chemistry/MoleculeViewer3D'
 import {
   fetchMoleculeByName,
   getAutocompleteSuggestions,
   fetchSynonyms,
-  MOLECULE_CATEGORIES,
+  MOLECULE_CATEGORIES as IMPORTED_CATEGORIES,
   type PubChemMolecule
 } from '@/lib/pubchem'
-import {
-  getAllMolecules,
-  getMoleculeInfo,
-} from '@/lib/chemistry/molecules/database'
-import {
-  getAllMaterials,
-  getMaterialInfo,
-} from '@/lib/chemistry/molecules/hamiltonians/materials'
-import {
-  getAllDrugs,
-  getDrugInfo,
-} from '@/lib/chemistry/molecules/hamiltonians/drug-molecules'
-import type { MoleculeInfo } from '@/lib/chemistry/molecules/types'
 
-export type SearchSource = 'all' | 'local' | 'pubchem'
+const MOLECULE_CATEGORIES = IMPORTED_CATEGORIES || {
+  'Pharmaceuticals': ['aspirin', 'ibuprofen', 'paracetamol', 'penicillin', 'morphine', 'metformin'],
+  'Neurotransmitters': ['dopamine', 'serotonin', 'adrenaline', 'acetylcholine', 'gaba', 'glutamate'],
+  'Vitamins': ['vitamin c', 'vitamin d', 'vitamin e', 'vitamin b12', 'folic acid', 'biotin'],
+  'Hormones': ['insulin', 'testosterone', 'estrogen', 'cortisol', 'melatonin', 'thyroxine'],
+  'Simple Molecules': ['water', 'methane', 'ammonia', 'carbon dioxide', 'hydrogen peroxide', 'ozone'],
+  'Organic Solvents': ['ethanol', 'acetone', 'benzene', 'toluene', 'chloroform', 'diethyl ether'],
+  'Sugars': ['glucose', 'fructose', 'sucrose', 'lactose', 'maltose', 'ribose'],
+  'Amino Acids': ['glycine', 'alanine', 'valine', 'leucine', 'isoleucine', 'proline']
+}
+import type { MoleculeInfo } from '@/lib/chemistry/molecules/types'
 
 interface MoleculeExplorerTabProps {
   onMoleculeSelect?: (molecule: MoleculeInfo | PubChemMolecule) => void
@@ -65,7 +58,6 @@ const CATEGORY_ICONS: Record<string, React.ReactNode> = {
 }
 
 export function MoleculeExplorerTab({ onMoleculeSelect, onRunVQE }: MoleculeExplorerTabProps) {
-  const [searchSource, setSearchSource] = useState<SearchSource>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [suggestions, setSuggestions] = useState<string[]>([])
   const [showSuggestions, setShowSuggestions] = useState(false)
@@ -79,10 +71,6 @@ export function MoleculeExplorerTab({ onMoleculeSelect, onRunVQE }: MoleculeExpl
 
   const debounceRef = useRef<NodeJS.Timeout>()
   const searchRef = useRef<HTMLDivElement>(null)
-
-  const localMolecules = useMemo(() => getAllMolecules(), [])
-  const materials = useMemo(() => getAllMaterials(), [])
-  const drugs = useMemo(() => getAllDrugs(), [])
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -102,17 +90,15 @@ export function MoleculeExplorerTab({ onMoleculeSelect, onRunVQE }: MoleculeExpl
 
     if (value.length >= 2) {
       debounceRef.current = setTimeout(async () => {
-        if (searchSource !== 'local') {
-          const results = await getAutocompleteSuggestions(value)
-          setSuggestions(results)
-          setShowSuggestions(results.length > 0)
-        }
+        const results = await getAutocompleteSuggestions(value)
+        setSuggestions(results)
+        setShowSuggestions(results.length > 0)
       }, 300)
     } else {
       setSuggestions([])
       setShowSuggestions(false)
     }
-  }, [searchSource])
+  }, [])
 
   const handleSearch = useCallback(async (query?: string) => {
     const searchTerm = query || searchQuery
@@ -123,33 +109,21 @@ export function MoleculeExplorerTab({ onMoleculeSelect, onRunVQE }: MoleculeExpl
     setShowSuggestions(false)
 
     try {
-      if (searchSource === 'local') {
-        const localMatch = [...localMolecules, ...materials, ...drugs].find(
-          m => m.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-               m.formula.toLowerCase().includes(searchTerm.toLowerCase())
-        )
-        if (localMatch) {
-          onMoleculeSelect?.(localMatch)
-        } else {
-          setError(`No local molecule found for "${searchTerm}"`)
-        }
+      const molecule = await fetchMoleculeByName(searchTerm)
+      if (molecule) {
+        setSelectedMolecule(molecule)
+        const syns = await fetchSynonyms(molecule.cid)
+        setSynonyms(syns)
+        onMoleculeSelect?.(molecule as any)
       } else {
-        const molecule = await fetchMoleculeByName(searchTerm)
-        if (molecule) {
-          setSelectedMolecule(molecule)
-          const syns = await fetchSynonyms(molecule.cid)
-          setSynonyms(syns)
-          onMoleculeSelect?.(molecule as any)
-        } else {
-          setError(`No molecule found for "${searchTerm}"`)
-        }
+        setError(`No molecule found for "${searchTerm}"`)
       }
     } catch (err) {
       setError('Failed to fetch molecule data')
     }
 
     setIsLoading(false)
-  }, [searchQuery, searchSource, localMolecules, materials, drugs, onMoleculeSelect])
+  }, [searchQuery, onMoleculeSelect])
 
   const handleCategoryClick = useCallback(async (category: string) => {
     if (activeCategory === category) {
@@ -161,17 +135,39 @@ export function MoleculeExplorerTab({ onMoleculeSelect, onRunVQE }: MoleculeExpl
     setActiveCategory(category)
     setCategoryLoading(true)
     setCategoryMolecules([])
+    setError(null)
 
-    const molecules = MOLECULE_CATEGORIES[category as keyof typeof MOLECULE_CATEGORIES] || []
-    const results: PubChemMolecule[] = []
+    try {
+      const moleculeNames = MOLECULE_CATEGORIES[category as keyof typeof MOLECULE_CATEGORIES] || []
 
-    for (const name of molecules.slice(0, 6)) {
-      const mol = await fetchMoleculeByName(name)
-      if (mol) results.push(mol)
+      if (moleculeNames.length === 0) {
+        setCategoryLoading(false)
+        return
+      }
+
+      const fetchPromises = moleculeNames.slice(0, 6).map(async (name) => {
+        try {
+          const mol = await fetchMoleculeByName(name)
+          return mol
+        } catch (err) {
+          console.error(`Failed to fetch ${name}:`, err)
+          return null
+        }
+      })
+
+      const fetchedMolecules = await Promise.all(fetchPromises)
+      const validMolecules = fetchedMolecules.filter((mol): mol is PubChemMolecule =>
+        mol !== null && mol !== undefined && typeof mol.cid === 'number'
+      )
+
+      setCategoryMolecules(validMolecules)
+    } catch (err) {
+      console.error('Category fetch error:', err)
+      setError('Failed to load category molecules')
+      setCategoryMolecules([])
+    } finally {
+      setCategoryLoading(false)
     }
-
-    setCategoryMolecules(results)
-    setCategoryLoading(false)
   }, [activeCategory])
 
   const downloadMolecule = (format: 'sdf' | 'mol' | 'xyz' | 'json') => {
@@ -221,23 +217,8 @@ export function MoleculeExplorerTab({ onMoleculeSelect, onRunVQE }: MoleculeExpl
         <Card variant="neumorph" className="p-4">
           <div className="flex items-center gap-2 mb-4">
             <Database className="w-5 h-5 text-orange-400" />
-            <h3 className="font-semibold text-white">Unified Search</h3>
-          </div>
-
-          <div className="flex gap-1 mb-4">
-            {(['all', 'local', 'pubchem'] as const).map(source => (
-              <button
-                key={source}
-                onClick={() => setSearchSource(source)}
-                className={`px-3 py-1.5 text-xs rounded-lg transition-all ${
-                  searchSource === source
-                    ? 'bg-orange-500 text-white'
-                    : 'bg-neumorph-base shadow-neumorph-xs border border-white/[0.02] text-slate-400 hover:text-white'
-                }`}
-              >
-                {source === 'all' ? 'All' : source === 'local' ? 'Local' : 'PubChem (116M+)'}
-              </button>
-            ))}
+            <h3 className="font-semibold text-white">PubChem Search</h3>
+            <Badge variant="secondary" size="sm">116M+ Molecules</Badge>
           </div>
 
           <div ref={searchRef} className="relative mb-4">
@@ -297,17 +278,25 @@ export function MoleculeExplorerTab({ onMoleculeSelect, onRunVQE }: MoleculeExpl
           </h4>
 
           <div className="grid grid-cols-2 gap-2">
-            {Object.keys(MOLECULE_CATEGORIES).map(category => (
+            {Object.keys(MOLECULE_CATEGORIES || {}).map(category => (
               <button
                 key={category}
-                onClick={() => handleCategoryClick(category)}
+                onClick={() => {
+                  try {
+                    handleCategoryClick(category)
+                  } catch (err) {
+                    console.error('Category click error:', err)
+                    setError('Failed to load category')
+                  }
+                }}
+                disabled={categoryLoading}
                 className={`flex items-center gap-2 p-2 rounded-lg text-xs transition-all ${
                   activeCategory === category
                     ? 'bg-orange-500/20 border border-orange-500 text-orange-400'
                     : 'bg-neumorph-base shadow-neumorph-xs border border-white/[0.02] text-slate-400 hover:text-white'
-                }`}
+                } ${categoryLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
-                {CATEGORY_ICONS[category]}
+                {CATEGORY_ICONS[category] || <Atom className="w-4 h-4" />}
                 <span className="truncate">{category}</span>
               </button>
             ))}
@@ -321,50 +310,35 @@ export function MoleculeExplorerTab({ onMoleculeSelect, onRunVQE }: MoleculeExpl
 
           {categoryMolecules.length > 0 && (
             <div className="mt-4 space-y-2">
-              {categoryMolecules.map(mol => (
-                <button
-                  key={mol.cid}
-                  onClick={() => {
-                    setSelectedMolecule(mol)
-                    onMoleculeSelect?.(mol as any)
-                  }}
-                  className="w-full p-2 bg-neumorph-base rounded-lg text-left hover:bg-orange-500/10 transition-colors"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium text-white">{mol.name}</span>
-                    <Badge variant="secondary" size="sm">{mol.formula}</Badge>
-                  </div>
-                  <div className="text-xs text-slate-500 mt-1">
-                    {mol.molecularWeight?.toFixed(2)} g/mol
-                  </div>
-                </button>
-              ))}
+              {categoryMolecules.map((mol, index) => {
+                const weight = typeof mol?.molecularWeight === 'number'
+                  ? mol.molecularWeight.toFixed(2)
+                  : parseFloat(String(mol?.molecularWeight || 0)).toFixed(2)
+                return (
+                  <button
+                    key={mol?.cid || `mol-${index}`}
+                    onClick={() => {
+                      if (mol) {
+                        setSelectedMolecule(mol)
+                        onMoleculeSelect?.(mol as any)
+                      }
+                    }}
+                    className="w-full p-2 bg-neumorph-base rounded-lg text-left hover:bg-orange-500/10 transition-colors"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium text-white">{mol?.name || 'Unknown'}</span>
+                      <Badge variant="secondary" size="sm">{mol?.formula || '-'}</Badge>
+                    </div>
+                    <div className="text-xs text-slate-500 mt-1">
+                      {weight} g/mol
+                    </div>
+                  </button>
+                )
+              })}
             </div>
           )}
         </Card>
 
-        <Card variant="neumorph" className="p-4">
-          <h4 className="font-semibold text-white mb-3 flex items-center gap-2">
-            <Atom className="w-4 h-4 text-orange-400" />
-            Local Database
-          </h4>
-
-          <div className="space-y-2 max-h-48 overflow-y-auto">
-            {localMolecules.slice(0, 5).map(mol => (
-              <button
-                key={mol.id}
-                onClick={() => onMoleculeSelect?.(mol)}
-                className="w-full p-2 bg-neumorph-base rounded-lg text-left hover:bg-orange-500/10 transition-colors"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-white">{mol.formula}</span>
-                  <Badge variant="warning" size="sm">{mol.qubitsRequired.sto3g}q</Badge>
-                </div>
-                <div className="text-xs text-slate-500">{mol.name}</div>
-              </button>
-            ))}
-          </div>
-        </Card>
       </div>
 
       <div className="lg:col-span-8 space-y-4">
@@ -404,7 +378,9 @@ export function MoleculeExplorerTab({ onMoleculeSelect, onRunVQE }: MoleculeExpl
                 <div className="bg-neumorph-darker p-3 rounded-lg">
                   <div className="text-xs text-slate-500">Molecular Weight</div>
                   <div className="text-lg font-semibold text-white">
-                    {selectedMolecule.molecularWeight?.toFixed(2)} g/mol
+                    {typeof selectedMolecule.molecularWeight === 'number'
+                      ? selectedMolecule.molecularWeight.toFixed(2)
+                      : parseFloat(String(selectedMolecule.molecularWeight || 0)).toFixed(2)} g/mol
                   </div>
                 </div>
                 <div className="bg-neumorph-darker p-3 rounded-lg">

@@ -93,6 +93,24 @@ function getPropertyValue(props: PubChemCompound['props'], label: string, name?:
   return prop?.value?.sval ?? prop?.value?.fval ?? prop?.value?.ival
 }
 
+async function fetchMoleculeProperties(cid: number): Promise<{ molecularWeight: number; formula: string }> {
+  try {
+    const response = await fetch(
+      `${PUBCHEM_BASE_URL}/compound/cid/${cid}/property/MolecularWeight,MolecularFormula/JSON`
+    )
+    if (!response.ok) return { molecularWeight: 0, formula: '' }
+    const data = await response.json()
+    const props = data.PropertyTable?.Properties?.[0]
+    const weight = props?.MolecularWeight
+    return {
+      molecularWeight: typeof weight === 'number' ? weight : parseFloat(String(weight)) || 0,
+      formula: props?.MolecularFormula || ''
+    }
+  } catch {
+    return { molecularWeight: 0, formula: '' }
+  }
+}
+
 function calculateElectrons(elements: string[]): number {
   const atomicNumbers: Record<string, number> = {
     H: 1, He: 2, Li: 3, Be: 4, B: 5, C: 6, N: 7, O: 8, F: 9, Ne: 10,
@@ -109,6 +127,8 @@ export async function fetchMoleculeByName(name: string): Promise<PubChemMolecule
       `${PUBCHEM_BASE_URL}/compound/name/${encodeURIComponent(name)}/record/JSON?record_type=3d`
     )
 
+    let molecule: PubChemMolecule | null = null
+
     if (!response.ok) {
       if (response.status === 404) {
         const response2d = await fetch(
@@ -116,13 +136,26 @@ export async function fetchMoleculeByName(name: string): Promise<PubChemMolecule
         )
         if (!response2d.ok) return null
         const data2d = await response2d.json()
-        return transformPubChemData(data2d.PC_Compounds?.[0], name)
+        molecule = transformPubChemData(data2d.PC_Compounds?.[0], name)
+      } else {
+        return null
       }
-      return null
+    } else {
+      const data = await response.json()
+      molecule = transformPubChemData(data.PC_Compounds?.[0], name)
     }
 
-    const data = await response.json()
-    return transformPubChemData(data.PC_Compounds?.[0], name)
+    if (molecule && (!molecule.molecularWeight || molecule.molecularWeight === 0 || !molecule.formula)) {
+      const props = await fetchMoleculeProperties(molecule.cid)
+      if (!molecule.molecularWeight || molecule.molecularWeight === 0) {
+        molecule.molecularWeight = props.molecularWeight
+      }
+      if (!molecule.formula) {
+        molecule.formula = props.formula
+      }
+    }
+
+    return molecule
   } catch (error) {
     console.error('PubChem fetch error:', error)
     return null
@@ -135,17 +168,31 @@ export async function fetchMoleculeByCID(cid: number): Promise<PubChemMolecule |
       `${PUBCHEM_BASE_URL}/compound/cid/${cid}/record/JSON?record_type=3d`
     )
 
+    let molecule: PubChemMolecule | null = null
+
     if (!response.ok) {
       const response2d = await fetch(
         `${PUBCHEM_BASE_URL}/compound/cid/${cid}/JSON`
       )
       if (!response2d.ok) return null
       const data2d = await response2d.json()
-      return transformPubChemData(data2d.PC_Compounds?.[0])
+      molecule = transformPubChemData(data2d.PC_Compounds?.[0])
+    } else {
+      const data = await response.json()
+      molecule = transformPubChemData(data.PC_Compounds?.[0])
     }
 
-    const data = await response.json()
-    return transformPubChemData(data.PC_Compounds?.[0])
+    if (molecule && (!molecule.molecularWeight || molecule.molecularWeight === 0 || !molecule.formula)) {
+      const props = await fetchMoleculeProperties(molecule.cid)
+      if (!molecule.molecularWeight || molecule.molecularWeight === 0) {
+        molecule.molecularWeight = props.molecularWeight
+      }
+      if (!molecule.formula) {
+        molecule.formula = props.formula
+      }
+    }
+
+    return molecule
   } catch (error) {
     console.error('PubChem fetch error:', error)
     return null
@@ -161,7 +208,19 @@ export async function fetchMoleculeBySMILES(smiles: string): Promise<PubChemMole
     if (!response.ok) return null
 
     const data = await response.json()
-    return transformPubChemData(data.PC_Compounds?.[0])
+    const molecule = transformPubChemData(data.PC_Compounds?.[0])
+
+    if (molecule && (!molecule.molecularWeight || molecule.molecularWeight === 0 || !molecule.formula)) {
+      const props = await fetchMoleculeProperties(molecule.cid)
+      if (!molecule.molecularWeight || molecule.molecularWeight === 0) {
+        molecule.molecularWeight = props.molecularWeight
+      }
+      if (!molecule.formula) {
+        molecule.formula = props.formula
+      }
+    }
+
+    return molecule
   } catch (error) {
     console.error('PubChem fetch error:', error)
     return null

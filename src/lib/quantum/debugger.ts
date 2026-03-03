@@ -8,6 +8,8 @@ import type {
 } from '@/types/simulator'
 import { QuantumSimulator } from './simulator'
 
+export type { DebuggerSnapshot, DebuggerState } from '@/types/simulator'
+
 export const DEFAULT_DEBUGGER_STATE: DebuggerState = {
   isActive: false,
   currentStep: -1,

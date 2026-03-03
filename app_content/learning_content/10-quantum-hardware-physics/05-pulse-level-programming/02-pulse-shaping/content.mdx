@@ -1,0 +1,487 @@
+---
+title: "Pulse Shaping for High-Fidelity Gates"
+description: "Learn how pulse shapes affect gate fidelity, spectral content, and leakage."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Explain why pulse shaping is necessary for high-fidelity quantum gates
+- Analyze the spectral content of different pulse envelopes and their bandwidth
+- Compare Gaussian, Gaussian square, and cosine pulse shapes
+- Understand the relationship between pulse bandwidth and leakage to non-computational states
+- Design pulse envelopes that balance gate speed with fidelity requirements
+
+## 1. Why Pulse Shape Matters
+
+In the previous lesson, we treated microwave pulses as having constant amplitude (square pulses). While conceptually simple, square pulses have significant drawbacks for high-fidelity quantum gates.
+
+<Definition term="Pulse Shaping">
+Pulse shaping refers to the careful design of the time-domain envelope of a microwave pulse to achieve specific goals: minimizing spectral leakage, reducing transitions to non-computational states, and optimizing gate fidelity while maintaining reasonable gate times.
+</Definition>
+
+### The Problem with Square Pulses
+
+A square pulse of duration T has a frequency spectrum given by the sinc function:
+
+<Formula>
+$$\tilde{\Omega}(\omega) = \Omega_0 T \cdot \text{sinc}\left(\frac{(\omega - \omega_d) T}{2}\right)$$
+</Formula>
+
+The sinc function has slowly decaying sidelobes that extend far from the carrier frequency:
+
+<Formula>
+$$\text{sinc}(x) = \frac{\sin(\pi x)}{\pi x}$$
+</Formula>
+
+<Warning>
+Square pulses have infinite bandwidth in principle. The sidelobes decay only as 1/f, meaning significant spectral power exists at frequencies far from the intended drive frequency. This can excite unwanted transitions.
+</Warning>
+
+### Consequences of Poor Pulse Shaping
+
+1. **Leakage**: Spectral components at $\omega_{12} = \omega_{01} + \alpha$ can excite the |1⟩→|2⟩ transition
+2. **Crosstalk**: Power at neighboring qubit frequencies causes unintended rotations
+3. **Decoherence**: Broadband noise couples more effectively to the environment
+4. **Control Electronics**: Sharp transitions stress AWG (Arbitrary Waveform Generator) hardware
+
+## 2. Gaussian Pulses
+
+The most common pulse shape in superconducting qubit systems is the **Gaussian envelope**.
+
+### Gaussian Envelope Definition
+
+<Formula>
+$$\Omega(t) = \Omega_0 \exp\left(-\frac{(t - t_0)^2}{2\sigma^2}\right)$$
+</Formula>
+
+where:
+- $\Omega_0$ is the peak amplitude
+- $t_0$ is the pulse center
+- $\sigma$ is the standard deviation (width parameter)
+
+### Why Gaussian?
+
+The Fourier transform of a Gaussian is also a Gaussian:
+
+<Formula>
+$$\tilde{\Omega}(\omega) = \Omega_0 \sigma \sqrt{2\pi} \exp\left(-\frac{\sigma^2 \omega^2}{2}\right)$$
+</Formula>
+
+Key properties:
+- **No sidelobes**: The spectrum decays exponentially, not polynomially
+- **Minimum uncertainty**: Gaussian pulses achieve the minimum time-bandwidth product
+- **Smooth transitions**: Continuous derivatives of all orders
+
+<Tip>
+The time-bandwidth product for a Gaussian pulse is ΔtΔf ≈ 0.44, compared to ≈ 0.89 for a square pulse. This means Gaussian pulses achieve the same spectral confinement with shorter duration.
+</Tip>
+
+### Truncated Gaussian
+
+In practice, we cannot use an infinitely long Gaussian. The pulse is truncated at some multiple of σ:
+
+<Formula>
+$$\Omega(t) = \Omega_0 \exp\left(-\frac{(t - t_0)^2}{2\sigma^2}\right) \cdot \text{rect}\left(\frac{t - t_0}{2n\sigma}\right)$$
+</Formula>
+
+where n is typically 2-4 (pulse extends ±nσ from center).
+
+<Example>
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def gaussian_pulse(t, amp, sigma, center):
+    """Generate a Gaussian pulse envelope."""
+    return amp * np.exp(-0.5 * ((t - center) / sigma)**2)
+
+def truncated_gaussian(t, amp, sigma, center, n_sigma=3):
+    """Generate a truncated Gaussian pulse."""
+    pulse = gaussian_pulse(t, amp, sigma, center)
+    # Truncate outside ±n_sigma
+    mask = np.abs(t - center) <= n_sigma * sigma
+    return pulse * mask
+
+# Create time array
+dt = 0.1  # ns
+t = np.arange(0, 50, dt)
+
+# Gaussian parameters
+amp = 1.0
+sigma = 5.0  # ns
+center = 25.0  # ns
+
+# Generate pulses
+gauss_full = gaussian_pulse(t, amp, sigma, center)
+gauss_trunc = truncated_gaussian(t, amp, sigma, center, n_sigma=3)
+
+# Plot
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+# Time domain
+axes[0].plot(t, gauss_full, 'b-', label='Full Gaussian', alpha=0.5)
+axes[0].plot(t, gauss_trunc, 'r-', label='Truncated (3σ)')
+axes[0].axvline(center - 3*sigma, color='gray', linestyle='--', alpha=0.5)
+axes[0].axvline(center + 3*sigma, color='gray', linestyle='--', alpha=0.5)
+axes[0].set_xlabel('Time (ns)')
+axes[0].set_ylabel('Amplitude')
+axes[0].set_title('Gaussian Pulse Envelope')
+axes[0].legend()
+axes[0].grid(True, alpha=0.3)
+
+# Frequency domain
+freq = np.fft.fftfreq(len(t), dt) * 1000  # Convert to MHz
+spectrum_full = np.abs(np.fft.fft(gauss_full))
+spectrum_trunc = np.abs(np.fft.fft(gauss_trunc))
+
+axes[1].semilogy(freq[:len(freq)//2], spectrum_full[:len(freq)//2],
+                  'b-', label='Full Gaussian', alpha=0.5)
+axes[1].semilogy(freq[:len(freq)//2], spectrum_trunc[:len(freq)//2],
+                  'r-', label='Truncated (3σ)')
+axes[1].set_xlabel('Frequency (MHz)')
+axes[1].set_ylabel('Spectral Amplitude (log)')
+axes[1].set_title('Frequency Spectrum')
+axes[1].set_xlim(0, 200)
+axes[1].legend()
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+</Example>
+
+## 3. Gaussian Square Pulses
+
+For longer gates or when a sustained drive is needed, the **Gaussian square** (flat-top Gaussian) pulse is commonly used.
+
+### Definition
+
+<Formula>
+$$\Omega(t) = \begin{cases}
+\Omega_0 \exp\left(-\frac{(t - t_{rise})^2}{2\sigma^2}\right) & t < t_{rise} \\
+\Omega_0 & t_{rise} \leq t \leq t_{rise} + t_{flat} \\
+\Omega_0 \exp\left(-\frac{(t - t_{rise} - t_{flat})^2}{2\sigma^2}\right) & t > t_{rise} + t_{flat}
+\end{cases}$$
+</Formula>
+
+This combines:
+- Gaussian rise (smooth turn-on)
+- Flat top (sustained drive)
+- Gaussian fall (smooth turn-off)
+
+### Advantages
+
+1. **Longer rotations**: Allows arbitrary rotation angles without extremely high amplitudes
+2. **Readout pulses**: Ideal for measurement where sustained drive is needed
+3. **Two-qubit gates**: Cross-resonance gates benefit from flat-top pulses
+
+<Example>
+```python
+def gaussian_square(t, amp, sigma, rise_time, flat_time):
+    """
+    Generate a Gaussian square (flat-top Gaussian) pulse.
+
+    Args:
+        t: Time array
+        amp: Peak amplitude
+        sigma: Gaussian rise/fall width
+        rise_time: Center of rising edge
+        flat_time: Duration of flat top
+    """
+    pulse = np.zeros_like(t)
+
+    # Rising Gaussian edge
+    rise_mask = t < rise_time
+    pulse[rise_mask] = amp * np.exp(-0.5 * ((t[rise_mask] - rise_time) / sigma)**2)
+
+    # Flat top
+    flat_mask = (t >= rise_time) & (t < rise_time + flat_time)
+    pulse[flat_mask] = amp
+
+    # Falling Gaussian edge
+    fall_center = rise_time + flat_time
+    fall_mask = t >= fall_center
+    pulse[fall_mask] = amp * np.exp(-0.5 * ((t[fall_mask] - fall_center) / sigma)**2)
+
+    return pulse
+
+# Parameters
+t = np.linspace(0, 100, 1000)
+amp = 1.0
+sigma = 5.0
+rise_time = 20.0
+flat_time = 40.0
+
+pulse = gaussian_square(t, amp, sigma, rise_time, flat_time)
+
+plt.figure(figsize=(10, 4))
+plt.plot(t, pulse, 'b-', linewidth=2)
+plt.xlabel('Time (ns)')
+plt.ylabel('Amplitude')
+plt.title('Gaussian Square Pulse')
+plt.grid(True, alpha=0.3)
+plt.show()
+```
+</Example>
+
+## 4. Other Common Pulse Shapes
+
+### Cosine (Hann) Pulse
+
+<Formula>
+$$\Omega(t) = \frac{\Omega_0}{2}\left(1 - \cos\left(\frac{2\pi t}{T}\right)\right)$$
+</Formula>
+
+Properties:
+- Zero amplitude at start and end
+- Zero derivative at start and end
+- Good spectral properties (sidelobes decay as 1/f³)
+
+### Raised Cosine Pulse
+
+<Formula>
+$$\Omega(t) = \frac{\Omega_0}{2}\left(1 - \cos\left(\frac{\pi t}{T}\right)\right) \quad \text{for } 0 \leq t \leq T$$
+</Formula>
+
+Often used for the rise/fall portions of flat-top pulses.
+
+### Blackman Pulse
+
+<Formula>
+$$\Omega(t) = 0.42 - 0.5\cos\left(\frac{2\pi t}{T}\right) + 0.08\cos\left(\frac{4\pi t}{T}\right)$$
+</Formula>
+
+Properties:
+- Excellent sidelobe suppression (first sidelobe at -58 dB)
+- Wider main lobe than Hann window
+- Used when crosstalk must be minimized
+
+### Comparison Table
+
+| Pulse Shape | Sidelobe Decay | Main Lobe Width | Complexity |
+|-------------|----------------|-----------------|------------|
+| Square | 1/f | Narrow | Low |
+| Gaussian | Exponential | Medium | Low |
+| Hann (Cosine) | 1/f³ | Medium | Low |
+| Blackman | 1/f⁵ | Wide | Low |
+| DRAG | Exponential | Medium | Medium |
+
+## 5. Spectral Analysis of Pulses
+
+Understanding the frequency content of pulses is crucial for predicting leakage and crosstalk.
+
+### Bandwidth Definition
+
+For a pulse with spectrum $\tilde{\Omega}(\omega)$, we define bandwidth as the frequency range containing most of the power:
+
+<Formula>
+$$\Delta\omega = \frac{\int_{-\infty}^{\infty} \omega^2 |\tilde{\Omega}(\omega)|^2 d\omega}{\int_{-\infty}^{\infty} |\tilde{\Omega}(\omega)|^2 d\omega}$$
+</Formula>
+
+Or more practically, the full width at half maximum (FWHM) of the spectrum.
+
+### Time-Bandwidth Product
+
+For any pulse, there is a fundamental limit:
+
+<Formula>
+$$\Delta t \cdot \Delta f \geq \frac{1}{4\pi}$$
+</Formula>
+
+Different pulse shapes achieve different products:
+
+| Pulse | Time-Bandwidth Product |
+|-------|------------------------|
+| Gaussian | 0.44 |
+| Square | 0.89 |
+| Hann | 0.65 |
+| Blackman | 0.81 |
+
+<Tip>
+The time-bandwidth product tells you the fundamental tradeoff: shorter pulses require more bandwidth. Choose pulse shapes that achieve good spectral properties (low sidelobes) while keeping close to the theoretical minimum.
+</Tip>
+
+### Leakage Estimation
+
+For a transmon with anharmonicity α, spectral power at the 1-2 transition frequency causes leakage:
+
+<Formula>
+$$P_{leak} \propto \left|\tilde{\Omega}(\omega_{12})\right|^2 = \left|\tilde{\Omega}(\omega_{01} + \alpha)\right|^2$$
+</Formula>
+
+To minimize leakage:
+1. Use smooth pulse shapes (low spectral sidelobes)
+2. Increase pulse duration (narrower spectrum)
+3. Use DRAG correction (next lesson)
+
+<Example>
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def analyze_pulse_spectrum(pulse, dt, label):
+    """Compute and plot the spectrum of a pulse."""
+    n = len(pulse)
+    freq = np.fft.fftfreq(n, dt)
+    spectrum = np.abs(np.fft.fft(pulse))
+
+    # Normalize
+    spectrum = spectrum / spectrum.max()
+
+    # Only positive frequencies
+    pos_mask = freq >= 0
+    return freq[pos_mask], spectrum[pos_mask]
+
+# Create pulses of equal duration
+dt = 0.1  # ns
+T = 30  # ns total duration
+t = np.arange(0, T, dt)
+n = len(t)
+
+# Different pulse shapes
+pulses = {}
+
+# Square
+pulses['Square'] = np.ones(n)
+
+# Gaussian (truncated at 3σ)
+sigma = T / 6  # So pulse spans ±3σ
+pulses['Gaussian'] = np.exp(-0.5 * ((t - T/2) / sigma)**2)
+
+# Hann (cosine)
+pulses['Hann'] = 0.5 * (1 - np.cos(2 * np.pi * t / T))
+
+# Blackman
+pulses['Blackman'] = (0.42 - 0.5 * np.cos(2*np.pi*t/T) +
+                       0.08 * np.cos(4*np.pi*t/T))
+
+# Normalize all to same area (same rotation angle)
+for key in pulses:
+    pulses[key] = pulses[key] / pulses[key].sum() * n
+
+# Plot time domain and frequency domain
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+colors = ['blue', 'red', 'green', 'purple']
+
+for (name, pulse), color in zip(pulses.items(), colors):
+    axes[0].plot(t, pulse, color=color, label=name, linewidth=2)
+
+axes[0].set_xlabel('Time (ns)')
+axes[0].set_ylabel('Normalized Amplitude')
+axes[0].set_title('Pulse Shapes (Equal Area)')
+axes[0].legend()
+axes[0].grid(True, alpha=0.3)
+
+# Frequency spectra
+for (name, pulse), color in zip(pulses.items(), colors):
+    freq, spec = analyze_pulse_spectrum(pulse, dt, name)
+    axes[1].semilogy(freq * 1000, spec, color=color, label=name, linewidth=2)
+
+# Mark typical anharmonicity location
+alpha_MHz = 250  # Typical transmon anharmonicity
+axes[1].axvline(alpha_MHz, color='black', linestyle='--',
+                 label=f'α = {alpha_MHz} MHz')
+
+axes[1].set_xlabel('Frequency (MHz)')
+axes[1].set_ylabel('Normalized Spectral Amplitude')
+axes[1].set_title('Frequency Spectra (Log Scale)')
+axes[1].set_xlim(0, 500)
+axes[1].set_ylim(1e-5, 1.5)
+axes[1].legend()
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# Quantify leakage potential
+print("Spectral amplitude at α = 250 MHz (leakage indicator):")
+for (name, pulse), color in zip(pulses.items(), colors):
+    freq, spec = analyze_pulse_spectrum(pulse, dt, name)
+    # Interpolate to find value at α
+    from scipy.interpolate import interp1d
+    f_interp = interp1d(freq * 1000, spec)
+    leak_amp = f_interp(alpha_MHz)
+    print(f"  {name}: {leak_amp:.2e}")
+```
+</Example>
+
+## 6. Pulse Design Considerations
+
+### Gate Time vs Fidelity Tradeoff
+
+Faster gates have broader spectra, increasing leakage:
+
+<Formula>
+$$\text{Gate time} \propto \frac{1}{\Omega_{max}}$$
+$$\text{Bandwidth} \propto \frac{1}{\text{Gate time}}$$
+$$\text{Leakage} \propto \left(\frac{\text{Bandwidth}}{|\alpha|}\right)^2$$
+</Formula>
+
+This creates a fundamental tension between speed and fidelity.
+
+### Practical Guidelines
+
+1. **Gate time selection**: Aim for gate times of 4-10 times 1/|α|
+2. **Truncation**: Use at least 3σ truncation for Gaussian pulses
+3. **Rise time**: Smooth edges should be at least 1/(2|α|) long
+4. **Sampling**: Ensure AWG sample rate is at least 4× the pulse bandwidth
+
+<Warning>
+The 1/|α| timescale (~4 ns for typical transmons) sets the minimum practical gate time. Going faster than this requires advanced techniques like DRAG pulses or optimal control.
+</Warning>
+
+### Pulse Parameterization in Practice
+
+In Qiskit Pulse, pulses are typically defined by:
+
+```python
+from qiskit.pulse import library as pulse_lib
+
+# Gaussian pulse
+gaussian = pulse_lib.Gaussian(
+    duration=160,      # samples
+    amp=0.1,           # normalized amplitude
+    sigma=40,          # width in samples
+    name='gaussian_pulse'
+)
+
+# Gaussian square (flat-top)
+gauss_square = pulse_lib.GaussianSquare(
+    duration=640,      # total samples
+    amp=0.05,          # amplitude
+    sigma=64,          # rise/fall width
+    width=384,         # flat top width
+    name='flat_top_pulse'
+)
+```
+
+## 7. Summary
+
+Pulse shaping is essential for achieving high-fidelity quantum gates:
+
+1. **Square pulses** have poor spectral properties (slow sidelobe decay)
+2. **Gaussian pulses** offer excellent spectral confinement with exponential decay
+3. **Gaussian square pulses** combine smooth edges with sustained drive capability
+4. **Spectral bandwidth** determines leakage to non-computational states
+5. **Time-bandwidth tradeoff** limits how fast gates can be while maintaining fidelity
+6. **Anharmonicity** sets the frequency scale that must be avoided
+
+Understanding these principles is crucial for:
+- Calibrating gate pulses on real hardware
+- Minimizing crosstalk in multi-qubit systems
+- Achieving the gate fidelities required for quantum error correction
+
+<Tip>
+Modern quantum processors achieve single-qubit gate fidelities >99.9% through careful pulse shaping combined with DRAG corrections and optimal control techniques covered in subsequent lessons.
+</Tip>
+
+## Further Reading
+
+- Motzoi et al., "Simple Pulses for Elimination of Leakage" (2009) - Original DRAG paper
+- Lucero et al., "Reduced phase error through optimized control" (2010)
+- Next lesson: Calibration - systematic procedures for tuning pulse parameters

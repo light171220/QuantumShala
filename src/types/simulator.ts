@@ -309,3 +309,59 @@ export interface ComparisonResult {
   metrics: ComparisonMetrics
   timestamp: number
 }
+
+export interface ParseError {
+  code: string
+  message: string
+  line: number
+  column?: number
+  severity: 'error'
+  suggestion?: string
+}
+
+export interface ParseWarning {
+  code: string
+  message: string
+  line: number
+  column?: number
+  severity: 'warning'
+  suggestion?: string
+}
+
+export interface ParsedGate {
+  id: string
+  type: GateType
+  name: string
+  qubits: number[]
+  controlQubits: number[]
+  parameters: number[]
+  line: number
+  column?: number
+}
+
+export interface ParsedMeasurement {
+  qubit: number
+  classicalBit: number
+  line: number
+}
+
+export interface ParsedCircuit {
+  numQubits: number
+  numClassicalBits: number
+  gates: ParsedGate[]
+  measurements: ParsedMeasurement[]
+  barriers: number[][]
+  metadata: {
+    circuitDepth: number
+    gateCount: number
+    twoQubitGateCount: number
+  }
+}
+
+export interface ParseResult {
+  success: boolean
+  circuit: ParsedCircuit | null
+  errors: ParseError[]
+  warnings: ParseWarning[]
+  parseTimeMs: number
+}

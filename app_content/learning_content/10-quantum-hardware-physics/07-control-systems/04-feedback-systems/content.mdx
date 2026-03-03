@@ -1,0 +1,628 @@
+---
+title: "Real-Time Feedback and Adaptive Control"
+description: "Master the design and implementation of real-time feedback systems for quantum computing."
+duration: 50
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Design feedback loops that operate within qubit coherence time constraints
+- Implement active qubit reset using measurement feedback
+- Analyze latency budgets for mid-circuit measurement and conditional operations
+- Apply classical feedback for quantum error detection and correction
+- Evaluate the trade-offs between feedback speed and measurement fidelity
+
+## 1. Introduction to Quantum Feedback
+
+Real-time feedback in quantum computing allows the classical control system to make decisions based on measurement outcomes while qubits maintain coherence. This capability is essential for many quantum algorithms and error correction protocols.
+
+<Definition term="Real-Time Quantum Feedback">
+Real-time quantum feedback is the process of measuring a quantum system, processing the result classically, and applying a conditional quantum operation - all within a time much shorter than the qubit coherence time. This enables adaptive quantum algorithms and error correction.
+</Definition>
+
+### Why Real-Time Feedback Matters
+
+| Application | Feedback Requirement | Typical Latency Budget |
+|-------------|---------------------|----------------------|
+| Active reset | Conditional pi pulse | < 1 μs |
+| Repeat-until-success gates | Conditional retry | < 5 μs |
+| Syndrome extraction | Multi-qubit readout | < 1 μs |
+| Real-time error correction | Decode + correct | < 10 μs |
+| Teleportation | Conditional Pauli | < 1 μs |
+
+<Tip>
+The key insight is that feedback latency must be a small fraction of $T_2$ coherence time. For superconducting qubits with $T_2 \sim 100$ μs, feedback at 500 ns consumes only 0.5% of the coherence budget, leaving 99.5% for useful computation.
+</Tip>
+
+## 2. Feedback System Architecture
+
+### End-to-End Feedback Path
+
+The complete feedback loop includes multiple stages:
+
+```
+Qubit → Readout Resonator → Amplifiers → ADC → FPGA Processing → DAC → Drive Line → Qubit
+        ←──────────────── Total Feedback Latency ────────────────────→
+```
+
+**Latency Breakdown:**
+
+<Formula>
+$$T_{feedback} = T_{readout} + T_{ADC} + T_{process} + T_{decision} + T_{DAC} + T_{drive}$$
+</Formula>
+
+### Component Latencies
+
+| Component | Typical Latency | Notes |
+|-----------|----------------|-------|
+| Readout resonator | 200-500 ns | Ring-up time |
+| Traveling wave amplifier | 5-10 ns | Group delay |
+| ADC conversion | 5-20 ns | Pipeline delay |
+| Digital demodulation | 50-100 ns | FPGA processing |
+| Integration | 100-500 ns | Depends on SNR |
+| Threshold decision | 5-10 ns | Comparison |
+| Conditional logic | 10-30 ns | State machine |
+| DAC conversion | 5-20 ns | Pipeline delay |
+| Drive propagation | 5-10 ns | Cable delay |
+
+<Example>
+Calculating total feedback latency:
+
+```python
+import numpy as np
+
+def calculate_feedback_latency(config: dict) -> dict:
+    """
+    Calculate total feedback latency and analyze budget.
+
+    Args:
+        config: Dictionary of component latencies in ns
+
+    Returns:
+        Analysis results
+    """
+    # Sum all latencies
+    total = sum(config.values())
+
+    # Categorize
+    readout_chain = config.get('readout_ringup', 0) + \
+                    config.get('amplifier_delay', 0)
+
+    digitization = config.get('adc_pipeline', 0) + \
+                   config.get('dac_pipeline', 0)
+
+    processing = config.get('demodulation', 0) + \
+                 config.get('integration', 0) + \
+                 config.get('threshold', 0) + \
+                 config.get('decision_logic', 0)
+
+    return {
+        'total_ns': total,
+        'readout_chain_ns': readout_chain,
+        'digitization_ns': digitization,
+        'processing_ns': processing,
+        'breakdown': config
+    }
+
+# Typical superconducting qubit system
+system_config = {
+    'readout_ringup': 300,    # Resonator ring-up
+    'amplifier_delay': 10,    # TWPA/HEMT delay
+    'adc_pipeline': 15,       # ADC latency
+    'demodulation': 60,       # Digital mixing
+    'integration': 200,       # Signal integration
+    'threshold': 8,           # Comparison
+    'decision_logic': 20,     # Conditional branch
+    'dac_pipeline': 15,       # DAC latency
+    'drive_cable': 8,         # Cable delay
+}
+
+result = calculate_feedback_latency(system_config)
+print(f"Total feedback latency: {result['total_ns']} ns")
+print(f"  Readout chain: {result['readout_chain_ns']} ns")
+print(f"  Digitization: {result['digitization_ns']} ns")
+print(f"  Processing: {result['processing_ns']} ns")
+
+# Check against T2
+T2_us = 100
+latency_fraction = result['total_ns'] / (T2_us * 1000) * 100
+print(f"\nFraction of T2: {latency_fraction:.2f}%")
+```
+</Example>
+
+## 3. Active Qubit Reset
+
+### The Reset Problem
+
+Before running a new quantum circuit, qubits should be in the ground state |0⟩. Passive reset (waiting for thermal relaxation) takes 5-10 × T1, which is hundreds of microseconds. Active reset uses feedback to achieve reset in ~1 μs.
+
+<Definition term="Active Reset">
+Active reset is a feedback protocol that measures the qubit state and conditionally applies a pi pulse to flip qubits found in the |1⟩ state to |0⟩. This is much faster than passive thermal relaxation.
+</Definition>
+
+### Active Reset Protocol
+
+```
+1. Measure qubit
+2. If result = |1⟩: Apply X gate (pi pulse)
+3. If result = |0⟩: No operation
+4. (Optional) Repeat for higher fidelity
+```
+
+<Formula>
+$$P_{reset} = P(0|0) + P(0|1) \cdot P_{flip}$$
+</Formula>
+
+where $P(0|0)$ is probability of correctly identifying |0⟩, $P(0|1)$ is probability of measuring |1⟩ when in |1⟩, and $P_{flip}$ is the X gate fidelity.
+
+```python
+import numpy as np
+
+def simulate_active_reset(
+    p_thermal_1: float,      # Probability qubit is in |1> before reset
+    measurement_fidelity: float,  # Probability of correct measurement
+    gate_fidelity: float,    # X gate fidelity
+    n_iterations: int = 1    # Number of reset iterations
+) -> dict:
+    """
+    Simulate active reset protocol.
+
+    Returns probability of being in |0> after reset.
+    """
+    # Initial state probabilities
+    p_0 = 1 - p_thermal_1
+    p_1 = p_thermal_1
+
+    for _ in range(n_iterations):
+        # Measurement outcomes (probability of measuring each state)
+        # P(measure 0 | state 0) = measurement_fidelity
+        # P(measure 1 | state 1) = measurement_fidelity
+
+        # After measurement and conditional flip:
+        # If in |0> and measure 0: stay in |0> (no flip)
+        # If in |0> and measure 1: flip to |1> (error)
+        # If in |1> and measure 1: flip to |0> (correct reset)
+        # If in |1> and measure 0: stay in |1> (error)
+
+        p_0_new = (
+            p_0 * measurement_fidelity +  # Correct ID of |0>
+            p_1 * measurement_fidelity * gate_fidelity  # Correct flip |1>->|0>
+        )
+
+        p_1_new = (
+            p_0 * (1 - measurement_fidelity) * gate_fidelity +  # Incorrect flip |0>->|1>
+            p_1 * (1 - measurement_fidelity) +  # Missed |1> state
+            p_1 * measurement_fidelity * (1 - gate_fidelity)  # Failed flip
+        )
+
+        # Normalize
+        total = p_0_new + p_1_new
+        p_0 = p_0_new / total
+        p_1 = p_1_new / total
+
+    return {
+        'p_ground': p_0,
+        'p_excited': p_1,
+        'reset_fidelity': p_0,
+        'improvement_over_passive': p_0 / (1 - p_thermal_1)
+    }
+
+# Compare passive vs active reset
+print("Reset Comparison:")
+print("-" * 40)
+
+# Thermal state (passive reset with some residual excitation)
+p_thermal = 0.05  # 5% residual after ~5*T1 wait
+
+# Single iteration active reset
+result_1 = simulate_active_reset(
+    p_thermal_1=p_thermal,
+    measurement_fidelity=0.98,
+    gate_fidelity=0.999,
+    n_iterations=1
+)
+print(f"After 1 active reset iteration: P(|0>) = {result_1['p_ground']:.4f}")
+
+# Two iterations
+result_2 = simulate_active_reset(
+    p_thermal_1=p_thermal,
+    measurement_fidelity=0.98,
+    gate_fidelity=0.999,
+    n_iterations=2
+)
+print(f"After 2 active reset iterations: P(|0>) = {result_2['p_ground']:.4f}")
+```
+
+## 4. Mid-Circuit Measurement
+
+### Conditional Operations
+
+Mid-circuit measurement enables algorithms that branch based on measurement outcomes. The key challenge is maintaining coherence on unmeasured qubits while the measurement and decision occur.
+
+<Warning>
+Mid-circuit measurement can cause crosstalk and disturbance to unmeasured qubits. Careful engineering of readout resonator frequencies, drive powers, and shielding is essential.
+</Warning>
+
+### Measurement-Based Uncomputation
+
+A common use of mid-circuit measurement is ancilla-based computation:
+
+```
+|ψ⟩|0⟩ → Entangle → Measure ancilla → Conditionally correct |ψ⟩
+```
+
+```python
+def teleportation_feedback_sequence(measurement_results: tuple) -> list:
+    """
+    Generate feedback operations for quantum teleportation.
+
+    Args:
+        measurement_results: (m1, m2) Bell measurement outcomes
+
+    Returns:
+        List of Pauli corrections to apply to target qubit
+    """
+    m1, m2 = measurement_results
+
+    corrections = []
+
+    # Pauli-X correction based on first measurement
+    if m2 == 1:
+        corrections.append({'gate': 'X', 'qubit': 'target'})
+
+    # Pauli-Z correction based on second measurement
+    if m1 == 1:
+        corrections.append({'gate': 'Z', 'qubit': 'target'})
+
+    return corrections
+
+# Example: All possible Bell measurement outcomes
+print("Teleportation Corrections:")
+for m1 in [0, 1]:
+    for m2 in [0, 1]:
+        corrections = teleportation_feedback_sequence((m1, m2))
+        if corrections:
+            gates = ', '.join([c['gate'] for c in corrections])
+        else:
+            gates = 'None'
+        print(f"  m1={m1}, m2={m2} -> Apply: {gates}")
+```
+
+## 5. Latency Budget Analysis
+
+### Critical Path Identification
+
+To optimize feedback latency, identify and minimize the critical path:
+
+<Formula>
+$$T_{critical} = \max\left(\sum_{i \in path_1} T_i, \sum_{j \in path_2} T_j, ...\right)$$
+</Formula>
+
+**Optimization strategies:**
+
+1. **Reduce integration time**: Trade SNR for speed
+2. **Parallel processing**: Demodulate I and Q simultaneously
+3. **Pipeline processing**: Start next stage before current completes
+4. **Faster ADC/DAC**: Higher sample rates reduce latency
+
+<Example>
+Integration time trade-off analysis:
+
+```python
+import numpy as np
+
+def integration_time_tradeoff(
+    snr_per_sample: float,
+    sample_rate_hz: float,
+    target_snr: float
+) -> dict:
+    """
+    Calculate integration time needed for target SNR.
+
+    SNR improves as sqrt(n_samples) for white noise.
+
+    Args:
+        snr_per_sample: SNR for single sample
+        sample_rate_hz: ADC sample rate
+        target_snr: Required SNR for reliable classification
+
+    Returns:
+        Integration analysis
+    """
+    # Number of samples needed
+    n_samples = (target_snr / snr_per_sample) ** 2
+
+    # Integration time
+    integration_time_ns = n_samples / sample_rate_hz * 1e9
+
+    # Classification fidelity (approximate)
+    # F ≈ 0.5 * (1 + erf(SNR / sqrt(2)))
+    from scipy.special import erf
+    fidelity = 0.5 * (1 + erf(target_snr / np.sqrt(2)))
+
+    return {
+        'n_samples': int(n_samples),
+        'integration_time_ns': integration_time_ns,
+        'classification_fidelity': fidelity,
+        'snr': target_snr
+    }
+
+# Analyze trade-offs for different target SNRs
+print("Integration Time vs Classification Fidelity:")
+print("-" * 60)
+print(f"{'SNR':>6} {'Samples':>10} {'Time (ns)':>12} {'Fidelity':>10}")
+print("-" * 60)
+
+snr_per_sample = 0.1  # Typical for superconducting readout
+sample_rate = 500e6   # 500 MSPS
+
+for target_snr in [2, 3, 4, 5, 6]:
+    result = integration_time_tradeoff(snr_per_sample, sample_rate, target_snr)
+    print(f"{target_snr:>6} {result['n_samples']:>10} "
+          f"{result['integration_time_ns']:>12.0f} "
+          f"{result['classification_fidelity']:>10.4f}")
+
+print("-" * 60)
+print("Note: Higher SNR requires longer integration but gives better fidelity")
+```
+</Example>
+
+## 6. Feedback for Error Detection
+
+### Syndrome-Based Feedback
+
+In quantum error correction, syndrome measurements identify errors without collapsing the encoded quantum state:
+
+<Formula>
+$$\text{Syndrome} \, s = M \cdot e$$
+</Formula>
+
+where $M$ is the parity check matrix and $e$ is the error vector.
+
+```python
+import numpy as np
+
+class SimpleSyndromeDecoder:
+    """
+    Minimal syndrome decoder for feedback system.
+    """
+
+    def __init__(self, code_type: str = 'bit_flip_3'):
+        """
+        Initialize decoder for simple codes.
+
+        Args:
+            code_type: 'bit_flip_3' for 3-qubit bit flip code
+        """
+        self.code_type = code_type
+
+        if code_type == 'bit_flip_3':
+            # Parity check matrix for 3-qubit bit flip code
+            # Stabilizers: Z1Z2 and Z2Z3
+            self.parity_matrix = np.array([
+                [1, 1, 0],  # Z1Z2
+                [0, 1, 1]   # Z2Z3
+            ])
+
+            # Lookup table: syndrome -> correction
+            self.lookup = {
+                (0, 0): [],       # No error
+                (1, 0): [0],      # Error on qubit 0
+                (1, 1): [1],      # Error on qubit 1
+                (0, 1): [2],      # Error on qubit 2
+            }
+
+    def decode(self, syndrome: tuple) -> list:
+        """
+        Decode syndrome to get correction operations.
+
+        Args:
+            syndrome: Tuple of syndrome measurement results
+
+        Returns:
+            List of qubit indices to apply X correction
+        """
+        if self.code_type == 'bit_flip_3':
+            return self.lookup.get(syndrome, [])
+
+        raise NotImplementedError(f"Unknown code: {self.code_type}")
+
+    def latency_estimate_ns(self) -> int:
+        """
+        Estimate decoding latency.
+
+        For lookup table: essentially 1 clock cycle.
+        """
+        if self.code_type == 'bit_flip_3':
+            # Lookup table is O(1)
+            return 10  # ~1-2 clock cycles at 100-200 MHz
+
+        return 100  # More complex codes need more time
+
+# Test the decoder
+decoder = SimpleSyndromeDecoder('bit_flip_3')
+
+print("3-Qubit Bit Flip Code Decoding:")
+print("-" * 40)
+for s1 in [0, 1]:
+    for s2 in [0, 1]:
+        syndrome = (s1, s2)
+        correction = decoder.decode(syndrome)
+        if correction:
+            print(f"Syndrome {syndrome} -> Apply X to qubit {correction}")
+        else:
+            print(f"Syndrome {syndrome} -> No error")
+
+print(f"\nDecoding latency: ~{decoder.latency_estimate_ns()} ns")
+```
+
+### Real-Time Decoder Requirements
+
+For larger codes, decoding becomes more complex:
+
+| Code | Distance | Qubits | Syndromes | Decode Time |
+|------|----------|--------|-----------|-------------|
+| Bit flip 3 | 1 | 3 | 2 | ~10 ns |
+| Steane [[7,1,3]] | 3 | 7 | 6 | ~50 ns |
+| Surface code 3×3 | 3 | 17 | 8 | ~100-500 ns |
+| Surface code 5×5 | 5 | 49 | 24 | ~1-10 μs |
+
+<Warning>
+As quantum error correction codes scale up, decoder latency becomes a critical bottleneck. Specialized decoders using union-find algorithms, neural networks, or custom ASICs are active research areas.
+</Warning>
+
+## 7. Feedback Control Theory
+
+### Discrete-Time Feedback Model
+
+Quantum feedback can be modeled as a discrete-time control system:
+
+<Formula>
+$$\rho_{k+1} = \mathcal{E}_{u_k}[\mathcal{M}_k[\rho_k]]$$
+</Formula>
+
+where $\mathcal{M}_k$ is the measurement superoperator and $\mathcal{E}_{u_k}$ is the control operation conditioned on outcome $u_k$.
+
+### Stability and Convergence
+
+For feedback protocols like active reset, we want the system to converge to a target state:
+
+<Formula>
+$$\lim_{k \to \infty} \rho_k = \rho_{target}$$
+</Formula>
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def feedback_convergence_simulation(
+    p_initial_excited: float,
+    measurement_fidelity: float,
+    gate_fidelity: float,
+    n_rounds: int
+) -> dict:
+    """
+    Simulate convergence of feedback reset protocol.
+
+    Returns trajectory of ground state probability.
+    """
+    p_0 = 1 - p_initial_excited
+    trajectory = [p_0]
+
+    for _ in range(n_rounds):
+        p_1 = 1 - p_0
+
+        # Feedback dynamics (simplified model)
+        p_0_new = (
+            p_0 * measurement_fidelity +
+            p_1 * measurement_fidelity * gate_fidelity
+        )
+
+        p_1_new = (
+            p_0 * (1 - measurement_fidelity) * gate_fidelity +
+            p_1 * (1 - measurement_fidelity) +
+            p_1 * measurement_fidelity * (1 - gate_fidelity)
+        )
+
+        total = p_0_new + p_1_new
+        p_0 = p_0_new / total
+        trajectory.append(p_0)
+
+    return {
+        'trajectory': trajectory,
+        'final_fidelity': trajectory[-1],
+        'converged_in': next(
+            (i for i, p in enumerate(trajectory) if p > 0.999), n_rounds
+        )
+    }
+
+# Simulate different initial conditions
+results = []
+for p_init in [0.5, 0.3, 0.1, 0.05]:
+    result = feedback_convergence_simulation(
+        p_initial_excited=p_init,
+        measurement_fidelity=0.98,
+        gate_fidelity=0.999,
+        n_rounds=10
+    )
+    results.append((p_init, result))
+    print(f"Initial P(|1>)={p_init}: Final P(|0>)={result['final_fidelity']:.4f}, "
+          f"Converged in {result['converged_in']} rounds")
+```
+
+## 8. Practical Implementation Challenges
+
+### Measurement-Induced Dephasing
+
+Fast measurements can cause dephasing on neighboring qubits:
+
+<Formula>
+$$T_2^{eff} = \left(\frac{1}{T_2} + \frac{1}{T_\phi^{meas}}\right)^{-1}$$
+</Formula>
+
+**Mitigation strategies:**
+- Frequency separation between qubit and readout
+- Purcell filters
+- Dynamical decoupling during readout
+
+### Crosstalk Compensation
+
+Measurement signals can cause unwanted qubit rotations:
+
+```python
+def calculate_ac_stark_shift(
+    drive_amplitude: float,  # V
+    detuning_hz: float,      # Hz
+    coupling_mhz: float      # MHz
+) -> float:
+    """
+    Calculate AC Stark shift from off-resonant drive.
+
+    Returns shift in MHz.
+    """
+    # AC Stark shift: delta = Omega^2 / (4 * Delta)
+    # where Omega is Rabi frequency and Delta is detuning
+
+    omega_mhz = drive_amplitude * coupling_mhz  # Simplified
+    delta_mhz = detuning_hz / 1e6
+
+    stark_shift_mhz = (omega_mhz ** 2) / (4 * delta_mhz)
+
+    return stark_shift_mhz
+
+# Example: readout drive causing shift
+shift = calculate_ac_stark_shift(
+    drive_amplitude=0.1,
+    detuning_hz=1e9,  # 1 GHz detuning
+    coupling_mhz=50   # 50 MHz coupling
+)
+print(f"AC Stark shift during readout: {shift*1000:.2f} kHz")
+```
+
+### Thermal Management
+
+Feedback systems must handle heat dissipation:
+- ADC/DAC power consumption
+- FPGA power at high clock rates
+- Cable heat load to cryostat
+
+## 9. Summary
+
+Real-time feedback is essential for advanced quantum computing:
+
+1. **Latency requirements**: Feedback must complete within a small fraction of $T_2$
+2. **Active reset**: Achieves >99.9% ground state preparation in ~1 μs
+3. **Mid-circuit measurement**: Enables adaptive algorithms and error correction
+4. **Syndrome decoding**: Real-time error detection requires fast decoders
+5. **Control theory**: Feedback protocols can be analyzed for stability and convergence
+
+The combination of high-fidelity measurements, fast classical processing, and precise conditional operations enables the quantum feedback necessary for fault-tolerant quantum computing.
+
+## Further Reading
+
+- Rist\`e et al., "Feedback Control of a Solid-State Qubit Using High-Fidelity Projective Measurement" (2012)
+- Ryan et al., "Real-time Experimental Feedback Control of a Quantum System" (2011)
+- Next lesson: Quantum Control Waveform Design

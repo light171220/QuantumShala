@@ -1,0 +1,973 @@
+---
+title: "Security and Compliance for Quantum Applications"
+description: "Learn security best practices and compliance requirements for production quantum applications."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+- Implement secure API access for quantum backends
+- Design comprehensive audit logging for quantum operations
+- Ensure compliance with data protection regulations
+- Apply security best practices for quantum workloads
+
+## 1. Security Landscape for Quantum Computing
+
+Quantum applications face unique security challenges that require specialized approaches:
+
+```
+QUANTUM SECURITY CONSIDERATIONS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Threat Model:
+┌─────────────────────────────────────────────────────────────────┐
+│ CONFIDENTIALITY THREATS                                         │
+│ • Algorithm/IP theft (circuit designs)                          │
+│ • Data exposure through results                                 │
+│ • Side-channel attacks on quantum operations                    │
+│ • Credential compromise for backend access                      │
+├─────────────────────────────────────────────────────────────────┤
+│ INTEGRITY THREATS                                               │
+│ • Result manipulation                                           │
+│ • Circuit tampering                                             │
+│ • Parameter injection                                           │
+│ • Man-in-the-middle attacks                                     │
+├─────────────────────────────────────────────────────────────────┤
+│ AVAILABILITY THREATS                                            │
+│ • Resource exhaustion attacks                                   │
+│ • Queue flooding                                                │
+│ • Backend denial of service                                     │
+└─────────────────────────────────────────────────────────────────┘
+
+Quantum-Specific Concerns:
+• Circuit IP protection (valuable algorithms)
+• Result confidentiality (may reveal sensitive inputs)
+• Backend trust (third-party QPU access)
+• Post-quantum readiness (future-proofing)
+```
+
+## 2. API Security for Quantum Backends
+
+```python
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Callable
+from datetime import datetime, timedelta
+from enum import Enum
+import hashlib
+import hmac
+import secrets
+import base64
+import json
+import time
+
+class AuthMethod(Enum):
+    """Supported authentication methods."""
+    API_KEY = "api_key"
+    JWT = "jwt"
+    OAUTH2 = "oauth2"
+    MUTUAL_TLS = "mtls"
+
+@dataclass
+class APICredentials:
+    """Secure credential storage."""
+    credential_id: str
+    auth_method: AuthMethod
+    created_at: datetime
+    expires_at: Optional[datetime]
+    scopes: List[str]
+    rate_limit_tier: str
+    metadata: Dict = field(default_factory=dict)
+
+    # Sensitive fields - never log these
+    _secret_hash: str = field(repr=False, default="")
+
+class SecureCredentialManager:
+    """
+    Manages quantum API credentials securely.
+
+    Best practices:
+    - Never store plaintext secrets
+    - Rotate credentials regularly
+    - Use short-lived tokens when possible
+    - Implement least-privilege access
+    """
+
+    def __init__(self, encryption_key: bytes):
+        self._encryption_key = encryption_key
+        self._credentials: Dict[str, APICredentials] = {}
+
+    def create_api_key(
+        self,
+        scopes: List[str],
+        expires_in_days: int = 90,
+        rate_limit_tier: str = "standard"
+    ) -> Dict:
+        """
+        Create a new API key with specified permissions.
+
+        Returns the key only once - must be stored securely by caller.
+        """
+        # Generate cryptographically secure key
+        raw_key = secrets.token_urlsafe(32)
+        key_id = f"qk_{secrets.token_hex(8)}"
+
+        # Hash the key for storage
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+
+        credential = APICredentials(
+            credential_id=key_id,
+            auth_method=AuthMethod.API_KEY,
+            created_at=datetime.now(),
+            expires_at=datetime.now() + timedelta(days=expires_in_days),
+            scopes=scopes,
+            rate_limit_tier=rate_limit_tier,
+            _secret_hash=key_hash
+        )
+
+        self._credentials[key_id] = credential
+
+        # Return key only once
+        return {
+            'key_id': key_id,
+            'api_key': raw_key,  # Only time this is available
+            'expires_at': credential.expires_at.isoformat(),
+            'scopes': scopes,
+            'warning': 'Store this key securely - it cannot be retrieved again'
+        }
+
+    def validate_api_key(self, key_id: str, api_key: str) -> Dict:
+        """Validate an API key and return permissions."""
+        if key_id not in self._credentials:
+            return {'valid': False, 'reason': 'Unknown key ID'}
+
+        credential = self._credentials[key_id]
+
+        # Check expiration
+        if credential.expires_at and datetime.now() > credential.expires_at:
+            return {'valid': False, 'reason': 'Key expired'}
+
+        # Verify key hash
+        key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+        if not hmac.compare_digest(key_hash, credential._secret_hash):
+            return {'valid': False, 'reason': 'Invalid key'}
+
+        return {
+            'valid': True,
+            'scopes': credential.scopes,
+            'rate_limit_tier': credential.rate_limit_tier,
+            'expires_at': credential.expires_at.isoformat()
+        }
+
+    def revoke_credential(self, key_id: str) -> bool:
+        """Revoke a credential immediately."""
+        if key_id in self._credentials:
+            del self._credentials[key_id]
+            return True
+        return False
+
+    def rotate_credential(self, old_key_id: str) -> Optional[Dict]:
+        """Rotate a credential, creating new one and marking old for expiry."""
+        if old_key_id not in self._credentials:
+            return None
+
+        old_cred = self._credentials[old_key_id]
+
+        # Create new credential with same permissions
+        new_cred = self.create_api_key(
+            scopes=old_cred.scopes,
+            rate_limit_tier=old_cred.rate_limit_tier
+        )
+
+        # Set old credential to expire soon (grace period)
+        old_cred.expires_at = datetime.now() + timedelta(hours=24)
+
+        return {
+            'new_credential': new_cred,
+            'old_expires_at': old_cred.expires_at.isoformat(),
+            'message': 'Old credential valid for 24h grace period'
+        }
+
+
+class RequestSigner:
+    """
+    Signs API requests for integrity verification.
+
+    Prevents tampering with circuit data in transit.
+    """
+
+    def __init__(self, signing_key: bytes):
+        self._signing_key = signing_key
+
+    def sign_request(
+        self,
+        method: str,
+        path: str,
+        body: Dict,
+        timestamp: int = None
+    ) -> Dict:
+        """Create signature for a request."""
+        if timestamp is None:
+            timestamp = int(time.time())
+
+        # Create canonical request
+        body_json = json.dumps(body, sort_keys=True, separators=(',', ':'))
+        canonical = f"{method}\n{path}\n{timestamp}\n{body_json}"
+
+        # Sign with HMAC-SHA256
+        signature = hmac.new(
+            self._signing_key,
+            canonical.encode(),
+            hashlib.sha256
+        ).hexdigest()
+
+        return {
+            'signature': signature,
+            'timestamp': timestamp,
+            'algorithm': 'HMAC-SHA256'
+        }
+
+    def verify_signature(
+        self,
+        method: str,
+        path: str,
+        body: Dict,
+        signature: str,
+        timestamp: int,
+        max_age_seconds: int = 300
+    ) -> Dict:
+        """Verify request signature."""
+        # Check timestamp freshness
+        current_time = int(time.time())
+        if abs(current_time - timestamp) > max_age_seconds:
+            return {'valid': False, 'reason': 'Request too old'}
+
+        # Recalculate expected signature
+        expected = self.sign_request(method, path, body, timestamp)
+
+        if hmac.compare_digest(signature, expected['signature']):
+            return {'valid': True}
+        else:
+            return {'valid': False, 'reason': 'Signature mismatch'}
+```
+
+## 3. Input Validation and Sanitization
+
+```python
+from typing import Any, Union
+import re
+import math
+
+class CircuitValidator:
+    """
+    Validates quantum circuit inputs to prevent injection attacks.
+
+    Quantum-specific validation includes:
+    - Parameter bounds checking
+    - Gate validity verification
+    - Qubit index validation
+    - Circuit depth limits
+    """
+
+    def __init__(
+        self,
+        max_qubits: int = 127,
+        max_gates: int = 10000,
+        max_depth: int = 1000,
+        max_parameter_value: float = 100.0
+    ):
+        self.max_qubits = max_qubits
+        self.max_gates = max_gates
+        self.max_depth = max_depth
+        self.max_parameter_value = max_parameter_value
+
+        # Valid gate names
+        self.valid_gates = {
+            'h', 'x', 'y', 'z', 's', 't', 'sdg', 'tdg',
+            'rx', 'ry', 'rz', 'u', 'u1', 'u2', 'u3',
+            'cx', 'cz', 'cy', 'swap', 'iswap',
+            'ccx', 'cswap', 'measure', 'barrier'
+        }
+
+    def validate_circuit(self, circuit_data: Dict) -> Dict:
+        """
+        Comprehensive circuit validation.
+
+        Returns validation result with any errors found.
+        """
+        errors = []
+
+        # Validate qubit count
+        num_qubits = circuit_data.get('num_qubits', 0)
+        if not isinstance(num_qubits, int) or num_qubits < 1:
+            errors.append("Invalid qubit count: must be positive integer")
+        elif num_qubits > self.max_qubits:
+            errors.append(f"Qubit count {num_qubits} exceeds maximum {self.max_qubits}")
+
+        # Validate gates
+        gates = circuit_data.get('gates', [])
+        if not isinstance(gates, list):
+            errors.append("Gates must be a list")
+        elif len(gates) > self.max_gates:
+            errors.append(f"Gate count {len(gates)} exceeds maximum {self.max_gates}")
+        else:
+            for i, gate in enumerate(gates):
+                gate_errors = self._validate_gate(gate, num_qubits, i)
+                errors.extend(gate_errors)
+
+        # Validate circuit depth
+        depth = circuit_data.get('depth', 0)
+        if depth > self.max_depth:
+            errors.append(f"Circuit depth {depth} exceeds maximum {self.max_depth}")
+
+        return {
+            'valid': len(errors) == 0,
+            'errors': errors,
+            'warnings': self._generate_warnings(circuit_data)
+        }
+
+    def _validate_gate(self, gate: Dict, num_qubits: int, index: int) -> List[str]:
+        """Validate a single gate."""
+        errors = []
+        prefix = f"Gate {index}"
+
+        # Check gate structure
+        if not isinstance(gate, dict):
+            return [f"{prefix}: Gate must be a dictionary"]
+
+        # Validate gate name
+        name = gate.get('name', '').lower()
+        if name not in self.valid_gates:
+            errors.append(f"{prefix}: Unknown gate '{name}'")
+
+        # Validate qubit indices
+        qubits = gate.get('qubits', [])
+        if not isinstance(qubits, list):
+            errors.append(f"{prefix}: Qubits must be a list")
+        else:
+            for q in qubits:
+                if not isinstance(q, int) or q < 0 or q >= num_qubits:
+                    errors.append(f"{prefix}: Invalid qubit index {q}")
+
+        # Validate parameters
+        params = gate.get('params', [])
+        if params:
+            for j, p in enumerate(params):
+                if not isinstance(p, (int, float)):
+                    errors.append(f"{prefix}: Parameter {j} must be numeric")
+                elif math.isnan(p) or math.isinf(p):
+                    errors.append(f"{prefix}: Parameter {j} is NaN or Inf")
+                elif abs(p) > self.max_parameter_value:
+                    errors.append(f"{prefix}: Parameter {j} exceeds bounds")
+
+        return errors
+
+    def _generate_warnings(self, circuit_data: Dict) -> List[str]:
+        """Generate warnings for potentially problematic circuits."""
+        warnings = []
+
+        depth = circuit_data.get('depth', 0)
+        if depth > 100:
+            warnings.append(f"Deep circuit ({depth}) may have low fidelity")
+
+        gates = circuit_data.get('gates', [])
+        two_qubit_count = sum(1 for g in gates if len(g.get('qubits', [])) > 1)
+        if two_qubit_count > 50:
+            warnings.append(f"Many two-qubit gates ({two_qubit_count}) may reduce fidelity")
+
+        return warnings
+
+    def sanitize_circuit(self, circuit_data: Dict) -> Dict:
+        """Sanitize circuit data, removing potentially dangerous elements."""
+        sanitized = {
+            'num_qubits': int(circuit_data.get('num_qubits', 0)),
+            'gates': [],
+            'metadata': {}
+        }
+
+        for gate in circuit_data.get('gates', []):
+            sanitized_gate = {
+                'name': str(gate.get('name', '')).lower()[:20],
+                'qubits': [int(q) for q in gate.get('qubits', []) if isinstance(q, (int, float))],
+                'params': [float(p) for p in gate.get('params', []) if isinstance(p, (int, float))]
+            }
+            sanitized['gates'].append(sanitized_gate)
+
+        # Copy only safe metadata fields
+        safe_metadata_keys = ['name', 'description', 'version']
+        for key in safe_metadata_keys:
+            if key in circuit_data.get('metadata', {}):
+                value = circuit_data['metadata'][key]
+                if isinstance(value, str) and len(value) < 256:
+                    sanitized['metadata'][key] = value
+
+        return sanitized
+```
+
+## 4. Audit Logging
+
+```python
+from enum import Enum
+import uuid
+import json
+
+class AuditEventType(Enum):
+    """Types of audit events."""
+    # Authentication
+    AUTH_SUCCESS = "auth.success"
+    AUTH_FAILURE = "auth.failure"
+    AUTH_LOGOUT = "auth.logout"
+    CREDENTIAL_CREATED = "credential.created"
+    CREDENTIAL_REVOKED = "credential.revoked"
+
+    # Circuit Operations
+    CIRCUIT_SUBMITTED = "circuit.submitted"
+    CIRCUIT_EXECUTED = "circuit.executed"
+    CIRCUIT_FAILED = "circuit.failed"
+    CIRCUIT_CANCELLED = "circuit.cancelled"
+
+    # Data Access
+    RESULT_ACCESSED = "result.accessed"
+    RESULT_EXPORTED = "result.exported"
+    RESULT_DELETED = "result.deleted"
+
+    # Administrative
+    CONFIG_CHANGED = "config.changed"
+    USER_CREATED = "user.created"
+    PERMISSION_CHANGED = "permission.changed"
+    BACKEND_ACCESSED = "backend.accessed"
+
+@dataclass
+class AuditEvent:
+    """Immutable audit event record."""
+    event_id: str
+    event_type: AuditEventType
+    timestamp: datetime
+    actor_id: str
+    actor_type: str  # "user", "service", "system"
+    resource_type: str
+    resource_id: str
+    action: str
+    outcome: str  # "success", "failure", "denied"
+    details: Dict
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for storage."""
+        return {
+            'event_id': self.event_id,
+            'event_type': self.event_type.value,
+            'timestamp': self.timestamp.isoformat(),
+            'actor': {
+                'id': self.actor_id,
+                'type': self.actor_type
+            },
+            'resource': {
+                'type': self.resource_type,
+                'id': self.resource_id
+            },
+            'action': self.action,
+            'outcome': self.outcome,
+            'details': self.details,
+            'context': {
+                'ip_address': self.ip_address,
+                'user_agent': self.user_agent
+            }
+        }
+
+class QuantumAuditLogger:
+    """
+    Comprehensive audit logging for quantum operations.
+
+    Provides tamper-evident logging with:
+    - Immutable event records
+    - Cryptographic integrity verification
+    - Compliance-ready export formats
+    """
+
+    def __init__(self, application_name: str):
+        self.application_name = application_name
+        self.events: List[AuditEvent] = []
+        self._event_hashes: List[str] = []
+
+    def log_event(
+        self,
+        event_type: AuditEventType,
+        actor_id: str,
+        actor_type: str,
+        resource_type: str,
+        resource_id: str,
+        action: str,
+        outcome: str,
+        details: Dict = None,
+        ip_address: str = None,
+        user_agent: str = None
+    ) -> str:
+        """
+        Log an audit event.
+
+        Returns the event ID for reference.
+        """
+        event = AuditEvent(
+            event_id=str(uuid.uuid4()),
+            event_type=event_type,
+            timestamp=datetime.now(),
+            actor_id=actor_id,
+            actor_type=actor_type,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            action=action,
+            outcome=outcome,
+            details=details or {},
+            ip_address=ip_address,
+            user_agent=user_agent
+        )
+
+        # Calculate hash for integrity chain
+        event_json = json.dumps(event.to_dict(), sort_keys=True)
+        previous_hash = self._event_hashes[-1] if self._event_hashes else "genesis"
+        event_hash = hashlib.sha256(f"{previous_hash}{event_json}".encode()).hexdigest()
+
+        self.events.append(event)
+        self._event_hashes.append(event_hash)
+
+        return event.event_id
+
+    def log_circuit_submission(
+        self,
+        user_id: str,
+        circuit_id: str,
+        circuit_hash: str,
+        backend: str,
+        shots: int,
+        ip_address: str = None
+    ) -> str:
+        """Log a circuit submission event."""
+        return self.log_event(
+            event_type=AuditEventType.CIRCUIT_SUBMITTED,
+            actor_id=user_id,
+            actor_type="user",
+            resource_type="circuit",
+            resource_id=circuit_id,
+            action="submit",
+            outcome="success",
+            details={
+                'circuit_hash': circuit_hash,
+                'backend': backend,
+                'shots': shots
+            },
+            ip_address=ip_address
+        )
+
+    def log_result_access(
+        self,
+        user_id: str,
+        job_id: str,
+        access_type: str,  # "view", "download", "delete"
+        ip_address: str = None
+    ) -> str:
+        """Log a result access event."""
+        return self.log_event(
+            event_type=AuditEventType.RESULT_ACCESSED,
+            actor_id=user_id,
+            actor_type="user",
+            resource_type="result",
+            resource_id=job_id,
+            action=access_type,
+            outcome="success",
+            ip_address=ip_address
+        )
+
+    def query_events(
+        self,
+        event_types: List[AuditEventType] = None,
+        actor_id: str = None,
+        resource_id: str = None,
+        start_time: datetime = None,
+        end_time: datetime = None,
+        limit: int = 100
+    ) -> List[AuditEvent]:
+        """Query audit events with filters."""
+        results = []
+
+        for event in reversed(self.events):  # Most recent first
+            if len(results) >= limit:
+                break
+
+            if event_types and event.event_type not in event_types:
+                continue
+            if actor_id and event.actor_id != actor_id:
+                continue
+            if resource_id and event.resource_id != resource_id:
+                continue
+            if start_time and event.timestamp < start_time:
+                continue
+            if end_time and event.timestamp > end_time:
+                continue
+
+            results.append(event)
+
+        return results
+
+    def verify_integrity(self) -> Dict:
+        """Verify the integrity of the audit log chain."""
+        if not self.events:
+            return {'valid': True, 'message': 'Empty log'}
+
+        previous_hash = "genesis"
+        for i, event in enumerate(self.events):
+            event_json = json.dumps(event.to_dict(), sort_keys=True)
+            expected_hash = hashlib.sha256(f"{previous_hash}{event_json}".encode()).hexdigest()
+
+            if expected_hash != self._event_hashes[i]:
+                return {
+                    'valid': False,
+                    'message': f'Integrity violation at event {i}',
+                    'event_id': event.event_id
+                }
+
+            previous_hash = expected_hash
+
+        return {'valid': True, 'message': 'All events verified', 'event_count': len(self.events)}
+
+    def export_for_compliance(self, start_time: datetime, end_time: datetime) -> Dict:
+        """Export audit logs in compliance-ready format."""
+        events = self.query_events(start_time=start_time, end_time=end_time, limit=10000)
+
+        return {
+            'export_metadata': {
+                'application': self.application_name,
+                'export_time': datetime.now().isoformat(),
+                'period_start': start_time.isoformat(),
+                'period_end': end_time.isoformat(),
+                'event_count': len(events)
+            },
+            'integrity_verification': self.verify_integrity(),
+            'events': [e.to_dict() for e in events]
+        }
+```
+
+## 5. Data Protection and Privacy
+
+```python
+class DataClassification(Enum):
+    """Data classification levels."""
+    PUBLIC = "public"
+    INTERNAL = "internal"
+    CONFIDENTIAL = "confidential"
+    RESTRICTED = "restricted"
+
+@dataclass
+class DataProtectionPolicy:
+    """Data protection policy configuration."""
+    classification: DataClassification
+    encryption_required: bool
+    retention_days: int
+    allowed_regions: List[str]
+    requires_consent: bool
+    anonymization_required: bool
+
+class QuantumDataProtector:
+    """
+    Data protection for quantum computing operations.
+
+    Handles:
+    - Circuit data classification
+    - Result anonymization
+    - Data retention enforcement
+    - Regional data residency
+    """
+
+    def __init__(self):
+        self.policies: Dict[DataClassification, DataProtectionPolicy] = {}
+        self._setup_default_policies()
+
+    def _setup_default_policies(self):
+        """Set up default data protection policies."""
+
+        self.policies[DataClassification.PUBLIC] = DataProtectionPolicy(
+            classification=DataClassification.PUBLIC,
+            encryption_required=False,
+            retention_days=365,
+            allowed_regions=["*"],
+            requires_consent=False,
+            anonymization_required=False
+        )
+
+        self.policies[DataClassification.INTERNAL] = DataProtectionPolicy(
+            classification=DataClassification.INTERNAL,
+            encryption_required=True,
+            retention_days=180,
+            allowed_regions=["us", "eu"],
+            requires_consent=False,
+            anonymization_required=False
+        )
+
+        self.policies[DataClassification.CONFIDENTIAL] = DataProtectionPolicy(
+            classification=DataClassification.CONFIDENTIAL,
+            encryption_required=True,
+            retention_days=90,
+            allowed_regions=["us"],
+            requires_consent=True,
+            anonymization_required=True
+        )
+
+        self.policies[DataClassification.RESTRICTED] = DataProtectionPolicy(
+            classification=DataClassification.RESTRICTED,
+            encryption_required=True,
+            retention_days=30,
+            allowed_regions=["us-gov"],
+            requires_consent=True,
+            anonymization_required=True
+        )
+
+    def classify_circuit_data(self, circuit_data: Dict, context: Dict) -> DataClassification:
+        """
+        Classify circuit data based on content and context.
+
+        Considers:
+        - Input data sensitivity
+        - Algorithm type
+        - User organization
+        - Intended use
+        """
+        # Check for sensitive input encoding
+        if context.get('contains_pii', False):
+            return DataClassification.RESTRICTED
+
+        if context.get('proprietary_algorithm', False):
+            return DataClassification.CONFIDENTIAL
+
+        if context.get('internal_use', False):
+            return DataClassification.INTERNAL
+
+        return DataClassification.PUBLIC
+
+    def anonymize_result(self, result: Dict, classification: DataClassification) -> Dict:
+        """
+        Anonymize quantum result data according to classification.
+        """
+        policy = self.policies[classification]
+
+        if not policy.anonymization_required:
+            return result
+
+        anonymized = {
+            'job_id': hashlib.sha256(result.get('job_id', '').encode()).hexdigest()[:16],
+            'status': result.get('status'),
+            'backend': 'anonymized',
+            'shots': result.get('shots'),
+            'counts': result.get('counts'),  # Bitstrings don't contain PII
+            'execution_time': result.get('execution_time'),
+            'anonymized': True
+        }
+
+        # Remove potentially identifying metadata
+        excluded_fields = ['user_id', 'organization', 'ip_address', 'circuit_name']
+        for field in excluded_fields:
+            anonymized.pop(field, None)
+
+        return anonymized
+
+    def check_regional_compliance(
+        self,
+        data_classification: DataClassification,
+        target_region: str
+    ) -> Dict:
+        """Check if data can be processed in target region."""
+        policy = self.policies[data_classification]
+
+        if "*" in policy.allowed_regions:
+            return {'allowed': True}
+
+        if target_region in policy.allowed_regions:
+            return {'allowed': True}
+
+        return {
+            'allowed': False,
+            'reason': f"Data with classification {data_classification.value} "
+                     f"cannot be processed in region {target_region}",
+            'allowed_regions': policy.allowed_regions
+        }
+
+    def get_retention_policy(self, classification: DataClassification) -> Dict:
+        """Get data retention requirements."""
+        policy = self.policies[classification]
+
+        return {
+            'classification': classification.value,
+            'retention_days': policy.retention_days,
+            'encryption_required': policy.encryption_required,
+            'deletion_procedure': 'secure_wipe' if policy.encryption_required else 'standard'
+        }
+```
+
+## 6. Compliance Frameworks
+
+```python
+class ComplianceFramework(Enum):
+    """Supported compliance frameworks."""
+    SOC2 = "soc2"
+    HIPAA = "hipaa"
+    GDPR = "gdpr"
+    FEDRAMP = "fedramp"
+    ISO27001 = "iso27001"
+
+@dataclass
+class ComplianceControl:
+    """A single compliance control."""
+    control_id: str
+    framework: ComplianceFramework
+    description: str
+    implementation: str
+    evidence_required: List[str]
+    automated_check: Optional[Callable[[], bool]] = None
+
+class QuantumComplianceManager:
+    """
+    Manages compliance requirements for quantum applications.
+    """
+
+    def __init__(self):
+        self.controls: Dict[str, ComplianceControl] = {}
+        self._setup_controls()
+
+    def _setup_controls(self):
+        """Set up compliance controls relevant to quantum computing."""
+
+        # SOC2 Controls
+        self.controls['SOC2-CC6.1'] = ComplianceControl(
+            control_id='SOC2-CC6.1',
+            framework=ComplianceFramework.SOC2,
+            description='Logical and physical access controls',
+            implementation='API key authentication with role-based access',
+            evidence_required=['access_logs', 'role_definitions', 'key_rotation_logs']
+        )
+
+        self.controls['SOC2-CC6.6'] = ComplianceControl(
+            control_id='SOC2-CC6.6',
+            framework=ComplianceFramework.SOC2,
+            description='Encryption of data in transit and at rest',
+            implementation='TLS 1.3 for API, AES-256 for stored circuits',
+            evidence_required=['encryption_config', 'certificate_audit']
+        )
+
+        # HIPAA Controls
+        self.controls['HIPAA-164.312(a)'] = ComplianceControl(
+            control_id='HIPAA-164.312(a)',
+            framework=ComplianceFramework.HIPAA,
+            description='Access control - unique user identification',
+            implementation='Individual API keys with audit logging',
+            evidence_required=['user_provisioning_logs', 'access_audit_trail']
+        )
+
+        self.controls['HIPAA-164.312(b)'] = ComplianceControl(
+            control_id='HIPAA-164.312(b)',
+            framework=ComplianceFramework.HIPAA,
+            description='Audit controls',
+            implementation='Comprehensive audit logging with tamper detection',
+            evidence_required=['audit_logs', 'integrity_verification_reports']
+        )
+
+        # GDPR Controls
+        self.controls['GDPR-Art32'] = ComplianceControl(
+            control_id='GDPR-Art32',
+            framework=ComplianceFramework.GDPR,
+            description='Security of processing',
+            implementation='Encryption, pseudonymization, access controls',
+            evidence_required=['security_assessment', 'encryption_evidence']
+        )
+
+        self.controls['GDPR-Art17'] = ComplianceControl(
+            control_id='GDPR-Art17',
+            framework=ComplianceFramework.GDPR,
+            description='Right to erasure',
+            implementation='Data deletion API with verification',
+            evidence_required=['deletion_logs', 'retention_policy']
+        )
+
+    def get_controls_for_framework(
+        self,
+        framework: ComplianceFramework
+    ) -> List[ComplianceControl]:
+        """Get all controls for a specific framework."""
+        return [c for c in self.controls.values() if c.framework == framework]
+
+    def generate_compliance_report(
+        self,
+        frameworks: List[ComplianceFramework]
+    ) -> Dict:
+        """Generate compliance status report."""
+        report = {
+            'generated_at': datetime.now().isoformat(),
+            'frameworks': {}
+        }
+
+        for framework in frameworks:
+            controls = self.get_controls_for_framework(framework)
+
+            framework_status = {
+                'total_controls': len(controls),
+                'controls': []
+            }
+
+            for control in controls:
+                status = {
+                    'control_id': control.control_id,
+                    'description': control.description,
+                    'implementation': control.implementation,
+                    'evidence_required': control.evidence_required,
+                    'status': 'implemented'  # Would be checked in production
+                }
+                framework_status['controls'].append(status)
+
+            report['frameworks'][framework.value] = framework_status
+
+        return report
+
+    def export_evidence_package(
+        self,
+        framework: ComplianceFramework,
+        audit_logger: QuantumAuditLogger,
+        period_start: datetime,
+        period_end: datetime
+    ) -> Dict:
+        """Export evidence package for compliance audit."""
+        controls = self.get_controls_for_framework(framework)
+
+        return {
+            'framework': framework.value,
+            'period': {
+                'start': period_start.isoformat(),
+                'end': period_end.isoformat()
+            },
+            'audit_logs': audit_logger.export_for_compliance(period_start, period_end),
+            'controls': [
+                {
+                    'control_id': c.control_id,
+                    'evidence_types': c.evidence_required
+                }
+                for c in controls
+            ]
+        }
+```
+
+## Summary
+
+Security and compliance for quantum applications requires:
+
+1. **API Security**: Secure credential management, request signing, and authentication
+2. **Input Validation**: Circuit sanitization to prevent injection attacks
+3. **Audit Logging**: Comprehensive, tamper-evident logging of all operations
+4. **Data Protection**: Classification, encryption, and regional compliance
+5. **Compliance Frameworks**: Controls for SOC2, HIPAA, GDPR, and other standards
+
+Quantum applications often handle valuable IP (algorithms) and sensitive data (encoded inputs), requiring security measures that account for the unique nature of quantum computing.
+
+## Further Reading
+
+- NIST Cybersecurity Framework
+- Cloud Security Alliance Guidance
+- Quantum Computing Security Best Practices

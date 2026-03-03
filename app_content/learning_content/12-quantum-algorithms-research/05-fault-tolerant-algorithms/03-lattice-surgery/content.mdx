@@ -1,0 +1,864 @@
+---
+title: "Lattice Surgery Operations: Implementing Logical Gates on Surface Codes"
+description: "Master lattice surgery techniques for implementing logical operations on surface codes. Learn merge and split operations, multi-qubit gates, and routing strategies for large-scale quantum computation."
+duration: 75
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the geometry of surface code lattice surgery
+- Implement merge and split operations for logical measurements
+- Design multi-qubit Pauli measurements using lattice surgery
+- Analyze time and space costs of lattice surgery operations
+- Create routing strategies for non-local operations
+- Compare lattice surgery with other approaches like braiding
+
+## 1. Introduction to Lattice Surgery
+
+<Definition term="Lattice Surgery">
+**Lattice surgery** is a technique for implementing logical operations on surface codes by physically merging and splitting code patches. Instead of moving defects through the lattice (braiding), lattice surgery modifies the boundary conditions of code patches to implement joint Pauli measurements.
+</Definition>
+
+Lattice surgery has emerged as the preferred approach for surface code quantum computing because:
+1. **Lower overhead** than defect-based approaches
+2. **Planar-compatible** - works with 2D qubit arrays
+3. **Efficient multi-qubit measurements** for CNOT and other gates
+4. **Natural parallelism** for independent operations
+
+<Formula>
+$$\text{CNOT via measurement: } \text{CNOT}_{c \to t} = M_{XX} \cdot M_{ZZ}$$
+
+where $M_{XX}$ and $M_{ZZ}$ are joint Pauli measurements followed by conditional corrections.
+</Formula>
+
+```python
+import numpy as np
+from typing import List, Tuple, Dict, Optional, Set
+from dataclasses import dataclass
+from enum import Enum
+
+class BoundaryType(Enum):
+    """Surface code boundary types."""
+    ROUGH = 'rough'   # X-type boundary
+    SMOOTH = 'smooth' # Z-type boundary
+
+class PauliType(Enum):
+    """Pauli operator types."""
+    X = 'X'
+    Z = 'Z'
+    Y = 'Y'
+
+@dataclass
+class SurfaceCodePatch:
+    """
+    Represents a single surface code logical qubit patch.
+    """
+    id: str
+    distance: int
+    position: Tuple[int, int]  # (row, col) in the layout
+
+    # Boundary types (top, right, bottom, left)
+    boundaries: Tuple[BoundaryType, BoundaryType, BoundaryType, BoundaryType]
+
+    @property
+    def physical_qubits(self) -> int:
+        """Physical qubits in this patch."""
+        return 2 * self.distance ** 2
+
+    @property
+    def dimensions(self) -> Tuple[int, int]:
+        """Physical dimensions (height, width) in units of d."""
+        return (self.distance, self.distance)
+
+    def adjacent_to(self, other: 'SurfaceCodePatch') -> Optional[str]:
+        """
+        Check if patches are adjacent and return shared edge direction.
+
+        Returns: 'top', 'right', 'bottom', 'left', or None
+        """
+        r1, c1 = self.position
+        r2, c2 = other.position
+
+        if r1 == r2 and c1 + 1 == c2:
+            return 'right'
+        elif r1 == r2 and c1 - 1 == c2:
+            return 'left'
+        elif r1 + 1 == r2 and c1 == c2:
+            return 'bottom'
+        elif r1 - 1 == r2 and c1 == c2:
+            return 'top'
+        return None
+
+    def compatible_merge(self, other: 'SurfaceCodePatch',
+                        direction: str) -> Tuple[bool, Optional[PauliType]]:
+        """
+        Check if merge is possible and what Pauli it measures.
+
+        Returns: (can_merge, pauli_type)
+        """
+        dir_to_idx = {'top': 0, 'right': 1, 'bottom': 2, 'left': 3}
+        opposite = {'top': 'bottom', 'right': 'left',
+                   'bottom': 'top', 'left': 'right'}
+
+        my_boundary = self.boundaries[dir_to_idx[direction]]
+        their_boundary = other.boundaries[dir_to_idx[opposite[direction]]]
+
+        if my_boundary != their_boundary:
+            return False, None
+
+        # Rough-rough merge measures XX, smooth-smooth measures ZZ
+        if my_boundary == BoundaryType.ROUGH:
+            return True, PauliType.X
+        else:
+            return True, PauliType.Z
+
+
+class LatticeSurgeryPrimitive:
+    """
+    Basic lattice surgery operations.
+    """
+
+    @staticmethod
+    def merge(patch1: SurfaceCodePatch,
+              patch2: SurfaceCodePatch,
+              direction: str) -> Dict:
+        """
+        Merge two adjacent patches to measure joint Pauli.
+
+        Args:
+            patch1: First patch
+            patch2: Second patch
+            direction: Direction from patch1 to patch2
+
+        Returns:
+            Operation description
+        """
+        can_merge, pauli = patch1.compatible_merge(patch2, direction)
+
+        if not can_merge:
+            return {'error': 'Incompatible boundary types for merge'}
+
+        return {
+            'operation': 'merge',
+            'patches': [patch1.id, patch2.id],
+            'direction': direction,
+            'measures': f'{pauli.value}{pauli.value}',
+            'time_cost': patch1.distance,  # d code cycles
+            'space_cost': 0,  # No additional qubits during merge
+            'steps': [
+                f'1. Measure new stabilizers across boundary',
+                f'2. Wait d rounds for reliable syndrome',
+                f'3. Decode joint measurement outcome'
+            ]
+        }
+
+    @staticmethod
+    def split(merged_patch: SurfaceCodePatch,
+              split_direction: str,
+              measurement_basis: PauliType) -> Dict:
+        """
+        Split a merged patch back into two separate patches.
+
+        Args:
+            merged_patch: The merged patch to split
+            split_direction: Where to split ('horizontal' or 'vertical')
+            measurement_basis: X or Z for split measurement
+
+        Returns:
+            Operation description
+        """
+        return {
+            'operation': 'split',
+            'merged_patch': merged_patch.id,
+            'direction': split_direction,
+            'measurement': measurement_basis.value,
+            'time_cost': merged_patch.distance,
+            'steps': [
+                f'1. Stop measuring stabilizers across split line',
+                f'2. Initialize new boundary stabilizers',
+                f'3. Measure {measurement_basis.value} along split'
+            ]
+        }
+
+
+# Demonstration
+print("LATTICE SURGERY BASICS")
+print("=" * 60)
+
+# Create two adjacent patches with compatible boundaries
+# Standard configuration: rough on top/bottom, smooth on left/right
+patch_a = SurfaceCodePatch(
+    id='A', distance=5, position=(0, 0),
+    boundaries=(BoundaryType.ROUGH, BoundaryType.SMOOTH,
+                BoundaryType.ROUGH, BoundaryType.SMOOTH)
+)
+
+patch_b = SurfaceCodePatch(
+    id='B', distance=5, position=(0, 1),
+    boundaries=(BoundaryType.ROUGH, BoundaryType.SMOOTH,
+                BoundaryType.ROUGH, BoundaryType.SMOOTH)
+)
+
+print(f"\nPatch A at {patch_a.position}: {patch_a.physical_qubits} physical qubits")
+print(f"Patch B at {patch_b.position}: {patch_b.physical_qubits} physical qubits")
+
+# Check merge compatibility
+direction = patch_a.adjacent_to(patch_b)
+print(f"\nPatches adjacent via: {direction}")
+
+surgery = LatticeSurgeryPrimitive()
+merge_op = surgery.merge(patch_a, patch_b, direction)
+print(f"\nMerge operation:")
+print(f"  Measures: {merge_op['measures']}")
+print(f"  Time cost: {merge_op['time_cost']} code cycles")
+for step in merge_op['steps']:
+    print(f"    {step}")
+```
+
+## 2. Implementing Logical CNOT with Lattice Surgery
+
+<Definition term="Measurement-Based CNOT">
+The CNOT gate can be implemented by measuring $X_c X_t$ (control-target XX) and $Z_c Z_t$ (control-target ZZ), followed by Pauli corrections based on the measurement outcomes:
+
+$$\text{CNOT}_{c \to t} = S_c^{m_{XX}} \cdot Z_t^{m_{ZZ}} \cdot M_{ZZ} \cdot M_{XX}$$
+
+where $m_{XX}$ and $m_{ZZ}$ are the measurement results (0 or 1).
+</Definition>
+
+```python
+class LatticeSurgeryCNOT:
+    """
+    Implements CNOT gate using lattice surgery.
+    """
+
+    def __init__(self, distance: int):
+        self.d = distance
+        self.ancilla_count = 0
+
+    def create_ancilla(self, position: Tuple[int, int],
+                       boundary_config: str = 'standard') -> SurfaceCodePatch:
+        """Create an ancilla patch for surgery."""
+        self.ancilla_count += 1
+
+        if boundary_config == 'standard':
+            bounds = (BoundaryType.ROUGH, BoundaryType.SMOOTH,
+                     BoundaryType.ROUGH, BoundaryType.SMOOTH)
+        else:
+            bounds = (BoundaryType.SMOOTH, BoundaryType.ROUGH,
+                     BoundaryType.SMOOTH, BoundaryType.ROUGH)
+
+        return SurfaceCodePatch(
+            id=f'ancilla_{self.ancilla_count}',
+            distance=self.d,
+            position=position,
+            boundaries=bounds
+        )
+
+    def cnot_via_xx_zz(self, control: SurfaceCodePatch,
+                       target: SurfaceCodePatch) -> Dict:
+        """
+        Implement CNOT using XX and ZZ measurements.
+
+        Layout:
+            [Control] -- [Ancilla] -- [Target]
+
+        Protocol:
+            1. Prepare ancilla in |+⟩
+            2. Measure XX between control and ancilla
+            3. Measure ZZ between ancilla and target
+            4. Measure ancilla in X basis
+            5. Apply corrections based on outcomes
+        """
+        steps = []
+        total_time = 0
+
+        # Step 1: Prepare ancilla between control and target
+        # In practice, need routing if not adjacent
+        ancilla_pos = (control.position[0], control.position[1] + 1)
+        ancilla = self.create_ancilla(ancilla_pos, 'standard')
+
+        steps.append({
+            'action': 'prepare_ancilla',
+            'state': '|+⟩',
+            'patch': ancilla.id,
+            'time': self.d
+        })
+        total_time += self.d
+
+        # Step 2: Measure XX (control-ancilla)
+        # Merge rough boundaries
+        steps.append({
+            'action': 'merge',
+            'patches': [control.id, ancilla.id],
+            'measurement': 'XX',
+            'time': self.d
+        })
+        total_time += self.d
+
+        # Step 3: Split with X measurement
+        steps.append({
+            'action': 'split',
+            'patches': [control.id, ancilla.id],
+            'measurement': 'X',
+            'time': self.d
+        })
+        total_time += self.d
+
+        # Step 4: Measure ZZ (ancilla-target)
+        # Merge smooth boundaries
+        steps.append({
+            'action': 'merge',
+            'patches': [ancilla.id, target.id],
+            'measurement': 'ZZ',
+            'time': self.d
+        })
+        total_time += self.d
+
+        # Step 5: Split with Z measurement
+        steps.append({
+            'action': 'split',
+            'patches': [ancilla.id, target.id],
+            'measurement': 'Z',
+            'time': self.d
+        })
+        total_time += self.d
+
+        # Step 6: Measure ancilla (destructs it)
+        steps.append({
+            'action': 'measure_destruct',
+            'patch': ancilla.id,
+            'basis': 'X',
+            'time': self.d
+        })
+        total_time += self.d
+
+        return {
+            'gate': 'CNOT',
+            'control': control.id,
+            'target': target.id,
+            'protocol': 'XX-ZZ lattice surgery',
+            'steps': steps,
+            'total_time': total_time,
+            'ancilla_qubits': ancilla.physical_qubits,
+            'corrections': 'S_c^{m_XX} Z_t^{m_ZZ} based on measurement outcomes'
+        }
+
+    def parallel_cnots(self, pairs: List[Tuple[SurfaceCodePatch, SurfaceCodePatch]]) -> Dict:
+        """
+        Execute multiple CNOTs in parallel where possible.
+
+        CNOTs on disjoint qubits can be done simultaneously.
+        """
+        # Check for conflicts (shared qubits)
+        all_patches = set()
+        for ctrl, tgt in pairs:
+            if ctrl.id in all_patches or tgt.id in all_patches:
+                return {'error': 'Conflicting CNOTs - cannot parallelize'}
+            all_patches.add(ctrl.id)
+            all_patches.add(tgt.id)
+
+        # All pairs are independent
+        total_time = 6 * self.d  # Same as single CNOT
+
+        return {
+            'gates': [f'CNOT({c.id}, {t.id})' for c, t in pairs],
+            'parallel': True,
+            'total_time': total_time,
+            'speedup': f'{len(pairs)}x vs sequential'
+        }
+
+
+# Demonstration
+print("\n" + "=" * 60)
+print("CNOT VIA LATTICE SURGERY")
+print("=" * 60)
+
+cnot_impl = LatticeSurgeryCNOT(distance=5)
+
+control = SurfaceCodePatch('ctrl', 5, (0, 0),
+    (BoundaryType.ROUGH, BoundaryType.SMOOTH, BoundaryType.ROUGH, BoundaryType.SMOOTH))
+target = SurfaceCodePatch('tgt', 5, (0, 2),
+    (BoundaryType.ROUGH, BoundaryType.SMOOTH, BoundaryType.ROUGH, BoundaryType.SMOOTH))
+
+cnot_op = cnot_impl.cnot_via_xx_zz(control, target)
+
+print(f"\nCNOT from {cnot_op['control']} to {cnot_op['target']}")
+print(f"Total time: {cnot_op['total_time']} code cycles")
+print(f"Ancilla qubits: {cnot_op['ancilla_qubits']}")
+print("\nSteps:")
+for i, step in enumerate(cnot_op['steps'], 1):
+    print(f"  {i}. {step['action']}: {step.get('measurement', step.get('state', step.get('basis', '')))}")
+```
+
+## 3. Multi-Qubit Pauli Measurements
+
+<Definition term="Multi-Qubit Pauli Measurement">
+Lattice surgery naturally extends to measuring products of Paulis on multiple qubits:
+
+$$M_{P_1 P_2 \cdots P_n} = \text{measure } P_1 \otimes P_2 \otimes \cdots \otimes P_n$$
+
+This is essential for:
+- Implementing stabilizer measurements
+- Syndrome extraction at the logical level
+- Multi-controlled gates
+</Definition>
+
+```python
+class MultiQubitSurgery:
+    """
+    Implements multi-qubit Pauli measurements via lattice surgery.
+    """
+
+    def __init__(self, distance: int):
+        self.d = distance
+
+    def measure_pauli_product(self,
+                              patches: List[SurfaceCodePatch],
+                              paulis: List[PauliType]) -> Dict:
+        """
+        Measure a product of Paulis on multiple patches.
+
+        Example: Measure X_1 Z_2 X_3 on three patches
+
+        Uses a chain of ancillas to connect all patches.
+        """
+        if len(patches) != len(paulis):
+            return {'error': 'Must specify Pauli for each patch'}
+
+        n = len(patches)
+
+        # Strategy: Create ancilla chain
+        # Each ancilla connects two patches
+        steps = []
+
+        # Prepare ancilla chain in |+⟩^⊗(n-1)
+        num_ancillas = n - 1
+        steps.append({
+            'action': 'prepare_ancillas',
+            'count': num_ancillas,
+            'state': '|+⟩ each',
+            'time': self.d
+        })
+
+        # Merge operations to create connected chain
+        for i in range(n - 1):
+            merge_type = 'XX' if paulis[i] == PauliType.X else 'ZZ'
+            steps.append({
+                'action': 'merge',
+                'between': f'patch_{i} and ancilla_{i}',
+                'measurement': merge_type,
+                'time': self.d
+            })
+
+        # Final connection to last patch
+        steps.append({
+            'action': 'merge',
+            'between': f'ancilla_{n-2} and patch_{n-1}',
+            'measurement': 'XX' if paulis[-1] == PauliType.X else 'ZZ',
+            'time': self.d
+        })
+
+        # Split operations
+        for i in range(n - 1):
+            steps.append({
+                'action': 'split',
+                'measurement': paulis[i].value,
+                'time': self.d
+            })
+
+        # Measure ancillas
+        steps.append({
+            'action': 'measure_ancillas',
+            'count': num_ancillas,
+            'basis': 'X',
+            'time': self.d
+        })
+
+        pauli_string = ''.join(p.value for p in paulis)
+
+        return {
+            'measurement': pauli_string,
+            'patches': [p.id for p in patches],
+            'ancilla_count': num_ancillas,
+            'steps': steps,
+            'total_time': self.d * (2 * n + 1),  # Approximate
+            'classical_outcome': f'Product of individual measurements'
+        }
+
+    def measure_stabilizer(self,
+                          patches: List[SurfaceCodePatch],
+                          stabilizer: str) -> Dict:
+        """
+        Measure a stabilizer on logical qubits.
+
+        stabilizer: String like "XZZY" specifying Pauli on each qubit
+        """
+        paulis = []
+        for p in stabilizer:
+            if p == 'X':
+                paulis.append(PauliType.X)
+            elif p == 'Z':
+                paulis.append(PauliType.Z)
+            elif p == 'Y':
+                paulis.append(PauliType.Y)
+            elif p == 'I':
+                continue  # Skip identity
+            else:
+                return {'error': f'Unknown Pauli: {p}'}
+
+        return self.measure_pauli_product(patches, paulis)
+
+
+# Demonstration
+print("\n" + "=" * 60)
+print("MULTI-QUBIT PAULI MEASUREMENTS")
+print("=" * 60)
+
+multi_surgery = MultiQubitSurgery(distance=5)
+
+# Create 4 patches
+patches = [
+    SurfaceCodePatch(f'q{i}', 5, (0, i),
+        (BoundaryType.ROUGH, BoundaryType.SMOOTH, BoundaryType.ROUGH, BoundaryType.SMOOTH))
+    for i in range(4)
+]
+
+# Measure XZZX (example from surface code stabilizer)
+result = multi_surgery.measure_stabilizer(patches, "XZZX")
+print(f"\nMeasuring: {result['measurement']}")
+print(f"Ancillas needed: {result['ancilla_count']}")
+print(f"Total time: {result['total_time']} code cycles")
+```
+
+## 4. Routing and Layout Optimization
+
+<Definition term="Lattice Surgery Routing">
+**Routing** in lattice surgery refers to the problem of connecting non-adjacent logical qubits to perform operations. Since surgery requires physical adjacency, we must either:
+1. Move qubits through swap operations
+2. Use intermediate ancilla chains
+3. Design layouts that minimize routing needs
+</Definition>
+
+<Tip>
+Good qubit layout can dramatically reduce routing overhead. Algorithms with local connectivity (like those mapping to 2D geometry) are much more efficient on surface code architectures.
+</Tip>
+
+```python
+class SurgeryRouter:
+    """
+    Routes operations in a lattice surgery architecture.
+    """
+
+    def __init__(self, grid_rows: int, grid_cols: int, distance: int):
+        self.rows = grid_rows
+        self.cols = grid_cols
+        self.d = distance
+
+        # Track which grid positions are occupied
+        self.occupied: Set[Tuple[int, int]] = set()
+        self.patches: Dict[str, SurfaceCodePatch] = {}
+
+    def add_patch(self, patch: SurfaceCodePatch) -> bool:
+        """Add a patch to the layout."""
+        if patch.position in self.occupied:
+            return False
+        self.occupied.add(patch.position)
+        self.patches[patch.id] = patch
+        return True
+
+    def manhattan_distance(self, pos1: Tuple[int, int],
+                           pos2: Tuple[int, int]) -> int:
+        """Compute Manhattan distance between positions."""
+        return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
+
+    def find_path(self, start: Tuple[int, int],
+                  end: Tuple[int, int]) -> List[Tuple[int, int]]:
+        """
+        Find a path between two positions avoiding obstacles.
+
+        Simple A* pathfinding.
+        """
+        from heapq import heappush, heappop
+
+        if start == end:
+            return [start]
+
+        # A* search
+        frontier = [(0, start, [start])]
+        visited = {start}
+
+        while frontier:
+            _, current, path = heappop(frontier)
+
+            if current == end:
+                return path
+
+            r, c = current
+            for dr, dc in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                new_pos = (r + dr, c + dc)
+
+                # Check bounds
+                if not (0 <= new_pos[0] < self.rows and
+                        0 <= new_pos[1] < self.cols):
+                    continue
+
+                # Check obstacles (but allow start/end)
+                if new_pos in self.occupied and new_pos != end:
+                    continue
+
+                if new_pos not in visited:
+                    visited.add(new_pos)
+                    new_path = path + [new_pos]
+                    priority = len(new_path) + self.manhattan_distance(new_pos, end)
+                    heappush(frontier, (priority, new_pos, new_path))
+
+        return []  # No path found
+
+    def route_operation(self, patch1_id: str, patch2_id: str) -> Dict:
+        """
+        Determine how to connect two patches for surgery.
+        """
+        patch1 = self.patches.get(patch1_id)
+        patch2 = self.patches.get(patch2_id)
+
+        if not patch1 or not patch2:
+            return {'error': 'Patch not found'}
+
+        # Check if adjacent
+        direction = patch1.adjacent_to(patch2)
+        if direction:
+            return {
+                'strategy': 'direct',
+                'adjacent': True,
+                'direction': direction,
+                'routing_cost': 0,
+                'time_overhead': 0
+            }
+
+        # Need to route
+        path = self.find_path(patch1.position, patch2.position)
+
+        if not path:
+            return {
+                'strategy': 'failed',
+                'reason': 'No path available'
+            }
+
+        # Path length determines routing cost
+        path_length = len(path) - 2  # Exclude endpoints
+
+        return {
+            'strategy': 'ancilla_chain',
+            'adjacent': False,
+            'path': path,
+            'ancilla_count': path_length,
+            'time_overhead': path_length * self.d,
+            'space_overhead': path_length * 2 * self.d ** 2
+        }
+
+    def optimize_layout(self, operations: List[Tuple[str, str]]) -> Dict:
+        """
+        Analyze operations and suggest layout improvements.
+        """
+        total_routing_cost = 0
+        routing_details = []
+
+        for op1, op2 in operations:
+            route = self.route_operation(op1, op2)
+            if 'time_overhead' in route:
+                total_routing_cost += route['time_overhead']
+            routing_details.append({
+                'operation': f'{op1} <-> {op2}',
+                'route': route
+            })
+
+        return {
+            'total_operations': len(operations),
+            'total_routing_overhead': total_routing_cost,
+            'details': routing_details,
+            'suggestion': 'Place frequently interacting qubits adjacent'
+        }
+
+
+# Demonstration
+print("\n" + "=" * 60)
+print("LATTICE SURGERY ROUTING")
+print("=" * 60)
+
+router = SurgeryRouter(grid_rows=4, grid_cols=4, distance=5)
+
+# Add some logical qubits to the grid
+for i, (r, c) in enumerate([(0, 0), (0, 3), (2, 1), (3, 3)]):
+    patch = SurfaceCodePatch(f'Q{i}', 5, (r, c),
+        (BoundaryType.ROUGH, BoundaryType.SMOOTH, BoundaryType.ROUGH, BoundaryType.SMOOTH))
+    router.add_patch(patch)
+
+# Analyze routing for some operations
+operations = [('Q0', 'Q1'), ('Q0', 'Q2'), ('Q2', 'Q3')]
+analysis = router.optimize_layout(operations)
+
+print(f"\nRouting analysis for {len(operations)} operations:")
+print(f"Total routing overhead: {analysis['total_routing_overhead']} code cycles")
+for detail in analysis['details']:
+    print(f"  {detail['operation']}: {detail['route']['strategy']}")
+```
+
+## 5. Time-Space Tradeoffs
+
+<Formula>
+$$\text{Space-time volume: } V = n_{\text{physical}} \times t_{\text{cycles}}$$
+
+For lattice surgery CNOT:
+- **Space**: $O(d^2)$ ancilla qubits
+- **Time**: $O(d)$ code cycles
+- **Volume**: $O(d^3)$
+</Formula>
+
+```python
+class SurgeryResourceAnalysis:
+    """
+    Analyzes resource requirements for lattice surgery operations.
+    """
+
+    def __init__(self, distance: int):
+        self.d = distance
+        self.qubits_per_patch = 2 * distance ** 2
+
+    def cnot_resources(self) -> Dict:
+        """Resources for single CNOT."""
+        return {
+            'gate': 'CNOT',
+            'method': 'XX-ZZ lattice surgery',
+            'time_cycles': 6 * self.d,
+            'ancilla_qubits': self.qubits_per_patch,
+            'space_time_volume': 6 * self.d * self.qubits_per_patch
+        }
+
+    def t_gate_resources(self) -> Dict:
+        """Resources for T gate via injection."""
+        return {
+            'gate': 'T',
+            'method': 'Magic state injection',
+            'time_cycles': 2 * self.d,  # Injection protocol
+            'ancilla_qubits': self.qubits_per_patch,  # For magic state
+            'space_time_volume': 2 * self.d * self.qubits_per_patch,
+            'note': 'Plus factory overhead for magic state production'
+        }
+
+    def multi_target_cnot(self, num_targets: int) -> Dict:
+        """
+        Resources for CNOT with multiple targets (fan-out).
+
+        Can be done in parallel using tree structure.
+        """
+        # Tree depth
+        depth = int(np.ceil(np.log2(num_targets + 1)))
+
+        return {
+            'gate': f'CNOT (1 control, {num_targets} targets)',
+            'strategy': 'Binary tree fan-out',
+            'tree_depth': depth,
+            'time_cycles': 6 * self.d * depth,  # Sequential layers
+            'ancilla_qubits': num_targets * self.qubits_per_patch,
+            'parallelism': 'Each tree layer done in parallel'
+        }
+
+    def circuit_analysis(self,
+                        num_qubits: int,
+                        cnot_count: int,
+                        t_count: int,
+                        circuit_depth: int) -> Dict:
+        """
+        Full circuit resource analysis.
+        """
+        # Logical qubits
+        data_qubits = num_qubits * self.qubits_per_patch
+
+        # Ancillas for operations (reusable)
+        ancilla_qubits = self.qubits_per_patch  # One ancilla patch
+
+        # Time estimation
+        # Assume some parallelism
+        cnot_time = cnot_count * 6 * self.d / (num_qubits // 2)  # Rough parallel estimate
+        t_time = t_count * 2 * self.d  # T gates often sequential
+
+        total_time = cnot_time + t_time
+
+        return {
+            'circuit_stats': {
+                'logical_qubits': num_qubits,
+                'CNOT_count': cnot_count,
+                'T_count': t_count,
+                'depth': circuit_depth
+            },
+            'physical_resources': {
+                'data_physical_qubits': data_qubits,
+                'ancilla_physical_qubits': ancilla_qubits,
+                'total_physical_qubits': data_qubits + ancilla_qubits
+            },
+            'time_estimate': {
+                'total_code_cycles': total_time,
+                'assuming': 'Moderate parallelism'
+            },
+            'overhead_ratio': {
+                'space': data_qubits / num_qubits,
+                'time': total_time / circuit_depth
+            }
+        }
+
+
+# Demonstration
+print("\n" + "=" * 60)
+print("LATTICE SURGERY RESOURCE ANALYSIS")
+print("=" * 60)
+
+analysis = SurgeryResourceAnalysis(distance=11)
+
+print("\nSingle gate resources (d=11):")
+for gate_info in [analysis.cnot_resources(), analysis.t_gate_resources()]:
+    print(f"\n  {gate_info['gate']}:")
+    print(f"    Time: {gate_info['time_cycles']} cycles")
+    print(f"    Ancilla: {gate_info['ancilla_qubits']} qubits")
+
+# Analyze a circuit
+circuit = analysis.circuit_analysis(
+    num_qubits=100,
+    cnot_count=10000,
+    t_count=1000,
+    circuit_depth=500
+)
+
+print("\n\nCircuit resource estimate:")
+print(f"  Logical qubits: {circuit['circuit_stats']['logical_qubits']}")
+print(f"  Physical qubits: {circuit['physical_resources']['total_physical_qubits']}")
+print(f"  Space overhead: {circuit['overhead_ratio']['space']:.0f}x")
+```
+
+## Summary
+
+In this lesson, you learned the fundamentals of lattice surgery:
+
+1. **Lattice surgery** implements logical gates by merging and splitting surface code patches
+
+2. **Merge operations** measure joint Pauli operators (XX for rough boundaries, ZZ for smooth)
+
+3. **CNOT** is implemented via XX and ZZ measurements with an ancilla patch
+
+4. **Multi-qubit measurements** use ancilla chains to connect multiple patches
+
+5. **Routing** is crucial - non-adjacent operations require ancilla paths or qubit movement
+
+6. **Resource costs** scale as O(d) time and O(d^2) space per operation
+
+<Warning>
+Lattice surgery is highly sensitive to qubit layout. Poor placement can increase routing overhead by orders of magnitude. Always consider the connectivity of your algorithm when designing the logical qubit arrangement.
+</Warning>
+
+## Further Reading
+
+- Next lesson: Fault-Tolerant T Gates
+- Related: Surface code decoders and error correction
+- Advanced: Twist defects and domain walls

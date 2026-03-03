@@ -1,0 +1,304 @@
+---
+title: "Gate Scheduling and Timing"
+description: "Scheduling gates respecting timing constraints."
+duration: 50
+difficulty: "advanced"
+---
+
+## 1. Gate Durations
+
+Different gates take different times to execute.
+
+```python
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Set
+
+@dataclass
+class GateSpec:
+    name: str
+    duration: int  # in dt (device time units)
+
+# Typical IBM gate durations (approximate, in dt)
+GATE_DURATIONS = {
+    'id': 0,
+    'rz': 0,      # Virtual gate (implemented in software)
+    'sx': 160,
+    'x': 160,
+    'cx': 800,
+    'measure': 5000,
+}
+
+@dataclass
+class ScheduledGate:
+    name: str
+    qubits: Tuple[int, ...]
+    start_time: int
+    duration: int
+
+    @property
+    def end_time(self) -> int:
+        return self.start_time + self.duration
+```
+
+## 2. ASAP Scheduling
+
+Schedule gates As Soon As Possible.
+
+```python
+@dataclass
+class Gate:
+    name: str
+    qubits: Tuple[int, ...]
+
+class ASAPScheduler:
+    """As Soon As Possible scheduling."""
+
+    def __init__(self, gate_durations: Dict[str, int]):
+        self.durations = gate_durations
+
+    def schedule(self, gates: List[Gate]) -> List[ScheduledGate]:
+        """Schedule gates ASAP."""
+        # Track when each qubit becomes available
+        qubit_available = {}
+
+        scheduled = []
+
+        for gate in gates:
+            # Find earliest start time
+            start_time = 0
+            for q in gate.qubits:
+                if q in qubit_available:
+                    start_time = max(start_time, qubit_available[q])
+
+            duration = self.durations.get(gate.name, 100)
+
+            scheduled.append(ScheduledGate(
+                name=gate.name,
+                qubits=gate.qubits,
+                start_time=start_time,
+                duration=duration
+            ))
+
+            # Update qubit availability
+            end_time = start_time + duration
+            for q in gate.qubits:
+                qubit_available[q] = end_time
+
+        return scheduled
+
+# Example
+scheduler = ASAPScheduler(GATE_DURATIONS)
+gates = [
+    Gate('sx', (0,)),
+    Gate('sx', (1,)),
+    Gate('cx', (0, 1)),
+    Gate('sx', (0,)),
+]
+
+scheduled = scheduler.schedule(gates)
+for g in scheduled:
+    print(f"{g.name}({g.qubits}): t={g.start_time}-{g.end_time}")
+```
+
+## 3. ALAP Scheduling
+
+Schedule gates As Late As Possible.
+
+```python
+class ALAPScheduler:
+    """As Late As Possible scheduling."""
+
+    def __init__(self, gate_durations: Dict[str, int]):
+        self.durations = gate_durations
+
+    def schedule(self, gates: List[Gate], total_time: int = None) -> List[ScheduledGate]:
+        """Schedule gates ALAP."""
+        # First compute ASAP to get total time
+        if total_time is None:
+            asap = ASAPScheduler(self.durations).schedule(gates)
+            total_time = max(g.end_time for g in asap)
+
+        # Schedule in reverse order
+        qubit_deadline = {q: total_time for q in self._all_qubits(gates)}
+
+        scheduled = []
+
+        for gate in reversed(gates):
+            duration = self.durations.get(gate.name, 100)
+
+            # Find latest possible end time
+            end_time = total_time
+            for q in gate.qubits:
+                end_time = min(end_time, qubit_deadline[q])
+
+            start_time = end_time - duration
+
+            scheduled.append(ScheduledGate(
+                name=gate.name,
+                qubits=gate.qubits,
+                start_time=start_time,
+                duration=duration
+            ))
+
+            # Update qubit deadlines
+            for q in gate.qubits:
+                qubit_deadline[q] = start_time
+
+        return list(reversed(scheduled))
+
+    def _all_qubits(self, gates: List[Gate]) -> Set[int]:
+        qubits = set()
+        for g in gates:
+            qubits.update(g.qubits)
+        return qubits
+
+# Compare ASAP vs ALAP
+alap_scheduler = ALAPScheduler(GATE_DURATIONS)
+alap_scheduled = alap_scheduler.schedule(gates)
+
+print("\nASAP vs ALAP:")
+print("ASAP:")
+for g in scheduled:
+    print(f"  {g.name}({g.qubits}): t={g.start_time}")
+print("ALAP:")
+for g in alap_scheduled:
+    print(f"  {g.name}({g.qubits}): t={g.start_time}")
+```
+
+## 4. Scheduling with Alignment
+
+Align gates to hardware timing constraints.
+
+```python
+class AlignedScheduler:
+    """Schedule with timing alignment."""
+
+    def __init__(self, gate_durations: Dict[str, int], alignment: int = 16):
+        self.durations = gate_durations
+        self.alignment = alignment  # Align to multiples of this
+
+    def align_time(self, t: int) -> int:
+        """Round time up to alignment boundary."""
+        return ((t + self.alignment - 1) // self.alignment) * self.alignment
+
+    def schedule(self, gates: List[Gate]) -> List[ScheduledGate]:
+        """Schedule with alignment."""
+        qubit_available = {}
+        scheduled = []
+
+        for gate in gates:
+            # Find earliest aligned start time
+            start_time = 0
+            for q in gate.qubits:
+                if q in qubit_available:
+                    start_time = max(start_time, qubit_available[q])
+
+            start_time = self.align_time(start_time)
+            duration = self.durations.get(gate.name, 100)
+
+            scheduled.append(ScheduledGate(
+                name=gate.name,
+                qubits=gate.qubits,
+                start_time=start_time,
+                duration=duration
+            ))
+
+            end_time = start_time + duration
+            for q in gate.qubits:
+                qubit_available[q] = end_time
+
+        return scheduled
+```
+
+## 5. Dynamical Decoupling Integration
+
+Insert DD sequences in idle periods.
+
+```python
+class DDScheduler:
+    """Scheduler with dynamical decoupling."""
+
+    def __init__(self, gate_durations: Dict[str, int],
+                 dd_sequence: List[str] = ['x', 'x']):
+        self.durations = gate_durations
+        self.dd_sequence = dd_sequence
+
+    def schedule_with_dd(self, gates: List[Gate]) -> List[ScheduledGate]:
+        """Schedule and insert DD sequences in idle periods."""
+        # First, ASAP schedule
+        asap = ASAPScheduler(self.durations)
+        scheduled = asap.schedule(gates)
+
+        # Find idle periods per qubit
+        all_qubits = self._all_qubits(gates)
+        total_time = max(g.end_time for g in scheduled)
+
+        # Track busy intervals per qubit
+        busy = {q: [] for q in all_qubits}
+        for g in scheduled:
+            for q in g.qubits:
+                busy[q].append((g.start_time, g.end_time))
+
+        # Sort intervals
+        for q in busy:
+            busy[q].sort()
+
+        # Find gaps and insert DD
+        dd_gates = []
+        for q in all_qubits:
+            gaps = self._find_gaps(busy[q], total_time)
+            for gap_start, gap_end in gaps:
+                dd_gates.extend(self._insert_dd(q, gap_start, gap_end))
+
+        return scheduled + dd_gates
+
+    def _find_gaps(self, intervals: List[Tuple[int, int]],
+                   total: int) -> List[Tuple[int, int]]:
+        """Find idle gaps in schedule."""
+        gaps = []
+        current = 0
+
+        for start, end in intervals:
+            if start > current:
+                gaps.append((current, start))
+            current = max(current, end)
+
+        if current < total:
+            gaps.append((current, total))
+
+        return gaps
+
+    def _insert_dd(self, qubit: int, start: int, end: int) -> List[ScheduledGate]:
+        """Insert DD sequence in gap."""
+        dd_gates = []
+        duration = self.durations.get('x', 160)
+        total_dd_time = len(self.dd_sequence) * duration
+
+        if end - start >= total_dd_time:
+            # Distribute DD pulses evenly
+            gap = end - start
+            spacing = gap // (len(self.dd_sequence) + 1)
+
+            t = start + spacing - duration // 2
+            for pulse in self.dd_sequence:
+                dd_gates.append(ScheduledGate(
+                    name=pulse,
+                    qubits=(qubit,),
+                    start_time=t,
+                    duration=duration
+                ))
+                t += spacing
+
+        return dd_gates
+
+    def _all_qubits(self, gates):
+        return set(q for g in gates for q in g.qubits)
+```
+
+## Summary
+
+Scheduling optimizes circuit execution:
+1. **ASAP**: Execute gates as early as possible
+2. **ALAP**: Delay gates to reduce idle time before measurement
+3. **Alignment**: Respect hardware timing constraints
+4. **DD integration**: Fill idle time with decoupling sequences

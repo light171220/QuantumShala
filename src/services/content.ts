@@ -1,7 +1,6 @@
-import { downloadData } from 'aws-amplify/storage'
-
+const CDN_URL = 'https://d1q95cjsvt50nj.cloudfront.net'
 const CONTENT_BASE_PATH = 'content/lessons'
-const CACHE_TTL = 5 * 60 * 1000
+const CACHE_TTL = 10 * 60 * 1000
 
 const cache = new Map<string, { data: unknown; timestamp: number }>()
 
@@ -24,18 +23,17 @@ async function fetchContent<T>(path: string): Promise<T | null> {
   if (cached) return cached
 
   const fullPath = `${CONTENT_BASE_PATH}/${path}`
+  const url = `${CDN_URL}/${fullPath}`
 
   try {
-    console.log(`[Storage] Downloading: ${fullPath}`)
+    console.log(`[CDN] Fetching: ${url}`)
 
-    const downloadResult = await downloadData({
-      path: fullPath,
-      options: {
-        bucket: 'quantumshala-storage'
-      }
-    }).result
+    const response = await fetch(url, { cache: 'no-store' })
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
 
-    const text = await downloadResult.body.text()
+    const text = await response.text()
     let data: T
 
     if (path.endsWith('.json')) {
@@ -44,11 +42,16 @@ async function fetchContent<T>(path: string): Promise<T | null> {
       data = text as unknown as T
     }
 
-    console.log(`[Storage] Success: ${path}`)
+    console.log(`[CDN] Success: ${path}`,
+      typeof data === 'object' && data !== null && 'tracks' in data
+        ? `(${(data as {tracks: unknown[]}).tracks.length} tracks)`
+        : ''
+    )
     setCache(cacheKey, data)
     return data
-  } catch (error: any) {
-    console.error(`[Storage] Error fetching ${fullPath}:`, error?.message || error)
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(`[CDN] Error fetching ${url}:`, message)
     return null
   }
 }
@@ -150,12 +153,16 @@ export async function getTracksIndex(): Promise<TrackIndex | null> {
 }
 
 export async function getAllTracks(): Promise<TrackSummary[]> {
+  console.log('[Content] getAllTracks() called')
   const index = await getTracksIndex()
   if (!index) {
-    console.error('Failed to load tracks index from S3')
+    console.error('[Content] Failed to load tracks index - index is null')
     throw new Error('Failed to load learning content. Please check console for details.')
   }
-  console.log(`Loaded ${index.tracks.length} tracks from S3`)
+  console.log(`[Content] Loaded ${index.tracks.length} tracks:`, index.tracks.map(t => t.id))
+  if (index.tracks.length > 0) {
+    console.log(`[Content] First track modules:`, index.tracks[0].modules?.length || 0)
+  }
   return index.tracks
 }
 

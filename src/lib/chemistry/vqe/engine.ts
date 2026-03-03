@@ -39,11 +39,17 @@ export class VQEEngine {
   private buildAnsatz(numQubits: number, config: AnsatzConfig): QMLCircuit {
     const circuit = new QMLCircuit(numQubits)
 
+    const mapEntanglement = (e?: string): 'linear' | 'circular' | 'full' => {
+      if (e === 'pairwise' || e === 'sca') return 'full'
+      if (e === 'linear' || e === 'circular' || e === 'full') return e
+      return 'linear'
+    }
+
     switch (config.type) {
       case 'hea':
         circuit.buildHEA(
           config.numLayers || 2,
-          config.entanglement || 'linear'
+          mapEntanglement(config.entanglement)
         )
         break
 
@@ -51,7 +57,8 @@ export class VQEEngine {
         this.buildUCCSD(circuit, numQubits, config.numLayers || 1)
         break
 
-      case 'adaptive':
+      case 'adapt':
+      case 'qubit_adapt':
         circuit.buildHEA(1, 'linear')
         break
 

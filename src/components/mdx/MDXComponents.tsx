@@ -1,10 +1,21 @@
 import React from 'react'
 import { Info, Lightbulb, AlertTriangle, BookOpen, Code, HelpCircle } from 'lucide-react'
+import { InteractiveCodeBlock } from '../ui/InteractiveCodeBlock'
+
+// Interactive MDX Components
+import ProofBuilder from './ProofBuilder'
+import DerivationWalkthrough from './DerivationWalkthrough'
+import CircuitChallenge from './CircuitChallenge'
+import PulseDesigner from './PulseDesigner'
+import NoiseExplorer from './NoiseExplorer'
+import VirtualQuantumLab from './VirtualQuantumLab'
 
 interface ComponentProps {
   children: React.ReactNode
   term?: string
   title?: string
+  language?: string
+  runnable?: boolean
 }
 
 export const Definition: React.FC<ComponentProps> = ({ term, children }) => (
@@ -86,11 +97,54 @@ export const MathBlock: React.FC<ComponentProps> = ({ children }) => (
   </div>
 )
 
-export const CodeExample: React.FC<ComponentProps> = ({ title, children }) => (
-  <div className="my-4">
-    {title && <div className="text-sm text-slate-400 mb-2">{title}</div>}
-    <div className="bg-neumorph-base shadow-neumorph-xs border border-white/[0.02] rounded-lg overflow-hidden">{children}</div>
-  </div>
+export const CodeExample: React.FC<ComponentProps> = ({ title, children, language = 'python', runnable = false }) => {
+  if (typeof children === 'string') {
+    return (
+      <InteractiveCodeBlock
+        code={children}
+        language={language}
+        title={title}
+        runnable={runnable}
+      />
+    )
+  }
+
+  if (React.isValidElement(children)) {
+    const childProps = children.props as { children?: React.ReactNode }
+    if (childProps.children && typeof childProps.children === 'string') {
+      return (
+        <InteractiveCodeBlock
+          code={childProps.children}
+          language={language}
+          title={title}
+          runnable={runnable}
+        />
+      )
+    }
+  }
+
+  return (
+    <div className="my-4">
+      {title && <div className="text-sm text-slate-400 mb-2">{title}</div>}
+      <div className="bg-neumorph-base shadow-neumorph-xs border border-white/[0.02] rounded-lg overflow-hidden">{children}</div>
+    </div>
+  )
+}
+
+export const CodeBlock: React.FC<{
+  code: string
+  language?: string
+  title?: string
+  runnable?: boolean
+  showLineNumbers?: boolean
+}> = ({ code, language = 'python', title, runnable = true, showLineNumbers = true }) => (
+  <InteractiveCodeBlock
+    code={code}
+    language={language}
+    title={title}
+    runnable={runnable}
+    showLineNumbers={showLineNumbers}
+  />
 )
 
 export const mdxComponents = {
@@ -104,4 +158,23 @@ export const mdxComponents = {
   KeyConcept,
   MathBlock,
   CodeExample,
+  CodeBlock,
+  InteractiveCodeBlock,
+  // Interactive MDX Components
+  ProofBuilder,
+  DerivationWalkthrough,
+  CircuitChallenge,
+  PulseDesigner,
+  NoiseExplorer,
+  VirtualQuantumLab,
+}
+
+// Re-export interactive components for direct imports
+export {
+  ProofBuilder,
+  DerivationWalkthrough,
+  CircuitChallenge,
+  PulseDesigner,
+  NoiseExplorer,
+  VirtualQuantumLab,
 }

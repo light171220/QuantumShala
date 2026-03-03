@@ -1,0 +1,495 @@
+---
+title: "Gate Merging: Rotation Combining and Commutation"
+description: "Learn techniques for combining consecutive gates into single operations through rotation merging and commutation-based reordering."
+duration: 55
+difficulty: "intermediate"
+---
+
+## 1. Introduction to Gate Merging
+
+Gate merging combines multiple consecutive operations into fewer gates, reducing circuit depth and gate count. Unlike cancellation (which removes gates entirely), merging preserves the computational effect while simplifying the representation.
+
+### Key Merging Strategies
+
+1. **Rotation merging**: Combine same-axis rotations
+2. **Unitary synthesis**: Merge arbitrary single-qubit gates
+3. **Commutation reordering**: Move gates to enable merging
+4. **Two-qubit consolidation**: Combine adjacent two-qubit operations
+
+```python
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+import numpy as np
+import math
+
+@dataclass
+class Gate:
+    """Gate representation with matrix computation."""
+    name: str
+    qubits: Tuple[int, ...]
+    params: Tuple[float, ...] = ()
+
+    def matrix(self) -> np.ndarray:
+        """Compute the unitary matrix for this gate."""
+        if self.name == 'RX':
+            theta = self.params[0]
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            return np.array([[c, -1j*s], [-1j*s, c]])
+        elif self.name == 'RY':
+            theta = self.params[0]
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            return np.array([[c, -s], [s, c]])
+        elif self.name == 'RZ':
+            theta = self.params[0]
+            return np.array([[np.exp(-1j*theta/2), 0],
+                           [0, np.exp(1j*theta/2)]])
+        elif self.name == 'H':
+            return np.array([[1, 1], [1, -1]]) / np.sqrt(2)
+        elif self.name == 'X':
+            return np.array([[0, 1], [1, 0]])
+        elif self.name == 'Z':
+            return np.array([[1, 0], [0, -1]])
+        elif self.name == 'U3':
+            theta, phi, lam = self.params
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            return np.array([
+                [c, -np.exp(1j*lam)*s],
+                [np.exp(1j*phi)*s, np.exp(1j*(phi+lam))*c]
+            ])
+        raise ValueError(f"Unknown gate: {self.name}")
+```
+
+## 2. Same-Axis Rotation Merging
+
+Consecutive rotations about the same axis simply add their angles:
+
+$$R_z(\theta_1) R_z(\theta_2) = R_z(\theta_1 + \theta_2)$$
+
+```python
+def merge_same_axis_rotations(gates: List[Gate]) -> List[Gate]:
+    """
+    Merge consecutive rotations about the same axis.
+
+    RX(a) RX(b) -> RX(a+b)
+    RY(a) RY(b) -> RY(a+b)
+    RZ(a) RZ(b) -> RZ(a+b)
+    """
+    ROTATION_GATES = {'RX', 'RY', 'RZ'}
+    result: List[Gate] = []
+
+    for gate in gates:
+        if (result and
+            gate.name in ROTATION_GATES and
+            result[-1].name == gate.name and
+            result[-1].qubits == gate.qubits):
+
+            # Merge: add angles
+            prev = result.pop()
+            new_angle = prev.params[0] + gate.params[0]
+
+            # Normalize angle to [-pi, pi]
+            new_angle = normalize_angle(new_angle)
+
+            # Only add if angle is significant
+            if abs(new_angle) > 1e-10:
+                result.append(Gate(gate.name, gate.qubits, (new_angle,)))
+        else:
+            result.append(gate)
+
+    return result
+
+
+def normalize_angle(angle: float) -> float:
+    """Normalize angle to [-pi, pi] range."""
+    while angle > math.pi:
+        angle -= 2 * math.pi
+    while angle < -math.pi:
+        angle += 2 * math.pi
+    return angle
+
+
+# Example
+circuit = [
+    Gate('RZ', (0,), (0.3,)),
+    Gate('RZ', (0,), (0.4,)),   # Merges to RZ(0.7)
+    Gate('RX', (0,), (0.5,)),
+    Gate('RZ', (0,), (-0.7,)),  # Cancels with merged RZ
+]
+
+merged = merge_same_axis_rotations(circuit)
+print(f"Merged {len(circuit)} gates to {len(merged)}")
+```
+
+## 3. Phase Gate Merging
+
+Phase gates (S, T, Z, P, U1) are all diagonal and can be merged:
+
+```python
+def merge_phase_gates(gates: List[Gate]) -> List[Gate]:
+    """
+    Merge consecutive phase/diagonal gates.
+
+    All these gates have form diag(1, e^(i*phi)):
+    - Z = P(pi)
+    - S = P(pi/2)
+    - T = P(pi/4)
+    - RZ(theta) ~ P(theta/2) up to global phase
+    """
+    PHASE_GATES = {
+        'Z': math.pi,
+        'S': math.pi/2,
+        'SDG': -math.pi/2,
+        'T': math.pi/4,
+        'TDG': -math.pi/4,
+    }
+
+    result: List[Gate] = []
+    accumulated_phase = {}  # qubit -> accumulated phase
+
+    for gate in gates:
+        qubit = gate.qubits[0] if len(gate.qubits) == 1 else None
+
+        if qubit is not None:
+            if gate.name in PHASE_GATES:
+                phase = PHASE_GATES[gate.name]
+                accumulated_phase[qubit] = accumulated_phase.get(qubit, 0) + phase
+
+            elif gate.name == 'RZ':
+                phase = gate.params[0]
+                accumulated_phase[qubit] = accumulated_phase.get(qubit, 0) + phase
+
+            elif gate.name in ('P', 'U1'):
+                phase = gate.params[0]
+                accumulated_phase[qubit] = accumulated_phase.get(qubit, 0) + phase
+
+            else:
+                # Non-phase gate: flush accumulated phase first
+                if qubit in accumulated_phase:
+                    flush_phase(result, qubit, accumulated_phase.pop(qubit))
+                result.append(gate)
+        else:
+            # Multi-qubit gate: flush all phases for involved qubits
+            for q in gate.qubits:
+                if q in accumulated_phase:
+                    flush_phase(result, q, accumulated_phase.pop(q))
+            result.append(gate)
+
+    # Flush remaining phases
+    for qubit, phase in accumulated_phase.items():
+        flush_phase(result, qubit, phase)
+
+    return result
+
+
+def flush_phase(result: List[Gate], qubit: int, phase: float):
+    """Add accumulated phase as a single gate."""
+    phase = normalize_angle(phase)
+    if abs(phase) < 1e-10:
+        return  # Zero phase, skip
+
+    # Decompose into simple gates if possible
+    if abs(phase - math.pi) < 1e-10:
+        result.append(Gate('Z', (qubit,)))
+    elif abs(phase - math.pi/2) < 1e-10:
+        result.append(Gate('S', (qubit,)))
+    elif abs(phase + math.pi/2) < 1e-10:
+        result.append(Gate('SDG', (qubit,)))
+    elif abs(phase - math.pi/4) < 1e-10:
+        result.append(Gate('T', (qubit,)))
+    elif abs(phase + math.pi/4) < 1e-10:
+        result.append(Gate('TDG', (qubit,)))
+    else:
+        result.append(Gate('RZ', (qubit,), (phase,)))
+```
+
+## 4. Single-Qubit Unitary Synthesis
+
+Any sequence of single-qubit gates can be merged into a single U3 gate using Euler decomposition:
+
+$$U = e^{i\alpha} R_z(\phi) R_y(\theta) R_z(\lambda)$$
+
+```python
+def merge_single_qubit_gates(gates: List[Gate], qubit: int) -> Optional[Gate]:
+    """
+    Merge all single-qubit gates on a qubit into one U3 gate.
+
+    Uses ZYZ Euler decomposition.
+    """
+    # Filter gates on this qubit
+    qubit_gates = [g for g in gates if g.qubits == (qubit,)]
+
+    if not qubit_gates:
+        return None
+
+    # Compute combined unitary
+    U = np.eye(2, dtype=complex)
+    for gate in qubit_gates:
+        U = gate.matrix() @ U
+
+    # Decompose to ZYZ
+    theta, phi, lam, global_phase = zyz_decomposition(U)
+
+    # Skip if effectively identity
+    if abs(theta) < 1e-10 and abs(phi) < 1e-10 and abs(lam) < 1e-10:
+        return None
+
+    return Gate('U3', (qubit,), (theta, phi, lam))
+
+
+def zyz_decomposition(U: np.ndarray) -> Tuple[float, float, float, float]:
+    """
+    Decompose 2x2 unitary into ZYZ Euler angles.
+
+    U = e^(i*alpha) * Rz(phi) * Ry(theta) * Rz(lambda)
+
+    Returns: (theta, phi, lambda, global_phase)
+    """
+    # Ensure unitary
+    det = np.linalg.det(U)
+    global_phase = np.angle(det) / 2
+    U = U / np.sqrt(det)  # Make special unitary (det = 1)
+
+    # Extract angles
+    # U = [[cos(t/2)*e^(-i(p+l)/2), -sin(t/2)*e^(-i(p-l)/2)],
+    #      [sin(t/2)*e^(i(p-l)/2),   cos(t/2)*e^(i(p+l)/2)]]
+
+    theta = 2 * np.arccos(np.clip(np.abs(U[0, 0]), 0, 1))
+
+    if abs(theta) < 1e-10:  # Near identity
+        phi = 0
+        lam = 2 * np.angle(U[1, 1])
+    elif abs(theta - np.pi) < 1e-10:  # Near X rotation
+        phi = 2 * np.angle(U[1, 0])
+        lam = 0
+    else:
+        phi_plus_lam = -2 * np.angle(U[0, 0])
+        phi_minus_lam = 2 * np.angle(U[1, 0])
+        phi = (phi_plus_lam + phi_minus_lam) / 2
+        lam = (phi_plus_lam - phi_minus_lam) / 2
+
+    return theta, phi, lam, global_phase
+
+
+# Example: Merge H-T-H into single gate
+gates = [Gate('H', (0,)), Gate('T', (0,)), Gate('H', (0,))]
+merged = merge_single_qubit_gates(gates, 0)
+print(f"Merged to: {merged}")
+```
+
+## 5. Commutation-Based Reordering
+
+Gates that commute can be reordered to group mergeable operations:
+
+```python
+# Commutation rules for common gates
+COMMUTATION_RULES = {
+    # Diagonal gates commute with each other
+    ('RZ', 'RZ'): True,
+    ('RZ', 'Z'): True,
+    ('RZ', 'S'): True,
+    ('RZ', 'T'): True,
+    ('Z', 'S'): True,
+    ('Z', 'T'): True,
+    ('S', 'T'): True,
+    ('CZ', 'RZ'): True,  # CZ commutes with RZ on either qubit
+
+    # X-type gates commute
+    ('RX', 'RX'): True,
+    ('RX', 'X'): True,
+
+    # Y-type gates commute
+    ('RY', 'RY'): True,
+    ('RY', 'Y'): True,
+
+    # Control qubit commutations
+    ('CX', 'RZ'): 'control',  # RZ on control commutes with CX
+    ('CZ', 'RZ'): True,       # RZ commutes with CZ on either qubit
+}
+
+
+def can_commute(g1: Gate, g2: Gate) -> bool:
+    """Check if two gates can be commuted."""
+    # Disjoint qubits always commute
+    if set(g1.qubits).isdisjoint(set(g2.qubits)):
+        return True
+
+    # Same qubit: check rule table
+    key = (g1.name, g2.name)
+    rev_key = (g2.name, g1.name)
+
+    if key in COMMUTATION_RULES:
+        rule = COMMUTATION_RULES[key]
+        if rule is True:
+            return True
+        if rule == 'control':
+            # g2 must act only on control qubit of g1
+            return len(g1.qubits) >= 2 and g2.qubits == (g1.qubits[0],)
+
+    if rev_key in COMMUTATION_RULES:
+        rule = COMMUTATION_RULES[rev_key]
+        if rule is True:
+            return True
+        if rule == 'control':
+            return len(g2.qubits) >= 2 and g1.qubits == (g2.qubits[0],)
+
+    return False
+
+
+def reorder_for_merging(gates: List[Gate]) -> List[Gate]:
+    """
+    Reorder gates using commutation to group mergeable operations.
+
+    Uses bubble-sort style reordering.
+    """
+    gates = list(gates)
+    changed = True
+
+    while changed:
+        changed = False
+
+        for i in range(len(gates) - 1):
+            g1, g2 = gates[i], gates[i + 1]
+
+            # Check if reordering would enable merging
+            should_swap = False
+
+            # Prefer grouping same-type rotations
+            if (g1.name in ('RX', 'RY', 'RZ') and
+                g2.name == g1.name and
+                g1.qubits == g2.qubits):
+                continue  # Already adjacent
+
+            # Look ahead: does g1 match a later gate?
+            for j in range(i + 2, min(i + 5, len(gates))):
+                if gates[j].name == g1.name and gates[j].qubits == g1.qubits:
+                    if can_commute(g1, g2):
+                        should_swap = True
+                        break
+
+            if should_swap:
+                gates[i], gates[i + 1] = gates[i + 1], gates[i]
+                changed = True
+
+    return gates
+```
+
+## 6. Complete Merging Pipeline
+
+```python
+class GateMergingPass:
+    """
+    Complete gate merging optimization pass.
+
+    Pipeline:
+    1. Reorder using commutation rules
+    2. Merge same-axis rotations
+    3. Merge phase gates
+    4. Optionally synthesize to basis gates
+    """
+
+    def __init__(self, use_commutation: bool = True,
+                 synthesize_to_basis: bool = False):
+        self.use_commutation = use_commutation
+        self.synthesize_to_basis = synthesize_to_basis
+        self.stats = {}
+
+    def run(self, gates: List[Gate]) -> List[Gate]:
+        """Execute the merging pass."""
+        original_count = len(gates)
+
+        # Phase 1: Commutation-based reordering
+        if self.use_commutation:
+            gates = reorder_for_merging(gates)
+
+        # Phase 2: Merge same-axis rotations
+        gates = merge_same_axis_rotations(gates)
+
+        # Phase 3: Merge phase gates
+        gates = merge_phase_gates(gates)
+
+        # Phase 4: Iterative merging (may expose more opportunities)
+        prev_count = len(gates) + 1
+        while len(gates) < prev_count:
+            prev_count = len(gates)
+            gates = merge_same_axis_rotations(gates)
+            if self.use_commutation:
+                gates = reorder_for_merging(gates)
+
+        self.stats = {
+            'original': original_count,
+            'final': len(gates),
+            'reduction': original_count - len(gates)
+        }
+
+        return gates
+
+    def report(self) -> str:
+        pct = self.stats['reduction'] / max(1, self.stats['original']) * 100
+        return (f"Gate Merging: {self.stats['original']} -> "
+                f"{self.stats['final']} ({pct:.1f}% reduction)")
+```
+
+## 7. Two-Qubit Gate Merging
+
+Adjacent two-qubit gates can sometimes be merged using KAK decomposition:
+
+```python
+def merge_two_qubit_gates(g1: Gate, g2: Gate) -> Optional[List[Gate]]:
+    """
+    Attempt to merge two adjacent two-qubit gates.
+
+    Uses the fact that any two-qubit gate can be decomposed
+    into at most 3 CNOT gates with single-qubit rotations.
+    """
+    if g1.qubits != g2.qubits:
+        return None  # Must act on same qubit pair
+
+    # Compute combined unitary
+    U1 = compute_two_qubit_matrix(g1)
+    U2 = compute_two_qubit_matrix(g2)
+    U_combined = U2 @ U1
+
+    # Check CNOT count of combined operation
+    cnot_count = estimate_cnot_count(U_combined)
+
+    # Only merge if it reduces CNOT count
+    original_cnots = count_cnots([g1, g2])
+    if cnot_count < original_cnots:
+        return decompose_two_qubit(U_combined, g1.qubits)
+
+    return None
+
+
+def estimate_cnot_count(U: np.ndarray) -> int:
+    """
+    Estimate minimum CNOT count for a two-qubit unitary.
+
+    Based on Weyl chamber coordinates.
+    """
+    # Simplified: use trace-based heuristic
+    trace = np.abs(np.trace(U))
+
+    if trace > 3.99:  # Near identity
+        return 0
+    elif trace > 2.82:  # Single CNOT equivalent
+        return 1
+    elif trace > 1.99:  # Two CNOTs
+        return 2
+    else:
+        return 3
+```
+
+## Summary
+
+Gate merging optimizes circuits by:
+
+1. **Same-axis rotations**: RZ(a)RZ(b) = RZ(a+b)
+2. **Phase accumulation**: Combine S, T, Z, P gates
+3. **Unitary synthesis**: Merge arbitrary single-qubit sequences to U3
+4. **Commutation reordering**: Move gates to enable merging
+5. **Two-qubit consolidation**: Use KAK decomposition
+
+Best practices:
+- Apply merging after cancellation
+- Use commutation to maximize opportunities
+- Consider basis gate constraints for final synthesis

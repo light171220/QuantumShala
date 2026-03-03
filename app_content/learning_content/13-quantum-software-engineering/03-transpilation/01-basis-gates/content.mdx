@@ -1,0 +1,528 @@
+---
+title: "Basis Gates: Native Gate Sets and Decomposition"
+description: "Understand hardware-native gate sets and learn techniques for decomposing arbitrary gates into basis operations."
+duration: 55
+difficulty: "intermediate"
+---
+
+## 1. Understanding Basis Gates
+
+Quantum hardware can only execute a limited set of native operations called **basis gates**. Transpilation converts abstract circuits into sequences of these hardware-supported gates.
+
+### Common Basis Gate Sets
+
+| Provider | Single-Qubit Basis | Two-Qubit Basis |
+|----------|-------------------|-----------------|
+| IBM Quantum | RZ, SX, X | CX (CNOT) |
+| Rigetti | RX, RZ | CZ |
+| IonQ | RX, RY, RZ | XX (Molmer-Sorensen) |
+| Google | PHXZ | SYC (Sycamore) |
+| Quantinuum | RZ, U1q | ZZ |
+
+```python
+from dataclasses import dataclass
+from typing import List, Tuple, Set, Dict
+import numpy as np
+import math
+
+@dataclass
+class BasisGateSet:
+    """Definition of a hardware basis gate set."""
+    name: str
+    single_qubit: Set[str]
+    two_qubit: Set[str]
+    description: str = ""
+
+# Standard basis gate sets
+IBM_BASIS = BasisGateSet(
+    name="IBM Quantum",
+    single_qubit={'RZ', 'SX', 'X'},
+    two_qubit={'CX'},
+    description="RZ for phase, SX (sqrt-X) for pi/2 rotation, X for pi rotation"
+)
+
+RIGETTI_BASIS = BasisGateSet(
+    name="Rigetti",
+    single_qubit={'RX', 'RZ'},
+    two_qubit={'CZ'},
+    description="Native parametric rotations with CZ entanglement"
+)
+
+IONQ_BASIS = BasisGateSet(
+    name="IonQ",
+    single_qubit={'RX', 'RY', 'RZ'},
+    two_qubit={'XX'},
+    description="Full rotation freedom with Molmer-Sorensen gate"
+)
+
+GOOGLE_BASIS = BasisGateSet(
+    name="Google Sycamore",
+    single_qubit={'PHXZ'},  # Single parameterized gate
+    two_qubit={'SYC'},
+    description="PHXZ combines phase and rotation, SYC is iSWAP-like"
+)
+```
+
+## 2. Single-Qubit Gate Decomposition
+
+Any single-qubit unitary can be decomposed into basis gates using Euler angles.
+
+### ZYZ Decomposition
+
+$$U = e^{i\alpha} R_z(\phi) R_y(\theta) R_z(\lambda)$$
+
+```python
+class SingleQubitDecomposer:
+    """Decompose arbitrary single-qubit gates to basis sets."""
+
+    def __init__(self, basis: BasisGateSet):
+        self.basis = basis
+
+    def decompose(self, U: np.ndarray) -> List[Tuple[str, float]]:
+        """
+        Decompose 2x2 unitary to basis gates.
+
+        Returns list of (gate_name, parameter) tuples.
+        """
+        # Extract Euler angles
+        theta, phi, lam, phase = self._zyz_angles(U)
+
+        # Route to appropriate basis
+        if 'SX' in self.basis.single_qubit:
+            return self._to_ibm_basis(theta, phi, lam)
+        elif 'RX' in self.basis.single_qubit and 'RZ' in self.basis.single_qubit:
+            return self._to_rz_rx_basis(theta, phi, lam)
+        else:
+            return self._to_rz_ry_basis(theta, phi, lam)
+
+    def _zyz_angles(self, U: np.ndarray) -> Tuple[float, float, float, float]:
+        """Extract ZYZ Euler angles from unitary."""
+        # Normalize to SU(2)
+        det = np.linalg.det(U)
+        phase = np.angle(det) / 2
+        U = U / np.sqrt(det)
+
+        # Extract theta from |U[0,0]|
+        theta = 2 * np.arccos(np.clip(np.abs(U[0, 0]), 0, 1))
+
+        # Extract phi and lambda
+        if abs(theta) < 1e-10:
+            phi = 0
+            lam = 2 * np.angle(U[1, 1])
+        elif abs(theta - np.pi) < 1e-10:
+            phi = 2 * np.angle(U[1, 0])
+            lam = 0
+        else:
+            phi_plus_lam = -2 * np.angle(U[0, 0])
+            phi_minus_lam = 2 * np.angle(U[1, 0])
+            phi = (phi_plus_lam + phi_minus_lam) / 2
+            lam = (phi_plus_lam - phi_minus_lam) / 2
+
+        return theta, phi, lam, phase
+
+    def _to_rz_ry_basis(
+        self,
+        theta: float,
+        phi: float,
+        lam: float
+    ) -> List[Tuple[str, float]]:
+        """Decompose to RZ-RY-RZ."""
+        gates = []
+        if abs(phi) > 1e-10:
+            gates.append(('RZ', phi))
+        if abs(theta) > 1e-10:
+            gates.append(('RY', theta))
+        if abs(lam) > 1e-10:
+            gates.append(('RZ', lam))
+        return gates
+
+    def _to_ibm_basis(
+        self,
+        theta: float,
+        phi: float,
+        lam: float
+    ) -> List[Tuple[str, float]]:
+        """
+        Decompose to IBM basis: RZ, SX, X.
+
+        Uses: U = RZ(phi) * SX * RZ(theta+pi) * SX * RZ(lam+pi)
+        """
+        gates = []
+
+        # Handle special cases for efficiency
+        if abs(theta) < 1e-10:
+            # Only Z rotation
+            total_z = phi + lam
+            if abs(total_z) > 1e-10:
+                gates.append(('RZ', self._normalize_angle(total_z)))
+            return gates
+
+        if abs(theta - np.pi) < 1e-10:
+            # X gate equivalent
+            if abs(phi) > 1e-10:
+                gates.append(('RZ', phi))
+            gates.append(('X', 0))
+            if abs(lam) > 1e-10:
+                gates.append(('RZ', lam))
+            return gates
+
+        # General case: RZ-SX-RZ-SX-RZ
+        if abs(lam + np.pi) > 1e-10:
+            gates.append(('RZ', self._normalize_angle(lam + np.pi)))
+        gates.append(('SX', 0))
+        if abs(theta + np.pi) > 1e-10:
+            gates.append(('RZ', self._normalize_angle(theta + np.pi)))
+        gates.append(('SX', 0))
+        if abs(phi) > 1e-10:
+            gates.append(('RZ', phi))
+
+        return gates
+
+    def _to_rz_rx_basis(
+        self,
+        theta: float,
+        phi: float,
+        lam: float
+    ) -> List[Tuple[str, float]]:
+        """
+        Decompose to RZ-RX-RZ (XZX decomposition).
+
+        RY(theta) = RZ(-pi/2) * RX(theta) * RZ(pi/2)
+        """
+        gates = []
+
+        if abs(phi - np.pi/2) > 1e-10:
+            gates.append(('RZ', phi - np.pi/2))
+        if abs(theta) > 1e-10:
+            gates.append(('RX', theta))
+        if abs(lam + np.pi/2) > 1e-10:
+            gates.append(('RZ', lam + np.pi/2))
+
+        return gates
+
+    def _normalize_angle(self, angle: float) -> float:
+        """Normalize angle to [-pi, pi]."""
+        while angle > np.pi:
+            angle -= 2 * np.pi
+        while angle < -np.pi:
+            angle += 2 * np.pi
+        return angle
+```
+
+## 3. Two-Qubit Gate Decomposition
+
+Two-qubit gates require decomposition into native entangling operations.
+
+### CNOT Decomposition
+
+```python
+class TwoQubitDecomposer:
+    """Decompose two-qubit gates to native operations."""
+
+    def __init__(self, basis: BasisGateSet):
+        self.basis = basis
+        self.single_qubit = SingleQubitDecomposer(basis)
+
+    def decompose_cnot(self, ctrl: int, targ: int) -> List[Tuple[str, Tuple, float]]:
+        """
+        Decompose CNOT to basis gates.
+
+        Returns: List of (gate_name, qubits, parameter)
+        """
+        if 'CX' in self.basis.two_qubit:
+            return [('CX', (ctrl, targ), 0)]
+
+        if 'CZ' in self.basis.two_qubit:
+            # CNOT = H(targ) * CZ * H(targ)
+            return [
+                ('H', (targ,), 0),
+                ('CZ', (ctrl, targ), 0),
+                ('H', (targ,), 0)
+            ]
+
+        if 'XX' in self.basis.two_qubit:
+            # CNOT from Molmer-Sorensen gate
+            # More complex decomposition
+            return self._cnot_from_xx(ctrl, targ)
+
+        raise ValueError(f"Cannot decompose CNOT with basis {self.basis.name}")
+
+    def decompose_swap(self, q1: int, q2: int) -> List[Tuple[str, Tuple, float]]:
+        """Decompose SWAP into basis gates."""
+        if 'CX' in self.basis.two_qubit:
+            return [
+                ('CX', (q1, q2), 0),
+                ('CX', (q2, q1), 0),
+                ('CX', (q1, q2), 0)
+            ]
+
+        if 'CZ' in self.basis.two_qubit:
+            # SWAP = (H CZ H) * (H CZ H) * (H CZ H) simplified
+            return [
+                ('H', (q2,), 0),
+                ('CZ', (q1, q2), 0),
+                ('H', (q2,), 0),
+                ('H', (q1,), 0),
+                ('CZ', (q2, q1), 0),
+                ('H', (q1,), 0),
+                ('H', (q2,), 0),
+                ('CZ', (q1, q2), 0),
+                ('H', (q2,), 0)
+            ]
+
+        raise ValueError(f"Cannot decompose SWAP with basis {self.basis.name}")
+
+    def decompose_controlled_rotation(
+        self,
+        gate: str,
+        ctrl: int,
+        targ: int,
+        angle: float
+    ) -> List[Tuple[str, Tuple, float]]:
+        """
+        Decompose controlled rotation gates (CRX, CRY, CRZ).
+
+        CRZ(theta) = RZ(theta/2) * CX * RZ(-theta/2) * CX
+        """
+        if gate.upper() == 'CRZ':
+            return [
+                ('RZ', (targ,), angle / 2),
+                ('CX', (ctrl, targ), 0),
+                ('RZ', (targ,), -angle / 2),
+                ('CX', (ctrl, targ), 0)
+            ]
+
+        if gate.upper() == 'CRX':
+            # CRX = RZ(-pi/2) * CRZ * RZ(pi/2) on target
+            return [
+                ('RZ', (targ,), -np.pi/2),
+                ('RZ', (targ,), angle / 2),
+                ('CX', (ctrl, targ), 0),
+                ('RZ', (targ,), -angle / 2),
+                ('CX', (ctrl, targ), 0),
+                ('RZ', (targ,), np.pi/2)
+            ]
+
+        if gate.upper() == 'CRY':
+            # CRY requires more complex decomposition
+            return [
+                ('RY', (targ,), angle / 2),
+                ('CX', (ctrl, targ), 0),
+                ('RY', (targ,), -angle / 2),
+                ('CX', (ctrl, targ), 0)
+            ]
+
+        raise ValueError(f"Unknown controlled rotation: {gate}")
+
+    def _cnot_from_xx(
+        self,
+        ctrl: int,
+        targ: int
+    ) -> List[Tuple[str, Tuple, float]]:
+        """Build CNOT from XX (Molmer-Sorensen) gate."""
+        # CNOT = (local gates) * XX(pi/4) * (local gates)
+        return [
+            ('RY', (ctrl,), np.pi/2),
+            ('XX', (ctrl, targ), np.pi/4),
+            ('RX', (ctrl,), -np.pi/2),
+            ('RX', (targ,), -np.pi/2),
+            ('RY', (ctrl,), -np.pi/2)
+        ]
+```
+
+## 4. Complete Gate Decomposition Pipeline
+
+```python
+@dataclass
+class Gate:
+    name: str
+    qubits: Tuple[int, ...]
+    params: Tuple[float, ...] = ()
+
+
+class GateDecomposer:
+    """
+    Complete gate decomposition to basis gates.
+    """
+
+    def __init__(self, basis: BasisGateSet):
+        self.basis = basis
+        self.single_decomp = SingleQubitDecomposer(basis)
+        self.two_decomp = TwoQubitDecomposer(basis)
+        self.stats = {'decomposed': 0, 'native': 0}
+
+    def decompose(self, gates: List[Gate]) -> List[Gate]:
+        """Decompose all gates to basis."""
+        result = []
+
+        for gate in gates:
+            if self._is_native(gate):
+                result.append(gate)
+                self.stats['native'] += 1
+            else:
+                decomposed = self._decompose_gate(gate)
+                result.extend(decomposed)
+                self.stats['decomposed'] += 1
+
+        return result
+
+    def _is_native(self, gate: Gate) -> bool:
+        """Check if gate is already in basis."""
+        name = gate.name.upper()
+        if len(gate.qubits) == 1:
+            return name in self.basis.single_qubit
+        else:
+            return name in self.basis.two_qubit
+
+    def _decompose_gate(self, gate: Gate) -> List[Gate]:
+        """Decompose a single non-native gate."""
+        name = gate.name.upper()
+        qubits = gate.qubits
+        params = gate.params
+
+        # Single-qubit gates
+        if len(qubits) == 1:
+            matrix = self._gate_to_matrix(gate)
+            decomp = self.single_decomp.decompose(matrix)
+            return [Gate(g, qubits, (p,) if p != 0 else ())
+                    for g, p in decomp]
+
+        # Standard two-qubit gates
+        if name in ('CX', 'CNOT'):
+            decomp = self.two_decomp.decompose_cnot(qubits[0], qubits[1])
+            return [Gate(g, q, (p,) if p != 0 else ())
+                    for g, q, p in decomp]
+
+        if name == 'SWAP':
+            decomp = self.two_decomp.decompose_swap(qubits[0], qubits[1])
+            return [Gate(g, q, (p,) if p != 0 else ())
+                    for g, q, p in decomp]
+
+        if name in ('CRZ', 'CRX', 'CRY'):
+            decomp = self.two_decomp.decompose_controlled_rotation(
+                name, qubits[0], qubits[1], params[0]
+            )
+            return [Gate(g, q, (p,) if p != 0 else ())
+                    for g, q, p in decomp]
+
+        if name == 'CZ':
+            # CZ = H-CNOT-H
+            return [
+                Gate('H', (qubits[1],)),
+                *self._decompose_gate(Gate('CX', qubits)),
+                Gate('H', (qubits[1],))
+            ]
+
+        raise ValueError(f"Cannot decompose gate: {name}")
+
+    def _gate_to_matrix(self, gate: Gate) -> np.ndarray:
+        """Convert gate to 2x2 unitary matrix."""
+        name = gate.name.upper()
+        params = gate.params
+
+        if name == 'H':
+            return np.array([[1, 1], [1, -1]]) / np.sqrt(2)
+        elif name == 'X':
+            return np.array([[0, 1], [1, 0]])
+        elif name == 'Y':
+            return np.array([[0, -1j], [1j, 0]])
+        elif name == 'Z':
+            return np.array([[1, 0], [0, -1]])
+        elif name == 'S':
+            return np.array([[1, 0], [0, 1j]])
+        elif name == 'SDG':
+            return np.array([[1, 0], [0, -1j]])
+        elif name == 'T':
+            return np.array([[1, 0], [0, np.exp(1j * np.pi / 4)]])
+        elif name == 'TDG':
+            return np.array([[1, 0], [0, np.exp(-1j * np.pi / 4)]])
+        elif name == 'RX':
+            theta = params[0]
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            return np.array([[c, -1j*s], [-1j*s, c]])
+        elif name == 'RY':
+            theta = params[0]
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            return np.array([[c, -s], [s, c]])
+        elif name == 'RZ':
+            theta = params[0]
+            return np.array([[np.exp(-1j*theta/2), 0],
+                           [0, np.exp(1j*theta/2)]])
+        elif name == 'U3':
+            theta, phi, lam = params
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            return np.array([
+                [c, -np.exp(1j*lam)*s],
+                [np.exp(1j*phi)*s, np.exp(1j*(phi+lam))*c]
+            ])
+
+        raise ValueError(f"Unknown gate: {name}")
+```
+
+## 5. Optimization During Decomposition
+
+```python
+class OptimizedDecomposer(GateDecomposer):
+    """Decomposer with optimization passes."""
+
+    def decompose(self, gates: List[Gate]) -> List[Gate]:
+        """Decompose with optimization."""
+        # Initial decomposition
+        result = super().decompose(gates)
+
+        # Post-decomposition optimization
+        result = self._merge_rotations(result)
+        result = self._cancel_adjacent(result)
+
+        return result
+
+    def _merge_rotations(self, gates: List[Gate]) -> List[Gate]:
+        """Merge consecutive same-axis rotations."""
+        result = []
+
+        for gate in gates:
+            if (result and
+                gate.name in ('RZ', 'RX', 'RY') and
+                result[-1].name == gate.name and
+                result[-1].qubits == gate.qubits):
+                prev = result.pop()
+                new_angle = prev.params[0] + gate.params[0]
+                new_angle = self.single_decomp._normalize_angle(new_angle)
+                if abs(new_angle) > 1e-10:
+                    result.append(Gate(gate.name, gate.qubits, (new_angle,)))
+            else:
+                result.append(gate)
+
+        return result
+
+    def _cancel_adjacent(self, gates: List[Gate]) -> List[Gate]:
+        """Cancel adjacent inverse gates."""
+        result = []
+        self_inverse = {'H', 'X', 'Y', 'Z', 'CX', 'CNOT', 'CZ', 'SWAP'}
+
+        for gate in gates:
+            if (result and
+                gate.name.upper() in self_inverse and
+                result[-1].name == gate.name and
+                result[-1].qubits == gate.qubits):
+                result.pop()
+            else:
+                result.append(gate)
+
+        return result
+```
+
+## Summary
+
+Basis gate decomposition is essential for hardware execution:
+
+1. **Single-qubit**: ZYZ decomposition adapts to any basis (IBM, Rigetti, etc.)
+2. **Two-qubit**: CNOT, SWAP decompose to native entangling gates
+3. **Controlled rotations**: CRZ, CRX, CRY use CNOT + rotations
+4. **Optimization**: Merge rotations and cancel inverses post-decomposition
+
+Key considerations:
+- Different hardware has different native gates
+- Minimize gate count during decomposition
+- Consider gate fidelities in cost optimization
+- Chain single-qubit decomposition with two-qubit for complete circuits

@@ -1,0 +1,544 @@
+---
+title: "Template Matching: Pattern-Based Optimization"
+description: "Learn pattern-based circuit optimization using template libraries and graph-based matching algorithms."
+duration: 60
+difficulty: "intermediate"
+---
+
+## 1. Introduction to Template Matching
+
+Template matching is a powerful optimization technique that identifies known patterns in circuits and replaces them with more efficient equivalents. Unlike algebraic methods, templates encode domain knowledge about useful transformations.
+
+### Core Concept
+
+A **template** consists of:
+- **Pattern**: A circuit fragment to search for
+- **Replacement**: An equivalent but more efficient circuit
+- **Constraints**: Conditions for valid application (e.g., parameter relationships)
+
+```python
+from dataclasses import dataclass, field
+from typing import List, Tuple, Dict, Optional, Callable
+import math
+
+@dataclass
+class Gate:
+    name: str
+    qubits: Tuple[int, ...]
+    params: Tuple[float, ...] = ()
+
+@dataclass
+class Template:
+    """Circuit optimization template."""
+    name: str
+    pattern: List[Gate]           # Gates to match
+    replacement: List[Gate]       # Replacement gates
+    cost_reduction: int           # Expected gate reduction
+    constraints: Optional[Callable] = None  # Validity check
+
+    def matches(self, gates: List[Gate], start: int) -> Optional[Dict]:
+        """
+        Check if pattern matches at position.
+        Returns variable bindings if match, None otherwise.
+        """
+        if start + len(self.pattern) > len(gates):
+            return None
+
+        bindings = {}  # Map pattern qubits/params to actual values
+
+        for i, pattern_gate in enumerate(self.pattern):
+            actual_gate = gates[start + i]
+
+            if pattern_gate.name != actual_gate.name:
+                return None
+
+            # Bind or verify qubits
+            for p_qubit, a_qubit in zip(pattern_gate.qubits, actual_gate.qubits):
+                if p_qubit in bindings:
+                    if bindings[p_qubit] != a_qubit:
+                        return None
+                else:
+                    bindings[p_qubit] = a_qubit
+
+            # Bind or verify parameters
+            for p_param, a_param in zip(pattern_gate.params, actual_gate.params):
+                if isinstance(p_param, str):  # Variable
+                    if p_param in bindings:
+                        if abs(bindings[p_param] - a_param) > 1e-10:
+                            return None
+                    else:
+                        bindings[p_param] = a_param
+                elif abs(p_param - a_param) > 1e-10:  # Literal
+                    return None
+
+        # Check constraints
+        if self.constraints and not self.constraints(bindings):
+            return None
+
+        return bindings
+```
+
+## 2. Common Template Patterns
+
+### Identity Templates
+
+These templates recognize patterns that simplify to identity:
+
+```python
+# Template library: Identity patterns
+IDENTITY_TEMPLATES = [
+    # H-H = I
+    Template(
+        name="hadamard_cancel",
+        pattern=[Gate('H', (0,)), Gate('H', (0,))],
+        replacement=[],
+        cost_reduction=2
+    ),
+
+    # X-X = I
+    Template(
+        name="pauli_x_cancel",
+        pattern=[Gate('X', (0,)), Gate('X', (0,))],
+        replacement=[],
+        cost_reduction=2
+    ),
+
+    # CNOT-CNOT = I
+    Template(
+        name="cnot_cancel",
+        pattern=[Gate('CX', (0, 1)), Gate('CX', (0, 1))],
+        replacement=[],
+        cost_reduction=2
+    ),
+
+    # S-S = Z
+    Template(
+        name="ss_to_z",
+        pattern=[Gate('S', (0,)), Gate('S', (0,))],
+        replacement=[Gate('Z', (0,))],
+        cost_reduction=1
+    ),
+
+    # T-T = S
+    Template(
+        name="tt_to_s",
+        pattern=[Gate('T', (0,)), Gate('T', (0,))],
+        replacement=[Gate('S', (0,))],
+        cost_reduction=1
+    ),
+]
+```
+
+### CNOT Optimization Templates
+
+```python
+# CNOT patterns that can be simplified
+CNOT_TEMPLATES = [
+    # CNOT(a,b) - CNOT(b,a) - CNOT(a,b) = SWAP(a,b)
+    Template(
+        name="cnot_swap",
+        pattern=[
+            Gate('CX', (0, 1)),
+            Gate('CX', (1, 0)),
+            Gate('CX', (0, 1))
+        ],
+        replacement=[Gate('SWAP', (0, 1))],
+        cost_reduction=2  # If SWAP costs 1 vs 3 CNOTs
+    ),
+
+    # H-CNOT-H pattern on target = CNOT with swapped control/target
+    Template(
+        name="cnot_direction_change",
+        pattern=[
+            Gate('H', (1,)),
+            Gate('H', (0,)),
+            Gate('CX', (0, 1)),
+            Gate('H', (1,)),
+            Gate('H', (0,))
+        ],
+        replacement=[Gate('CX', (1, 0))],
+        cost_reduction=4
+    ),
+
+    # Z on control of CNOT can commute through
+    Template(
+        name="z_cnot_commute",
+        pattern=[
+            Gate('Z', (0,)),
+            Gate('CX', (0, 1))
+        ],
+        replacement=[
+            Gate('CX', (0, 1)),
+            Gate('Z', (0,))
+        ],
+        cost_reduction=0  # Enables further optimization
+    ),
+]
+```
+
+### Hadamard Conjugation Templates
+
+```python
+# H-X-H = Z patterns
+CONJUGATION_TEMPLATES = [
+    # H-X-H = Z
+    Template(
+        name="hxh_to_z",
+        pattern=[Gate('H', (0,)), Gate('X', (0,)), Gate('H', (0,))],
+        replacement=[Gate('Z', (0,))],
+        cost_reduction=2
+    ),
+
+    # H-Z-H = X
+    Template(
+        name="hzh_to_x",
+        pattern=[Gate('H', (0,)), Gate('Z', (0,)), Gate('H', (0,))],
+        replacement=[Gate('X', (0,))],
+        cost_reduction=2
+    ),
+
+    # H-Y-H = -Y (global phase, effectively Y)
+    Template(
+        name="hyh_to_y",
+        pattern=[Gate('H', (0,)), Gate('Y', (0,)), Gate('H', (0,))],
+        replacement=[Gate('Y', (0,))],
+        cost_reduction=2
+    ),
+
+    # H-S-H = Sdg (up to phase)
+    Template(
+        name="hsh_transform",
+        pattern=[Gate('H', (0,)), Gate('S', (0,)), Gate('H', (0,))],
+        replacement=[Gate('SDG', (0,)), Gate('H', (0,)), Gate('S', (0,)), Gate('H', (0,))],
+        cost_reduction=-1  # Actually expands, but enables other opts
+    ),
+]
+```
+
+## 3. Pattern Matching Algorithm
+
+Efficient pattern matching uses a sliding window approach with early termination:
+
+```python
+class TemplateMatcher:
+    """
+    Template-based circuit optimizer.
+
+    Uses a sliding window to find pattern matches and applies replacements.
+    """
+
+    def __init__(self, templates: List[Template]):
+        self.templates = templates
+        # Sort by cost reduction for greedy optimization
+        self.templates.sort(key=lambda t: -t.cost_reduction)
+        self.stats = {'matches': 0, 'gates_saved': 0}
+
+    def find_match(
+        self,
+        gates: List[Gate],
+        start: int
+    ) -> Optional[Tuple[Template, Dict, int]]:
+        """
+        Find a matching template at position.
+
+        Returns (template, bindings, match_length) or None.
+        """
+        for template in self.templates:
+            bindings = template.matches(gates, start)
+            if bindings is not None:
+                return (template, bindings, len(template.pattern))
+        return None
+
+    def apply_replacement(
+        self,
+        template: Template,
+        bindings: Dict
+    ) -> List[Gate]:
+        """
+        Generate replacement gates with bound values.
+        """
+        result = []
+        for gate in template.replacement:
+            # Substitute bound qubits
+            new_qubits = tuple(
+                bindings.get(q, q) for q in gate.qubits
+            )
+            # Substitute bound parameters
+            new_params = tuple(
+                bindings.get(p, p) if isinstance(p, str) else p
+                for p in gate.params
+            )
+            result.append(Gate(gate.name, new_qubits, new_params))
+        return result
+
+    def optimize(self, gates: List[Gate]) -> List[Gate]:
+        """
+        Apply template matching optimization.
+
+        Uses greedy left-to-right matching with restarts on changes.
+        """
+        gates = list(gates)
+        changed = True
+
+        while changed:
+            changed = False
+            i = 0
+
+            while i < len(gates):
+                match = self.find_match(gates, i)
+
+                if match:
+                    template, bindings, match_len = match
+                    replacement = self.apply_replacement(template, bindings)
+
+                    # Replace matched portion
+                    gates = gates[:i] + replacement + gates[i + match_len:]
+
+                    self.stats['matches'] += 1
+                    self.stats['gates_saved'] += match_len - len(replacement)
+                    changed = True
+
+                    # Don't advance - check for more matches at same position
+                    if not replacement:
+                        continue
+
+                i += 1
+
+        return gates
+```
+
+## 4. Parameterized Templates
+
+Templates with variable parameters require constraint checking:
+
+```python
+def create_rotation_templates() -> List[Template]:
+    """Create templates for rotation gate patterns."""
+
+    # RZ(a)-RZ(b) = RZ(a+b) with constraint
+    def rz_merge_constraint(bindings):
+        return 'theta1' in bindings and 'theta2' in bindings
+
+    rz_merge = Template(
+        name="rz_merge",
+        pattern=[
+            Gate('RZ', (0,), ('theta1',)),
+            Gate('RZ', (0,), ('theta2',))
+        ],
+        replacement=[
+            Gate('RZ', (0,), ('theta_sum',))  # Need special handling
+        ],
+        cost_reduction=1,
+        constraints=rz_merge_constraint
+    )
+
+    return [rz_merge]
+
+
+class ParameterizedMatcher(TemplateMatcher):
+    """Extended matcher with parameter computation."""
+
+    def apply_replacement(
+        self,
+        template: Template,
+        bindings: Dict
+    ) -> List[Gate]:
+        """Generate replacement with computed parameters."""
+
+        # Compute derived parameters
+        if template.name == "rz_merge":
+            theta_sum = bindings['theta1'] + bindings['theta2']
+            # Normalize
+            while theta_sum > math.pi:
+                theta_sum -= 2 * math.pi
+            while theta_sum < -math.pi:
+                theta_sum += 2 * math.pi
+
+            if abs(theta_sum) < 1e-10:
+                return []  # Cancels to identity
+
+            bindings['theta_sum'] = theta_sum
+
+        return super().apply_replacement(template, bindings)
+```
+
+## 5. Graph-Based Template Matching
+
+For complex patterns, represent circuits as DAGs and use subgraph matching:
+
+```python
+from collections import defaultdict
+
+class CircuitDAG:
+    """
+    DAG representation of a quantum circuit.
+
+    Nodes are gates, edges represent dependencies.
+    """
+
+    def __init__(self, gates: List[Gate], num_qubits: int):
+        self.gates = gates
+        self.num_qubits = num_qubits
+        self.predecessors = defaultdict(list)
+        self.successors = defaultdict(list)
+        self._build_dag()
+
+    def _build_dag(self):
+        """Build dependency graph."""
+        # Track last gate on each qubit
+        last_on_qubit = {}
+
+        for i, gate in enumerate(self.gates):
+            for qubit in gate.qubits:
+                if qubit in last_on_qubit:
+                    pred = last_on_qubit[qubit]
+                    self.predecessors[i].append(pred)
+                    self.successors[pred].append(i)
+                last_on_qubit[qubit] = i
+
+    def topological_order(self) -> List[int]:
+        """Return gates in topological order."""
+        in_degree = {i: len(self.predecessors[i])
+                     for i in range(len(self.gates))}
+        queue = [i for i, d in in_degree.items() if d == 0]
+        order = []
+
+        while queue:
+            node = queue.pop(0)
+            order.append(node)
+            for succ in self.successors[node]:
+                in_degree[succ] -= 1
+                if in_degree[succ] == 0:
+                    queue.append(succ)
+
+        return order
+
+
+def find_subgraph_match(
+    circuit_dag: CircuitDAG,
+    pattern_dag: CircuitDAG
+) -> Optional[Dict[int, int]]:
+    """
+    Find a subgraph isomorphism from pattern to circuit.
+
+    Returns mapping from pattern node indices to circuit node indices.
+    Uses VF2-style algorithm for small patterns.
+    """
+    # Simplified implementation for small patterns
+    pattern_gates = pattern_dag.gates
+
+    for start in range(len(circuit_dag.gates)):
+        mapping = try_match_from(circuit_dag, pattern_dag, start, {})
+        if mapping is not None:
+            return mapping
+
+    return None
+
+
+def try_match_from(
+    circuit: CircuitDAG,
+    pattern: CircuitDAG,
+    circuit_start: int,
+    partial_mapping: Dict[int, int]
+) -> Optional[Dict[int, int]]:
+    """Recursive subgraph matching."""
+    if len(partial_mapping) == len(pattern.gates):
+        return partial_mapping
+
+    # Find next pattern node to match
+    pattern_idx = len(partial_mapping)
+    pattern_gate = pattern.gates[pattern_idx]
+
+    # Try matching with circuit gates
+    for circuit_idx in range(len(circuit.gates)):
+        if circuit_idx in partial_mapping.values():
+            continue
+
+        circuit_gate = circuit.gates[circuit_idx]
+
+        # Check gate compatibility
+        if circuit_gate.name != pattern_gate.name:
+            continue
+
+        # Check edge constraints
+        valid = True
+        for pred in pattern.predecessors[pattern_idx]:
+            if pred in partial_mapping:
+                circuit_pred = partial_mapping[pred]
+                if circuit_pred not in circuit.predecessors[circuit_idx]:
+                    valid = False
+                    break
+
+        if valid:
+            new_mapping = {**partial_mapping, pattern_idx: circuit_idx}
+            result = try_match_from(circuit, pattern, circuit_start, new_mapping)
+            if result is not None:
+                return result
+
+    return None
+```
+
+## 6. Building Custom Template Libraries
+
+```python
+class TemplateLibrary:
+    """
+    Manage a collection of optimization templates.
+    """
+
+    def __init__(self):
+        self.templates: Dict[str, List[Template]] = {
+            'identity': [],
+            'cnot': [],
+            'hadamard': [],
+            'rotation': [],
+            'custom': []
+        }
+
+    def add_template(self, template: Template, category: str = 'custom'):
+        """Add a template to the library."""
+        self.templates[category].append(template)
+
+    def get_all(self) -> List[Template]:
+        """Get all templates, sorted by cost reduction."""
+        all_templates = []
+        for category_templates in self.templates.values():
+            all_templates.extend(category_templates)
+        return sorted(all_templates, key=lambda t: -t.cost_reduction)
+
+    def create_matcher(self) -> TemplateMatcher:
+        """Create a matcher with all templates."""
+        return TemplateMatcher(self.get_all())
+
+
+# Build standard library
+def create_standard_library() -> TemplateLibrary:
+    """Create library with standard optimization templates."""
+    library = TemplateLibrary()
+
+    for t in IDENTITY_TEMPLATES:
+        library.add_template(t, 'identity')
+
+    for t in CNOT_TEMPLATES:
+        library.add_template(t, 'cnot')
+
+    for t in CONJUGATION_TEMPLATES:
+        library.add_template(t, 'hadamard')
+
+    return library
+```
+
+## Summary
+
+Template matching provides:
+
+1. **Domain knowledge encoding**: Capture expert optimization rules
+2. **Pattern-based rewriting**: Replace inefficient sequences
+3. **Extensibility**: Add custom templates for specific use cases
+4. **Composability**: Layer with other optimization passes
+
+Best practices:
+- Order templates by cost reduction (greedy application)
+- Include constraint checking for parameterized templates
+- Use DAG-based matching for non-sequential patterns
+- Iterate until convergence for maximum optimization

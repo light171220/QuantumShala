@@ -15,6 +15,7 @@ import {
   ChevronRight,
   X,
   LayoutDashboard,
+  Library,
 } from 'lucide-react'
 import { cn } from '@/utils/cn'
 import { useAuthStore } from '@/stores/authStore'
@@ -35,6 +36,7 @@ const navItems = [
   { path: '/hub/qml', icon: Brain, label: 'QML Studio' },
   { path: '/hub/pqc', icon: Shield, label: 'PQC Lab' },
   { path: '/hub/chemistry', icon: FlaskConical, label: 'Chemistry Lab' },
+  { path: '/hub/research', icon: Library, label: 'Research Hub' },
   { type: 'divider', label: 'Profile' },
   { path: '/leaderboard', icon: Trophy, label: 'Leaderboard' },
   { path: '/achievements', icon: Atom, label: 'Achievements' },

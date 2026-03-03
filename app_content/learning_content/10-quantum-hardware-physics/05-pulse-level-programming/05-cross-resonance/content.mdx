@@ -1,0 +1,405 @@
+---
+title: "Cross-Resonance Gates for Two-Qubit Operations"
+description: "Learn the physics and pulse-level implementation of cross-resonance gates."
+duration: 60
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Explain the physics of cross-resonance interaction between coupled transmons
+- Derive the effective CR Hamiltonian and understand its ZX interaction term
+- Implement CR pulses with proper echoing sequences to cancel unwanted terms
+- Design calibration experiments for CR gate amplitude and duration
+- Analyze CR gate performance including leakage and classical crosstalk
+
+## 1. Introduction to Two-Qubit Gates
+
+Two-qubit entangling gates are essential for universal quantum computation. While single-qubit gates can be implemented with high fidelity (>99.9%), two-qubit gates remain a major challenge, typically achieving 99-99.5% fidelity.
+
+<Definition term="Cross-Resonance Gate">
+The cross-resonance (CR) gate is a two-qubit entangling operation implemented by driving one qubit (control) at the frequency of another qubit (target). The resulting interaction generates entanglement through a ZX-type coupling, enabling CNOT gates on fixed-frequency superconducting processors.
+</Definition>
+
+### Why Cross-Resonance?
+
+For fixed-frequency transmons (used in IBM Quantum systems), traditional frequency-tuning approaches for two-qubit gates are not available. The CR gate provides:
+
+1. **No flux tuning required**: Works with fixed-frequency qubits
+2. **All-microwave control**: Uses only existing drive lines
+3. **Scalability**: Compatible with large-scale integration
+4. **High coherence**: Avoids flux-noise-sensitive operations
+
+## 2. Physical Mechanism
+
+### Coupled Transmon System
+
+Consider two transmons coupled through a capacitor or resonator:
+
+<Formula>
+$$\hat{H}_0 = \frac{\omega_1}{2}\hat{\sigma}_z^{(1)} + \frac{\omega_2}{2}\hat{\sigma}_z^{(2)} + J(\hat{\sigma}_+^{(1)}\hat{\sigma}_-^{(2)} + \hat{\sigma}_-^{(1)}\hat{\sigma}_+^{(2)})$$
+</Formula>
+
+where:
+- $\omega_1, \omega_2$ are the qubit frequencies
+- $J$ is the exchange coupling strength (typically 1-5 MHz)
+- The coupling term enables energy exchange between qubits
+
+### Cross-Resonance Drive
+
+When we drive qubit 1 (control) at the frequency of qubit 2 (target):
+
+<Formula>
+$$\hat{H}_{CR} = \Omega_{CR}(t)\cos(\omega_2 t)\hat{\sigma}_x^{(1)}$$
+</Formula>
+
+This off-resonant drive on qubit 1 generates an effective drive on qubit 2 through the coupling.
+
+### Effective Hamiltonian
+
+In the appropriate rotating frame, the effective CR Hamiltonian is:
+
+<Formula>
+$$\hat{H}_{eff} = \frac{\omega_{ZX}}{2}\hat{\sigma}_z^{(1)}\hat{\sigma}_x^{(2)} + \frac{\omega_{ZI}}{2}\hat{\sigma}_z^{(1)} + \frac{\omega_{IX}}{2}\hat{\sigma}_x^{(2)} + \frac{\omega_{ZZ}}{2}\hat{\sigma}_z^{(1)}\hat{\sigma}_z^{(2)}$$
+</Formula>
+
+where:
+- **ZX term**: The desired entangling interaction
+- **ZI term**: Single-qubit Z on control (frame shift)
+- **IX term**: Single-qubit X on target (direct drive leakage)
+- **ZZ term**: Always-on ZZ coupling
+
+<Tip>
+The ZX interaction rate scales as $\omega_{ZX} \propto J \cdot \Omega_{CR} / \Delta$ where $\Delta = \omega_1 - \omega_2$ is the frequency detuning between qubits. Larger coupling J and smaller detuning give faster gates.
+</Tip>
+
+## 3. ZX Interaction and CNOT
+
+### ZX Rotation
+
+The ZX term generates the unitary:
+
+<Formula>
+$$ZX(\theta) = e^{-i\frac{\theta}{2}\sigma_z \otimes \sigma_x}$$
+</Formula>
+
+This is a conditional X rotation: the target qubit rotates about X by ±θ/2 depending on the control state.
+
+### Building CNOT
+
+A CNOT gate can be constructed from ZX(π/2) with single-qubit corrections:
+
+<Formula>
+$$CNOT = (I \otimes R_x(-\frac{\pi}{2})) \cdot ZX(\frac{\pi}{2}) \cdot (R_z(-\frac{\pi}{2}) \otimes I)$$
+</Formula>
+
+Or equivalently:
+
+<Formula>
+$$CNOT \sim R_{ZX}(\frac{\pi}{2}) \cdot (R_z(\frac{\pi}{2}) \otimes R_x(-\frac{\pi}{2}))$$
+</Formula>
+
+<Example>
+```python
+import numpy as np
+
+def zx_gate(theta):
+    """ZX rotation gate."""
+    c = np.cos(theta / 2)
+    s = np.sin(theta / 2)
+
+    return np.array([
+        [c, -1j*s, 0, 0],
+        [-1j*s, c, 0, 0],
+        [0, 0, c, 1j*s],
+        [0, 0, 1j*s, c]
+    ])
+
+def cnot_from_zx():
+    """Construct CNOT from ZX(π/2) and single-qubit gates."""
+    # Pauli matrices
+    I = np.eye(2)
+    X = np.array([[0, 1], [1, 0]])
+    Z = np.array([[1, 0], [0, -1]])
+
+    # Rotation gates
+    def Rx(theta):
+        return np.cos(theta/2)*I - 1j*np.sin(theta/2)*X
+
+    def Rz(theta):
+        return np.cos(theta/2)*I - 1j*np.sin(theta/2)*Z
+
+    # ZX(π/2)
+    ZX_pi2 = zx_gate(np.pi / 2)
+
+    # Single-qubit corrections
+    Rz_ctrl = np.kron(Rz(np.pi/2), I)
+    Rx_tgt = np.kron(I, Rx(-np.pi/2))
+
+    # Full CNOT (up to global phase)
+    CNOT = Rx_tgt @ ZX_pi2 @ Rz_ctrl
+
+    return CNOT
+
+# Verify CNOT
+CNOT_expected = np.array([
+    [1, 0, 0, 0],
+    [0, 1, 0, 0],
+    [0, 0, 0, 1],
+    [0, 0, 1, 0]
+])
+
+CNOT_constructed = cnot_from_zx()
+
+# Check equivalence (up to global phase)
+phase = CNOT_constructed[0, 0] / CNOT_expected[0, 0]
+diff = np.abs(CNOT_constructed - phase * CNOT_expected).max()
+print(f"Maximum difference from ideal CNOT: {diff:.2e}")
+```
+</Example>
+
+## 4. Echoed Cross-Resonance
+
+### The Problem with Direct CR
+
+The direct CR Hamiltonian contains unwanted terms (ZI, IX, ZZ) that accumulate phase errors. The IX term is particularly problematic as it rotates the target qubit regardless of the control state.
+
+### Echo Sequence
+
+The echoed CR sequence cancels unwanted single-qubit terms:
+
+```
+CR(+) → X(control) → CR(-) → X(control)
+```
+
+where CR(+) and CR(-) have opposite phases.
+
+<Formula>
+$$U_{echo} = X_1 \cdot U_{CR}(-\theta) \cdot X_1 \cdot U_{CR}(\theta)$$
+</Formula>
+
+This echo:
+- **Doubles** the ZX term (adds constructively)
+- **Cancels** IX and ZI terms (adds destructively)
+- **Retains** ZZ term (adds constructively)
+
+<Definition term="Echoed CR Gate">
+The echoed cross-resonance gate uses an X pulse on the control qubit between two CR pulses of opposite phase. This refocusing technique cancels spurious single-qubit rotations while preserving the desired ZX entangling interaction.
+</Definition>
+
+### Direct CNOT Pulse Sequence
+
+A complete CNOT using echoed CR:
+
+```
+1. CR(+θ) on control at target frequency
+2. X gate on control
+3. CR(-θ) on control at target frequency
+4. X gate on control
+5. Optional: Single-qubit corrections
+```
+
+<Example>
+```python
+from qiskit import pulse
+from qiskit.pulse import DriveChannel, ControlChannel
+
+def build_echoed_cr_schedule(cr_duration, cr_amp, control_qubit, target_qubit):
+    """
+    Build an echoed CR pulse schedule.
+
+    Args:
+        cr_duration: Duration of each CR pulse (samples)
+        cr_amp: CR pulse amplitude
+        control_qubit: Control qubit index
+        target_qubit: Target qubit index
+    """
+    with pulse.build(name='echoed_cr') as schedule:
+        # Get channels
+        cr_channel = ControlChannel(control_qubit)  # CR drive channel
+        ctrl_drive = DriveChannel(control_qubit)
+
+        # CR pulse parameters
+        cr_pulse = pulse.GaussianSquare(
+            duration=cr_duration,
+            amp=cr_amp,
+            sigma=cr_duration // 8,
+            width=cr_duration // 2
+        )
+
+        # X gate on control (calibrated)
+        x_pulse = pulse.Drag(duration=160, amp=0.2, sigma=40, beta=2)
+
+        # Echoed sequence
+        # CR(+)
+        pulse.play(cr_pulse, cr_channel)
+
+        # X on control
+        pulse.play(x_pulse, ctrl_drive)
+
+        # CR(-) with opposite phase
+        cr_pulse_neg = pulse.GaussianSquare(
+            duration=cr_duration,
+            amp=-cr_amp,  # Negative for phase flip
+            sigma=cr_duration // 8,
+            width=cr_duration // 2
+        )
+        pulse.play(cr_pulse_neg, cr_channel)
+
+        # X on control
+        pulse.play(x_pulse, ctrl_drive)
+
+    return schedule
+```
+</Example>
+
+## 5. CR Gate Calibration
+
+### Amplitude Calibration
+
+The CR amplitude determines the ZX rotation rate. Calibrate by:
+
+1. Prepare control in |+⟩ = (|0⟩ + |1⟩)/√2
+2. Apply CR pulse for fixed duration
+3. Measure target qubit tomography
+4. Fit ZX rotation angle vs amplitude
+
+### Duration Calibration
+
+For a fixed amplitude, find the duration for π/2 ZX rotation:
+
+1. Sweep CR duration
+2. Measure conditional rotation of target
+3. Find duration where |00⟩→|00⟩ and |10⟩→|10⟩+i|11⟩
+
+<Example>
+```python
+def cr_amplitude_calibration(amp_range, cr_duration):
+    """
+    Simulate CR amplitude calibration experiment.
+
+    Returns ZX rotation angle for each amplitude.
+    """
+    # Physical parameters (typical values)
+    J_MHz = 3.0  # Coupling strength
+    Delta_MHz = 100.0  # Frequency detuning
+
+    # ZX rate scales as J * Omega / Delta
+    # omega_ZX = 2 * J * Omega / Delta (simplified model)
+
+    zx_angles = []
+
+    for amp in amp_range:
+        # CR amplitude in MHz (assuming linear scaling)
+        Omega_MHz = amp * 100  # 100 MHz at amp=1
+
+        # ZX rate
+        omega_ZX_MHz = 2 * J_MHz * Omega_MHz / Delta_MHz
+
+        # Total ZX angle for given duration
+        duration_us = cr_duration * 1e-3  # Convert ns to μs
+        theta_ZX = 2 * np.pi * omega_ZX_MHz * duration_us
+
+        zx_angles.append(theta_ZX)
+
+    return np.array(zx_angles)
+
+# Calibration sweep
+amp_range = np.linspace(0.1, 0.5, 21)
+cr_duration = 300  # ns
+
+zx_angles = cr_amplitude_calibration(amp_range, cr_duration)
+
+# Find amplitude for π/2 ZX
+target_angle = np.pi / 2
+optimal_idx = np.argmin(np.abs(zx_angles - target_angle))
+optimal_amp = amp_range[optimal_idx]
+
+print(f"Optimal CR amplitude for ZX(π/2): {optimal_amp:.3f}")
+print(f"Achieved angle: {zx_angles[optimal_idx]/np.pi:.3f}π")
+```
+</Example>
+
+## 6. CR Performance Considerations
+
+### Classical Crosstalk
+
+The CR drive on qubit 1 can directly excite qubit 2 (the IX term). This "classical crosstalk" is canceled by the echo but still contributes errors if not perfectly balanced.
+
+### Leakage
+
+During CR, the control qubit is driven off-resonance, which can excite the |2⟩ level. DRAG-like corrections on the CR pulse can mitigate this.
+
+### ZZ Coupling
+
+The always-on ZZ coupling accumulates phase during the gate:
+
+<Formula>
+$$\theta_{ZZ} = \omega_{ZZ} \cdot t_{gate}$$
+</Formula>
+
+This must be calibrated and compensated with single-qubit Z rotations.
+
+### Gate Time vs Fidelity
+
+| Factor | Effect | Mitigation |
+|--------|--------|------------|
+| Longer gate | More decoherence | Increase CR amplitude |
+| Higher amplitude | More leakage | Careful pulse shaping |
+| Echo overhead | Additional X gates | Optimize X gate fidelity |
+| ZZ accumulation | Phase errors | Post-gate Z corrections |
+
+<Warning>
+CR gate fidelity is typically limited by coherence time during the long gate duration (200-500 ns for echoed CR). The gate time must be much shorter than T2 for high fidelity.
+</Warning>
+
+## 7. Advanced CR Techniques
+
+### Active Cancellation
+
+Apply a simultaneous drive on the target qubit to cancel the IX term:
+
+<Formula>
+$$\hat{H}_{cancel} = -\frac{\omega_{IX}}{2}\hat{\sigma}_x^{(2)}$$
+</Formula>
+
+This "target rotary" tone is calibrated to exactly cancel classical crosstalk.
+
+### Derivative-Based CR (DRAG-CR)
+
+Apply DRAG-like corrections to the CR pulse:
+
+<Formula>
+$$\Omega_{CR}(t) = \Omega_I(t) + i\beta_{CR}\dot{\Omega}_I(t)$$
+</Formula>
+
+This reduces leakage during the CR drive.
+
+### Direct CNOT
+
+Instead of ZX(π/2) + corrections, directly calibrate a CNOT by optimizing all pulse parameters together. This can achieve higher fidelity by accounting for all error sources simultaneously.
+
+## 8. Summary
+
+Cross-resonance gates enable two-qubit operations on fixed-frequency superconducting qubits:
+
+1. **CR Mechanism**: Driving control at target frequency creates ZX coupling
+2. **Effective Hamiltonian**: Contains ZX (desired) plus spurious ZI, IX, ZZ terms
+3. **Echoed CR**: X pulses on control cancel single-qubit errors
+4. **CNOT Construction**: ZX(π/2) + single-qubit corrections = CNOT
+5. **Calibration**: Tune amplitude/duration for correct ZX angle
+6. **Error Sources**: Classical crosstalk, leakage, ZZ coupling, decoherence
+
+Modern IBM Quantum systems achieve CR-based CNOT fidelities of 99-99.5%, with ongoing improvements through better calibration and error mitigation.
+
+<Tip>
+When working with real quantum hardware, always check the calibrated gate parameters. The native CR gate parameters vary between qubit pairs due to differences in coupling strength and frequency detuning.
+</Tip>
+
+## Further Reading
+
+- Chow et al., "Simple All-Microwave Entangling Gate for Fixed-Frequency Superconducting Qubits" (2011)
+- Sheldon et al., "Procedure for systematically tuning up cross-talk" (2016)
+- Next lesson: Optimal Control - using numerical optimization for pulse design

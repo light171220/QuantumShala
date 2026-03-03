@@ -4,6 +4,12 @@ import path from 'path'
 
 export default defineConfig({
   plugins: [react()],
+  worker: {
+    format: 'es',
+  },
+  optimizeDeps: {
+    exclude: ['@anthropic-ai/sdk'],
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
