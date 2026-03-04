@@ -1,0 +1,1011 @@
+---
+title: "QAOA for Combinatorial Optimization"
+description: "Apply the Quantum Approximate Optimization Algorithm to combinatorial optimization problems including Max-Cut, portfolio optimization, and constraint satisfaction, with focus on problem encoding, mixer design, and parameter optimization strategies."
+duration: 45
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Encode combinatorial optimization problems as quantum Hamiltonians
+- Design appropriate mixer operators for different problem structures
+- Implement parameter optimization strategies for QAOA
+- Apply QAOA to Max-Cut and portfolio optimization problems
+- Analyze QAOA performance and approximation ratios
+
+## 1. Introduction to QAOA
+
+The Quantum Approximate Optimization Algorithm (QAOA) is a variational algorithm designed to find approximate solutions to combinatorial optimization problems. It alternates between problem-specific phase separations and mixing operations.
+
+<Definition term="QAOA">
+A hybrid quantum-classical algorithm that prepares approximate solutions to combinatorial optimization problems by applying alternating layers of problem Hamiltonian evolution and mixing Hamiltonian evolution, with classically optimized parameters.
+</Definition>
+
+<Formula>
+$$|\gamma, \beta\rangle = e^{-i\beta_p B} e^{-i\gamma_p C} \cdots e^{-i\beta_1 B} e^{-i\gamma_1 C} |+\rangle^{\otimes n}$$
+</Formula>
+
+### The QAOA Framework
+
+```python
+import numpy as np
+from typing import List, Dict, Tuple, Callable
+from dataclasses import dataclass
+from scipy.optimize import minimize
+
+@dataclass
+class QAOAProblem:
+    """Represents a QAOA optimization problem."""
+    n_qubits: int
+    cost_hamiltonian: List[Dict]  # Cost function as Pauli terms
+    mixer_hamiltonian: List[Dict]  # Mixing operator
+    objective_function: Callable  # Classical cost function
+
+class QAOACircuit:
+    """
+    QAOA circuit implementation.
+    """
+
+    def __init__(self, problem: QAOAProblem, p: int):
+        """
+        Args:
+            problem: The optimization problem
+            p: Number of QAOA layers
+        """
+        self.problem = problem
+        self.p = p
+        self.n_qubits = problem.n_qubits
+        self.dim = 2 ** self.n_qubits
+
+    def initial_state(self) -> np.ndarray:
+        """
+        Prepare initial |+>^n state.
+        """
+        state = np.ones(self.dim, dtype=complex) / np.sqrt(self.dim)
+        return state
+
+    def apply_cost_layer(
+        self,
+        state: np.ndarray,
+        gamma: float
+    ) -> np.ndarray:
+        """
+        Apply cost Hamiltonian evolution: exp(-i * gamma * C).
+        """
+        for term in self.problem.cost_hamiltonian:
+            state = self._apply_pauli_rotation(
+                state,
+                term['paulis'],
+                term['coeff'] * gamma
+            )
+        return state
+
+    def apply_mixer_layer(
+        self,
+        state: np.ndarray,
+        beta: float
+    ) -> np.ndarray:
+        """
+        Apply mixer Hamiltonian evolution: exp(-i * beta * B).
+        """
+        for term in self.problem.mixer_hamiltonian:
+            state = self._apply_pauli_rotation(
+                state,
+                term['paulis'],
+                term['coeff'] * beta
+            )
+        return state
+
+    def _apply_pauli_rotation(
+        self,
+        state: np.ndarray,
+        paulis: Dict[int, str],
+        angle: float
+    ) -> np.ndarray:
+        """Apply exp(-i * angle * P) where P is a Pauli string."""
+        if not paulis:
+            # Identity: just a global phase
+            return state * np.exp(-1j * angle)
+
+        # For diagonal Pauli strings (only Z), apply phase
+        if all(p == 'Z' for p in paulis.values()):
+            new_state = state.copy()
+            for i in range(self.dim):
+                # Compute parity of specified qubits
+                parity = 0
+                for qubit in paulis.keys():
+                    parity ^= (i >> qubit) & 1
+                sign = 1 if parity == 0 else -1
+                new_state[i] *= np.exp(-1j * angle * sign)
+            return new_state
+
+        # For X mixer
+        if len(paulis) == 1 and list(paulis.values())[0] == 'X':
+            qubit = list(paulis.keys())[0]
+            return self._apply_rx(state, qubit, 2 * angle)
+
+        return state  # General case not implemented
+
+    def _apply_rx(
+        self,
+        state: np.ndarray,
+        qubit: int,
+        theta: float
+    ) -> np.ndarray:
+        """Apply RX(theta) gate."""
+        new_state = np.zeros_like(state)
+        c, s = np.cos(theta / 2), np.sin(theta / 2)
+
+        for i in range(self.dim):
+            bit = (i >> qubit) & 1
+            partner = i ^ (1 << qubit)
+
+            new_state[i] += c * state[i]
+            new_state[i] += -1j * s * state[partner]
+
+        return new_state
+
+    def run(
+        self,
+        gammas: np.ndarray,
+        betas: np.ndarray
+    ) -> np.ndarray:
+        """
+        Execute QAOA circuit with given parameters.
+        """
+        state = self.initial_state()
+
+        for layer in range(self.p):
+            state = self.apply_cost_layer(state, gammas[layer])
+            state = self.apply_mixer_layer(state, betas[layer])
+
+        return state
+
+    def compute_expectation(
+        self,
+        state: np.ndarray
+    ) -> float:
+        """
+        Compute expectation value of cost Hamiltonian.
+        """
+        expectation = 0.0
+
+        for term in self.problem.cost_hamiltonian:
+            exp_val = self._pauli_expectation(state, term['paulis'])
+            expectation += term['coeff'] * np.real(exp_val)
+
+        return expectation
+
+    def _pauli_expectation(
+        self,
+        state: np.ndarray,
+        paulis: Dict[int, str]
+    ) -> complex:
+        """Compute <state|P|state> for Pauli string P."""
+        if not paulis:
+            return 1.0
+
+        # For Z-only strings
+        if all(p == 'Z' for p in paulis.values()):
+            result = 0.0
+            for i in range(self.dim):
+                parity = 0
+                for qubit in paulis.keys():
+                    parity ^= (i >> qubit) & 1
+                sign = 1 if parity == 0 else -1
+                result += sign * np.abs(state[i]) ** 2
+            return result
+
+        return 0.0  # General case
+```
+
+## 2. Problem Encoding
+
+### 2.1 QUBO to Ising Transformation
+
+<Definition term="QUBO">
+Quadratic Unconstrained Binary Optimization - a problem format where the objective is to minimize a quadratic function of binary variables: min sum_{i,j} Q_{ij} x_i x_j where x_i in {0, 1}.
+</Definition>
+
+<Formula>
+$$H_{Ising} = \sum_i h_i Z_i + \sum_{i<j} J_{ij} Z_i Z_j + \text{const}$$
+</Formula>
+
+```python
+class ProblemEncoder:
+    """
+    Encode optimization problems as Ising/QAOA Hamiltonians.
+    """
+
+    @staticmethod
+    def qubo_to_ising(
+        Q: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray, float]:
+        """
+        Convert QUBO matrix to Ising Hamiltonian.
+
+        QUBO: min x^T Q x where x in {0,1}^n
+        Ising: min sum h_i z_i + sum J_ij z_i z_j where z in {-1,+1}^n
+
+        Transformation: x_i = (1 - z_i) / 2
+
+        Args:
+            Q: QUBO matrix (can be upper triangular)
+
+        Returns:
+            (h, J, offset) where h is linear coefficients,
+            J is coupling matrix, offset is constant
+        """
+        n = Q.shape[0]
+
+        # Make Q symmetric
+        Q_sym = (Q + Q.T) / 2
+
+        # Initialize Ising coefficients
+        h = np.zeros(n)
+        J = np.zeros((n, n))
+        offset = 0.0
+
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    # Linear term: Q_ii * x_i = Q_ii * (1-z_i)/2
+                    h[i] -= Q_sym[i, i] / 2
+                    offset += Q_sym[i, i] / 2
+                elif i < j:
+                    # Quadratic: Q_ij * x_i * x_j
+                    # = Q_ij * (1-z_i)/2 * (1-z_j)/2
+                    # = Q_ij/4 * (1 - z_i - z_j + z_i*z_j)
+                    J[i, j] = Q_sym[i, j] / 4
+                    h[i] -= Q_sym[i, j] / 4
+                    h[j] -= Q_sym[i, j] / 4
+                    offset += Q_sym[i, j] / 4
+
+        return h, J, offset
+
+    @staticmethod
+    def ising_to_hamiltonian(
+        h: np.ndarray,
+        J: np.ndarray,
+        offset: float = 0.0
+    ) -> List[Dict]:
+        """
+        Convert Ising model to Pauli Hamiltonian terms.
+        """
+        n = len(h)
+        terms = []
+
+        # Constant term
+        if abs(offset) > 1e-10:
+            terms.append({'coeff': offset, 'paulis': {}})
+
+        # Linear terms
+        for i in range(n):
+            if abs(h[i]) > 1e-10:
+                terms.append({'coeff': h[i], 'paulis': {i: 'Z'}})
+
+        # Quadratic terms
+        for i in range(n):
+            for j in range(i + 1, n):
+                if abs(J[i, j]) > 1e-10:
+                    terms.append({'coeff': J[i, j], 'paulis': {i: 'Z', j: 'Z'}})
+
+        return terms
+
+# Example: Encode a simple 3-variable QUBO
+Q = np.array([
+    [1, -2, 0],
+    [-2, 2, -1],
+    [0, -1, 1]
+])
+
+encoder = ProblemEncoder()
+h, J, offset = encoder.qubo_to_ising(Q)
+hamiltonian = encoder.ising_to_hamiltonian(h, J, offset)
+
+print("QUBO to Ising conversion:")
+print(f"Linear coefficients h: {h}")
+print(f"Coupling matrix J:\n{J}")
+print(f"Offset: {offset}")
+print(f"\nHamiltonian terms: {len(hamiltonian)}")
+```
+
+### 2.2 Max-Cut Problem
+
+<Definition term="Max-Cut">
+Given a graph G = (V, E), partition vertices into two sets to maximize the number of edges between the sets. Equivalent to maximizing sum_{(i,j) in E} (1 - z_i z_j) / 2.
+</Definition>
+
+```python
+class MaxCutProblem:
+    """
+    Max-Cut problem encoding for QAOA.
+    """
+
+    def __init__(self, edges: List[Tuple[int, int]], n_vertices: int = None):
+        """
+        Args:
+            edges: List of (i, j) edges
+            n_vertices: Number of vertices (inferred if not provided)
+        """
+        self.edges = edges
+        self.n_vertices = n_vertices or max(max(e) for e in edges) + 1
+
+    def get_cost_hamiltonian(self) -> List[Dict]:
+        """
+        Create Max-Cut cost Hamiltonian.
+
+        C = sum_{(i,j) in E} (1 - Z_i Z_j) / 2
+          = |E|/2 - (1/2) * sum_{(i,j)} Z_i Z_j
+
+        We want to maximize C, so minimize -C.
+        """
+        terms = []
+
+        # Each edge contributes -1/2 * ZZ
+        for i, j in self.edges:
+            terms.append({
+                'coeff': 0.5,  # We'll minimize, so positive = maximize cut
+                'paulis': {i: 'Z', j: 'Z'}
+            })
+
+        return terms
+
+    def get_standard_mixer(self) -> List[Dict]:
+        """
+        Standard X mixer: B = sum_i X_i
+        """
+        terms = []
+        for i in range(self.n_vertices):
+            terms.append({'coeff': 1.0, 'paulis': {i: 'X'}})
+        return terms
+
+    def evaluate_cut(self, bitstring: str) -> int:
+        """
+        Evaluate cut value for a given bitstring assignment.
+        """
+        cut = 0
+        for i, j in self.edges:
+            if bitstring[i] != bitstring[j]:
+                cut += 1
+        return cut
+
+    def create_qaoa_problem(self) -> QAOAProblem:
+        """Create complete QAOA problem specification."""
+        return QAOAProblem(
+            n_qubits=self.n_vertices,
+            cost_hamiltonian=self.get_cost_hamiltonian(),
+            mixer_hamiltonian=self.get_standard_mixer(),
+            objective_function=self.evaluate_cut
+        )
+
+# Example: Triangle graph
+triangle_edges = [(0, 1), (1, 2), (0, 2)]
+maxcut = MaxCutProblem(triangle_edges)
+
+print("Max-Cut on Triangle Graph")
+print("=" * 40)
+print(f"Vertices: {maxcut.n_vertices}")
+print(f"Edges: {maxcut.edges}")
+print(f"\nCost Hamiltonian terms:")
+for term in maxcut.get_cost_hamiltonian():
+    print(f"  {term}")
+
+# Evaluate all possible cuts
+print(f"\nAll cuts:")
+for i in range(2 ** maxcut.n_vertices):
+    bitstring = format(i, f'0{maxcut.n_vertices}b')
+    cut_value = maxcut.evaluate_cut(bitstring)
+    print(f"  {bitstring}: cut = {cut_value}")
+```
+
+## 3. Mixer Design
+
+The choice of mixer operator significantly impacts QAOA performance, especially for constrained problems.
+
+### 3.1 Standard Transverse Field Mixer
+
+<Formula>
+$$B = \sum_i X_i$$
+</Formula>
+
+```python
+class MixerDesigner:
+    """
+    Design mixer operators for different problem types.
+    """
+
+    @staticmethod
+    def transverse_field_mixer(n_qubits: int) -> List[Dict]:
+        """
+        Standard X mixer that allows transitions between all states.
+
+        B = sum_i X_i
+        exp(-i*beta*B) = product_i RX(2*beta)
+        """
+        return [{'coeff': 1.0, 'paulis': {i: 'X'}} for i in range(n_qubits)]
+
+    @staticmethod
+    def xy_mixer(n_qubits: int, ring: bool = True) -> List[Dict]:
+        """
+        XY mixer that preserves Hamming weight (number of 1s).
+
+        Good for problems with cardinality constraints.
+
+        B_XY = sum_{i,j} (X_i X_j + Y_i Y_j) / 2
+        """
+        terms = []
+
+        for i in range(n_qubits):
+            j = (i + 1) % n_qubits if ring else i + 1
+            if j < n_qubits:
+                # XX term
+                terms.append({'coeff': 0.5, 'paulis': {i: 'X', j: 'X'}})
+                # YY term
+                terms.append({'coeff': 0.5, 'paulis': {i: 'Y', j: 'Y'}})
+
+        return terms
+
+    @staticmethod
+    def grover_mixer(n_qubits: int) -> List[Dict]:
+        """
+        Grover-style mixer: 2|s><s| - I where |s> = |+>^n
+
+        Provides faster mixing but requires more gates.
+        """
+        # This is typically implemented as a reflection
+        # Rather than as Pauli terms
+        return [{'coeff': 1.0, 'paulis': {i: 'X'}} for i in range(n_qubits)]
+
+    @staticmethod
+    def constraint_preserving_mixer(
+        n_qubits: int,
+        allowed_transitions: List[Tuple[int, int]]
+    ) -> List[Dict]:
+        """
+        Custom mixer that only allows specified bit-flip transitions.
+
+        Useful for hard constraints that must be satisfied.
+        """
+        terms = []
+
+        for i, j in allowed_transitions:
+            # Swap-like operation between qubits i and j
+            terms.append({'coeff': 0.5, 'paulis': {i: 'X', j: 'X'}})
+            terms.append({'coeff': 0.5, 'paulis': {i: 'Y', j: 'Y'}})
+
+        return terms
+
+# Example mixers
+print("Mixer Examples")
+print("=" * 40)
+
+designer = MixerDesigner()
+
+x_mixer = designer.transverse_field_mixer(4)
+print(f"X mixer (4 qubits): {len(x_mixer)} terms")
+
+xy_mixer = designer.xy_mixer(4)
+print(f"XY mixer (4 qubits): {len(xy_mixer)} terms")
+```
+
+### 3.2 Warm-Start QAOA
+
+<Tip>
+Warm-start QAOA uses classical preprocessing to find a good initial state, potentially improving convergence and solution quality.
+</Tip>
+
+```python
+class WarmStartQAOA:
+    """
+    QAOA with classical warm-starting.
+    """
+
+    def __init__(self, problem: QAOAProblem):
+        self.problem = problem
+        self.n_qubits = problem.n_qubits
+
+    def classical_relaxation(self, cost_matrix: np.ndarray) -> np.ndarray:
+        """
+        Solve relaxed problem to get continuous solution.
+
+        Returns angles theta_i where optimal classical solution
+        would have z_i = cos(theta_i).
+        """
+        # Simple heuristic: random or spectral relaxation
+        n = self.n_qubits
+
+        # For Max-Cut, use spectral method
+        # Eigenvector of Laplacian gives good approximation
+        laplacian = -cost_matrix
+        np.fill_diagonal(laplacian, -np.sum(cost_matrix, axis=1))
+
+        eigenvalues, eigenvectors = np.linalg.eigh(laplacian)
+        second_eigenvector = eigenvectors[:, 1]
+
+        # Convert to angles
+        thetas = np.arccos(np.clip(second_eigenvector, -1, 1))
+
+        return thetas
+
+    def warm_start_initial_state(
+        self,
+        thetas: np.ndarray
+    ) -> np.ndarray:
+        """
+        Prepare warm-start initial state.
+
+        Instead of |+>^n, use |psi> = prod_i (cos(theta_i/2)|0> + sin(theta_i/2)|1>)
+        """
+        dim = 2 ** self.n_qubits
+        state = np.zeros(dim, dtype=complex)
+
+        for i in range(dim):
+            amplitude = 1.0
+            for qubit in range(self.n_qubits):
+                bit = (i >> qubit) & 1
+                if bit == 0:
+                    amplitude *= np.cos(thetas[qubit] / 2)
+                else:
+                    amplitude *= np.sin(thetas[qubit] / 2)
+            state[i] = amplitude
+
+        return state
+
+    def biased_mixer(self, thetas: np.ndarray) -> List[Dict]:
+        """
+        Create mixer biased toward warm-start solution.
+
+        Uses rotation around the warm-start axis.
+        """
+        # Standard mixer but with modified angles
+        return [{'coeff': 1.0, 'paulis': {i: 'X'}} for i in range(self.n_qubits)]
+```
+
+## 4. Parameter Optimization
+
+### 4.1 Optimization Strategies
+
+```python
+class QAOAOptimizer:
+    """
+    Parameter optimization for QAOA.
+    """
+
+    def __init__(self, qaoa_circuit: QAOACircuit):
+        self.circuit = qaoa_circuit
+        self.p = qaoa_circuit.p
+
+    def objective(self, params: np.ndarray) -> float:
+        """
+        QAOA objective function: minimize -<C> to maximize cut.
+        """
+        gammas = params[:self.p]
+        betas = params[self.p:]
+
+        state = self.circuit.run(gammas, betas)
+        expectation = self.circuit.compute_expectation(state)
+
+        # We want to maximize the cut, but optimizers minimize
+        # So return negative (or the raw expectation if cost is already set up right)
+        return expectation
+
+    def optimize_cobyla(
+        self,
+        initial_params: np.ndarray = None,
+        max_iterations: int = 100
+    ) -> Dict:
+        """
+        Optimize using COBYLA (gradient-free).
+        """
+        if initial_params is None:
+            initial_params = np.random.uniform(0, np.pi, 2 * self.p)
+
+        history = []
+
+        def callback(params):
+            history.append(self.objective(params))
+
+        result = minimize(
+            self.objective,
+            initial_params,
+            method='COBYLA',
+            options={'maxiter': max_iterations},
+            callback=callback
+        )
+
+        return {
+            'optimal_params': result.x,
+            'optimal_value': result.fun,
+            'history': history,
+            'success': result.success
+        }
+
+    def grid_search(
+        self,
+        gamma_range: Tuple[float, float] = (0, np.pi),
+        beta_range: Tuple[float, float] = (0, np.pi),
+        n_points: int = 20
+    ) -> Dict:
+        """
+        Grid search for p=1 QAOA (visualization/analysis).
+        """
+        if self.p != 1:
+            raise ValueError("Grid search only for p=1")
+
+        gammas = np.linspace(gamma_range[0], gamma_range[1], n_points)
+        betas = np.linspace(beta_range[0], beta_range[1], n_points)
+
+        values = np.zeros((n_points, n_points))
+
+        for i, gamma in enumerate(gammas):
+            for j, beta in enumerate(betas):
+                values[i, j] = self.objective(np.array([gamma, beta]))
+
+        best_idx = np.unravel_index(np.argmin(values), values.shape)
+        best_gamma = gammas[best_idx[0]]
+        best_beta = betas[best_idx[1]]
+
+        return {
+            'gammas': gammas,
+            'betas': betas,
+            'values': values,
+            'best_gamma': best_gamma,
+            'best_beta': best_beta,
+            'best_value': values[best_idx]
+        }
+
+    def fixed_angle_heuristics(self) -> Dict[str, np.ndarray]:
+        """
+        Return commonly used fixed angle patterns.
+        """
+        return {
+            'linear': {
+                'gammas': np.linspace(0.1, 0.5, self.p),
+                'betas': np.linspace(0.5, 0.1, self.p)
+            },
+            'constant': {
+                'gammas': np.full(self.p, np.pi / 4),
+                'betas': np.full(self.p, np.pi / 4)
+            },
+            'fourier': {
+                'gammas': np.array([np.pi / (4 * (k + 1)) for k in range(self.p)]),
+                'betas': np.array([np.pi / (4 * (k + 1)) for k in range(self.p)])
+            }
+        }
+
+# Complete QAOA example
+def run_qaoa_maxcut_example():
+    """Complete QAOA example on Max-Cut."""
+
+    # Create Max-Cut problem on a small graph
+    edges = [(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)]  # Square with diagonal
+    n_vertices = 4
+
+    maxcut = MaxCutProblem(edges, n_vertices)
+    problem = maxcut.create_qaoa_problem()
+
+    print("QAOA for Max-Cut")
+    print("=" * 50)
+    print(f"Graph: {n_vertices} vertices, {len(edges)} edges")
+
+    # Run QAOA with p=1
+    p = 1
+    circuit = QAOACircuit(problem, p)
+    optimizer = QAOAOptimizer(circuit)
+
+    # Grid search for p=1
+    grid_result = optimizer.grid_search(n_points=30)
+    print(f"\nGrid search result:")
+    print(f"  Best gamma: {grid_result['best_gamma']:.4f}")
+    print(f"  Best beta: {grid_result['best_beta']:.4f}")
+    print(f"  Best value: {grid_result['best_value']:.4f}")
+
+    # Optimize with best starting point
+    opt_result = optimizer.optimize_cobyla(
+        initial_params=np.array([grid_result['best_gamma'], grid_result['best_beta']]),
+        max_iterations=100
+    )
+
+    print(f"\nOptimization result:")
+    print(f"  Optimal params: {opt_result['optimal_params']}")
+    print(f"  Optimal value: {opt_result['optimal_value']:.4f}")
+
+    # Sample solution
+    gammas = opt_result['optimal_params'][:p]
+    betas = opt_result['optimal_params'][p:]
+    final_state = circuit.run(gammas, betas)
+
+    print(f"\nSolution distribution:")
+    probs = np.abs(final_state) ** 2
+    for i in np.argsort(probs)[-5:]:
+        bitstring = format(i, f'0{n_vertices}b')
+        cut = maxcut.evaluate_cut(bitstring)
+        print(f"  {bitstring}: prob={probs[i]:.4f}, cut={cut}")
+
+# Uncomment to run
+# run_qaoa_maxcut_example()
+```
+
+## 5. Portfolio Optimization Application
+
+<Definition term="Portfolio Optimization">
+Select a subset of assets to maximize expected return while minimizing risk, subject to budget and diversification constraints. Maps naturally to QUBO and thus QAOA.
+</Definition>
+
+```python
+class PortfolioOptimization:
+    """
+    Portfolio optimization as QAOA problem.
+    """
+
+    def __init__(
+        self,
+        expected_returns: np.ndarray,
+        covariance_matrix: np.ndarray,
+        risk_factor: float = 0.5,
+        budget: int = None
+    ):
+        """
+        Args:
+            expected_returns: Expected return for each asset
+            covariance_matrix: Covariance between asset returns
+            risk_factor: Trade-off between return and risk (0-1)
+            budget: Number of assets to select (None = no constraint)
+        """
+        self.returns = expected_returns
+        self.covariance = covariance_matrix
+        self.risk_factor = risk_factor
+        self.budget = budget
+        self.n_assets = len(expected_returns)
+
+    def create_qubo(self) -> np.ndarray:
+        """
+        Create QUBO matrix for portfolio optimization.
+
+        Minimize: risk_factor * x^T Sigma x - (1-risk_factor) * mu^T x
+
+        Subject to: sum(x) = budget (if specified)
+        """
+        n = self.n_assets
+        Q = np.zeros((n, n))
+
+        # Risk term (quadratic)
+        Q += self.risk_factor * self.covariance
+
+        # Return term (linear, goes on diagonal)
+        for i in range(n):
+            Q[i, i] -= (1 - self.risk_factor) * self.returns[i]
+
+        # Budget constraint as penalty (if specified)
+        if self.budget is not None:
+            penalty = 10.0  # Large penalty for constraint violation
+            # (sum_i x_i - budget)^2 = sum_i x_i + 2*sum_{i<j} x_i x_j - 2*budget*sum_i x_i + budget^2
+            for i in range(n):
+                Q[i, i] += penalty * (1 - 2 * self.budget)
+                for j in range(i + 1, n):
+                    Q[i, j] += penalty * 2
+
+        return Q
+
+    def create_qaoa_problem(self) -> QAOAProblem:
+        """Create QAOA problem from portfolio specification."""
+        Q = self.create_qubo()
+        encoder = ProblemEncoder()
+        h, J, offset = encoder.qubo_to_ising(Q)
+        cost_hamiltonian = encoder.ising_to_hamiltonian(h, J, offset)
+
+        # Standard X mixer
+        mixer = [{'coeff': 1.0, 'paulis': {i: 'X'}} for i in range(self.n_assets)]
+
+        return QAOAProblem(
+            n_qubits=self.n_assets,
+            cost_hamiltonian=cost_hamiltonian,
+            mixer_hamiltonian=mixer,
+            objective_function=lambda x: self.evaluate_portfolio(x)
+        )
+
+    def evaluate_portfolio(self, selection: str) -> float:
+        """
+        Evaluate portfolio quality.
+
+        Args:
+            selection: Binary string indicating selected assets
+        """
+        x = np.array([int(b) for b in selection])
+
+        if self.budget is not None and np.sum(x) != self.budget:
+            return float('inf')  # Constraint violation
+
+        expected_return = np.dot(self.returns, x)
+        risk = np.dot(x, np.dot(self.covariance, x))
+
+        return self.risk_factor * risk - (1 - self.risk_factor) * expected_return
+
+# Example portfolio problem
+def portfolio_example():
+    """Demonstrate portfolio optimization with QAOA."""
+
+    # 5 assets with different return/risk profiles
+    np.random.seed(42)
+    n_assets = 5
+
+    # Expected annual returns (%)
+    expected_returns = np.array([0.12, 0.08, 0.15, 0.06, 0.10])
+
+    # Covariance matrix (risk)
+    volatilities = np.array([0.20, 0.15, 0.25, 0.10, 0.18])
+    correlations = np.array([
+        [1.0, 0.3, 0.5, 0.1, 0.4],
+        [0.3, 1.0, 0.2, 0.4, 0.3],
+        [0.5, 0.2, 1.0, 0.1, 0.5],
+        [0.1, 0.4, 0.1, 1.0, 0.2],
+        [0.4, 0.3, 0.5, 0.2, 1.0]
+    ])
+    covariance = np.outer(volatilities, volatilities) * correlations
+
+    print("Portfolio Optimization with QAOA")
+    print("=" * 50)
+    print(f"Assets: {n_assets}")
+    print(f"Expected returns: {expected_returns}")
+
+    # Select 2 assets from 5
+    portfolio = PortfolioOptimization(
+        expected_returns,
+        covariance,
+        risk_factor=0.5,
+        budget=2
+    )
+
+    # Evaluate all possible portfolios
+    print(f"\nAll 2-asset portfolios (budget=2):")
+    best_selection = None
+    best_value = float('inf')
+
+    for i in range(2 ** n_assets):
+        selection = format(i, f'0{n_assets}b')
+        if selection.count('1') == 2:
+            value = portfolio.evaluate_portfolio(selection)
+            selected_assets = [j for j, b in enumerate(selection) if b == '1']
+            print(f"  {selection} (assets {selected_assets}): value = {value:.4f}")
+
+            if value < best_value:
+                best_value = value
+                best_selection = selection
+
+    print(f"\nBest portfolio: {best_selection} with value {best_value:.4f}")
+
+# Uncomment to run
+# portfolio_example()
+```
+
+## 6. Performance Analysis
+
+```python
+class QAOAAnalyzer:
+    """
+    Analyze QAOA performance and approximation quality.
+    """
+
+    def __init__(
+        self,
+        problem: QAOAProblem,
+        optimal_value: float = None
+    ):
+        self.problem = problem
+        self.optimal_value = optimal_value
+        self.n_qubits = problem.n_qubits
+
+    def approximation_ratio(
+        self,
+        qaoa_value: float
+    ) -> float:
+        """
+        Compute approximation ratio: QAOA_value / optimal_value
+        """
+        if self.optimal_value is None or self.optimal_value == 0:
+            return None
+        return qaoa_value / self.optimal_value
+
+    def sample_solutions(
+        self,
+        state: np.ndarray,
+        n_samples: int = 1000
+    ) -> Dict[str, int]:
+        """
+        Sample solutions from QAOA output state.
+        """
+        probs = np.abs(state) ** 2
+        samples = np.random.choice(len(state), size=n_samples, p=probs)
+
+        counts = {}
+        for s in samples:
+            bitstring = format(s, f'0{self.n_qubits}b')
+            counts[bitstring] = counts.get(bitstring, 0) + 1
+
+        return counts
+
+    def success_probability(
+        self,
+        state: np.ndarray,
+        optimal_solutions: List[str]
+    ) -> float:
+        """
+        Probability of measuring an optimal solution.
+        """
+        probs = np.abs(state) ** 2
+        total = 0.0
+
+        for sol in optimal_solutions:
+            idx = int(sol, 2)
+            total += probs[idx]
+
+        return total
+
+    def analyze_depth_scaling(
+        self,
+        p_values: List[int],
+        optimizer: Callable
+    ) -> Dict:
+        """
+        Analyze how solution quality scales with circuit depth p.
+        """
+        results = {'p': [], 'value': [], 'approximation_ratio': []}
+
+        for p in p_values:
+            circuit = QAOACircuit(self.problem, p)
+            qaoa_opt = QAOAOptimizer(circuit)
+            result = optimizer(qaoa_opt)
+
+            results['p'].append(p)
+            results['value'].append(result['optimal_value'])
+
+            if self.optimal_value:
+                ratio = self.approximation_ratio(result['optimal_value'])
+                results['approximation_ratio'].append(ratio)
+
+        return results
+
+# Summary of QAOA performance guarantees
+print("\nQAOA Performance Summary")
+print("=" * 50)
+print("""
+For Max-Cut on 3-regular graphs:
+- p=1 QAOA achieves approximation ratio >= 0.6924
+- Optimal classical is 0.9326 (Goemans-Williamson)
+
+As p increases:
+- Solution quality improves monotonically
+- At p -> infinity, QAOA can find optimal solution
+- Practical limit due to noise and optimization difficulty
+
+Key factors for success:
+1. Good parameter optimization
+2. Appropriate mixer for problem structure
+3. Sufficient circuit depth (p)
+4. Error mitigation on real hardware
+""")
+```
+
+## Summary
+
+In this lesson, you learned how to apply QAOA to combinatorial optimization:
+
+1. **Problem Encoding**: QUBO to Ising transformation and Hamiltonian construction
+2. **Max-Cut Application**: Encoding graph partitioning as QAOA problem
+3. **Mixer Design**: Standard, XY, and constraint-preserving mixers
+4. **Parameter Optimization**: Grid search, COBYLA, and heuristic strategies
+5. **Portfolio Optimization**: Financial applications of QAOA
+6. **Performance Analysis**: Approximation ratios and depth scaling
+
+<Warning>
+QAOA performance depends heavily on problem structure, circuit depth, and parameter optimization. For small problems, classical algorithms may outperform QAOA, but quantum advantage is expected for larger, more complex instances.
+</Warning>
+
+## Further Reading
+
+- Farhi, E. et al. (2014). "A Quantum Approximate Optimization Algorithm"
+- Zhou, L. et al. (2020). "Quantum Approximate Optimization Algorithm: Performance, Mechanism, and Implementation"
+- Hadfield, S. et al. (2019). "From the Quantum Approximate Optimization Algorithm to a Quantum Alternating Operator Ansatz"

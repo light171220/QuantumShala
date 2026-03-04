@@ -1,0 +1,703 @@
+---
+title: "Quantum Walks on Graphs"
+description: "Master the theory and implementation of quantum walks on graphs, including both discrete-time and continuous-time quantum walks."
+duration: 45
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Distinguish between discrete-time and continuous-time quantum walks
+- Implement quantum walks on various graph structures
+- Analyze the mixing time and hitting time of quantum walks
+- Compare quantum walk spreading with classical random walks
+- Apply quantum walks to search problems on graphs
+- Understand the role of interference in quantum walk speedups
+
+## 1. Introduction to Quantum Walks
+
+Quantum walks are the quantum analog of classical random walks, where a particle traverses a graph according to quantum mechanical rules. Unlike classical random walks governed by probability distributions, quantum walks evolve according to unitary dynamics, enabling interference effects that lead to fundamentally different behavior.
+
+<Definition term="Quantum Walk">
+A quantum walk is the quantum mechanical analog of a classical random walk. The walker exists in a superposition of positions on the graph, and the walk evolution is governed by a unitary operator that preserves coherence and enables interference.
+</Definition>
+
+The key differences from classical random walks:
+
+| Property | Classical Random Walk | Quantum Walk |
+|----------|----------------------|--------------|
+| State | Probability distribution | Amplitude distribution |
+| Evolution | Stochastic matrix | Unitary operator |
+| Spreading | Diffusive ($\sqrt{t}$) | Ballistic ($t$) |
+| Interference | None | Constructive/Destructive |
+
+<Formula>
+$$\text{Classical: } p_{i}(t+1) = \sum_j P_{ij} p_j(t)$$
+$$\text{Quantum: } |\psi(t+1)\rangle = U|\psi(t)\rangle$$
+</Formula>
+
+## 2. Continuous-Time Quantum Walks (CTQW)
+
+Continuous-time quantum walks are defined by the Schrodinger equation with the graph Laplacian or adjacency matrix as the Hamiltonian.
+
+<Definition term="Continuous-Time Quantum Walk">
+For a graph $G$ with adjacency matrix $A$, the continuous-time quantum walk is governed by:
+$$|\psi(t)\rangle = e^{-iAt}|\psi(0)\rangle$$
+where the state $|\psi\rangle = \sum_v \alpha_v |v\rangle$ is a superposition over vertices.
+</Definition>
+
+<Formula>
+$$\frac{d|\psi(t)\rangle}{dt} = -iH|\psi(t)\rangle$$
+$$H = \gamma A \text{ or } H = \gamma L$$
+</Formula>
+
+where $L = D - A$ is the graph Laplacian and $D$ is the degree matrix.
+
+```python
+import numpy as np
+from scipy.linalg import expm
+import matplotlib.pyplot as plt
+from typing import Tuple, List
+
+def adjacency_matrix_line(n: int) -> np.ndarray:
+    """Create adjacency matrix for a line graph with n vertices."""
+    A = np.zeros((n, n))
+    for i in range(n - 1):
+        A[i, i + 1] = 1
+        A[i + 1, i] = 1
+    return A
+
+def adjacency_matrix_cycle(n: int) -> np.ndarray:
+    """Create adjacency matrix for a cycle graph with n vertices."""
+    A = adjacency_matrix_line(n)
+    A[0, n - 1] = 1
+    A[n - 1, 0] = 1
+    return A
+
+def continuous_time_quantum_walk(A: np.ndarray, psi_0: np.ndarray,
+                                  t: float, gamma: float = 1.0) -> np.ndarray:
+    """
+    Evolve a continuous-time quantum walk.
+
+    Args:
+        A: Adjacency matrix of the graph
+        psi_0: Initial state vector
+        t: Evolution time
+        gamma: Hopping rate
+
+    Returns:
+        Evolved state |psi(t)>
+    """
+    H = gamma * A
+    U = expm(-1j * H * t)
+    return U @ psi_0
+
+def probability_distribution(psi: np.ndarray) -> np.ndarray:
+    """Compute probability distribution from quantum state."""
+    return np.abs(psi)**2
+
+# Example: CTQW on a line graph
+n_vertices = 21
+A = adjacency_matrix_line(n_vertices)
+
+# Start at the center vertex
+psi_0 = np.zeros(n_vertices, dtype=complex)
+psi_0[n_vertices // 2] = 1.0
+
+# Evolve and observe spreading
+times = [0, 2, 5, 10]
+print("Continuous-Time Quantum Walk on Line Graph")
+print("=" * 50)
+
+for t in times:
+    psi_t = continuous_time_quantum_walk(A, psi_0, t)
+    probs = probability_distribution(psi_t)
+    variance = np.sum(probs * (np.arange(n_vertices) - n_vertices//2)**2)
+    print(f"t = {t:2d}: Variance = {variance:.2f}, Max prob = {np.max(probs):.4f}")
+```
+
+## 3. Discrete-Time Quantum Walks (DTQW)
+
+Discrete-time quantum walks require an additional "coin" degree of freedom to enable unitary evolution. The walker's Hilbert space is $\mathcal{H} = \mathcal{H}_{\text{position}} \otimes \mathcal{H}_{\text{coin}}$.
+
+<Definition term="Discrete-Time Quantum Walk">
+A discrete-time quantum walk consists of two operations applied alternately:
+1. **Coin operation** $C$: A unitary acting on the coin space
+2. **Shift operation** $S$: Moves the walker based on coin state
+
+The walk operator is $U = S \cdot (I_{\text{pos}} \otimes C)$.
+</Definition>
+
+For a walk on a line with a 2-dimensional coin:
+
+<Formula>
+$$S = \sum_x |x+1\rangle\langle x| \otimes |0\rangle\langle 0| + |x-1\rangle\langle x| \otimes |1\rangle\langle 1|$$
+$$C_{\text{Hadamard}} = \frac{1}{\sqrt{2}}\begin{pmatrix} 1 & 1 \\ 1 & -1 \end{pmatrix}$$
+</Formula>
+
+```python
+def hadamard_coin() -> np.ndarray:
+    """Standard Hadamard coin for 1D quantum walk."""
+    return np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+
+def grover_coin() -> np.ndarray:
+    """Grover diffusion coin for 1D quantum walk."""
+    return np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+
+def shift_operator_1d(n_positions: int) -> np.ndarray:
+    """
+    Build shift operator for 1D discrete-time quantum walk.
+
+    The total Hilbert space is n_positions * 2 (position x coin).
+    State ordering: |x, coin> with coin in {0, 1}.
+    """
+    dim = 2 * n_positions
+    S = np.zeros((dim, dim), dtype=complex)
+
+    for x in range(n_positions):
+        # |0> coin: move right (x -> x+1)
+        if x + 1 < n_positions:
+            # |x+1, 0><x, 0|
+            S[2*(x+1), 2*x] = 1
+        else:
+            # Boundary: stay or wrap
+            S[2*x, 2*x] = 1
+
+        # |1> coin: move left (x -> x-1)
+        if x - 1 >= 0:
+            # |x-1, 1><x, 1|
+            S[2*(x-1) + 1, 2*x + 1] = 1
+        else:
+            # Boundary: stay or wrap
+            S[2*x + 1, 2*x + 1] = 1
+
+    return S
+
+def coin_operator_1d(n_positions: int, coin: np.ndarray) -> np.ndarray:
+    """Build full coin operator: I_position tensor C_coin."""
+    return np.kron(np.eye(n_positions), coin)
+
+def discrete_time_walk_step(S: np.ndarray, C: np.ndarray,
+                             psi: np.ndarray) -> np.ndarray:
+    """Apply one step of discrete-time quantum walk."""
+    return S @ (C @ psi)
+
+def run_discrete_walk(n_positions: int, n_steps: int,
+                       coin: np.ndarray, initial_pos: int,
+                       initial_coin: np.ndarray) -> List[np.ndarray]:
+    """
+    Run discrete-time quantum walk and return position probabilities at each step.
+
+    Args:
+        n_positions: Number of positions on the line
+        n_steps: Number of walk steps
+        coin: 2x2 coin unitary
+        initial_pos: Starting position
+        initial_coin: Initial coin state (2-vector)
+
+    Returns:
+        List of position probability distributions
+    """
+    # Initialize state
+    dim = 2 * n_positions
+    psi = np.zeros(dim, dtype=complex)
+    psi[2*initial_pos] = initial_coin[0]
+    psi[2*initial_pos + 1] = initial_coin[1]
+
+    # Build operators
+    S = shift_operator_1d(n_positions)
+    C = coin_operator_1d(n_positions, coin)
+
+    # Run walk
+    probabilities = []
+    for step in range(n_steps + 1):
+        # Extract position probabilities
+        pos_probs = np.zeros(n_positions)
+        for x in range(n_positions):
+            pos_probs[x] = np.abs(psi[2*x])**2 + np.abs(psi[2*x + 1])**2
+        probabilities.append(pos_probs)
+
+        if step < n_steps:
+            psi = discrete_time_walk_step(S, C, psi)
+
+    return probabilities
+
+# Example: Compare Hadamard walk spreading
+n_pos = 101
+n_steps = 50
+center = n_pos // 2
+
+# Symmetric initial coin state
+coin_state = np.array([1, 1j], dtype=complex) / np.sqrt(2)
+
+probs = run_discrete_walk(n_pos, n_steps, hadamard_coin(), center, coin_state)
+
+print("\nDiscrete-Time Quantum Walk (Hadamard Coin)")
+print("=" * 50)
+for step in [0, 10, 25, 50]:
+    variance = np.sum(probs[step] * (np.arange(n_pos) - center)**2)
+    print(f"Step {step:2d}: Variance = {variance:.2f}")
+```
+
+## 4. Quantum Walk Speedup: Ballistic vs Diffusive Spreading
+
+The fundamental speedup of quantum walks comes from ballistic spreading compared to diffusive spreading in classical walks.
+
+<Tip>
+Classical random walks spread as $\sigma \sim \sqrt{t}$ (diffusive), while quantum walks spread as $\sigma \sim t$ (ballistic). This quadratic speedup in spreading is the basis for many quantum walk algorithmic advantages.
+</Tip>
+
+<Formula>
+$$\text{Classical: } \langle x^2 \rangle - \langle x \rangle^2 \sim t$$
+$$\text{Quantum: } \langle x^2 \rangle - \langle x \rangle^2 \sim t^2$$
+</Formula>
+
+```python
+def classical_random_walk_1d(n_positions: int, n_steps: int,
+                              start: int, n_trials: int = 10000) -> np.ndarray:
+    """
+    Simulate classical random walk and return average probability distribution.
+    """
+    counts = np.zeros(n_positions)
+
+    for _ in range(n_trials):
+        pos = start
+        for _ in range(n_steps):
+            if np.random.random() < 0.5:
+                pos = min(pos + 1, n_positions - 1)
+            else:
+                pos = max(pos - 1, 0)
+        counts[pos] += 1
+
+    return counts / n_trials
+
+def compare_quantum_classical(n_positions: int, max_steps: int) -> dict:
+    """
+    Compare spreading of quantum and classical walks.
+    """
+    center = n_positions // 2
+    coin_state = np.array([1, 1j], dtype=complex) / np.sqrt(2)
+
+    quantum_variances = []
+    classical_variances = []
+    steps_list = list(range(0, max_steps + 1, 5))
+
+    # Quantum walk
+    probs_quantum = run_discrete_walk(n_positions, max_steps,
+                                       hadamard_coin(), center, coin_state)
+
+    for step in steps_list:
+        # Quantum variance
+        q_var = np.sum(probs_quantum[step] * (np.arange(n_positions) - center)**2)
+        quantum_variances.append(q_var)
+
+        # Classical variance (analytical: variance = step for unbiased walk)
+        classical_variances.append(step)
+
+    return {
+        'steps': steps_list,
+        'quantum_variance': quantum_variances,
+        'classical_variance': classical_variances
+    }
+
+# Compare spreading
+n_pos = 201
+max_steps = 100
+comparison = compare_quantum_classical(n_pos, max_steps)
+
+print("\nQuantum vs Classical Walk Spreading")
+print("=" * 50)
+print(f"{'Step':>6} {'Classical Var':>15} {'Quantum Var':>15} {'Ratio':>10}")
+print("-" * 50)
+for i in range(0, len(comparison['steps']), 4):
+    step = comparison['steps'][i]
+    c_var = comparison['classical_variance'][i]
+    q_var = comparison['quantum_variance'][i]
+    ratio = q_var / c_var if c_var > 0 else 0
+    print(f"{step:6d} {c_var:15.2f} {q_var:15.2f} {ratio:10.2f}")
+```
+
+## 5. Quantum Walks on General Graphs
+
+For walks on arbitrary graphs, we need to generalize the coin and shift operations.
+
+<Definition term="Coined Walk on Graphs">
+For a graph $G = (V, E)$ with maximum degree $d$, the coined quantum walk uses:
+- Position space: $\mathcal{H}_V = \text{span}\{|v\rangle : v \in V\}$
+- Coin space: $\mathcal{H}_C = \text{span}\{|c\rangle : c \in \{1, \ldots, d\}\}$
+- State space: $\mathcal{H} = \mathcal{H}_V \otimes \mathcal{H}_C$
+</Definition>
+
+```python
+def build_graph_walk_operators(adjacency_matrix: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Build shift and coin operators for quantum walk on a general graph.
+
+    Args:
+        adjacency_matrix: n x n adjacency matrix
+
+    Returns:
+        (shift_operator, coin_operator) for the graph
+    """
+    n = adjacency_matrix.shape[0]
+    degrees = np.sum(adjacency_matrix, axis=1).astype(int)
+    max_degree = int(np.max(degrees))
+
+    # State space dimension: sum of degrees (directed edges)
+    # Alternative: n * max_degree with padding
+    dim = n * max_degree
+
+    # Build neighbor lists
+    neighbors = []
+    for v in range(n):
+        nbrs = np.where(adjacency_matrix[v] > 0)[0].tolist()
+        # Pad to max_degree
+        while len(nbrs) < max_degree:
+            nbrs.append(v)  # Self-loop padding
+        neighbors.append(nbrs)
+
+    # Shift operator: |u, c> -> |neighbors[u][c], c'>
+    S = np.zeros((dim, dim), dtype=complex)
+    for v in range(n):
+        for c in range(max_degree):
+            u = neighbors[v][c]
+            # Find which coin index at u corresponds to v
+            try:
+                c_new = neighbors[u].index(v)
+            except ValueError:
+                c_new = c  # Fallback
+
+            idx_from = v * max_degree + c
+            idx_to = u * max_degree + c_new
+            S[idx_to, idx_from] = 1
+
+    # Grover coin at each vertex
+    def grover_diffusion(d: int) -> np.ndarray:
+        """d-dimensional Grover diffusion operator."""
+        return 2 * np.ones((d, d)) / d - np.eye(d)
+
+    C = np.zeros((dim, dim), dtype=complex)
+    for v in range(n):
+        d = degrees[v]
+        grover = grover_diffusion(max_degree)
+        for i in range(max_degree):
+            for j in range(max_degree):
+                C[v * max_degree + i, v * max_degree + j] = grover[i, j]
+
+    return S, C
+
+def graph_walk_evolution(adjacency_matrix: np.ndarray,
+                          initial_vertex: int, n_steps: int) -> List[np.ndarray]:
+    """
+    Evolve quantum walk on a graph and return vertex probabilities.
+    """
+    n = adjacency_matrix.shape[0]
+    max_degree = int(np.max(np.sum(adjacency_matrix, axis=1)))
+    dim = n * max_degree
+
+    S, C = build_graph_walk_operators(adjacency_matrix)
+    U = S @ C  # Walk operator
+
+    # Initialize at vertex with uniform coin
+    psi = np.zeros(dim, dtype=complex)
+    for c in range(max_degree):
+        psi[initial_vertex * max_degree + c] = 1.0 / np.sqrt(max_degree)
+
+    probabilities = []
+    for step in range(n_steps + 1):
+        # Extract vertex probabilities
+        vertex_probs = np.zeros(n)
+        for v in range(n):
+            for c in range(max_degree):
+                vertex_probs[v] += np.abs(psi[v * max_degree + c])**2
+        probabilities.append(vertex_probs)
+
+        if step < n_steps:
+            psi = U @ psi
+
+    return probabilities
+
+# Example: Walk on a small cycle
+n = 8
+A_cycle = adjacency_matrix_cycle(n)
+probs = graph_walk_evolution(A_cycle, 0, 20)
+
+print("\nQuantum Walk on 8-vertex Cycle")
+print("=" * 50)
+for step in [0, 5, 10, 20]:
+    print(f"Step {step}: {np.round(probs[step], 3)}")
+```
+
+## 6. Quantum Walk Search Algorithm
+
+Quantum walks can be used for spatial search, finding a marked vertex in a graph with quadratic speedup over classical search.
+
+<Definition term="Quantum Walk Search">
+Given a graph $G$ with a marked vertex $w$, the quantum walk search algorithm finds $w$ in time $O(\sqrt{n})$ for many graph structures, compared to $O(n)$ for classical search.
+</Definition>
+
+The algorithm modifies the walk operator at the marked vertex:
+
+<Formula>
+$$U' = U \cdot R_w$$
+$$R_w = I - 2|w\rangle\langle w| \otimes I_{\text{coin}}$$
+</Formula>
+
+```python
+def quantum_walk_search(adjacency_matrix: np.ndarray,
+                         marked_vertex: int, n_steps: int) -> Tuple[List[float], int]:
+    """
+    Quantum walk search for a marked vertex.
+
+    Args:
+        adjacency_matrix: Graph adjacency matrix
+        marked_vertex: Index of the vertex to find
+        n_steps: Maximum number of steps
+
+    Returns:
+        (probabilities_at_marked, optimal_step)
+    """
+    n = adjacency_matrix.shape[0]
+    max_degree = int(np.max(np.sum(adjacency_matrix, axis=1)))
+    dim = n * max_degree
+
+    S, C = build_graph_walk_operators(adjacency_matrix)
+    U = S @ C
+
+    # Oracle: flip phase at marked vertex
+    R_w = np.eye(dim, dtype=complex)
+    for c in range(max_degree):
+        idx = marked_vertex * max_degree + c
+        R_w[idx, idx] = -1
+
+    # Modified walk operator
+    U_prime = U @ R_w
+
+    # Initialize in uniform superposition
+    psi = np.ones(dim, dtype=complex) / np.sqrt(dim)
+
+    marked_probs = []
+    for step in range(n_steps + 1):
+        # Probability at marked vertex
+        prob_marked = sum(np.abs(psi[marked_vertex * max_degree + c])**2
+                          for c in range(max_degree))
+        marked_probs.append(prob_marked)
+
+        if step < n_steps:
+            psi = U_prime @ psi
+
+    optimal_step = np.argmax(marked_probs)
+    return marked_probs, optimal_step
+
+# Example: Search on complete graph
+def complete_graph(n: int) -> np.ndarray:
+    """Adjacency matrix for complete graph K_n."""
+    return np.ones((n, n)) - np.eye(n)
+
+n = 16
+A_complete = complete_graph(n)
+marked = 7
+
+probs, optimal = quantum_walk_search(A_complete, marked, 50)
+
+print(f"\nQuantum Walk Search on K_{n}")
+print(f"Marked vertex: {marked}")
+print(f"=" * 50)
+print(f"Optimal step: {optimal}")
+print(f"Success probability: {probs[optimal]:.4f}")
+print(f"Expected classical steps: {n}")
+print(f"Quantum speedup factor: {n / (optimal + 1):.2f}x")
+```
+
+## 7. Applications of Quantum Walks
+
+Quantum walks have numerous algorithmic applications:
+
+### Element Distinctness
+
+<Formula>
+$$\text{Classical: } O(n) \text{ queries}$$
+$$\text{Quantum walk: } O(n^{2/3}) \text{ queries}$$
+</Formula>
+
+### Triangle Finding
+
+<Formula>
+$$\text{Classical: } O(n^2) \text{ time}$$
+$$\text{Quantum walk: } O(n^{1.3}) \text{ time (best known)}$$
+</Formula>
+
+### Matrix Product Verification
+
+<Formula>
+$$\text{Classical: } O(n^2) \text{ time}$$
+$$\text{Quantum walk: } O(n^{5/3}) \text{ time}$$
+</Formula>
+
+<Warning>
+The quantum walk speedup depends critically on the graph structure. For some graphs (like the complete graph), we get optimal $\sqrt{n}$ speedup, while for others (like 2D grids), the speedup may be $\sqrt{n \log n}$ or less.
+</Warning>
+
+```python
+def analyze_quantum_walk_complexity(graph_type: str, n: int) -> dict:
+    """
+    Analyze quantum walk complexity for different graph types.
+    """
+    if graph_type == "complete":
+        classical_hitting = n
+        quantum_hitting = np.sqrt(n)
+        spectral_gap = 1 - 1/n
+    elif graph_type == "cycle":
+        classical_hitting = n**2
+        quantum_hitting = n
+        spectral_gap = 1 - np.cos(2*np.pi/n)
+    elif graph_type == "hypercube":
+        d = int(np.log2(n))
+        classical_hitting = n * d
+        quantum_hitting = np.sqrt(n) * d
+        spectral_gap = 2/d
+    elif graph_type == "2d_grid":
+        side = int(np.sqrt(n))
+        classical_hitting = n * np.log(n)
+        quantum_hitting = np.sqrt(n * np.log(n))
+        spectral_gap = 1/n
+    else:
+        raise ValueError(f"Unknown graph type: {graph_type}")
+
+    return {
+        'graph_type': graph_type,
+        'n_vertices': n,
+        'classical_hitting_time': classical_hitting,
+        'quantum_hitting_time': quantum_hitting,
+        'speedup': classical_hitting / quantum_hitting,
+        'spectral_gap': spectral_gap
+    }
+
+# Compare different graph types
+graph_types = ["complete", "cycle", "hypercube", "2d_grid"]
+n = 64
+
+print("\nQuantum Walk Complexity Analysis (n=64)")
+print("=" * 70)
+print(f"{'Graph Type':>12} {'Classical':>12} {'Quantum':>12} {'Speedup':>10} {'Gap':>10}")
+print("-" * 70)
+
+for gtype in graph_types:
+    analysis = analyze_quantum_walk_complexity(gtype, n)
+    print(f"{analysis['graph_type']:>12} "
+          f"{analysis['classical_hitting_time']:>12.1f} "
+          f"{analysis['quantum_hitting_time']:>12.1f} "
+          f"{analysis['speedup']:>10.2f}x "
+          f"{analysis['spectral_gap']:>10.4f}")
+```
+
+## 8. Implementing Quantum Walks with Qiskit
+
+Here's how to implement a discrete-time quantum walk using Qiskit:
+
+```python
+from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
+from qiskit_aer import AerSimulator
+from qiskit.quantum_info import Statevector
+import numpy as np
+
+def quantum_walk_circuit_1d(n_position_qubits: int, n_steps: int) -> QuantumCircuit:
+    """
+    Build quantum circuit for 1D discrete-time quantum walk.
+
+    Uses n_position_qubits for position (2^n positions) and 1 coin qubit.
+    """
+    n_positions = 2**n_position_qubits
+
+    # Create registers
+    position = QuantumRegister(n_position_qubits, 'pos')
+    coin = QuantumRegister(1, 'coin')
+    cr = ClassicalRegister(n_position_qubits, 'meas')
+
+    qc = QuantumCircuit(position, coin, cr)
+
+    # Initialize at center position with coin in |+>
+    center = n_positions // 2
+    # Encode center position
+    binary = format(center, f'0{n_position_qubits}b')
+    for i, bit in enumerate(reversed(binary)):
+        if bit == '1':
+            qc.x(position[i])
+
+    # Initialize coin in superposition
+    qc.h(coin[0])
+
+    # Apply walk steps
+    for step in range(n_steps):
+        # Coin operation (Hadamard)
+        qc.h(coin[0])
+
+        # Controlled increment (if coin = |0>)
+        # This is a simplified version; full implementation needs
+        # controlled addition circuit
+        qc.barrier()
+
+        # Conditional shift based on coin
+        # For coin=0: increment position
+        # For coin=1: decrement position
+
+        # Increment when coin=0 (controlled on coin being 0)
+        qc.x(coin[0])
+        for i in range(n_position_qubits):
+            # Multi-controlled X gate
+            controls = [coin[0]] + [position[j] for j in range(i)]
+            if len(controls) == 1:
+                qc.cx(controls[0], position[i])
+            elif len(controls) == 2:
+                qc.ccx(controls[0], controls[1], position[i])
+        qc.x(coin[0])
+
+        # Decrement when coin=1
+        # (Implementation of controlled decrement)
+        for i in range(n_position_qubits):
+            controls = [coin[0]] + [position[j] for j in range(i)]
+            if len(controls) == 1:
+                qc.cx(controls[0], position[i])
+                qc.x(position[i])
+            elif len(controls) == 2:
+                qc.ccx(controls[0], controls[1], position[i])
+
+        qc.barrier()
+
+    # Measure position
+    qc.measure(position, cr)
+
+    return qc
+
+# Create a simple walk circuit
+n_qubits = 3  # 8 positions
+n_steps = 2
+
+qc = quantum_walk_circuit_1d(n_qubits, n_steps)
+print(f"Quantum Walk Circuit: {n_qubits} position qubits, {n_steps} steps")
+print(f"Total qubits: {qc.num_qubits}")
+print(f"Circuit depth: {qc.depth()}")
+```
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Two types of quantum walks**: Continuous-time walks evolve via Hamiltonian dynamics ($e^{-iAt}$), while discrete-time walks use coin and shift operations
+2. **Ballistic spreading**: Quantum walks spread as $O(t)$ compared to classical $O(\sqrt{t})$
+3. **Graph walk formulation**: General graphs require careful construction of coin and shift operators
+4. **Search applications**: Quantum walk search achieves $O(\sqrt{n})$ on many graph structures
+5. **Speedup depends on structure**: The spectral gap and graph connectivity determine achievable speedup
+6. **Algorithmic applications**: Element distinctness, triangle finding, and matrix verification all benefit from quantum walks
+
+Quantum walks form a powerful paradigm for designing quantum algorithms on graphs, with applications ranging from search to optimization.
+
+## Further Reading
+
+- Childs, A. M. (2009). Universal computation by quantum walk. Physical Review Letters.
+- Ambainis, A. (2003). Quantum walks and their algorithmic applications.
+- Kempe, J. (2003). Quantum random walks: An introductory overview.
+- Santha, M. (2008). Quantum walk based search algorithms.
+- Next: Graph Isomorphism

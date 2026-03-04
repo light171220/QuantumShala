@@ -1,0 +1,1442 @@
+---
+title: "Error Handling in Hybrid Quantum-Classical Systems"
+description: "Master comprehensive error handling strategies for hybrid quantum-classical applications."
+duration: 50
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+- Identify and categorize common quantum job failure modes
+- Implement robust retry strategies with exponential backoff
+- Design graceful degradation patterns for hybrid systems
+- Build classical fallback mechanisms when quantum resources fail
+- Apply exception handling patterns specific to quantum computing
+
+## 1. Understanding Quantum Job Failures
+
+Quantum computing introduces unique failure modes not found in classical systems. Understanding these failure types is essential for building robust hybrid applications.
+
+```
+QUANTUM FAILURE TAXONOMY
+========================
+
+Hardware Failures                    Software/Service Failures
+-----------------                    -------------------------
+┌─────────────────────┐              ┌─────────────────────┐
+│ Calibration Drift   │              │ API Timeouts        │
+│ - T1/T2 degradation │              │ - Network issues    │
+│ - Gate fidelity     │              │ - Service overload  │
+│   changes           │              │ - Rate limiting     │
+└─────────────────────┘              └─────────────────────┘
+         │                                    │
+         ▼                                    ▼
+┌─────────────────────┐              ┌─────────────────────┐
+│ Qubit Failures      │              │ Queue Failures      │
+│ - Decoherence       │              │ - Job expiration    │
+│ - Crosstalk         │              │ - Priority changes  │
+│ - Measurement error │              │ - Backend offline   │
+└─────────────────────┘              └─────────────────────┘
+         │                                    │
+         ▼                                    ▼
+┌─────────────────────┐              ┌─────────────────────┐
+│ System Failures     │              │ Validation Failures │
+│ - Cryostat issues   │              │ - Circuit too large │
+│ - Power outages     │              │ - Invalid gates     │
+│ - Maintenance       │              │ - Qubit mapping     │
+└─────────────────────┘              └─────────────────────┘
+
+Impact Assessment:
+- Transient: Retry likely succeeds (network, rate limit)
+- Persistent: Requires intervention (calibration, maintenance)
+- Structural: Code changes needed (validation errors)
+```
+
+## 2. Quantum Exception Hierarchy
+
+Design a comprehensive exception hierarchy for quantum-specific errors.
+
+```python
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Dict, Any, Optional, List, Callable
+from enum import Enum
+import time
+import random
+import traceback
+
+class ErrorSeverity(Enum):
+    """Severity levels for quantum errors."""
+    LOW = "low"          # Retry likely to succeed
+    MEDIUM = "medium"    # May need different approach
+    HIGH = "high"        # Requires intervention
+    CRITICAL = "critical"  # System-level failure
+
+class ErrorCategory(Enum):
+    """Categories of quantum errors."""
+    HARDWARE = "hardware"
+    CALIBRATION = "calibration"
+    NETWORK = "network"
+    QUEUE = "queue"
+    VALIDATION = "validation"
+    EXECUTION = "execution"
+    TIMEOUT = "timeout"
+    RESOURCE = "resource"
+
+
+class QuantumError(Exception):
+    """Base exception for all quantum-related errors."""
+
+    def __init__(
+        self,
+        message: str,
+        category: ErrorCategory,
+        severity: ErrorSeverity,
+        retryable: bool = True,
+        details: Dict[str, Any] = None
+    ):
+        super().__init__(message)
+        self.message = message
+        self.category = category
+        self.severity = severity
+        self.retryable = retryable
+        self.details = details or {}
+        self.timestamp = time.time()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert error to dictionary for logging."""
+        return {
+            "message": self.message,
+            "category": self.category.value,
+            "severity": self.severity.value,
+            "retryable": self.retryable,
+            "details": self.details,
+            "timestamp": self.timestamp
+        }
+
+
+class HardwareError(QuantumError):
+    """Errors related to quantum hardware failures."""
+
+    def __init__(
+        self,
+        message: str,
+        qubit_ids: List[int] = None,
+        **kwargs
+    ):
+        super().__init__(
+            message,
+            category=ErrorCategory.HARDWARE,
+            severity=ErrorSeverity.HIGH,
+            retryable=False,
+            **kwargs
+        )
+        self.qubit_ids = qubit_ids or []
+
+
+class CalibrationError(QuantumError):
+    """Errors due to calibration drift or outdated calibration."""
+
+    def __init__(
+        self,
+        message: str,
+        calibration_age: float = None,
+        **kwargs
+    ):
+        super().__init__(
+            message,
+            category=ErrorCategory.CALIBRATION,
+            severity=ErrorSeverity.MEDIUM,
+            retryable=True,
+            **kwargs
+        )
+        self.calibration_age = calibration_age
+
+
+class JobTimeoutError(QuantumError):
+    """Errors when quantum jobs exceed time limits."""
+
+    def __init__(
+        self,
+        message: str,
+        job_id: str,
+        elapsed_time: float,
+        **kwargs
+    ):
+        super().__init__(
+            message,
+            category=ErrorCategory.TIMEOUT,
+            severity=ErrorSeverity.MEDIUM,
+            retryable=True,
+            **kwargs
+        )
+        self.job_id = job_id
+        self.elapsed_time = elapsed_time
+
+
+class QueueError(QuantumError):
+    """Errors related to job queue issues."""
+
+    def __init__(
+        self,
+        message: str,
+        queue_position: int = None,
+        estimated_wait: float = None,
+        **kwargs
+    ):
+        super().__init__(
+            message,
+            category=ErrorCategory.QUEUE,
+            severity=ErrorSeverity.LOW,
+            retryable=True,
+            **kwargs
+        )
+        self.queue_position = queue_position
+        self.estimated_wait = estimated_wait
+
+
+class CircuitValidationError(QuantumError):
+    """Errors in circuit validation before execution."""
+
+    def __init__(
+        self,
+        message: str,
+        circuit_depth: int = None,
+        invalid_gates: List[str] = None,
+        **kwargs
+    ):
+        super().__init__(
+            message,
+            category=ErrorCategory.VALIDATION,
+            severity=ErrorSeverity.HIGH,
+            retryable=False,
+            **kwargs
+        )
+        self.circuit_depth = circuit_depth
+        self.invalid_gates = invalid_gates or []
+
+
+# Exception hierarchy demonstration
+print("Quantum Error Hierarchy:")
+print("  QuantumError (base)")
+print("    ├── HardwareError")
+print("    ├── CalibrationError")
+print("    ├── JobTimeoutError")
+print("    ├── QueueError")
+print("    └── CircuitValidationError")
+```
+
+## 3. Retry Strategies with Exponential Backoff
+
+Implement sophisticated retry mechanisms for transient failures.
+
+```python
+import math
+from functools import wraps
+
+@dataclass
+class RetryConfig:
+    """Configuration for retry behavior."""
+    max_attempts: int = 3
+    initial_delay: float = 1.0
+    max_delay: float = 60.0
+    exponential_base: float = 2.0
+    jitter: bool = True
+    jitter_range: float = 0.5
+    retryable_exceptions: tuple = (QuantumError,)
+
+@dataclass
+class RetryResult:
+    """Result of a retry operation."""
+    success: bool
+    result: Any
+    attempts: int
+    total_delay: float
+    errors: List[Dict[str, Any]]
+
+
+class RetryStrategy(ABC):
+    """Abstract base class for retry strategies."""
+
+    @abstractmethod
+    def calculate_delay(self, attempt: int, error: Exception) -> float:
+        """Calculate delay before next retry attempt."""
+        pass
+
+    @abstractmethod
+    def should_retry(self, attempt: int, error: Exception) -> bool:
+        """Determine if another retry should be attempted."""
+        pass
+
+
+class ExponentialBackoffStrategy(RetryStrategy):
+    """
+    Exponential backoff with optional jitter.
+
+    Delay formula: min(max_delay, initial_delay * base^attempt) + jitter
+    """
+
+    def __init__(self, config: RetryConfig):
+        self.config = config
+
+    def calculate_delay(self, attempt: int, error: Exception) -> float:
+        """Calculate exponential backoff delay."""
+        base_delay = self.config.initial_delay * (
+            self.config.exponential_base ** attempt
+        )
+
+        # Cap at maximum delay
+        delay = min(base_delay, self.config.max_delay)
+
+        # Add jitter to prevent thundering herd
+        if self.config.jitter:
+            jitter_amount = delay * self.config.jitter_range
+            delay += random.uniform(-jitter_amount, jitter_amount)
+
+        return max(0, delay)
+
+    def should_retry(self, attempt: int, error: Exception) -> bool:
+        """Check if retry should be attempted."""
+        if attempt >= self.config.max_attempts:
+            return False
+
+        # Check if error is in retryable list
+        if isinstance(error, QuantumError):
+            return error.retryable
+
+        return isinstance(error, self.config.retryable_exceptions)
+
+
+class AdaptiveRetryStrategy(RetryStrategy):
+    """
+    Adaptive retry strategy that adjusts based on error patterns.
+
+    Tracks error history to make smarter retry decisions.
+    """
+
+    def __init__(self, config: RetryConfig):
+        self.config = config
+        self.error_history: List[Dict] = []
+        self.success_history: List[float] = []
+
+    def calculate_delay(self, attempt: int, error: Exception) -> float:
+        """Calculate delay based on error patterns."""
+        base_delay = self.config.initial_delay * (
+            self.config.exponential_base ** attempt
+        )
+
+        # Adjust delay based on recent error frequency
+        recent_errors = [
+            e for e in self.error_history
+            if time.time() - e["timestamp"] < 300  # Last 5 minutes
+        ]
+
+        if len(recent_errors) > 5:
+            # Many recent errors - increase delay
+            base_delay *= 1.5
+
+        # Check if similar errors have been failing
+        similar_errors = [
+            e for e in recent_errors
+            if e.get("category") == getattr(error, "category", None)
+        ]
+
+        if len(similar_errors) > 3:
+            # Same error type keeps failing - longer backoff
+            base_delay *= 2.0
+
+        return min(base_delay, self.config.max_delay)
+
+    def should_retry(self, attempt: int, error: Exception) -> bool:
+        """Adaptive retry decision."""
+        # Record error for pattern analysis
+        self.error_history.append({
+            "timestamp": time.time(),
+            "category": getattr(error, "category", None),
+            "attempt": attempt
+        })
+
+        if attempt >= self.config.max_attempts:
+            return False
+
+        # Don't retry if same error has failed many times
+        recent_same_errors = sum(
+            1 for e in self.error_history[-10:]
+            if e.get("category") == getattr(error, "category", None)
+        )
+
+        if recent_same_errors >= 5:
+            return False
+
+        if isinstance(error, QuantumError):
+            return error.retryable
+
+        return True
+
+    def record_success(self):
+        """Record successful execution."""
+        self.success_history.append(time.time())
+        # Clear old error history on success
+        cutoff = time.time() - 600  # 10 minutes
+        self.error_history = [
+            e for e in self.error_history
+            if e["timestamp"] > cutoff
+        ]
+
+
+class RetryExecutor:
+    """
+    Executes operations with retry logic.
+    """
+
+    def __init__(self, strategy: RetryStrategy):
+        self.strategy = strategy
+        self.metrics = {
+            "total_attempts": 0,
+            "successful_retries": 0,
+            "failed_operations": 0,
+            "total_delay_time": 0.0
+        }
+
+    def execute(
+        self,
+        operation: Callable,
+        *args,
+        **kwargs
+    ) -> RetryResult:
+        """
+        Execute operation with retry logic.
+        """
+        errors = []
+        total_delay = 0.0
+
+        for attempt in range(self.strategy.config.max_attempts):
+            self.metrics["total_attempts"] += 1
+
+            try:
+                result = operation(*args, **kwargs)
+
+                if attempt > 0:
+                    self.metrics["successful_retries"] += 1
+
+                if isinstance(self.strategy, AdaptiveRetryStrategy):
+                    self.strategy.record_success()
+
+                return RetryResult(
+                    success=True,
+                    result=result,
+                    attempts=attempt + 1,
+                    total_delay=total_delay,
+                    errors=errors
+                )
+
+            except Exception as e:
+                error_info = {
+                    "attempt": attempt + 1,
+                    "error_type": type(e).__name__,
+                    "message": str(e),
+                    "timestamp": time.time()
+                }
+
+                if isinstance(e, QuantumError):
+                    error_info.update(e.to_dict())
+
+                errors.append(error_info)
+
+                if not self.strategy.should_retry(attempt, e):
+                    break
+
+                if attempt < self.strategy.config.max_attempts - 1:
+                    delay = self.strategy.calculate_delay(attempt, e)
+                    total_delay += delay
+                    self.metrics["total_delay_time"] += delay
+                    time.sleep(delay)
+
+        self.metrics["failed_operations"] += 1
+
+        return RetryResult(
+            success=False,
+            result=None,
+            attempts=len(errors),
+            total_delay=total_delay,
+            errors=errors
+        )
+
+
+def with_retry(config: RetryConfig = None):
+    """
+    Decorator for adding retry logic to functions.
+    """
+    if config is None:
+        config = RetryConfig()
+
+    def decorator(func: Callable):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            strategy = ExponentialBackoffStrategy(config)
+            executor = RetryExecutor(strategy)
+            result = executor.execute(func, *args, **kwargs)
+
+            if not result.success:
+                last_error = result.errors[-1] if result.errors else {}
+                raise QuantumError(
+                    f"Operation failed after {result.attempts} attempts: "
+                    f"{last_error.get('message', 'Unknown error')}",
+                    category=ErrorCategory.EXECUTION,
+                    severity=ErrorSeverity.HIGH,
+                    retryable=False,
+                    details={"retry_history": result.errors}
+                )
+
+            return result.result
+
+        return wrapper
+    return decorator
+
+
+# Demonstration of retry strategies
+print("\nRetry Strategy Comparison:")
+print("=" * 50)
+
+config = RetryConfig(max_attempts=5, initial_delay=1.0)
+exp_strategy = ExponentialBackoffStrategy(config)
+
+print("\nExponential Backoff Delays:")
+for attempt in range(5):
+    delay = exp_strategy.calculate_delay(attempt, None)
+    print(f"  Attempt {attempt + 1}: {delay:.2f}s delay")
+```
+
+## 4. Graceful Degradation Patterns
+
+Design systems that maintain functionality when components fail.
+
+```python
+@dataclass
+class DegradationLevel:
+    """Represents a level of system degradation."""
+    name: str
+    description: str
+    capabilities: List[str]
+    performance_factor: float  # 1.0 = full, 0.0 = none
+
+class DegradationMode(Enum):
+    """System degradation modes."""
+    FULL_QUANTUM = "full_quantum"
+    REDUCED_QUANTUM = "reduced_quantum"
+    HYBRID_FALLBACK = "hybrid_fallback"
+    CLASSICAL_ONLY = "classical_only"
+    MINIMAL = "minimal"
+
+
+class GracefulDegradationManager:
+    """
+    Manages system degradation when quantum resources fail.
+
+    Implements progressive degradation:
+    1. Full quantum - All features available
+    2. Reduced quantum - Fewer qubits/shots
+    3. Hybrid fallback - Mix of quantum and classical
+    4. Classical only - Pure classical execution
+    5. Minimal - Basic functionality only
+    """
+
+    def __init__(self):
+        self.current_mode = DegradationMode.FULL_QUANTUM
+        self.mode_history: List[Dict] = []
+        self.health_metrics: Dict[str, float] = {
+            "quantum_availability": 1.0,
+            "queue_health": 1.0,
+            "error_rate": 0.0,
+            "latency_factor": 1.0
+        }
+
+        self.degradation_levels = {
+            DegradationMode.FULL_QUANTUM: DegradationLevel(
+                name="Full Quantum",
+                description="All quantum capabilities available",
+                capabilities=["vqe", "qaoa", "grover", "qml", "error_mitigation"],
+                performance_factor=1.0
+            ),
+            DegradationMode.REDUCED_QUANTUM: DegradationLevel(
+                name="Reduced Quantum",
+                description="Limited quantum resources",
+                capabilities=["vqe", "qaoa", "basic_circuits"],
+                performance_factor=0.7
+            ),
+            DegradationMode.HYBRID_FALLBACK: DegradationLevel(
+                name="Hybrid Fallback",
+                description="Quantum for critical paths only",
+                capabilities=["vqe", "basic_circuits"],
+                performance_factor=0.5
+            ),
+            DegradationMode.CLASSICAL_ONLY: DegradationLevel(
+                name="Classical Only",
+                description="No quantum resources",
+                capabilities=["classical_optimization", "simulation"],
+                performance_factor=0.3
+            ),
+            DegradationMode.MINIMAL: DegradationLevel(
+                name="Minimal",
+                description="Basic functionality only",
+                capabilities=["status_check"],
+                performance_factor=0.1
+            )
+        }
+
+    def update_health_metrics(
+        self,
+        quantum_availability: float = None,
+        queue_health: float = None,
+        error_rate: float = None,
+        latency_factor: float = None
+    ):
+        """Update system health metrics."""
+        if quantum_availability is not None:
+            self.health_metrics["quantum_availability"] = quantum_availability
+        if queue_health is not None:
+            self.health_metrics["queue_health"] = queue_health
+        if error_rate is not None:
+            self.health_metrics["error_rate"] = error_rate
+        if latency_factor is not None:
+            self.health_metrics["latency_factor"] = latency_factor
+
+        # Automatically adjust degradation mode
+        self._evaluate_degradation()
+
+    def _evaluate_degradation(self):
+        """Evaluate and adjust degradation level."""
+        # Calculate composite health score
+        health_score = (
+            self.health_metrics["quantum_availability"] * 0.4 +
+            self.health_metrics["queue_health"] * 0.2 +
+            (1 - self.health_metrics["error_rate"]) * 0.3 +
+            (1 / self.health_metrics["latency_factor"]) * 0.1
+        )
+
+        # Determine appropriate mode
+        if health_score >= 0.9:
+            new_mode = DegradationMode.FULL_QUANTUM
+        elif health_score >= 0.7:
+            new_mode = DegradationMode.REDUCED_QUANTUM
+        elif health_score >= 0.5:
+            new_mode = DegradationMode.HYBRID_FALLBACK
+        elif health_score >= 0.2:
+            new_mode = DegradationMode.CLASSICAL_ONLY
+        else:
+            new_mode = DegradationMode.MINIMAL
+
+        if new_mode != self.current_mode:
+            self._transition_mode(new_mode)
+
+    def _transition_mode(self, new_mode: DegradationMode):
+        """Transition to new degradation mode."""
+        self.mode_history.append({
+            "from_mode": self.current_mode.value,
+            "to_mode": new_mode.value,
+            "timestamp": time.time(),
+            "health_metrics": self.health_metrics.copy()
+        })
+
+        print(f"Degradation transition: {self.current_mode.value} -> {new_mode.value}")
+        self.current_mode = new_mode
+
+    def get_available_capabilities(self) -> List[str]:
+        """Get currently available capabilities."""
+        return self.degradation_levels[self.current_mode].capabilities
+
+    def can_execute(self, capability: str) -> bool:
+        """Check if a capability is available."""
+        return capability in self.get_available_capabilities()
+
+    def get_performance_factor(self) -> float:
+        """Get current performance factor."""
+        return self.degradation_levels[self.current_mode].performance_factor
+
+    def visualize_status(self) -> str:
+        """Generate status visualization."""
+        level = self.degradation_levels[self.current_mode]
+
+        output = f"\n{'=' * 50}\n"
+        output += f"System Status: {level.name}\n"
+        output += f"{'=' * 50}\n\n"
+
+        output += "Health Metrics:\n"
+        for metric, value in self.health_metrics.items():
+            bar_length = int(value * 20)
+            bar = "█" * bar_length + "░" * (20 - bar_length)
+            output += f"  {metric:25s} [{bar}] {value:.1%}\n"
+
+        output += f"\nPerformance Factor: {level.performance_factor:.0%}\n"
+        output += f"Available Capabilities: {', '.join(level.capabilities)}\n"
+
+        return output
+
+
+class DegradableQuantumService:
+    """
+    Quantum service with graceful degradation support.
+    """
+
+    def __init__(self):
+        self.degradation_manager = GracefulDegradationManager()
+        self.classical_fallbacks: Dict[str, Callable] = {}
+
+    def register_fallback(self, capability: str, fallback_fn: Callable):
+        """Register classical fallback for a capability."""
+        self.classical_fallbacks[capability] = fallback_fn
+
+    def execute(
+        self,
+        capability: str,
+        quantum_fn: Callable,
+        *args,
+        **kwargs
+    ) -> Any:
+        """
+        Execute with automatic degradation handling.
+        """
+        # Check if quantum capability is available
+        if self.degradation_manager.can_execute(capability):
+            try:
+                return quantum_fn(*args, **kwargs)
+            except QuantumError as e:
+                print(f"Quantum execution failed: {e.message}")
+                # Update health and try fallback
+                self.degradation_manager.update_health_metrics(
+                    error_rate=min(1.0, self.degradation_manager.health_metrics["error_rate"] + 0.2)
+                )
+
+        # Try classical fallback
+        if capability in self.classical_fallbacks:
+            print(f"Using classical fallback for {capability}")
+            return self.classical_fallbacks[capability](*args, **kwargs)
+
+        raise QuantumError(
+            f"Capability '{capability}' unavailable and no fallback registered",
+            category=ErrorCategory.RESOURCE,
+            severity=ErrorSeverity.HIGH,
+            retryable=False
+        )
+
+
+# Demonstrate graceful degradation
+manager = GracefulDegradationManager()
+print(manager.visualize_status())
+
+# Simulate degradation
+print("Simulating system degradation...")
+manager.update_health_metrics(quantum_availability=0.6, error_rate=0.3)
+print(manager.visualize_status())
+```
+
+## 5. Classical Fallback Mechanisms
+
+Implement robust classical alternatives when quantum resources are unavailable.
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+
+class ClassicalFallbackRegistry:
+    """
+    Registry for classical fallback implementations.
+
+    Maps quantum algorithms to their classical counterparts
+    with performance characteristics.
+    """
+
+    def __init__(self):
+        self.fallbacks: Dict[str, Dict[str, Any]] = {}
+        self._register_defaults()
+
+    def _register_defaults(self):
+        """Register default classical fallbacks."""
+
+        # VQE fallback
+        self.register(
+            "vqe",
+            ClassicalVQEFallback(),
+            accuracy_loss=0.1,
+            speedup_loss=0.8,
+            description="Brute-force or heuristic classical optimization"
+        )
+
+        # QAOA fallback
+        self.register(
+            "qaoa",
+            ClassicalQAOAFallback(),
+            accuracy_loss=0.15,
+            speedup_loss=0.9,
+            description="Classical approximation algorithms"
+        )
+
+        # Sampling fallback
+        self.register(
+            "quantum_sampling",
+            ClassicalSamplingFallback(),
+            accuracy_loss=0.05,
+            speedup_loss=0.5,
+            description="Classical Monte Carlo sampling"
+        )
+
+    def register(
+        self,
+        quantum_algorithm: str,
+        fallback_impl: Any,
+        accuracy_loss: float,
+        speedup_loss: float,
+        description: str
+    ):
+        """Register a classical fallback."""
+        self.fallbacks[quantum_algorithm] = {
+            "implementation": fallback_impl,
+            "accuracy_loss": accuracy_loss,
+            "speedup_loss": speedup_loss,
+            "description": description
+        }
+
+    def get_fallback(self, quantum_algorithm: str) -> Optional[Any]:
+        """Get fallback implementation."""
+        entry = self.fallbacks.get(quantum_algorithm)
+        return entry["implementation"] if entry else None
+
+    def get_fallback_info(self, quantum_algorithm: str) -> Dict[str, Any]:
+        """Get information about a fallback."""
+        return self.fallbacks.get(quantum_algorithm, {})
+
+
+class FallbackStrategy(ABC):
+    """Base class for fallback strategies."""
+
+    @abstractmethod
+    def execute(self, *args, **kwargs) -> Any:
+        pass
+
+    @abstractmethod
+    def estimate_quality(self) -> float:
+        """Estimate solution quality compared to quantum (0-1)."""
+        pass
+
+
+class ClassicalVQEFallback(FallbackStrategy):
+    """
+    Classical fallback for VQE.
+
+    Uses classical optimization techniques to find
+    ground state approximations.
+    """
+
+    def execute(
+        self,
+        hamiltonian_matrix: np.ndarray,
+        initial_params: np.ndarray = None,
+        method: str = "COBYLA"
+    ) -> Dict[str, Any]:
+        """
+        Execute classical VQE approximation.
+        """
+        # For small systems, use exact diagonalization
+        if hamiltonian_matrix.shape[0] <= 64:  # Up to 6 qubits
+            eigenvalues, eigenvectors = np.linalg.eigh(hamiltonian_matrix)
+            return {
+                "ground_state_energy": eigenvalues[0],
+                "ground_state": eigenvectors[:, 0],
+                "method": "exact_diagonalization",
+                "quality": 1.0
+            }
+
+        # For larger systems, use variational approach
+        def cost_function(params):
+            # Simplified cost function
+            state = self._prepare_state(params, hamiltonian_matrix.shape[0])
+            return np.real(state.conj() @ hamiltonian_matrix @ state)
+
+        if initial_params is None:
+            initial_params = np.random.uniform(0, 2 * np.pi, 10)
+
+        result = minimize(cost_function, initial_params, method=method)
+
+        return {
+            "ground_state_energy": result.fun,
+            "optimal_params": result.x,
+            "method": f"classical_{method}",
+            "quality": 0.9,
+            "iterations": result.nit
+        }
+
+    def _prepare_state(self, params: np.ndarray, dim: int) -> np.ndarray:
+        """Prepare trial state from parameters."""
+        state = np.zeros(dim, dtype=complex)
+        state[0] = 1.0
+        # Apply parameterized rotations (simplified)
+        for i, p in enumerate(params):
+            if i < dim:
+                state[i] = np.cos(p / 2) * state[i]
+        return state / np.linalg.norm(state)
+
+    def estimate_quality(self) -> float:
+        return 0.9
+
+
+class ClassicalQAOAFallback(FallbackStrategy):
+    """
+    Classical fallback for QAOA optimization problems.
+
+    Uses classical approximation algorithms for
+    combinatorial optimization.
+    """
+
+    def execute(
+        self,
+        problem_graph: Dict[str, Any],
+        num_iterations: int = 1000
+    ) -> Dict[str, Any]:
+        """
+        Execute classical QAOA approximation.
+
+        Uses simulated annealing for MAX-CUT style problems.
+        """
+        edges = problem_graph.get("edges", [])
+        num_nodes = problem_graph.get("num_nodes", 0)
+
+        # Simulated annealing
+        current_solution = np.random.choice([0, 1], size=num_nodes)
+        current_cost = self._evaluate_cut(current_solution, edges)
+
+        best_solution = current_solution.copy()
+        best_cost = current_cost
+
+        temperature = 1.0
+        cooling_rate = 0.995
+
+        for iteration in range(num_iterations):
+            # Flip random bit
+            candidate = current_solution.copy()
+            flip_idx = random.randint(0, num_nodes - 1)
+            candidate[flip_idx] = 1 - candidate[flip_idx]
+
+            candidate_cost = self._evaluate_cut(candidate, edges)
+
+            # Accept or reject
+            delta = candidate_cost - current_cost
+            if delta > 0 or random.random() < np.exp(delta / temperature):
+                current_solution = candidate
+                current_cost = candidate_cost
+
+                if current_cost > best_cost:
+                    best_solution = current_solution.copy()
+                    best_cost = current_cost
+
+            temperature *= cooling_rate
+
+        return {
+            "best_solution": best_solution.tolist(),
+            "best_cost": best_cost,
+            "method": "simulated_annealing",
+            "quality": 0.85,
+            "iterations": num_iterations
+        }
+
+    def _evaluate_cut(
+        self,
+        solution: np.ndarray,
+        edges: List[tuple]
+    ) -> int:
+        """Evaluate cut value for a solution."""
+        cut_value = 0
+        for i, j in edges:
+            if solution[i] != solution[j]:
+                cut_value += 1
+        return cut_value
+
+    def estimate_quality(self) -> float:
+        return 0.85
+
+
+class ClassicalSamplingFallback(FallbackStrategy):
+    """
+    Classical fallback for quantum sampling.
+
+    Uses Monte Carlo methods for probabilistic sampling.
+    """
+
+    def execute(
+        self,
+        probability_distribution: np.ndarray,
+        num_samples: int = 1000
+    ) -> Dict[str, Any]:
+        """
+        Execute classical sampling.
+        """
+        # Normalize distribution
+        probs = probability_distribution / probability_distribution.sum()
+
+        # Sample from distribution
+        samples = np.random.choice(
+            len(probs),
+            size=num_samples,
+            p=probs
+        )
+
+        # Count occurrences
+        unique, counts = np.unique(samples, return_counts=True)
+        result_counts = {str(bin(u)[2:].zfill(int(np.log2(len(probs))))): int(c)
+                        for u, c in zip(unique, counts)}
+
+        return {
+            "counts": result_counts,
+            "num_samples": num_samples,
+            "method": "monte_carlo",
+            "quality": 0.95
+        }
+
+    def estimate_quality(self) -> float:
+        return 0.95
+
+
+# Demonstrate fallback registry
+registry = ClassicalFallbackRegistry()
+
+print("\nClassical Fallback Registry:")
+print("=" * 60)
+for algorithm, info in registry.fallbacks.items():
+    print(f"\n{algorithm}:")
+    print(f"  Description: {info['description']}")
+    print(f"  Accuracy Loss: {info['accuracy_loss']:.0%}")
+    print(f"  Speedup Loss: {info['speedup_loss']:.0%}")
+```
+
+## 6. Comprehensive Error Handling Patterns
+
+Integrate all error handling components into a unified system.
+
+```python
+class QuantumErrorHandler:
+    """
+    Comprehensive error handler for quantum applications.
+
+    Integrates:
+    - Exception handling
+    - Retry logic
+    - Graceful degradation
+    - Classical fallbacks
+    - Monitoring and alerting
+    """
+
+    def __init__(self):
+        self.retry_config = RetryConfig(
+            max_attempts=3,
+            initial_delay=1.0,
+            exponential_base=2.0
+        )
+        self.retry_strategy = AdaptiveRetryStrategy(self.retry_config)
+        self.retry_executor = RetryExecutor(self.retry_strategy)
+
+        self.degradation_manager = GracefulDegradationManager()
+        self.fallback_registry = ClassicalFallbackRegistry()
+
+        self.error_log: List[Dict] = []
+        self.alert_handlers: List[Callable] = []
+
+    def register_alert_handler(self, handler: Callable):
+        """Register handler for error alerts."""
+        self.alert_handlers.append(handler)
+
+    def _send_alert(self, error: QuantumError):
+        """Send alert for critical errors."""
+        if error.severity in [ErrorSeverity.HIGH, ErrorSeverity.CRITICAL]:
+            for handler in self.alert_handlers:
+                try:
+                    handler(error.to_dict())
+                except Exception:
+                    pass
+
+    def handle_error(
+        self,
+        error: Exception,
+        context: Dict[str, Any] = None
+    ) -> Dict[str, Any]:
+        """
+        Handle an error with full error handling pipeline.
+        """
+        error_record = {
+            "timestamp": time.time(),
+            "error_type": type(error).__name__,
+            "message": str(error),
+            "context": context or {},
+            "traceback": traceback.format_exc()
+        }
+
+        if isinstance(error, QuantumError):
+            error_record.update(error.to_dict())
+            self._send_alert(error)
+
+            # Update degradation metrics based on error type
+            if error.category == ErrorCategory.HARDWARE:
+                self.degradation_manager.update_health_metrics(
+                    quantum_availability=0.5
+                )
+            elif error.category == ErrorCategory.QUEUE:
+                self.degradation_manager.update_health_metrics(
+                    queue_health=0.5
+                )
+            elif error.category == ErrorCategory.EXECUTION:
+                self.degradation_manager.update_health_metrics(
+                    error_rate=min(1.0,
+                        self.degradation_manager.health_metrics["error_rate"] + 0.1)
+                )
+
+        self.error_log.append(error_record)
+
+        return {
+            "handled": True,
+            "error_record": error_record,
+            "current_mode": self.degradation_manager.current_mode.value,
+            "available_capabilities": self.degradation_manager.get_available_capabilities()
+        }
+
+    def execute_with_resilience(
+        self,
+        operation_name: str,
+        quantum_fn: Callable,
+        fallback_name: str = None,
+        *args,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Execute operation with full resilience pipeline.
+
+        1. Try quantum execution with retries
+        2. On failure, try classical fallback
+        3. Update degradation state
+        4. Return result with metadata
+        """
+        result = {
+            "operation": operation_name,
+            "success": False,
+            "execution_type": None,
+            "result": None,
+            "errors": [],
+            "degradation_mode": self.degradation_manager.current_mode.value
+        }
+
+        # Check if operation is available in current mode
+        if not self.degradation_manager.can_execute(operation_name):
+            result["errors"].append({
+                "type": "capability_unavailable",
+                "message": f"Operation '{operation_name}' not available in "
+                          f"mode '{self.degradation_manager.current_mode.value}'"
+            })
+
+            # Try fallback directly
+            if fallback_name:
+                return self._try_fallback(result, fallback_name, *args, **kwargs)
+
+            return result
+
+        # Try quantum execution with retries
+        retry_result = self.retry_executor.execute(quantum_fn, *args, **kwargs)
+
+        if retry_result.success:
+            result["success"] = True
+            result["execution_type"] = "quantum"
+            result["result"] = retry_result.result
+            result["attempts"] = retry_result.attempts
+            return result
+
+        # Record errors
+        result["errors"].extend(retry_result.errors)
+
+        # Update degradation based on failure
+        self.degradation_manager.update_health_metrics(
+            error_rate=min(1.0,
+                self.degradation_manager.health_metrics["error_rate"] + 0.15)
+        )
+
+        # Try classical fallback
+        if fallback_name:
+            return self._try_fallback(result, fallback_name, *args, **kwargs)
+
+        return result
+
+    def _try_fallback(
+        self,
+        result: Dict,
+        fallback_name: str,
+        *args,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Try classical fallback execution."""
+        fallback = self.fallback_registry.get_fallback(fallback_name)
+
+        if fallback is None:
+            result["errors"].append({
+                "type": "fallback_unavailable",
+                "message": f"No fallback registered for '{fallback_name}'"
+            })
+            return result
+
+        try:
+            fallback_result = fallback.execute(*args, **kwargs)
+            result["success"] = True
+            result["execution_type"] = "classical_fallback"
+            result["result"] = fallback_result
+            result["fallback_quality"] = fallback.estimate_quality()
+
+        except Exception as e:
+            result["errors"].append({
+                "type": "fallback_error",
+                "message": str(e)
+            })
+
+        return result
+
+    def get_error_statistics(self) -> Dict[str, Any]:
+        """Get error statistics summary."""
+        if not self.error_log:
+            return {"total_errors": 0}
+
+        categories = {}
+        severities = {}
+
+        for error in self.error_log:
+            cat = error.get("category", "unknown")
+            sev = error.get("severity", "unknown")
+
+            categories[cat] = categories.get(cat, 0) + 1
+            severities[sev] = severities.get(sev, 0) + 1
+
+        return {
+            "total_errors": len(self.error_log),
+            "by_category": categories,
+            "by_severity": severities,
+            "retry_metrics": self.retry_executor.metrics,
+            "current_degradation": self.degradation_manager.current_mode.value
+        }
+
+
+# Demonstrate comprehensive error handling
+handler = QuantumErrorHandler()
+
+# Simulate error handling flow
+print("\nComprehensive Error Handling Demo:")
+print("=" * 50)
+
+def simulated_quantum_operation():
+    # Simulate random failure
+    if random.random() < 0.7:
+        raise JobTimeoutError(
+            "Job exceeded time limit",
+            job_id="test_123",
+            elapsed_time=300.0
+        )
+    return {"counts": {"00": 500, "11": 500}}
+
+result = handler.execute_with_resilience(
+    operation_name="vqe",
+    quantum_fn=simulated_quantum_operation,
+    fallback_name="vqe",
+    hamiltonian_matrix=np.array([[1, 0], [0, -1]])
+)
+
+print(f"\nExecution Result:")
+print(f"  Success: {result['success']}")
+print(f"  Type: {result['execution_type']}")
+print(f"  Mode: {result['degradation_mode']}")
+print(f"  Errors: {len(result['errors'])}")
+
+print(f"\nError Statistics:")
+stats = handler.get_error_statistics()
+print(f"  Total Errors: {stats['total_errors']}")
+print(f"  Current Degradation: {stats['current_degradation']}")
+```
+
+## 7. Circuit-Level Error Handling
+
+Handle errors specific to quantum circuit execution.
+
+```python
+class CircuitErrorHandler:
+    """
+    Handles errors at the quantum circuit level.
+
+    Detects and responds to:
+    - Circuit compilation errors
+    - Gate validation failures
+    - Qubit mapping issues
+    - Measurement errors
+    """
+
+    def __init__(self, backend_constraints: Dict[str, Any] = None):
+        self.backend_constraints = backend_constraints or {
+            "max_qubits": 127,
+            "max_depth": 1000,
+            "basis_gates": ["id", "rz", "sx", "x", "cx"],
+            "coupling_map": None
+        }
+
+    def validate_circuit(
+        self,
+        circuit_info: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Validate circuit before execution.
+        """
+        errors = []
+        warnings = []
+
+        num_qubits = circuit_info.get("num_qubits", 0)
+        depth = circuit_info.get("depth", 0)
+        gates = circuit_info.get("gates", [])
+
+        # Check qubit count
+        if num_qubits > self.backend_constraints["max_qubits"]:
+            errors.append({
+                "type": "qubit_overflow",
+                "message": f"Circuit requires {num_qubits} qubits, "
+                          f"backend supports {self.backend_constraints['max_qubits']}",
+                "suggestion": "Consider circuit cutting or use a larger backend"
+            })
+
+        # Check circuit depth
+        if depth > self.backend_constraints["max_depth"]:
+            warnings.append({
+                "type": "depth_warning",
+                "message": f"Circuit depth {depth} may cause decoherence issues",
+                "suggestion": "Consider circuit optimization or error mitigation"
+            })
+
+        # Check gate support
+        unsupported_gates = []
+        for gate in gates:
+            if gate not in self.backend_constraints["basis_gates"]:
+                unsupported_gates.append(gate)
+
+        if unsupported_gates:
+            warnings.append({
+                "type": "gate_transpilation",
+                "message": f"Gates {unsupported_gates} require transpilation",
+                "suggestion": "Transpilation will be applied automatically"
+            })
+
+        return {
+            "valid": len(errors) == 0,
+            "errors": errors,
+            "warnings": warnings,
+            "recommendations": self._get_recommendations(errors, warnings)
+        }
+
+    def _get_recommendations(
+        self,
+        errors: List[Dict],
+        warnings: List[Dict]
+    ) -> List[str]:
+        """Generate recommendations based on validation results."""
+        recommendations = []
+
+        for error in errors:
+            if error["type"] == "qubit_overflow":
+                recommendations.append(
+                    "Consider using circuit cutting techniques to partition "
+                    "the circuit across multiple executions"
+                )
+
+        for warning in warnings:
+            if warning["type"] == "depth_warning":
+                recommendations.append(
+                    "Enable error mitigation techniques like Zero Noise "
+                    "Extrapolation (ZNE) for deep circuits"
+                )
+
+        return recommendations
+
+    def handle_execution_error(
+        self,
+        error: Exception,
+        circuit_info: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Handle errors during circuit execution.
+        """
+        error_type = type(error).__name__
+
+        recovery_actions = []
+
+        if "calibration" in str(error).lower():
+            recovery_actions.append({
+                "action": "wait_recalibration",
+                "description": "Wait for backend recalibration",
+                "estimated_time": "15-30 minutes"
+            })
+            recovery_actions.append({
+                "action": "switch_backend",
+                "description": "Switch to alternative backend"
+            })
+
+        if "timeout" in str(error).lower():
+            recovery_actions.append({
+                "action": "reduce_shots",
+                "description": "Reduce number of shots and retry"
+            })
+            recovery_actions.append({
+                "action": "split_execution",
+                "description": "Split into smaller batches"
+            })
+
+        if "qubit" in str(error).lower():
+            recovery_actions.append({
+                "action": "remap_qubits",
+                "description": "Remap to avoid faulty qubits"
+            })
+
+        return {
+            "error_type": error_type,
+            "message": str(error),
+            "circuit_info": circuit_info,
+            "recovery_actions": recovery_actions,
+            "can_recover": len(recovery_actions) > 0
+        }
+
+
+# Demonstrate circuit error handling
+circuit_handler = CircuitErrorHandler()
+
+test_circuit = {
+    "num_qubits": 150,  # Over limit
+    "depth": 500,
+    "gates": ["h", "cx", "rz", "custom_gate"]
+}
+
+validation = circuit_handler.validate_circuit(test_circuit)
+
+print("\nCircuit Validation Result:")
+print(f"  Valid: {validation['valid']}")
+print(f"  Errors: {len(validation['errors'])}")
+print(f"  Warnings: {len(validation['warnings'])}")
+
+for error in validation["errors"]:
+    print(f"\n  Error: {error['type']}")
+    print(f"    {error['message']}")
+    print(f"    Suggestion: {error['suggestion']}")
+```
+
+## Summary
+
+Effective error handling in hybrid quantum-classical systems requires a multi-layered approach:
+
+1. **Exception Hierarchy**: Design quantum-specific exceptions that capture error categories, severity, and recoverability
+2. **Retry Strategies**: Implement exponential backoff with jitter and adaptive strategies for transient failures
+3. **Graceful Degradation**: Build systems that progressively reduce capabilities while maintaining core functionality
+4. **Classical Fallbacks**: Provide alternative implementations when quantum resources are unavailable
+5. **Comprehensive Integration**: Combine all error handling components into a unified resilience framework
+6. **Circuit-Level Handling**: Address errors specific to quantum circuit validation and execution
+
+## Further Reading
+
+- IBM Qiskit Runtime Error Handling Documentation
+- AWS Braket Error Recovery Patterns
+- Netflix Hystrix: Latency and Fault Tolerance Library
+- Microsoft Azure Quantum Reliability Patterns
+- "Release It!" by Michael Nygard - Stability Patterns

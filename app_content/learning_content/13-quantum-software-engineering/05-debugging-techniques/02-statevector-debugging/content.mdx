@@ -1,0 +1,839 @@
+---
+title: "Statevector Debugging"
+description: "Master statevector inspection techniques for debugging quantum circuits, including amplitude analysis, phase tracking, and state verification."
+duration: 45
+difficulty: "intermediate"
+---
+
+## 1. Understanding Statevector Debugging
+
+Statevector debugging allows you to inspect the exact quantum state at any point during circuit execution, making it invaluable for identifying logical errors in quantum algorithms.
+
+```
+Statevector Debugging Overview
+══════════════════════════════
+
+Classical Debugging          Quantum Debugging
+─────────────────           ─────────────────
+print(variable)    ────>    print(statevector)
+step through code  ────>    step through gates
+inspect memory     ────>    inspect amplitudes
+
+Key Differences:
+├── Quantum states exist in superposition
+├── Measurement collapses the state
+├── Phases are crucial but invisible in measurements
+└── Entanglement creates correlated states
+
+Debugging Strategy:
+1. Simulate circuit (no noise)
+2. Extract statevector after each operation
+3. Compare with expected theoretical state
+4. Identify where divergence occurs
+```
+
+## 2. Basic Statevector Inspection
+
+```python
+from qiskit import QuantumCircuit
+from qiskit.quantum_info import Statevector
+import numpy as np
+from typing import Dict, List, Tuple, Optional
+
+class StatevectorInspector:
+    """Core statevector debugging utilities."""
+
+    def __init__(self, precision: int = 4):
+        self.precision = precision
+
+    def get_statevector(self, circuit: QuantumCircuit) -> Statevector:
+        """Get statevector from circuit (removes measurements)."""
+        # Remove measurements for simulation
+        sim_circuit = circuit.remove_final_measurements(inplace=False)
+        return Statevector.from_instruction(sim_circuit)
+
+    def print_statevector(self, sv: Statevector,
+                          threshold: float = 1e-10):
+        """Print statevector in human-readable format."""
+        data = sv.data
+        n_qubits = int(np.log2(len(data)))
+
+        print(f"Statevector ({n_qubits} qubits):")
+        print("─" * 50)
+
+        non_zero_count = 0
+        for i, amplitude in enumerate(data):
+            if abs(amplitude) > threshold:
+                non_zero_count += 1
+                basis = format(i, f'0{n_qubits}b')
+
+                # Extract magnitude and phase
+                mag = abs(amplitude)
+                phase = np.angle(amplitude)
+                phase_deg = np.degrees(phase)
+
+                # Format amplitude
+                if abs(amplitude.imag) < threshold:
+                    amp_str = f"{amplitude.real:.{self.precision}f}"
+                else:
+                    amp_str = f"{amplitude:.{self.precision}f}"
+
+                print(f"  |{basis}⟩: {amp_str}")
+                print(f"          |amp| = {mag:.{self.precision}f}, "
+                      f"phase = {phase:.4f} rad ({phase_deg:.1f}°)")
+
+        print("─" * 50)
+        print(f"Non-zero amplitudes: {non_zero_count}/{len(data)}")
+
+    def extract_amplitudes(self, sv: Statevector,
+                           threshold: float = 1e-10) -> Dict[str, complex]:
+        """Extract non-zero amplitudes as dictionary."""
+        data = sv.data
+        n_qubits = int(np.log2(len(data)))
+
+        amplitudes = {}
+        for i, amp in enumerate(data):
+            if abs(amp) > threshold:
+                basis = format(i, f'0{n_qubits}b')
+                amplitudes[basis] = complex(amp)
+
+        return amplitudes
+
+# Example usage
+qc = QuantumCircuit(2)
+qc.h(0)
+qc.cx(0, 1)
+
+inspector = StatevectorInspector()
+sv = inspector.get_statevector(qc)
+inspector.print_statevector(sv)
+```
+
+## 3. Amplitude and Phase Analysis
+
+Understanding amplitude magnitudes and phases is critical for debugging.
+
+```python
+class AmplitudeAnalyzer:
+    """Detailed amplitude and phase analysis."""
+
+    def analyze_amplitudes(self, sv: Statevector) -> Dict:
+        """Comprehensive amplitude analysis."""
+        data = sv.data
+        n_qubits = int(np.log2(len(data)))
+
+        analysis = {
+            'n_qubits': n_qubits,
+            'total_states': len(data),
+            'non_zero_states': 0,
+            'max_amplitude': 0,
+            'min_nonzero_amplitude': float('inf'),
+            'amplitude_distribution': {},
+            'phase_distribution': {},
+            'entanglement_indicators': []
+        }
+
+        magnitudes = []
+        phases = []
+
+        for i, amp in enumerate(data):
+            mag = abs(amp)
+            if mag > 1e-10:
+                analysis['non_zero_states'] += 1
+                magnitudes.append(mag)
+                phases.append(np.angle(amp))
+
+                basis = format(i, f'0{n_qubits}b')
+                analysis['amplitude_distribution'][basis] = {
+                    'magnitude': mag,
+                    'phase': np.angle(amp),
+                    'probability': mag ** 2
+                }
+
+                if mag > analysis['max_amplitude']:
+                    analysis['max_amplitude'] = mag
+                if mag < analysis['min_nonzero_amplitude']:
+                    analysis['min_nonzero_amplitude'] = mag
+
+        # Phase analysis
+        if phases:
+            unique_phases = list(set(round(p, 4) for p in phases))
+            analysis['phase_distribution'] = {
+                'unique_phases': unique_phases,
+                'phase_variance': np.var(phases) if len(phases) > 1 else 0
+            }
+
+        # Check for uniform superposition
+        if magnitudes:
+            mag_variance = np.var(magnitudes)
+            analysis['is_uniform_superposition'] = mag_variance < 1e-6
+
+        return analysis
+
+    def check_normalization(self, sv: Statevector,
+                            tolerance: float = 1e-10) -> Dict:
+        """Verify state normalization."""
+        total_prob = sum(abs(amp) ** 2 for amp in sv.data)
+        is_normalized = abs(total_prob - 1.0) < tolerance
+
+        return {
+            'total_probability': total_prob,
+            'is_normalized': is_normalized,
+            'normalization_error': abs(total_prob - 1.0)
+        }
+
+    def compare_phases(self, sv: Statevector,
+                       basis_state_1: str,
+                       basis_state_2: str) -> Dict:
+        """Compare phases between two basis states."""
+        n_qubits = int(np.log2(len(sv.data)))
+
+        idx1 = int(basis_state_1, 2)
+        idx2 = int(basis_state_2, 2)
+
+        amp1 = sv.data[idx1]
+        amp2 = sv.data[idx2]
+
+        phase1 = np.angle(amp1)
+        phase2 = np.angle(amp2)
+        phase_diff = phase2 - phase1
+
+        # Normalize to [-pi, pi]
+        while phase_diff > np.pi:
+            phase_diff -= 2 * np.pi
+        while phase_diff < -np.pi:
+            phase_diff += 2 * np.pi
+
+        return {
+            'state_1': basis_state_1,
+            'state_2': basis_state_2,
+            'phase_1': phase1,
+            'phase_2': phase2,
+            'phase_difference': phase_diff,
+            'phase_diff_degrees': np.degrees(phase_diff)
+        }
+
+# Example
+analyzer = AmplitudeAnalyzer()
+analysis = analyzer.analyze_amplitudes(sv)
+print("\nAmplitude Analysis:")
+for key, value in analysis.items():
+    print(f"  {key}: {value}")
+```
+
+## 4. State Comparison and Verification
+
+```python
+class StateVerifier:
+    """Verify quantum states match expectations."""
+
+    def __init__(self, tolerance: float = 1e-6):
+        self.tolerance = tolerance
+
+    def compare_states(self, actual: Statevector,
+                       expected: Statevector) -> Dict:
+        """Compare two statevectors."""
+        if len(actual.data) != len(expected.data):
+            return {
+                'match': False,
+                'error': 'Dimension mismatch',
+                'actual_dim': len(actual.data),
+                'expected_dim': len(expected.data)
+            }
+
+        # Calculate fidelity
+        fidelity = abs(np.vdot(actual.data, expected.data)) ** 2
+
+        # Element-wise comparison
+        differences = []
+        n_qubits = int(np.log2(len(actual.data)))
+
+        for i, (a, e) in enumerate(zip(actual.data, expected.data)):
+            diff = abs(a - e)
+            if diff > self.tolerance:
+                basis = format(i, f'0{n_qubits}b')
+                differences.append({
+                    'basis_state': basis,
+                    'actual': complex(a),
+                    'expected': complex(e),
+                    'magnitude_diff': abs(abs(a) - abs(e)),
+                    'phase_diff': abs(np.angle(a) - np.angle(e))
+                })
+
+        return {
+            'match': len(differences) == 0,
+            'fidelity': fidelity,
+            'num_differences': len(differences),
+            'differences': differences
+        }
+
+    def verify_superposition(self, sv: Statevector,
+                             expected_states: List[str],
+                             expected_amplitudes: Optional[List[complex]] = None) -> Dict:
+        """Verify circuit creates expected superposition."""
+        n_qubits = int(np.log2(len(sv.data)))
+        results = {'verified': True, 'details': []}
+
+        # Check each expected state
+        for i, state in enumerate(expected_states):
+            idx = int(state, 2)
+            actual_amp = sv.data[idx]
+            actual_mag = abs(actual_amp)
+
+            detail = {
+                'state': state,
+                'actual_amplitude': complex(actual_amp),
+                'actual_probability': actual_mag ** 2
+            }
+
+            if expected_amplitudes and i < len(expected_amplitudes):
+                expected_amp = expected_amplitudes[i]
+                detail['expected_amplitude'] = expected_amp
+                detail['amplitude_match'] = abs(actual_amp - expected_amp) < self.tolerance
+                if not detail['amplitude_match']:
+                    results['verified'] = False
+            else:
+                # Just check state is present
+                detail['is_present'] = actual_mag > self.tolerance
+                if not detail['is_present']:
+                    results['verified'] = False
+
+            results['details'].append(detail)
+
+        # Check no unexpected states
+        for i, amp in enumerate(sv.data):
+            if abs(amp) > self.tolerance:
+                basis = format(i, f'0{n_qubits}b')
+                if basis not in expected_states:
+                    results['verified'] = False
+                    results['details'].append({
+                        'state': basis,
+                        'unexpected': True,
+                        'amplitude': complex(amp)
+                    })
+
+        return results
+
+    def verify_entanglement(self, sv: Statevector,
+                            qubit_pairs: List[Tuple[int, int]]) -> Dict:
+        """Check if specified qubit pairs are entangled."""
+        from qiskit.quantum_info import partial_trace, DensityMatrix
+
+        n_qubits = int(np.log2(len(sv.data)))
+        dm = DensityMatrix(sv)
+        results = {'pairs': []}
+
+        for q1, q2 in qubit_pairs:
+            # Trace out all other qubits
+            keep_qubits = [q1, q2]
+            trace_out = [i for i in range(n_qubits) if i not in keep_qubits]
+
+            if trace_out:
+                reduced_dm = partial_trace(dm, trace_out)
+            else:
+                reduced_dm = dm
+
+            # Check purity of reduced state
+            purity = np.real(np.trace(reduced_dm.data @ reduced_dm.data))
+
+            # For 2 qubits, check if it's a product state
+            # by checking if reduced DM is pure
+            is_entangled = purity < 0.99  # Not a pure product state
+
+            results['pairs'].append({
+                'qubits': (q1, q2),
+                'purity': purity,
+                'is_entangled': is_entangled
+            })
+
+        return results
+
+# Example
+verifier = StateVerifier()
+
+# Create Bell state
+bell_circuit = QuantumCircuit(2)
+bell_circuit.h(0)
+bell_circuit.cx(0, 1)
+bell_sv = Statevector.from_instruction(bell_circuit)
+
+# Verify it's a Bell state
+bell_expected = ['00', '11']
+bell_amps = [1/np.sqrt(2), 1/np.sqrt(2)]
+result = verifier.verify_superposition(bell_sv, bell_expected, bell_amps)
+print("\nBell State Verification:")
+print(f"  Verified: {result['verified']}")
+for detail in result['details']:
+    print(f"  {detail}")
+```
+
+## 5. Identifying State Preparation Errors
+
+```python
+class StatePreparationDebugger:
+    """Debug state preparation issues."""
+
+    def __init__(self):
+        self.common_errors = []
+
+    def diagnose_preparation(self, circuit: QuantumCircuit,
+                              expected_state: Statevector) -> Dict:
+        """Diagnose issues with state preparation."""
+        actual = Statevector.from_instruction(
+            circuit.remove_final_measurements(inplace=False)
+        )
+
+        diagnosis = {
+            'errors_found': [],
+            'suggestions': [],
+            'fidelity': abs(np.vdot(actual.data, expected_state.data)) ** 2
+        }
+
+        n_qubits = circuit.num_qubits
+
+        # Check for common errors
+        self._check_missing_superposition(actual, expected_state, diagnosis)
+        self._check_wrong_phase(actual, expected_state, diagnosis)
+        self._check_qubit_order(actual, expected_state, diagnosis)
+        self._check_missing_entanglement(actual, expected_state, diagnosis)
+
+        return diagnosis
+
+    def _check_missing_superposition(self, actual: Statevector,
+                                      expected: Statevector,
+                                      diagnosis: Dict):
+        """Check if superposition was not created."""
+        actual_nonzero = sum(1 for a in actual.data if abs(a) > 1e-10)
+        expected_nonzero = sum(1 for e in expected.data if abs(e) > 1e-10)
+
+        if actual_nonzero == 1 and expected_nonzero > 1:
+            diagnosis['errors_found'].append({
+                'type': 'missing_superposition',
+                'message': 'State is in computational basis but should be in superposition',
+                'actual_states': actual_nonzero,
+                'expected_states': expected_nonzero
+            })
+            diagnosis['suggestions'].append(
+                'Check if Hadamard or rotation gates are applied correctly'
+            )
+
+    def _check_wrong_phase(self, actual: Statevector,
+                           expected: Statevector,
+                           diagnosis: Dict):
+        """Check for phase errors."""
+        n_qubits = int(np.log2(len(actual.data)))
+        phase_errors = []
+
+        for i in range(len(actual.data)):
+            a_mag = abs(actual.data[i])
+            e_mag = abs(expected.data[i])
+
+            # If magnitudes match but amplitudes don't, it's a phase error
+            if abs(a_mag - e_mag) < 1e-6 and a_mag > 1e-10:
+                a_phase = np.angle(actual.data[i])
+                e_phase = np.angle(expected.data[i])
+                phase_diff = abs(a_phase - e_phase)
+
+                # Normalize
+                while phase_diff > np.pi:
+                    phase_diff -= 2 * np.pi
+
+                if abs(phase_diff) > 1e-6:
+                    basis = format(i, f'0{n_qubits}b')
+                    phase_errors.append({
+                        'state': basis,
+                        'actual_phase': a_phase,
+                        'expected_phase': e_phase,
+                        'difference': phase_diff
+                    })
+
+        if phase_errors:
+            diagnosis['errors_found'].append({
+                'type': 'phase_error',
+                'message': 'Correct magnitudes but wrong phases',
+                'affected_states': phase_errors
+            })
+            diagnosis['suggestions'].append(
+                'Check Z, S, T, or Rz gates for correct angles'
+            )
+
+    def _check_qubit_order(self, actual: Statevector,
+                           expected: Statevector,
+                           diagnosis: Dict):
+        """Check if qubits might be in wrong order."""
+        n_qubits = int(np.log2(len(actual.data)))
+
+        # Try bit-reversal
+        reversed_data = np.zeros_like(actual.data)
+        for i in range(len(actual.data)):
+            reversed_idx = int(format(i, f'0{n_qubits}b')[::-1], 2)
+            reversed_data[reversed_idx] = actual.data[i]
+
+        reversed_fidelity = abs(np.vdot(reversed_data, expected.data)) ** 2
+
+        if reversed_fidelity > 0.99:
+            diagnosis['errors_found'].append({
+                'type': 'qubit_order_reversed',
+                'message': 'Qubit order appears to be reversed',
+                'reversed_fidelity': reversed_fidelity
+            })
+            diagnosis['suggestions'].append(
+                'Check qubit indexing - Qiskit uses little-endian convention'
+            )
+
+    def _check_missing_entanglement(self, actual: Statevector,
+                                     expected: Statevector,
+                                     diagnosis: Dict):
+        """Check if entanglement is missing."""
+        from qiskit.quantum_info import DensityMatrix, partial_trace
+
+        n_qubits = int(np.log2(len(actual.data)))
+        if n_qubits < 2:
+            return
+
+        actual_dm = DensityMatrix(actual)
+        expected_dm = DensityMatrix(expected)
+
+        # Check purity of first qubit
+        actual_reduced = partial_trace(actual_dm, list(range(1, n_qubits)))
+        expected_reduced = partial_trace(expected_dm, list(range(1, n_qubits)))
+
+        actual_purity = np.real(np.trace(
+            actual_reduced.data @ actual_reduced.data
+        ))
+        expected_purity = np.real(np.trace(
+            expected_reduced.data @ expected_reduced.data
+        ))
+
+        # If expected is entangled but actual is not
+        if expected_purity < 0.99 and actual_purity > 0.99:
+            diagnosis['errors_found'].append({
+                'type': 'missing_entanglement',
+                'message': 'State should be entangled but appears separable',
+                'actual_purity': actual_purity,
+                'expected_purity': expected_purity
+            })
+            diagnosis['suggestions'].append(
+                'Verify CNOT or other entangling gates are correctly applied'
+            )
+
+# Example usage
+debugger = StatePreparationDebugger()
+
+# Intentionally wrong circuit (missing CNOT)
+wrong_circuit = QuantumCircuit(2)
+wrong_circuit.h(0)
+# Missing: cx(0, 1)
+
+# Expected Bell state
+expected_sv = Statevector([1/np.sqrt(2), 0, 0, 1/np.sqrt(2)])
+
+diagnosis = debugger.diagnose_preparation(wrong_circuit, expected_sv)
+print("\nState Preparation Diagnosis:")
+print(f"  Fidelity: {diagnosis['fidelity']:.4f}")
+for error in diagnosis['errors_found']:
+    print(f"  Error: {error['type']}")
+    print(f"    {error['message']}")
+for suggestion in diagnosis['suggestions']:
+    print(f"  Suggestion: {suggestion}")
+```
+
+## 6. Step-by-Step State Evolution
+
+```python
+class EvolutionDebugger:
+    """Debug by tracking state evolution through circuit."""
+
+    def __init__(self, circuit: QuantumCircuit):
+        self.circuit = circuit.remove_final_measurements(inplace=False)
+        self.evolution_log = []
+
+    def trace_evolution(self) -> List[Dict]:
+        """Trace state through entire circuit."""
+        self.evolution_log = []
+        partial = QuantumCircuit(self.circuit.num_qubits)
+
+        # Initial state
+        sv = Statevector.from_instruction(partial)
+        self.evolution_log.append({
+            'step': 0,
+            'operation': 'initial',
+            'qubits': [],
+            'state': sv.data.copy(),
+            'probabilities': sv.probabilities()
+        })
+
+        # After each gate
+        for i, (inst, qargs, cargs) in enumerate(self.circuit.data):
+            qubit_indices = [q._index for q in qargs]
+            partial.append(inst, qubit_indices)
+
+            sv = Statevector.from_instruction(partial)
+            self.evolution_log.append({
+                'step': i + 1,
+                'operation': inst.name,
+                'qubits': qubit_indices,
+                'state': sv.data.copy(),
+                'probabilities': sv.probabilities()
+            })
+
+        return self.evolution_log
+
+    def find_divergence(self, expected_states: List[np.ndarray],
+                        tolerance: float = 1e-6) -> Optional[int]:
+        """Find step where actual diverges from expected."""
+        if len(expected_states) != len(self.evolution_log):
+            raise ValueError("Expected states list length mismatch")
+
+        for i, (log, expected) in enumerate(zip(self.evolution_log,
+                                                  expected_states)):
+            actual = log['state']
+            fidelity = abs(np.vdot(actual, expected)) ** 2
+
+            if fidelity < 1 - tolerance:
+                return i
+
+        return None  # No divergence found
+
+    def print_evolution(self, show_amplitudes: bool = False):
+        """Print formatted evolution trace."""
+        n_qubits = self.circuit.num_qubits
+
+        print(f"\nState Evolution Trace ({n_qubits} qubits)")
+        print("=" * 60)
+
+        for log in self.evolution_log:
+            print(f"\nStep {log['step']}: {log['operation']}", end='')
+            if log['qubits']:
+                print(f" on qubit(s) {log['qubits']}")
+            else:
+                print()
+
+            if show_amplitudes:
+                for i, amp in enumerate(log['state']):
+                    if abs(amp) > 1e-10:
+                        basis = format(i, f'0{n_qubits}b')
+                        print(f"    |{basis}⟩: {amp:.4f}")
+            else:
+                # Just show non-zero basis states
+                nonzero = [format(i, f'0{n_qubits}b')
+                          for i, a in enumerate(log['state']) if abs(a) > 1e-10]
+                print(f"    Non-zero states: {', '.join(nonzero)}")
+
+    def get_state_at_step(self, step: int) -> np.ndarray:
+        """Get state at specific step."""
+        if step >= len(self.evolution_log):
+            raise IndexError(f"Step {step} does not exist")
+        return self.evolution_log[step]['state']
+
+    def compare_steps(self, step1: int, step2: int) -> Dict:
+        """Compare states at two steps."""
+        state1 = self.get_state_at_step(step1)
+        state2 = self.get_state_at_step(step2)
+
+        fidelity = abs(np.vdot(state1, state2)) ** 2
+
+        return {
+            'step_1': step1,
+            'step_2': step2,
+            'fidelity': fidelity,
+            'operation_between': [
+                self.evolution_log[i]['operation']
+                for i in range(step1 + 1, step2 + 1)
+            ]
+        }
+
+# Example
+qc = QuantumCircuit(3)
+qc.h(0)
+qc.cx(0, 1)
+qc.cx(1, 2)
+
+evo_debugger = EvolutionDebugger(qc)
+evo_debugger.trace_evolution()
+evo_debugger.print_evolution(show_amplitudes=True)
+```
+
+## 7. Debugging Common State Errors
+
+```
+Common Statevector Issues and Solutions
+═══════════════════════════════════════
+
+1. WRONG AMPLITUDE MAGNITUDES
+   Symptom: Probabilities don't match expected
+   Causes:
+   ├── Wrong rotation angles (Rx, Ry, Rz)
+   ├── Missing or extra gates
+   └── Incorrect number of Hadamards
+   Debug: Compare magnitudes at each step
+
+2. PHASE ERRORS
+   Symptom: Correct probabilities, wrong interference
+   Causes:
+   ├── Missing Z, S, or T gates
+   ├── Wrong Rz angle
+   └── Incorrect controlled-phase gates
+   Debug: Check phase differences between states
+
+3. QUBIT ORDERING ISSUES
+   Symptom: State looks "mirrored"
+   Causes:
+   ├── Little-endian vs big-endian confusion
+   ├── Wrong qubit indices in gates
+   └── Reversed measurement order
+   Debug: Try bit-reversing the state
+
+4. MISSING ENTANGLEMENT
+   Symptom: Product state instead of entangled
+   Causes:
+   ├── Missing CNOT/CZ gates
+   ├── CNOT on wrong qubits
+   └── Gate applied to wrong control/target
+   Debug: Check reduced state purity
+
+5. GLOBAL PHASE
+   Symptom: States differ by overall phase
+   Note: Global phase is usually irrelevant
+   Debug: Compare magnitudes and relative phases
+```
+
+## 8. Advanced Statevector Debugging Techniques
+
+```python
+class AdvancedStateDebugger:
+    """Advanced debugging techniques."""
+
+    def check_unitarity(self, circuit: QuantumCircuit) -> Dict:
+        """Verify circuit represents unitary operation."""
+        from qiskit.quantum_info import Operator
+
+        try:
+            op = Operator(circuit)
+            u = op.data
+
+            # Check U^dag * U = I
+            product = u.conj().T @ u
+            identity = np.eye(len(product))
+            max_error = np.max(np.abs(product - identity))
+
+            return {
+                'is_unitary': max_error < 1e-10,
+                'max_deviation': max_error
+            }
+        except Exception as e:
+            return {'error': str(e)}
+
+    def decompose_state(self, sv: Statevector) -> Dict:
+        """Decompose state into interpretable components."""
+        n_qubits = int(np.log2(len(sv.data)))
+        data = sv.data
+
+        decomposition = {
+            'superposition_type': None,
+            'entanglement_type': None,
+            'dominant_states': [],
+            'phase_pattern': None
+        }
+
+        # Find dominant states
+        probs = np.abs(data) ** 2
+        sorted_indices = np.argsort(probs)[::-1]
+
+        for idx in sorted_indices:
+            if probs[idx] > 0.01:  # > 1% probability
+                decomposition['dominant_states'].append({
+                    'state': format(idx, f'0{n_qubits}b'),
+                    'probability': probs[idx],
+                    'amplitude': complex(data[idx])
+                })
+
+        # Classify superposition
+        n_dominant = len(decomposition['dominant_states'])
+        if n_dominant == 1:
+            decomposition['superposition_type'] = 'computational_basis'
+        elif n_dominant == 2:
+            decomposition['superposition_type'] = 'two_state_superposition'
+        elif n_dominant == 2 ** n_qubits:
+            if np.var(probs) < 1e-6:
+                decomposition['superposition_type'] = 'uniform_superposition'
+            else:
+                decomposition['superposition_type'] = 'full_superposition'
+        else:
+            decomposition['superposition_type'] = 'partial_superposition'
+
+        return decomposition
+
+    def suggest_fixes(self, actual: Statevector,
+                      expected: Statevector) -> List[str]:
+        """Suggest potential fixes based on state comparison."""
+        suggestions = []
+        n_qubits = int(np.log2(len(actual.data)))
+
+        actual_nonzero = sum(1 for a in actual.data if abs(a) > 1e-10)
+        expected_nonzero = sum(1 for e in expected.data if abs(e) > 1e-10)
+
+        # Check for missing Hadamards
+        if actual_nonzero == 1 and expected_nonzero > 1:
+            suggestions.append(
+                f"Add H gates: expected {expected_nonzero} superposition "
+                f"states but got {actual_nonzero}"
+            )
+
+        # Check for extra Hadamards
+        if actual_nonzero > expected_nonzero:
+            suggestions.append(
+                f"Remove H gates: got {actual_nonzero} states but expected "
+                f"{expected_nonzero}"
+            )
+
+        # Check probabilities match (regardless of phase)
+        actual_probs = np.abs(actual.data) ** 2
+        expected_probs = np.abs(expected.data) ** 2
+
+        if np.allclose(actual_probs, expected_probs, atol=1e-6):
+            suggestions.append(
+                "Probabilities match - check for missing phase gates (Z, S, T, Rz)"
+            )
+
+        # Check for bit-reversed state
+        reversed_data = np.zeros_like(actual.data)
+        for i in range(len(actual.data)):
+            rev_idx = int(format(i, f'0{n_qubits}b')[::-1], 2)
+            reversed_data[rev_idx] = actual.data[i]
+
+        if np.allclose(reversed_data, expected.data, atol=1e-6):
+            suggestions.append(
+                "Qubit order is reversed - check indexing convention"
+            )
+
+        return suggestions
+
+# Example usage
+adv_debugger = AdvancedStateDebugger()
+
+qc = QuantumCircuit(2)
+qc.h(0)
+qc.cx(0, 1)
+
+unitarity = adv_debugger.check_unitarity(qc)
+print(f"\nUnitarity check: {unitarity}")
+
+sv = Statevector.from_instruction(qc)
+decomp = adv_debugger.decompose_state(sv)
+print(f"\nState decomposition:")
+for key, value in decomp.items():
+    print(f"  {key}: {value}")
+```
+
+## Summary
+
+Statevector debugging is essential for verifying quantum circuit correctness:
+
+1. **Amplitude Inspection**: Check magnitudes and phases at each step
+2. **State Comparison**: Use fidelity to measure state similarity
+3. **Evolution Tracing**: Track state changes gate by gate
+4. **Error Diagnosis**: Identify common issues like phase errors and missing entanglement
+5. **Verification**: Confirm superposition, entanglement, and normalization
+
+Remember that statevector debugging only works on simulators - real hardware requires different techniques due to measurement limitations.

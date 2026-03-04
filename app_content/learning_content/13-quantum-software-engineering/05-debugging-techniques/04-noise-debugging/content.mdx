@@ -1,0 +1,611 @@
+---
+title: "Noise Debugging"
+description: "Learn to identify, characterize, and debug noise sources in quantum circuits."
+duration: 45
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+By the end of this lesson, you will be able to:
+- Identify common noise sources in quantum systems
+- Simulate noise models using Qiskit Aer
+- Compare ideal and noisy circuit execution results
+- Estimate gate error rates from experimental data
+- Debug noise-related issues in quantum algorithms
+
+## 1. Understanding Quantum Noise Sources
+
+Quantum computers are susceptible to various noise sources that cause errors in computation. Understanding these sources is the first step in debugging noise-related issues.
+
+```
+Quantum Noise Taxonomy
+═══════════════════════════════════════════════════════════════
+                        QUANTUM NOISE
+                             │
+          ┌──────────────────┼──────────────────┐
+          │                  │                  │
+    ┌─────▼─────┐     ┌─────▼─────┐     ┌─────▼─────┐
+    │  COHERENT │     │INCOHERENT │     │  READOUT  │
+    │   ERRORS  │     │   ERRORS  │     │   ERRORS  │
+    └─────┬─────┘     └─────┬─────┘     └─────┬─────┘
+          │                 │                 │
+    ┌─────┴─────┐     ┌─────┴─────┐     ┌─────┴─────┐
+    │Over/under │     │ T1 decay  │     │  Bit-flip │
+    │ rotation  │     │ T2 dephase│     │   during  │
+    │   errors  │     │ Depolar.  │     │   readout │
+    └───────────┘     └───────────┘     └───────────┘
+```
+
+### 1.1 Coherent Errors
+
+Coherent errors are systematic and reversible. They arise from miscalibrated gates:
+
+```python
+import numpy as np
+from typing import Dict, List, Tuple
+
+class CoherentErrorAnalyzer:
+    """Analyze and detect coherent errors in quantum gates."""
+
+    def __init__(self):
+        self.ideal_gates = {
+            'X': np.array([[0, 1], [1, 0]], dtype=complex),
+            'Y': np.array([[0, -1j], [1j, 0]], dtype=complex),
+            'Z': np.array([[1, 0], [0, -1]], dtype=complex),
+            'H': np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2),
+            'S': np.array([[1, 0], [0, 1j]], dtype=complex),
+            'T': np.array([[1, 0], [0, np.exp(1j * np.pi / 4)]], dtype=complex)
+        }
+
+    def rotation_error(self, angle_error: float, axis: str = 'Z') -> np.ndarray:
+        """Generate rotation error matrix."""
+        if axis == 'Z':
+            return np.array([
+                [np.exp(-1j * angle_error / 2), 0],
+                [0, np.exp(1j * angle_error / 2)]
+            ])
+        elif axis == 'X':
+            c, s = np.cos(angle_error / 2), np.sin(angle_error / 2)
+            return np.array([[c, -1j * s], [-1j * s, c]])
+        elif axis == 'Y':
+            c, s = np.cos(angle_error / 2), np.sin(angle_error / 2)
+            return np.array([[c, -s], [s, c]])
+
+    def apply_coherent_error(self, gate: np.ndarray,
+                             angle_error: float,
+                             axis: str = 'Z') -> np.ndarray:
+        """Apply coherent error to a gate."""
+        error_matrix = self.rotation_error(angle_error, axis)
+        return error_matrix @ gate
+
+    def estimate_rotation_error(self, ideal: np.ndarray,
+                                actual: np.ndarray) -> Dict[str, float]:
+        """Estimate rotation error from ideal and actual gates."""
+        # Compute the error unitary: E = actual @ ideal†
+        error_unitary = actual @ np.conj(ideal.T)
+
+        # Extract rotation angle from trace
+        trace = np.trace(error_unitary)
+        angle = 2 * np.arccos(np.clip(np.abs(trace) / 2, -1, 1))
+
+        # Determine axis from off-diagonal elements
+        return {
+            'rotation_angle': np.degrees(angle),
+            'fidelity': np.abs(trace / 2) ** 2
+        }
+
+# Example: Detect over-rotation error
+analyzer = CoherentErrorAnalyzer()
+ideal_X = analyzer.ideal_gates['X']
+
+# Simulate 5-degree over-rotation
+over_rotation = np.radians(5)
+noisy_X = analyzer.apply_coherent_error(ideal_X, over_rotation, 'X')
+
+error_info = analyzer.estimate_rotation_error(ideal_X, noisy_X)
+print(f"Detected rotation error: {error_info['rotation_angle']:.2f}°")
+print(f"Gate fidelity: {error_info['fidelity']:.6f}")
+```
+
+### 1.2 Incoherent Errors (Decoherence)
+
+Incoherent errors are irreversible and arise from interaction with the environment:
+
+```python
+from dataclasses import dataclass
+from enum import Enum
+
+class NoiseType(Enum):
+    T1_DECAY = "t1_decay"           # Amplitude damping (energy relaxation)
+    T2_DEPHASING = "t2_dephasing"   # Phase damping (pure dephasing)
+    DEPOLARIZING = "depolarizing"   # Random Pauli errors
+    BIT_FLIP = "bit_flip"           # X errors
+    PHASE_FLIP = "phase_flip"       # Z errors
+
+@dataclass
+class DecoherenceParams:
+    """Decoherence parameters for a qubit."""
+    t1_us: float          # T1 relaxation time in microseconds
+    t2_us: float          # T2 dephasing time in microseconds
+    gate_time_ns: float   # Single gate duration in nanoseconds
+
+    @property
+    def t1_ns(self) -> float:
+        return self.t1_us * 1000
+
+    @property
+    def t2_ns(self) -> float:
+        return self.t2_us * 1000
+
+    def amplitude_damping_prob(self, duration_ns: float) -> float:
+        """Probability of T1 decay during given duration."""
+        return 1 - np.exp(-duration_ns / self.t1_ns)
+
+    def dephasing_prob(self, duration_ns: float) -> float:
+        """Probability of T2 dephasing during given duration."""
+        # Pure dephasing rate: 1/T_phi = 1/T2 - 1/(2*T1)
+        if self.t2_us > 2 * self.t1_us:
+            return 0  # Invalid: T2 cannot exceed 2*T1
+        t_phi = 1 / (1/self.t2_ns - 1/(2*self.t1_ns))
+        return 1 - np.exp(-duration_ns / t_phi)
+
+# Typical superconducting qubit parameters
+sc_qubit = DecoherenceParams(t1_us=100, t2_us=80, gate_time_ns=35)
+print(f"T1 decay prob per gate: {sc_qubit.amplitude_damping_prob(35):.6f}")
+print(f"T2 dephasing prob per gate: {sc_qubit.dephasing_prob(35):.6f}")
+```
+
+## 2. Building Noise Models
+
+Qiskit Aer provides comprehensive noise modeling capabilities:
+
+```python
+from qiskit_aer.noise import NoiseModel, depolarizing_error, thermal_relaxation_error
+from qiskit_aer.noise import pauli_error, ReadoutError
+from qiskit import QuantumCircuit
+from qiskit_aer import AerSimulator
+
+class NoiseModelBuilder:
+    """Build realistic noise models for simulation."""
+
+    def __init__(self):
+        self.noise_model = NoiseModel()
+
+    def add_depolarizing_noise(self,
+                                p1q: float = 0.001,
+                                p2q: float = 0.01) -> 'NoiseModelBuilder':
+        """Add depolarizing noise to gates."""
+        # Single-qubit depolarizing error
+        error_1q = depolarizing_error(p1q, 1)
+        self.noise_model.add_all_qubit_quantum_error(
+            error_1q, ['u1', 'u2', 'u3', 'rx', 'ry', 'rz', 'x', 'y', 'z', 'h', 's', 't']
+        )
+
+        # Two-qubit depolarizing error
+        error_2q = depolarizing_error(p2q, 2)
+        self.noise_model.add_all_qubit_quantum_error(error_2q, ['cx', 'cz', 'swap'])
+
+        return self
+
+    def add_thermal_relaxation(self,
+                               t1: float = 100e3,  # ns
+                               t2: float = 80e3,   # ns
+                               gate_time_1q: float = 35,  # ns
+                               gate_time_2q: float = 300) -> 'NoiseModelBuilder':
+        """Add thermal relaxation noise."""
+        # Single-qubit thermal relaxation
+        error_1q = thermal_relaxation_error(t1, t2, gate_time_1q)
+        self.noise_model.add_all_qubit_quantum_error(
+            error_1q, ['u1', 'u2', 'u3', 'rx', 'ry', 'rz', 'x', 'y', 'z', 'h']
+        )
+
+        # Two-qubit thermal relaxation (applied to each qubit)
+        error_2q = thermal_relaxation_error(t1, t2, gate_time_2q).expand(
+            thermal_relaxation_error(t1, t2, gate_time_2q)
+        )
+        self.noise_model.add_all_qubit_quantum_error(error_2q, ['cx'])
+
+        return self
+
+    def add_readout_error(self,
+                          p0_given_1: float = 0.02,
+                          p1_given_0: float = 0.01) -> 'NoiseModelBuilder':
+        """Add measurement readout errors."""
+        readout_error = ReadoutError([
+            [1 - p1_given_0, p1_given_0],  # P(measure | prepared 0)
+            [p0_given_1, 1 - p0_given_1]   # P(measure | prepared 1)
+        ])
+        self.noise_model.add_all_qubit_readout_error(readout_error)
+        return self
+
+    def build(self) -> NoiseModel:
+        """Return the constructed noise model."""
+        return self.noise_model
+
+# Build a realistic noise model
+noise_model = (NoiseModelBuilder()
+    .add_depolarizing_noise(p1q=0.0005, p2q=0.005)
+    .add_thermal_relaxation(t1=100e3, t2=80e3)
+    .add_readout_error(p0_given_1=0.02, p1_given_0=0.01)
+    .build())
+
+print("Noise model built with:")
+print(f"  Basis gates: {noise_model.basis_gates}")
+print(f"  Noise instructions: {noise_model.noise_instructions}")
+```
+
+## 3. Comparing Ideal vs Noisy Execution
+
+A key debugging technique is comparing results between ideal simulation and noisy execution:
+
+```python
+from qiskit import QuantumCircuit, transpile
+from qiskit_aer import AerSimulator
+from typing import Dict, Tuple
+import numpy as np
+
+class IdealVsNoisyComparator:
+    """Compare ideal and noisy quantum circuit execution."""
+
+    def __init__(self, noise_model: NoiseModel = None):
+        self.ideal_sim = AerSimulator(method='statevector')
+        self.noisy_sim = AerSimulator(noise_model=noise_model) if noise_model else None
+        self.noise_model = noise_model
+
+    def run_comparison(self, circuit: QuantumCircuit,
+                       shots: int = 10000) -> Dict:
+        """Run circuit on ideal and noisy simulators."""
+        # Ensure circuit has measurements
+        if circuit.num_clbits == 0:
+            meas_circuit = circuit.copy()
+            meas_circuit.measure_all()
+        else:
+            meas_circuit = circuit
+
+        # Ideal execution
+        ideal_job = self.ideal_sim.run(meas_circuit, shots=shots)
+        ideal_counts = ideal_job.result().get_counts()
+
+        # Noisy execution
+        noisy_counts = None
+        if self.noisy_sim:
+            noisy_job = self.noisy_sim.run(meas_circuit, shots=shots)
+            noisy_counts = noisy_job.result().get_counts()
+
+        return {
+            'ideal_counts': ideal_counts,
+            'noisy_counts': noisy_counts,
+            'shots': shots
+        }
+
+    def calculate_tvd(self, counts1: Dict[str, int],
+                      counts2: Dict[str, int]) -> float:
+        """Calculate Total Variation Distance between two distributions."""
+        shots1 = sum(counts1.values())
+        shots2 = sum(counts2.values())
+
+        all_outcomes = set(counts1.keys()) | set(counts2.keys())
+
+        tvd = 0.0
+        for outcome in all_outcomes:
+            p1 = counts1.get(outcome, 0) / shots1
+            p2 = counts2.get(outcome, 0) / shots2
+            tvd += abs(p1 - p2)
+
+        return tvd / 2  # TVD is half the L1 distance
+
+    def calculate_fidelity(self, counts1: Dict[str, int],
+                           counts2: Dict[str, int]) -> float:
+        """Calculate classical fidelity between distributions."""
+        shots1 = sum(counts1.values())
+        shots2 = sum(counts2.values())
+
+        all_outcomes = set(counts1.keys()) | set(counts2.keys())
+
+        fidelity = 0.0
+        for outcome in all_outcomes:
+            p1 = counts1.get(outcome, 0) / shots1
+            p2 = counts2.get(outcome, 0) / shots2
+            fidelity += np.sqrt(p1 * p2)
+
+        return fidelity ** 2
+
+    def diagnose_noise_impact(self, comparison: Dict) -> Dict:
+        """Diagnose the impact of noise on results."""
+        ideal = comparison['ideal_counts']
+        noisy = comparison['noisy_counts']
+
+        if noisy is None:
+            return {'error': 'No noisy results available'}
+
+        tvd = self.calculate_tvd(ideal, noisy)
+        fidelity = self.calculate_fidelity(ideal, noisy)
+
+        # Analyze specific degradation patterns
+        diagnosis = {
+            'tvd': tvd,
+            'fidelity': fidelity,
+            'noise_severity': 'low' if tvd < 0.1 else 'medium' if tvd < 0.3 else 'high',
+            'recommendations': []
+        }
+
+        if tvd > 0.3:
+            diagnosis['recommendations'].append(
+                "High noise impact detected. Consider error mitigation techniques."
+            )
+
+        if fidelity < 0.8:
+            diagnosis['recommendations'].append(
+                "Low fidelity suggests significant decoherence. Reduce circuit depth."
+            )
+
+        return diagnosis
+
+# Example usage
+qc = QuantumCircuit(2)
+qc.h(0)
+qc.cx(0, 1)  # Create Bell state
+
+comparator = IdealVsNoisyComparator(noise_model)
+results = comparator.run_comparison(qc)
+diagnosis = comparator.diagnose_noise_impact(results)
+
+print(f"Ideal counts: {results['ideal_counts']}")
+print(f"Noisy counts: {results['noisy_counts']}")
+print(f"TVD: {diagnosis['tvd']:.4f}")
+print(f"Fidelity: {diagnosis['fidelity']:.4f}")
+print(f"Severity: {diagnosis['noise_severity']}")
+```
+
+## 4. Error Rate Estimation
+
+Estimating gate error rates from experimental data is crucial for debugging:
+
+```python
+class ErrorRateEstimator:
+    """Estimate gate error rates from experimental data."""
+
+    def __init__(self):
+        pass
+
+    def estimate_from_rb(self, survival_probs: List[float],
+                         sequence_lengths: List[int]) -> Dict:
+        """Estimate error rate from Randomized Benchmarking data.
+
+        Fits: p = A * r^m + B
+        where r = 1 - (d-1)/d * error_rate, d = 2^n_qubits
+        """
+        from scipy.optimize import curve_fit
+
+        def rb_decay(m, A, r, B):
+            return A * (r ** m) + B
+
+        try:
+            popt, pcov = curve_fit(
+                rb_decay,
+                sequence_lengths,
+                survival_probs,
+                p0=[0.5, 0.99, 0.5],
+                bounds=([0, 0, 0], [1, 1, 1])
+            )
+
+            A, r, B = popt
+            d = 2  # Single qubit
+            error_per_clifford = (1 - r) * (d - 1) / d
+
+            return {
+                'decay_rate': r,
+                'error_per_clifford': error_per_clifford,
+                'asymptote': B,
+                'amplitude': A,
+                'fit_params': popt,
+                'fit_covariance': pcov
+            }
+        except Exception as e:
+            return {'error': str(e)}
+
+    def estimate_from_irb(self,
+                          rb_survival: List[float],
+                          irb_survival: List[float],
+                          sequence_lengths: List[int]) -> Dict:
+        """Estimate specific gate error from Interleaved RB."""
+        rb_result = self.estimate_from_rb(rb_survival, sequence_lengths)
+        irb_result = self.estimate_from_rb(irb_survival, sequence_lengths)
+
+        if 'error' in rb_result or 'error' in irb_result:
+            return {'error': 'Failed to fit RB or IRB data'}
+
+        r_rb = rb_result['decay_rate']
+        r_irb = irb_result['decay_rate']
+
+        # Gate error rate
+        d = 2
+        gate_error = (1 - r_irb / r_rb) * (d - 1) / d
+
+        return {
+            'rb_error_per_clifford': rb_result['error_per_clifford'],
+            'irb_error_per_clifford': irb_result['error_per_clifford'],
+            'gate_error': gate_error,
+            'gate_fidelity': 1 - gate_error
+        }
+
+    def estimate_from_process_tomography(self,
+                                         chi_matrix: np.ndarray,
+                                         ideal_chi: np.ndarray) -> Dict:
+        """Estimate error from process tomography chi matrices."""
+        # Process fidelity
+        fidelity = np.real(np.trace(chi_matrix @ ideal_chi))
+
+        # Average gate fidelity
+        d = int(np.sqrt(chi_matrix.shape[0]))
+        avg_fidelity = (d * fidelity + 1) / (d + 1)
+
+        return {
+            'process_fidelity': fidelity,
+            'average_gate_fidelity': avg_fidelity,
+            'error_rate': 1 - avg_fidelity
+        }
+
+# Example: Estimate error from simulated RB data
+estimator = ErrorRateEstimator()
+
+# Simulated RB data with ~0.5% error per Clifford
+sequence_lengths = [1, 10, 20, 50, 100, 200]
+r_true = 0.995  # True decay rate
+survival_probs = [0.5 * (r_true ** m) + 0.5 for m in sequence_lengths]
+# Add noise
+survival_probs = [p + np.random.normal(0, 0.01) for p in survival_probs]
+
+result = estimator.estimate_from_rb(survival_probs, sequence_lengths)
+print(f"Estimated error per Clifford: {result['error_per_clifford']:.4f}")
+print(f"Decay rate: {result['decay_rate']:.4f}")
+```
+
+## 5. Debugging Noise Issues in Algorithms
+
+When debugging noisy quantum algorithms, follow this systematic approach:
+
+```python
+class NoiseDebugger:
+    """Systematic noise debugging for quantum algorithms."""
+
+    def __init__(self, noise_model: NoiseModel):
+        self.noise_model = noise_model
+        self.comparator = IdealVsNoisyComparator(noise_model)
+
+    def layer_by_layer_analysis(self, circuit: QuantumCircuit,
+                                 shots: int = 10000) -> List[Dict]:
+        """Analyze noise accumulation layer by layer."""
+        results = []
+
+        # Build circuit incrementally
+        for i in range(1, len(circuit.data) + 1):
+            partial_circuit = QuantumCircuit(circuit.num_qubits)
+            for j in range(i):
+                instruction = circuit.data[j]
+                partial_circuit.append(instruction)
+
+            comparison = self.comparator.run_comparison(partial_circuit, shots)
+            diagnosis = self.comparator.diagnose_noise_impact(comparison)
+
+            results.append({
+                'depth': i,
+                'gate': str(circuit.data[i-1].operation.name),
+                'tvd': diagnosis['tvd'],
+                'fidelity': diagnosis['fidelity']
+            })
+
+        return results
+
+    def identify_noisy_gates(self, layer_results: List[Dict],
+                             threshold: float = 0.05) -> List[Dict]:
+        """Identify gates that cause significant noise increase."""
+        noisy_gates = []
+
+        for i in range(1, len(layer_results)):
+            tvd_increase = layer_results[i]['tvd'] - layer_results[i-1]['tvd']
+            if tvd_increase > threshold:
+                noisy_gates.append({
+                    'layer': i,
+                    'gate': layer_results[i]['gate'],
+                    'tvd_increase': tvd_increase,
+                    'cumulative_tvd': layer_results[i]['tvd']
+                })
+
+        return noisy_gates
+
+    def suggest_mitigation(self, analysis: List[Dict]) -> List[str]:
+        """Suggest noise mitigation strategies based on analysis."""
+        suggestions = []
+
+        final_tvd = analysis[-1]['tvd'] if analysis else 0
+        final_fidelity = analysis[-1]['fidelity'] if analysis else 1
+
+        if final_tvd > 0.3:
+            suggestions.append("Circuit depth too high. Consider circuit optimization.")
+
+        # Check for two-qubit gate impact
+        two_qubit_gates = [r for r in analysis if r['gate'] in ['cx', 'cz', 'swap']]
+        if two_qubit_gates:
+            avg_impact = np.mean([r['tvd'] for r in two_qubit_gates])
+            if avg_impact > 0.1:
+                suggestions.append("Two-qubit gates causing significant errors. "
+                                 "Consider native gate decomposition.")
+
+        if final_fidelity < 0.9:
+            suggestions.append("Consider error mitigation: ZNE, PEC, or M3.")
+
+        return suggestions
+
+# Example usage
+qc = QuantumCircuit(2)
+qc.h(0)
+qc.cx(0, 1)
+qc.rz(0.5, 0)
+qc.cx(0, 1)
+qc.h(0)
+
+debugger = NoiseDebugger(noise_model)
+layer_results = debugger.layer_by_layer_analysis(qc)
+
+print("Layer-by-layer analysis:")
+for r in layer_results:
+    print(f"  Depth {r['depth']}: {r['gate']:4s} | TVD={r['tvd']:.4f} | Fid={r['fidelity']:.4f}")
+
+noisy_gates = debugger.identify_noisy_gates(layer_results)
+print(f"\nNoisy gates identified: {len(noisy_gates)}")
+
+suggestions = debugger.suggest_mitigation(layer_results)
+print("\nMitigation suggestions:")
+for s in suggestions:
+    print(f"  - {s}")
+```
+
+## 6. Practical Debugging Workflow
+
+```
+Noise Debugging Workflow
+════════════════════════════════════════════════════════════════
+
+Step 1: BASELINE
+    ├─ Run ideal simulation
+    ├─ Verify expected behavior
+    └─ Establish success criteria
+
+Step 2: CHARACTERIZE
+    ├─ Identify noise sources
+    ├─ Measure T1, T2, gate errors
+    └─ Build accurate noise model
+
+Step 3: COMPARE
+    ├─ Run noisy simulation
+    ├─ Calculate TVD/fidelity
+    └─ Identify degradation patterns
+
+Step 4: LOCALIZE
+    ├─ Layer-by-layer analysis
+    ├─ Identify problematic gates
+    └─ Check two-qubit operations
+
+Step 5: MITIGATE
+    ├─ Apply circuit optimization
+    ├─ Use error mitigation
+    └─ Re-evaluate performance
+```
+
+## Summary
+
+| Noise Type | Source | Detection Method | Mitigation |
+|------------|--------|------------------|------------|
+| Coherent | Gate miscalibration | RB, GST | Recalibration |
+| T1 decay | Energy relaxation | T1 measurement | Reduce circuit depth |
+| T2 dephasing | Phase randomization | T2 measurement | Dynamical decoupling |
+| Depolarizing | Random Pauli errors | RB decay rate | Error correction |
+| Readout | Measurement errors | Calibration matrix | M3, TREX |
+
+## Further Reading
+
+- Nielsen & Chuang, "Quantum Computation and Quantum Information" (Chapter 8: Quantum Noise)
+- Qiskit Textbook: Noise and Error Mitigation
+- Randomized Benchmarking: Knill et al., PRA 77, 012307 (2008)

@@ -1,0 +1,1146 @@
+---
+title: "Interactive Debugging"
+description: "Learn to debug quantum circuits interactively with step-by-step execution, breakpoints, state inspection, and IDE integrations for efficient development workflows."
+duration: 35
+difficulty: "intermediate"
+---
+
+## 1. Understanding Interactive Debugging for Quantum Circuits
+
+Interactive debugging brings classical debugging paradigms to quantum computing, allowing developers to pause execution, inspect intermediate states, and step through quantum operations one gate at a time.
+
+```
+Interactive Debugging Paradigm
+==============================
+
+Classical Debugging               Quantum Interactive Debugging
+──────────────────               ─────────────────────────────
+Set breakpoint at line   ────>   Set breakpoint at gate index
+Step over statement      ────>   Step over gate operation
+Inspect variable value   ────>   Inspect statevector/density matrix
+Watch expression         ────>   Watch qubit probabilities
+Call stack               ────>   Gate execution history
+
+Key Capabilities:
+├── Step-by-step gate execution
+├── Breakpoints at specific circuit locations
+├── State inspection without measurement collapse
+├── Probability distribution monitoring
+├── Phase and entanglement tracking
+└── Integration with development environments
+```
+
+## 2. Building a Step-by-Step Circuit Executor
+
+The foundation of interactive debugging is executing circuits gate by gate.
+
+```python
+from qiskit import QuantumCircuit
+from qiskit.quantum_info import Statevector, DensityMatrix
+import numpy as np
+from typing import Dict, List, Optional, Tuple, Callable
+
+class StepExecutor:
+    """Execute quantum circuits step by step for debugging."""
+
+    def __init__(self, circuit: QuantumCircuit):
+        # Remove measurements for statevector simulation
+        self.original_circuit = circuit
+        self.circuit = circuit.remove_final_measurements(inplace=False)
+        self.n_qubits = circuit.num_qubits
+        self.current_step = 0
+        self.total_steps = len(self.circuit.data)
+        self.execution_history = []
+        self._initialize()
+
+    def _initialize(self):
+        """Initialize execution state."""
+        self.partial_circuit = QuantumCircuit(self.n_qubits)
+        self.current_state = Statevector.from_instruction(self.partial_circuit)
+        self.execution_history = [{
+            'step': 0,
+            'gate': 'initial',
+            'qubits': [],
+            'state': self.current_state.data.copy()
+        }]
+
+    def reset(self):
+        """Reset execution to initial state."""
+        self.current_step = 0
+        self._initialize()
+        print("Execution reset to initial state |0...0>")
+
+    def step(self) -> Optional[Dict]:
+        """Execute next gate and return state information."""
+        if self.current_step >= self.total_steps:
+            print("End of circuit reached.")
+            return None
+
+        # Get current instruction
+        inst, qargs, cargs = self.circuit.data[self.current_step]
+        qubit_indices = [q._index for q in qargs]
+
+        # Apply gate
+        self.partial_circuit.append(inst, qubit_indices)
+        self.current_state = Statevector.from_instruction(self.partial_circuit)
+        self.current_step += 1
+
+        # Record in history
+        step_info = {
+            'step': self.current_step,
+            'gate': inst.name,
+            'qubits': qubit_indices,
+            'state': self.current_state.data.copy(),
+            'probabilities': self.current_state.probabilities()
+        }
+        self.execution_history.append(step_info)
+
+        return step_info
+
+    def step_n(self, n: int) -> List[Dict]:
+        """Execute n steps and return all state information."""
+        results = []
+        for _ in range(n):
+            result = self.step()
+            if result is None:
+                break
+            results.append(result)
+        return results
+
+    def run_to_end(self) -> Dict:
+        """Execute all remaining gates."""
+        while self.current_step < self.total_steps:
+            self.step()
+        return self.get_current_info()
+
+    def get_current_info(self) -> Dict:
+        """Get current execution state."""
+        return {
+            'current_step': self.current_step,
+            'total_steps': self.total_steps,
+            'remaining': self.total_steps - self.current_step,
+            'state': self.current_state.data.copy(),
+            'probabilities': dict(self.current_state.probabilities_dict())
+        }
+
+    def print_status(self):
+        """Print current execution status."""
+        info = self.get_current_info()
+        print(f"\nExecution Status: Step {info['current_step']}/{info['total_steps']}")
+        print("-" * 50)
+
+        # Show non-zero amplitudes
+        for basis, prob in sorted(info['probabilities'].items(),
+                                  key=lambda x: x[1], reverse=True):
+            if prob > 1e-10:
+                amp = self.current_state.data[int(basis, 2)]
+                print(f"  |{basis}>: amp={amp:.4f}, prob={prob:.4f}")
+
+# Example usage
+qc = QuantumCircuit(2)
+qc.h(0)
+qc.cx(0, 1)
+qc.x(1)
+
+executor = StepExecutor(qc)
+print("Created step executor for Bell circuit")
+
+# Step through execution
+while executor.current_step < executor.total_steps:
+    result = executor.step()
+    print(f"\nAfter {result['gate']} on qubit(s) {result['qubits']}:")
+    executor.print_status()
+```
+
+## 3. Implementing Breakpoint System
+
+Breakpoints allow pausing execution at specific circuit locations.
+
+```python
+class BreakpointManager:
+    """Manage breakpoints for quantum circuit debugging."""
+
+    def __init__(self):
+        self.breakpoints: Dict[int, Dict] = {}
+        self.conditional_breakpoints: Dict[int, Callable] = {}
+        self.hit_counts: Dict[int, int] = {}
+
+    def add_breakpoint(self, gate_index: int, name: str = None,
+                       condition: Callable = None):
+        """Add breakpoint at gate index."""
+        self.breakpoints[gate_index] = {
+            'name': name or f"BP_{gate_index}",
+            'enabled': True,
+            'hit_count': 0
+        }
+        if condition:
+            self.conditional_breakpoints[gate_index] = condition
+        print(f"Breakpoint set at gate {gate_index}")
+
+    def remove_breakpoint(self, gate_index: int):
+        """Remove breakpoint."""
+        if gate_index in self.breakpoints:
+            del self.breakpoints[gate_index]
+            self.conditional_breakpoints.pop(gate_index, None)
+            print(f"Breakpoint removed from gate {gate_index}")
+
+    def toggle_breakpoint(self, gate_index: int):
+        """Enable/disable breakpoint."""
+        if gate_index in self.breakpoints:
+            self.breakpoints[gate_index]['enabled'] = \
+                not self.breakpoints[gate_index]['enabled']
+            status = "enabled" if self.breakpoints[gate_index]['enabled'] else "disabled"
+            print(f"Breakpoint at gate {gate_index} {status}")
+
+    def check_breakpoint(self, gate_index: int,
+                         state: np.ndarray = None) -> bool:
+        """Check if breakpoint should trigger."""
+        if gate_index not in self.breakpoints:
+            return False
+
+        bp = self.breakpoints[gate_index]
+        if not bp['enabled']:
+            return False
+
+        # Check conditional breakpoint
+        if gate_index in self.conditional_breakpoints:
+            if state is not None:
+                if not self.conditional_breakpoints[gate_index](state):
+                    return False
+
+        bp['hit_count'] += 1
+        return True
+
+    def list_breakpoints(self):
+        """List all breakpoints."""
+        print("\nBreakpoints:")
+        print("-" * 50)
+        if not self.breakpoints:
+            print("  No breakpoints set")
+            return
+
+        for idx, bp in sorted(self.breakpoints.items()):
+            status = "ON" if bp['enabled'] else "OFF"
+            cond = " (conditional)" if idx in self.conditional_breakpoints else ""
+            print(f"  [{status}] Gate {idx}: {bp['name']}{cond} "
+                  f"(hits: {bp['hit_count']})")
+
+
+class InteractiveDebugger:
+    """Full interactive debugger with breakpoint support."""
+
+    def __init__(self, circuit: QuantumCircuit):
+        self.circuit = circuit.remove_final_measurements(inplace=False)
+        self.executor = StepExecutor(circuit)
+        self.breakpoint_mgr = BreakpointManager()
+        self.watches: Dict[str, Callable] = {}
+
+    def add_breakpoint(self, gate_index: int, name: str = None):
+        """Add simple breakpoint."""
+        self.breakpoint_mgr.add_breakpoint(gate_index, name)
+
+    def add_conditional_breakpoint(self, gate_index: int,
+                                   condition: Callable[[np.ndarray], bool],
+                                   name: str = None):
+        """Add conditional breakpoint."""
+        self.breakpoint_mgr.add_breakpoint(gate_index, name, condition)
+
+    def add_watch(self, name: str, expression: Callable[[np.ndarray], any]):
+        """Add watch expression."""
+        self.watches[name] = expression
+        print(f"Watch added: {name}")
+
+    def continue_execution(self) -> Optional[int]:
+        """Continue until next breakpoint or end."""
+        while self.executor.current_step < self.executor.total_steps:
+            # Check breakpoint BEFORE executing
+            if self.breakpoint_mgr.check_breakpoint(
+                self.executor.current_step,
+                self.executor.current_state.data
+            ):
+                print(f"\n*** Breakpoint hit at gate {self.executor.current_step} ***")
+                self._print_context()
+                return self.executor.current_step
+
+            self.executor.step()
+
+        print("\nExecution completed.")
+        return None
+
+    def step_over(self) -> Optional[Dict]:
+        """Execute one gate."""
+        result = self.executor.step()
+        if result:
+            self._print_context()
+        return result
+
+    def run_to_gate(self, gate_index: int):
+        """Run until specific gate index."""
+        while self.executor.current_step < min(gate_index, self.executor.total_steps):
+            self.executor.step()
+        self._print_context()
+
+    def _print_context(self):
+        """Print current debugging context."""
+        step = self.executor.current_step
+        total = self.executor.total_steps
+
+        print(f"\n[Step {step}/{total}]")
+
+        # Show current and next gates
+        if step > 0:
+            prev_inst = self.circuit.data[step - 1]
+            print(f"  Executed: {prev_inst[0].name} on q{[q._index for q in prev_inst[1]]}")
+
+        if step < total:
+            next_inst = self.circuit.data[step]
+            print(f"  Next: {next_inst[0].name} on q{[q._index for q in next_inst[1]]}")
+
+        # Show watches
+        if self.watches:
+            print("\nWatch values:")
+            state = self.executor.current_state.data
+            for name, expr in self.watches.items():
+                try:
+                    value = expr(state)
+                    print(f"    {name}: {value}")
+                except Exception as e:
+                    print(f"    {name}: <error: {e}>")
+
+    def inspect_state(self) -> Dict:
+        """Get detailed state information."""
+        sv = self.executor.current_state
+        return {
+            'step': self.executor.current_step,
+            'statevector': sv.data,
+            'probabilities': dict(sv.probabilities_dict()),
+            'purity': np.real(np.trace(
+                DensityMatrix(sv).data @ DensityMatrix(sv).data
+            ))
+        }
+
+# Example usage
+qc = QuantumCircuit(3)
+qc.h(0)
+qc.h(1)
+qc.cx(0, 2)
+qc.cx(1, 2)
+qc.h(2)
+
+debugger = InteractiveDebugger(qc)
+
+# Set breakpoints
+debugger.add_breakpoint(2, "after_hadamards")
+debugger.add_breakpoint(4, "after_cnots")
+
+# Add watch for qubit 2 probability of |1>
+debugger.add_watch("q2_prob_1", lambda sv: abs(sv[1])**2 + abs(sv[3])**2 +
+                                           abs(sv[5])**2 + abs(sv[7])**2)
+
+# Run with breakpoints
+debugger.continue_execution()
+```
+
+## 4. State Inspector Tool
+
+A comprehensive tool for inspecting quantum states during debugging.
+
+```python
+class StateInspector:
+    """Inspect quantum states during interactive debugging."""
+
+    def __init__(self, n_qubits: int):
+        self.n_qubits = n_qubits
+
+    def full_inspection(self, state: np.ndarray) -> Dict:
+        """Complete state inspection."""
+        sv = Statevector(state)
+
+        return {
+            'amplitudes': self._get_amplitudes(state),
+            'probabilities': self._get_probabilities(state),
+            'phases': self._get_phases(state),
+            'entanglement': self._analyze_entanglement(sv),
+            'statistics': self._get_statistics(state)
+        }
+
+    def _get_amplitudes(self, state: np.ndarray,
+                        threshold: float = 1e-10) -> Dict[str, complex]:
+        """Extract non-zero amplitudes."""
+        amplitudes = {}
+        for i, amp in enumerate(state):
+            if abs(amp) > threshold:
+                basis = format(i, f'0{self.n_qubits}b')
+                amplitudes[basis] = complex(amp)
+        return amplitudes
+
+    def _get_probabilities(self, state: np.ndarray) -> Dict[str, float]:
+        """Get probability distribution."""
+        probs = {}
+        for i, amp in enumerate(state):
+            prob = abs(amp) ** 2
+            if prob > 1e-10:
+                basis = format(i, f'0{self.n_qubits}b')
+                probs[basis] = prob
+        return probs
+
+    def _get_phases(self, state: np.ndarray,
+                    threshold: float = 1e-10) -> Dict[str, float]:
+        """Extract phases of non-zero amplitudes."""
+        phases = {}
+        for i, amp in enumerate(state):
+            if abs(amp) > threshold:
+                basis = format(i, f'0{self.n_qubits}b')
+                phases[basis] = np.angle(amp)
+        return phases
+
+    def _analyze_entanglement(self, sv: Statevector) -> Dict:
+        """Analyze entanglement structure."""
+        from qiskit.quantum_info import partial_trace
+
+        if self.n_qubits < 2:
+            return {'message': 'Single qubit - no entanglement possible'}
+
+        dm = DensityMatrix(sv)
+        results = {}
+
+        # Check each qubit's purity
+        for q in range(self.n_qubits):
+            trace_out = [i for i in range(self.n_qubits) if i != q]
+            reduced = partial_trace(dm, trace_out)
+            purity = np.real(np.trace(reduced.data @ reduced.data))
+            results[f'qubit_{q}_purity'] = purity
+            results[f'qubit_{q}_entangled'] = purity < 0.99
+
+        return results
+
+    def _get_statistics(self, state: np.ndarray) -> Dict:
+        """Calculate statistical properties."""
+        probs = np.abs(state) ** 2
+        nonzero_probs = probs[probs > 1e-10]
+
+        return {
+            'num_nonzero_states': len(nonzero_probs),
+            'max_probability': float(np.max(probs)),
+            'min_nonzero_probability': float(np.min(nonzero_probs)) if len(nonzero_probs) > 0 else 0,
+            'entropy': float(-np.sum(nonzero_probs * np.log2(nonzero_probs))) if len(nonzero_probs) > 0 else 0
+        }
+
+    def compare_states(self, state1: np.ndarray,
+                       state2: np.ndarray) -> Dict:
+        """Compare two quantum states."""
+        fidelity = abs(np.vdot(state1, state2)) ** 2
+
+        # Amplitude changes
+        changes = []
+        for i in range(len(state1)):
+            diff = abs(state1[i] - state2[i])
+            if diff > 1e-10:
+                basis = format(i, f'0{self.n_qubits}b')
+                changes.append({
+                    'basis': basis,
+                    'before': complex(state1[i]),
+                    'after': complex(state2[i]),
+                    'prob_change': abs(state2[i])**2 - abs(state1[i])**2
+                })
+
+        return {
+            'fidelity': fidelity,
+            'num_changes': len(changes),
+            'changes': changes
+        }
+
+    def print_inspection(self, state: np.ndarray):
+        """Print formatted inspection results."""
+        inspection = self.full_inspection(state)
+
+        print("\n" + "=" * 60)
+        print("STATE INSPECTION REPORT")
+        print("=" * 60)
+
+        print("\nAMPLITUDES:")
+        for basis, amp in sorted(inspection['amplitudes'].items()):
+            prob = abs(amp) ** 2
+            phase = np.angle(amp)
+            print(f"  |{basis}>: {amp:.4f} (p={prob:.4f}, phi={phase:.3f})")
+
+        print("\nSTATISTICS:")
+        for key, value in inspection['statistics'].items():
+            print(f"  {key}: {value:.4f}")
+
+        print("\nENTANGLEMENT:")
+        for key, value in inspection['entanglement'].items():
+            print(f"  {key}: {value}")
+
+# Example
+inspector = StateInspector(2)
+
+# Create Bell state
+qc = QuantumCircuit(2)
+qc.h(0)
+qc.cx(0, 1)
+sv = Statevector.from_instruction(qc)
+
+inspector.print_inspection(sv.data)
+```
+
+## 5. Jupyter Notebook Debugging Workflows
+
+Jupyter notebooks provide excellent interactive debugging environments.
+
+```python
+# Jupyter-specific debugging utilities
+
+class JupyterQuantumDebugger:
+    """Interactive debugging for Jupyter notebooks."""
+
+    def __init__(self, circuit: QuantumCircuit):
+        self.circuit = circuit.remove_final_measurements(inplace=False)
+        self.step = 0
+        self.states = [Statevector.from_int(0, 2**circuit.num_qubits)]
+        self._compute_all_states()
+
+    def _compute_all_states(self):
+        """Pre-compute states at all steps."""
+        partial = QuantumCircuit(self.circuit.num_qubits)
+
+        for inst, qargs, cargs in self.circuit.data:
+            qubit_indices = [q._index for q in qargs]
+            partial.append(inst, qubit_indices)
+            self.states.append(Statevector.from_instruction(partial))
+
+    def show_step(self, step: int):
+        """Display state at specific step (for use with ipywidgets)."""
+        from IPython.display import display, HTML
+
+        if step < 0 or step >= len(self.states):
+            print(f"Invalid step. Range: 0-{len(self.states)-1}")
+            return
+
+        sv = self.states[step]
+
+        # Create HTML output
+        html = f"<h3>Step {step}/{len(self.states)-1}</h3>"
+
+        if step > 0:
+            inst, qargs, _ = self.circuit.data[step - 1]
+            qubits = [q._index for q in qargs]
+            html += f"<p><b>Just executed:</b> {inst.name} on qubit(s) {qubits}</p>"
+        else:
+            html += "<p><b>Initial state</b></p>"
+
+        # State table
+        html += "<table border='1' style='border-collapse: collapse;'>"
+        html += "<tr><th>Basis</th><th>Amplitude</th><th>Probability</th><th>Phase</th></tr>"
+
+        n_qubits = self.circuit.num_qubits
+        for i, amp in enumerate(sv.data):
+            if abs(amp) > 1e-10:
+                basis = format(i, f'0{n_qubits}b')
+                prob = abs(amp) ** 2
+                phase = np.angle(amp)
+                html += f"<tr><td>|{basis}></td><td>{amp:.4f}</td>"
+                html += f"<td>{prob:.4f}</td><td>{phase:.3f}</td></tr>"
+
+        html += "</table>"
+        display(HTML(html))
+
+    def create_slider_widget(self):
+        """Create interactive slider for step navigation."""
+        try:
+            import ipywidgets as widgets
+            from IPython.display import display
+
+            slider = widgets.IntSlider(
+                value=0,
+                min=0,
+                max=len(self.states) - 1,
+                step=1,
+                description='Step:',
+                continuous_update=False
+            )
+
+            output = widgets.interactive_output(
+                self.show_step,
+                {'step': slider}
+            )
+
+            display(slider, output)
+            return slider
+
+        except ImportError:
+            print("ipywidgets not available. Use show_step() directly.")
+
+    def show_circuit_with_marker(self, step: int):
+        """Display circuit with current position marked."""
+        from qiskit.visualization import circuit_drawer
+
+        # Create circuit copy with barrier at current step
+        marked = QuantumCircuit(self.circuit.num_qubits)
+        for i, (inst, qargs, cargs) in enumerate(self.circuit.data):
+            qubit_indices = [q._index for q in qargs]
+            if i == step:
+                marked.barrier(label=f">>> STEP {step}")
+            marked.append(inst, qubit_indices)
+
+        return marked.draw(output='mpl')
+
+    def compare_steps(self, step1: int, step2: int):
+        """Compare states at two steps."""
+        sv1 = self.states[step1]
+        sv2 = self.states[step2]
+
+        inspector = StateInspector(self.circuit.num_qubits)
+        comparison = inspector.compare_states(sv1.data, sv2.data)
+
+        print(f"\nComparison: Step {step1} -> Step {step2}")
+        print(f"Fidelity: {comparison['fidelity']:.6f}")
+        print(f"\nChanges ({comparison['num_changes']} states affected):")
+
+        for change in comparison['changes']:
+            print(f"  |{change['basis']}>: {change['before']:.3f} -> "
+                  f"{change['after']:.3f} (dp={change['prob_change']:.4f})")
+
+
+# Jupyter cell magic for debugging (example)
+"""
+# In Jupyter notebook:
+
+from IPython.core.magic import register_cell_magic
+
+@register_cell_magic
+def quantum_debug(line, cell):
+    '''Cell magic for quantum debugging.'''
+    # Execute cell to get circuit
+    exec(cell)
+    circuit = eval(line)  # circuit variable name
+
+    debugger = JupyterQuantumDebugger(circuit)
+    debugger.create_slider_widget()
+
+# Usage:
+%%quantum_debug qc
+qc = QuantumCircuit(2)
+qc.h(0)
+qc.cx(0, 1)
+"""
+```
+
+## 6. IDE Integrations
+
+Modern IDEs support quantum debugging through extensions and plugins.
+
+```python
+# VS Code and PyCharm debugging utilities
+
+class IDEDebugAdapter:
+    """Adapter for IDE debugging integration."""
+
+    def __init__(self, circuit: QuantumCircuit):
+        self.circuit = circuit.remove_final_measurements(inplace=False)
+        self.executor = StepExecutor(circuit)
+        self.breakpoints = set()
+        self.log_file = None
+
+    def enable_logging(self, filepath: str):
+        """Enable debug logging to file."""
+        self.log_file = filepath
+        with open(filepath, 'w') as f:
+            f.write("Quantum Debug Session Log\n")
+            f.write("=" * 50 + "\n\n")
+
+    def _log(self, message: str):
+        """Write to log file if enabled."""
+        if self.log_file:
+            with open(self.log_file, 'a') as f:
+                f.write(message + "\n")
+
+    def get_variables(self) -> Dict:
+        """Get current 'variables' for IDE debug view."""
+        sv = self.executor.current_state
+        n = self.executor.n_qubits
+
+        variables = {
+            'Execution': {
+                'current_step': self.executor.current_step,
+                'total_steps': self.executor.total_steps,
+                'n_qubits': n
+            },
+            'Probabilities': {},
+            'Amplitudes': {}
+        }
+
+        for i, amp in enumerate(sv.data):
+            if abs(amp) > 1e-10:
+                basis = format(i, f'0{n}b')
+                variables['Probabilities'][f'|{basis}>'] = f"{abs(amp)**2:.4f}"
+                variables['Amplitudes'][f'|{basis}>'] = f"{amp:.4f}"
+
+        return variables
+
+    def get_stack_trace(self) -> List[Dict]:
+        """Get 'stack trace' showing gate history."""
+        trace = []
+        for entry in self.executor.execution_history:
+            trace.append({
+                'step': entry['step'],
+                'operation': entry['gate'],
+                'qubits': entry.get('qubits', []),
+                'file': '<quantum_circuit>',
+                'line': entry['step']
+            })
+        return trace
+
+    def evaluate_expression(self, expr: str) -> str:
+        """Evaluate debug expression."""
+        sv = self.executor.current_state
+        n = self.executor.n_qubits
+
+        try:
+            if expr.startswith('prob('):
+                # prob(01) -> probability of |01>
+                basis = expr[5:-1]
+                idx = int(basis, 2)
+                return f"{abs(sv.data[idx])**2:.6f}"
+
+            elif expr.startswith('amp('):
+                # amp(01) -> amplitude of |01>
+                basis = expr[4:-1]
+                idx = int(basis, 2)
+                return f"{sv.data[idx]}"
+
+            elif expr.startswith('phase('):
+                # phase(01) -> phase of |01>
+                basis = expr[6:-1]
+                idx = int(basis, 2)
+                return f"{np.angle(sv.data[idx]):.6f}"
+
+            elif expr == 'entropy':
+                probs = np.abs(sv.data) ** 2
+                probs = probs[probs > 1e-10]
+                return f"{-np.sum(probs * np.log2(probs)):.6f}"
+
+            elif expr == 'nonzero':
+                return str(sum(1 for a in sv.data if abs(a) > 1e-10))
+
+            else:
+                return f"Unknown expression: {expr}"
+
+        except Exception as e:
+            return f"Error: {e}"
+
+    def create_debug_config(self, output_path: str = "quantum_debug.json"):
+        """Generate debug configuration file."""
+        import json
+
+        config = {
+            "circuit_info": {
+                "num_qubits": self.circuit.num_qubits,
+                "num_gates": len(self.circuit.data),
+                "gates": [
+                    {
+                        "index": i,
+                        "name": inst.name,
+                        "qubits": [q._index for q in qargs]
+                    }
+                    for i, (inst, qargs, cargs) in enumerate(self.circuit.data)
+                ]
+            },
+            "breakpoints": list(self.breakpoints),
+            "debug_expressions": [
+                "prob(00)", "prob(01)", "prob(10)", "prob(11)",
+                "entropy", "nonzero"
+            ]
+        }
+
+        with open(output_path, 'w') as f:
+            json.dump(config, f, indent=2)
+
+        print(f"Debug config written to {output_path}")
+
+
+# VS Code launch.json snippet for quantum debugging
+VS_CODE_LAUNCH_CONFIG = """
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Quantum Debug",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "env": {
+                "QUANTUM_DEBUG": "1"
+            },
+            "preLaunchTask": "quantum-setup"
+        }
+    ]
+}
+"""
+
+# Example usage
+print("VS Code launch.json configuration:")
+print(VS_CODE_LAUNCH_CONFIG)
+```
+
+## 7. Building Custom Debugging Utilities
+
+Create specialized debugging tools for your quantum development workflow.
+
+```python
+class QuantumDebugToolkit:
+    """Collection of custom debugging utilities."""
+
+    def __init__(self):
+        self.debug_sessions = {}
+        self.global_watches = []
+
+    def create_session(self, name: str, circuit: QuantumCircuit) -> str:
+        """Create new debug session."""
+        session_id = f"{name}_{len(self.debug_sessions)}"
+        self.debug_sessions[session_id] = {
+            'circuit': circuit,
+            'debugger': InteractiveDebugger(circuit),
+            'snapshots': [],
+            'annotations': {}
+        }
+        return session_id
+
+    def take_snapshot(self, session_id: str, label: str = None):
+        """Save current state snapshot."""
+        session = self.debug_sessions[session_id]
+        debugger = session['debugger']
+
+        snapshot = {
+            'label': label or f"snapshot_{len(session['snapshots'])}",
+            'step': debugger.executor.current_step,
+            'state': debugger.executor.current_state.data.copy(),
+            'timestamp': np.datetime64('now')
+        }
+        session['snapshots'].append(snapshot)
+        print(f"Snapshot saved: {snapshot['label']}")
+
+    def compare_snapshots(self, session_id: str,
+                         label1: str, label2: str) -> Dict:
+        """Compare two snapshots."""
+        session = self.debug_sessions[session_id]
+        snap1 = next(s for s in session['snapshots'] if s['label'] == label1)
+        snap2 = next(s for s in session['snapshots'] if s['label'] == label2)
+
+        inspector = StateInspector(session['circuit'].num_qubits)
+        return inspector.compare_states(snap1['state'], snap2['state'])
+
+    def annotate_gate(self, session_id: str, gate_idx: int, note: str):
+        """Add annotation to specific gate."""
+        session = self.debug_sessions[session_id]
+        session['annotations'][gate_idx] = note
+
+    def generate_debug_report(self, session_id: str) -> str:
+        """Generate comprehensive debug report."""
+        session = self.debug_sessions[session_id]
+        circuit = session['circuit']
+        debugger = session['debugger']
+
+        report = []
+        report.append("=" * 70)
+        report.append("QUANTUM DEBUG SESSION REPORT")
+        report.append("=" * 70)
+        report.append(f"\nSession: {session_id}")
+        report.append(f"Qubits: {circuit.num_qubits}")
+        report.append(f"Gates: {len(circuit.data)}")
+        report.append(f"Current Step: {debugger.executor.current_step}")
+        report.append(f"Snapshots: {len(session['snapshots'])}")
+
+        # Gate list with annotations
+        report.append("\n" + "-" * 70)
+        report.append("GATE SEQUENCE:")
+        report.append("-" * 70)
+
+        for i, (inst, qargs, _) in enumerate(circuit.data):
+            qubits = [q._index for q in qargs]
+            marker = ">>>" if i == debugger.executor.current_step else "   "
+            annotation = session['annotations'].get(i, "")
+            if annotation:
+                annotation = f" # {annotation}"
+            report.append(f"{marker} [{i}] {inst.name} q{qubits}{annotation}")
+
+        # Snapshots
+        if session['snapshots']:
+            report.append("\n" + "-" * 70)
+            report.append("SNAPSHOTS:")
+            report.append("-" * 70)
+
+            for snap in session['snapshots']:
+                report.append(f"\n  {snap['label']} (step {snap['step']}):")
+                inspector = StateInspector(circuit.num_qubits)
+                amps = inspector._get_amplitudes(snap['state'])
+                for basis, amp in sorted(amps.items()):
+                    report.append(f"    |{basis}>: {amp:.4f}")
+
+        return "\n".join(report)
+
+
+class AutoDebugger:
+    """Automatic debugging with anomaly detection."""
+
+    def __init__(self, circuit: QuantumCircuit):
+        self.circuit = circuit.remove_final_measurements(inplace=False)
+        self.anomalies = []
+
+    def run_with_checks(self) -> List[Dict]:
+        """Run circuit with automatic anomaly detection."""
+        self.anomalies = []
+        partial = QuantumCircuit(self.circuit.num_qubits)
+        prev_state = Statevector.from_instruction(partial)
+
+        for i, (inst, qargs, cargs) in enumerate(self.circuit.data):
+            qubit_indices = [q._index for q in qargs]
+            partial.append(inst, qubit_indices)
+            curr_state = Statevector.from_instruction(partial)
+
+            # Check for anomalies
+            self._check_normalization(i, curr_state)
+            self._check_unexpected_changes(i, inst.name, qubit_indices,
+                                          prev_state, curr_state)
+
+            prev_state = curr_state
+
+        return self.anomalies
+
+    def _check_normalization(self, step: int, state: Statevector):
+        """Check state normalization."""
+        norm = np.sum(np.abs(state.data) ** 2)
+        if abs(norm - 1.0) > 1e-10:
+            self.anomalies.append({
+                'type': 'normalization_error',
+                'step': step,
+                'expected_norm': 1.0,
+                'actual_norm': norm
+            })
+
+    def _check_unexpected_changes(self, step: int, gate: str,
+                                  qubits: List[int],
+                                  prev: Statevector,
+                                  curr: Statevector):
+        """Check for unexpected state changes."""
+        n = int(np.log2(len(prev.data)))
+
+        # For single-qubit gates, check if other qubits changed unexpectedly
+        if len(qubits) == 1 and gate not in ['measure', 'barrier']:
+            q = qubits[0]
+
+            for i in range(len(prev.data)):
+                if abs(prev.data[i] - curr.data[i]) > 1e-10:
+                    basis = format(i, f'0{n}b')
+                    # Check if change is only in expected qubit
+                    # This is a simplified check
+                    pass
+
+    def print_anomaly_report(self):
+        """Print detected anomalies."""
+        if not self.anomalies:
+            print("No anomalies detected.")
+            return
+
+        print(f"\n{len(self.anomalies)} anomalies detected:")
+        print("-" * 50)
+
+        for anomaly in self.anomalies:
+            print(f"\n  Step {anomaly['step']}: {anomaly['type']}")
+            for key, value in anomaly.items():
+                if key not in ['type', 'step']:
+                    print(f"    {key}: {value}")
+```
+
+## 8. Debug Session Workflow
+
+Complete debugging workflow putting all tools together.
+
+```python
+class DebugSession:
+    """Complete quantum debugging session."""
+
+    def __init__(self, circuit: QuantumCircuit, name: str = "debug"):
+        self.name = name
+        self.circuit = circuit
+        self.debugger = InteractiveDebugger(circuit)
+        self.inspector = StateInspector(circuit.num_qubits)
+        self.history = []
+        self.notes = []
+
+    def start(self):
+        """Start interactive debug session."""
+        print(f"\n{'='*60}")
+        print(f"QUANTUM DEBUG SESSION: {self.name}")
+        print(f"{'='*60}")
+        print(f"Circuit: {self.circuit.num_qubits} qubits, "
+              f"{len(self.circuit.data)} gates")
+        print("\nCommands:")
+        print("  s, step      - Execute next gate")
+        print("  c, continue  - Continue to breakpoint")
+        print("  b N          - Set breakpoint at gate N")
+        print("  i, inspect   - Inspect current state")
+        print("  p, print     - Print circuit")
+        print("  h, history   - Show execution history")
+        print("  r, reset     - Reset to beginning")
+        print("  q, quit      - End session")
+        print("-" * 60)
+
+        self._repl()
+
+    def _repl(self):
+        """Read-eval-print loop for debugging."""
+        while True:
+            try:
+                cmd = input("\n(qdb) ").strip().lower()
+
+                if not cmd:
+                    continue
+
+                elif cmd in ['s', 'step']:
+                    result = self.debugger.step_over()
+                    if result:
+                        self._record_action('step', result)
+
+                elif cmd in ['c', 'continue']:
+                    bp = self.debugger.continue_execution()
+                    if bp is not None:
+                        self._record_action('breakpoint', bp)
+
+                elif cmd.startswith('b '):
+                    gate_idx = int(cmd.split()[1])
+                    self.debugger.add_breakpoint(gate_idx)
+
+                elif cmd in ['i', 'inspect']:
+                    state = self.debugger.executor.current_state.data
+                    self.inspector.print_inspection(state)
+
+                elif cmd in ['p', 'print']:
+                    print(self.circuit.draw())
+
+                elif cmd in ['h', 'history']:
+                    self._print_history()
+
+                elif cmd in ['r', 'reset']:
+                    self.debugger.executor.reset()
+                    print("Session reset.")
+
+                elif cmd in ['q', 'quit']:
+                    print("Debug session ended.")
+                    break
+
+                else:
+                    print(f"Unknown command: {cmd}")
+
+            except KeyboardInterrupt:
+                print("\nSession interrupted.")
+                break
+            except Exception as e:
+                print(f"Error: {e}")
+
+    def _record_action(self, action: str, data: any):
+        """Record action in history."""
+        self.history.append({
+            'action': action,
+            'step': self.debugger.executor.current_step,
+            'data': data
+        })
+
+    def _print_history(self):
+        """Print action history."""
+        print("\nExecution History:")
+        print("-" * 40)
+        for entry in self.history[-10:]:  # Last 10 entries
+            print(f"  [{entry['step']}] {entry['action']}")
+
+
+# Example: Complete debugging workflow
+def debug_workflow_example():
+    """Demonstrate complete debugging workflow."""
+
+    # Create circuit with potential issue
+    qc = QuantumCircuit(2)
+    qc.h(0)
+    qc.cx(0, 1)  # Should create Bell state
+    qc.z(0)       # Adds phase - might be unintended
+    qc.h(1)       # Changes state - might be error
+
+    # Method 1: Quick inspection
+    print("=== Quick Inspection ===")
+    executor = StepExecutor(qc)
+    executor.run_to_end()
+    executor.print_status()
+
+    # Method 2: Step-by-step with breakpoints
+    print("\n=== Breakpoint Debugging ===")
+    debugger = InteractiveDebugger(qc)
+    debugger.add_breakpoint(2, "after_bell_creation")
+
+    # Run to breakpoint
+    debugger.continue_execution()
+
+    # Inspect at breakpoint
+    state_info = debugger.inspect_state()
+    print(f"\nAt breakpoint - Fidelity check needed")
+    print(f"Current probabilities: {state_info['probabilities']}")
+
+    # Method 3: Automated anomaly detection
+    print("\n=== Automated Analysis ===")
+    auto_debugger = AutoDebugger(qc)
+    anomalies = auto_debugger.run_with_checks()
+    auto_debugger.print_anomaly_report()
+
+# Run example
+debug_workflow_example()
+```
+
+## 9. Best Practices for Interactive Quantum Debugging
+
+```
+Interactive Debugging Best Practices
+════════════════════════════════════
+
+1. SET STRATEGIC BREAKPOINTS
+   ├── After state preparation
+   ├── Before and after entangling operations
+   ├── At algorithm phase boundaries
+   └── Before final measurements
+
+2. USE WATCHES EFFECTIVELY
+   ├── Track key qubit probabilities
+   ├── Monitor entanglement indicators
+   ├── Watch for phase accumulation
+   └── Check normalization continuously
+
+3. LEVERAGE SNAPSHOTS
+   ├── Save states at critical points
+   ├── Compare before/after operations
+   ├── Build test oracles from snapshots
+   └── Document expected states
+
+4. INTEGRATE WITH VERSION CONTROL
+   ├── Save debug configurations
+   ├── Track circuit changes with states
+   ├── Create reproducible debug sessions
+   └── Share debugging notes
+
+5. COMBINE TOOLS
+   ├── Visualization + state inspection
+   ├── Breakpoints + automated checks
+   ├── IDE integration + notebooks
+   └── Logging + interactive debugging
+```
+
+## Summary
+
+Interactive debugging transforms quantum circuit development:
+
+1. **Step Execution**: Execute gates one at a time to observe state evolution
+2. **Breakpoints**: Pause execution at critical points for inspection
+3. **State Inspection**: Examine amplitudes, phases, and entanglement in detail
+4. **Jupyter Integration**: Leverage notebooks for visual, interactive debugging
+5. **IDE Support**: Integrate quantum debugging into professional development environments
+6. **Custom Utilities**: Build specialized tools for your specific debugging needs
+
+Effective interactive debugging requires combining these tools with a systematic approach to identifying and resolving issues in quantum circuits.

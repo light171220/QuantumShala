@@ -1,0 +1,1424 @@
+---
+title: "Classical Optimizers for Quantum Circuits"
+description: "Master classical optimization techniques for variational quantum algorithms, including gradient-based and gradient-free methods, optimizer configuration, and convergence monitoring strategies."
+duration: 45
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+- Compare gradient-based and gradient-free optimization methods for quantum circuits
+- Configure and tune classical optimizers for variational algorithms
+- Implement parameter shift rules for quantum gradient computation
+- Design convergence monitoring and early stopping strategies
+- Select appropriate optimizers based on problem characteristics
+
+## 1. The Optimization Challenge in Variational Quantum Algorithms
+
+Variational quantum algorithms rely on classical optimizers to navigate parameter landscapes that are often rugged, noisy, and high-dimensional.
+
+```
+VARIATIONAL OPTIMIZATION LANDSCAPE
+===================================
+
+          ┌─────────────────────────────────────────┐
+          │    Parameter Space Challenges           │
+          ├─────────────────────────────────────────┤
+          │  • Barren plateaus (vanishing gradients)│
+          │  • Local minima and saddle points       │
+          │  • Shot noise from measurements         │
+          │  • Hardware noise corruption            │
+          │  • High dimensionality (many params)    │
+          └─────────────────────────────────────────┘
+
+Classical Optimizer                    Quantum Circuit
+─────────────────                      ───────────────
+┌─────────────┐     parameters θ       ┌─────────────┐
+│  Optimizer  │ ──────────────────────►│   U(θ)      │
+│  (COBYLA,   │                        │   Circuit   │
+│   SPSA,     │     cost value         │             │
+│   Adam)     │ ◄──────────────────────│   ⟨H⟩       │
+└─────────────┘                        └─────────────┘
+
+Key Questions:
+1. Which optimizer handles noise best?
+2. How many circuit evaluations are needed?
+3. When should we stop optimizing?
+```
+
+## 2. Gradient-Based Optimization Methods
+
+Gradient-based methods use derivative information to navigate the parameter landscape efficiently.
+
+### 2.1 Parameter Shift Rule for Quantum Gradients
+
+```python
+from typing import Callable, List, Tuple, Dict, Any, Optional
+from dataclasses import dataclass, field
+import numpy as np
+from scipy.optimize import minimize
+
+@dataclass
+class GradientConfig:
+    """Configuration for gradient computation."""
+    method: str = "parameter_shift"  # "parameter_shift", "finite_diff", "spsa"
+    shift_value: float = np.pi / 2  # For parameter shift rule
+    finite_diff_epsilon: float = 1e-5
+    num_shots: int = 1024
+
+class ParameterShiftGradient:
+    """
+    Compute gradients using the parameter shift rule.
+
+    For a circuit with parameters θ, the gradient is:
+    ∂⟨H⟩/∂θ_i = (⟨H⟩(θ_i + s) - ⟨H⟩(θ_i - s)) / (2 sin(s))
+
+    where s is typically π/2 for standard rotation gates.
+    """
+
+    def __init__(
+        self,
+        circuit_executor: Callable[[np.ndarray], float],
+        config: GradientConfig = None
+    ):
+        self.circuit_executor = circuit_executor
+        self.config = config or GradientConfig()
+        self.evaluation_count = 0
+
+    def compute_gradient(self, params: np.ndarray) -> np.ndarray:
+        """
+        Compute full gradient vector using parameter shift rule.
+
+        Requires 2 * num_params circuit evaluations.
+        """
+        gradient = np.zeros_like(params)
+        shift = self.config.shift_value
+
+        for i in range(len(params)):
+            # Shift parameter up
+            params_plus = params.copy()
+            params_plus[i] += shift
+
+            # Shift parameter down
+            params_minus = params.copy()
+            params_minus[i] -= shift
+
+            # Evaluate circuit at both points
+            cost_plus = self.circuit_executor(params_plus)
+            cost_minus = self.circuit_executor(params_minus)
+            self.evaluation_count += 2
+
+            # Parameter shift formula
+            gradient[i] = (cost_plus - cost_minus) / (2 * np.sin(shift))
+
+        return gradient
+
+    def compute_gradient_batch(
+        self,
+        params: np.ndarray,
+        param_indices: List[int] = None
+    ) -> np.ndarray:
+        """
+        Compute gradients for subset of parameters.
+
+        Useful for layer-wise training or when some
+        parameters are fixed.
+        """
+        if param_indices is None:
+            param_indices = list(range(len(params)))
+
+        gradient = np.zeros_like(params)
+        shift = self.config.shift_value
+
+        for i in param_indices:
+            params_plus = params.copy()
+            params_minus = params.copy()
+            params_plus[i] += shift
+            params_minus[i] -= shift
+
+            cost_plus = self.circuit_executor(params_plus)
+            cost_minus = self.circuit_executor(params_minus)
+            self.evaluation_count += 2
+
+            gradient[i] = (cost_plus - cost_minus) / (2 * np.sin(shift))
+
+        return gradient
+
+
+# Example: Parameter shift gradient computation
+def mock_vqe_cost(params: np.ndarray) -> float:
+    """Mock VQE cost function for demonstration."""
+    # Simulated noisy cost landscape
+    noise = np.random.normal(0, 0.01)
+    return np.sum(np.sin(params) ** 2) + noise
+
+gradient_computer = ParameterShiftGradient(mock_vqe_cost)
+test_params = np.array([0.5, 1.0, 1.5, 2.0])
+grad = gradient_computer.compute_gradient(test_params)
+print(f"Gradient: {grad}")
+print(f"Circuit evaluations: {gradient_computer.evaluation_count}")
+```
+
+### 2.2 Stochastic Gradient Descent (SGD)
+
+```python
+class SGDOptimizer:
+    """
+    Stochastic Gradient Descent optimizer for quantum circuits.
+
+    Simple but effective, especially with momentum.
+    """
+
+    def __init__(
+        self,
+        learning_rate: float = 0.1,
+        momentum: float = 0.9,
+        nesterov: bool = True
+    ):
+        self.learning_rate = learning_rate
+        self.momentum = momentum
+        self.nesterov = nesterov
+        self.velocity = None
+
+    def step(
+        self,
+        params: np.ndarray,
+        gradient: np.ndarray
+    ) -> np.ndarray:
+        """Perform single optimization step."""
+        if self.velocity is None:
+            self.velocity = np.zeros_like(params)
+
+        # Update velocity
+        self.velocity = self.momentum * self.velocity - self.learning_rate * gradient
+
+        if self.nesterov:
+            # Nesterov momentum: look-ahead gradient
+            return params + self.momentum * self.velocity - self.learning_rate * gradient
+        else:
+            return params + self.velocity
+
+    def reset(self):
+        """Reset optimizer state."""
+        self.velocity = None
+```
+
+### 2.3 Adam Optimizer
+
+```python
+class AdamOptimizer:
+    """
+    Adam optimizer with bias correction.
+
+    Combines momentum with adaptive learning rates.
+    Well-suited for noisy quantum cost functions.
+    """
+
+    def __init__(
+        self,
+        learning_rate: float = 0.01,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        epsilon: float = 1e-8
+    ):
+        self.learning_rate = learning_rate
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.epsilon = epsilon
+        self.m = None  # First moment
+        self.v = None  # Second moment
+        self.t = 0     # Time step
+
+    def step(
+        self,
+        params: np.ndarray,
+        gradient: np.ndarray
+    ) -> np.ndarray:
+        """Perform Adam update step."""
+        if self.m is None:
+            self.m = np.zeros_like(params)
+            self.v = np.zeros_like(params)
+
+        self.t += 1
+
+        # Update biased moments
+        self.m = self.beta1 * self.m + (1 - self.beta1) * gradient
+        self.v = self.beta2 * self.v + (1 - self.beta2) * gradient**2
+
+        # Bias correction
+        m_hat = self.m / (1 - self.beta1**self.t)
+        v_hat = self.v / (1 - self.beta2**self.t)
+
+        # Update parameters
+        return params - self.learning_rate * m_hat / (np.sqrt(v_hat) + self.epsilon)
+
+    def reset(self):
+        """Reset optimizer state."""
+        self.m = None
+        self.v = None
+        self.t = 0
+
+
+class AdamWOptimizer(AdamOptimizer):
+    """
+    AdamW: Adam with decoupled weight decay.
+
+    Better regularization for quantum circuits.
+    """
+
+    def __init__(
+        self,
+        learning_rate: float = 0.01,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        epsilon: float = 1e-8,
+        weight_decay: float = 0.01
+    ):
+        super().__init__(learning_rate, beta1, beta2, epsilon)
+        self.weight_decay = weight_decay
+
+    def step(
+        self,
+        params: np.ndarray,
+        gradient: np.ndarray
+    ) -> np.ndarray:
+        """AdamW update with weight decay."""
+        # Standard Adam update
+        new_params = super().step(params, gradient)
+
+        # Decoupled weight decay
+        new_params = new_params - self.learning_rate * self.weight_decay * params
+
+        return new_params
+```
+
+### 2.4 Natural Gradient Descent
+
+```python
+class NaturalGradientOptimizer:
+    """
+    Natural gradient descent using quantum Fisher information.
+
+    Accounts for the geometry of parameter space:
+    θ_new = θ - η * F^(-1) * ∇L
+
+    where F is the Quantum Fisher Information Matrix.
+    """
+
+    def __init__(
+        self,
+        learning_rate: float = 0.1,
+        regularization: float = 1e-4
+    ):
+        self.learning_rate = learning_rate
+        self.regularization = regularization
+
+    def compute_qfim(
+        self,
+        params: np.ndarray,
+        state_overlap_fn: Callable[[np.ndarray, np.ndarray], float]
+    ) -> np.ndarray:
+        """
+        Compute Quantum Fisher Information Matrix.
+
+        QFIM elements: F_ij = 4 * Re(⟨∂_i ψ|∂_j ψ⟩ - ⟨∂_i ψ|ψ⟩⟨ψ|∂_j ψ⟩)
+
+        Approximated using finite differences of state overlaps.
+        """
+        n = len(params)
+        epsilon = 1e-4
+        qfim = np.zeros((n, n))
+
+        for i in range(n):
+            for j in range(i, n):
+                # Compute QFIM element via parameter shifts
+                params_pp = params.copy()
+                params_pm = params.copy()
+                params_mp = params.copy()
+                params_mm = params.copy()
+
+                params_pp[i] += epsilon
+                params_pp[j] += epsilon
+
+                params_pm[i] += epsilon
+                params_pm[j] -= epsilon
+
+                params_mp[i] -= epsilon
+                params_mp[j] += epsilon
+
+                params_mm[i] -= epsilon
+                params_mm[j] -= epsilon
+
+                # Finite difference approximation
+                f_ij = (
+                    state_overlap_fn(params_pp, params) -
+                    state_overlap_fn(params_pm, params) -
+                    state_overlap_fn(params_mp, params) +
+                    state_overlap_fn(params_mm, params)
+                ) / (4 * epsilon**2)
+
+                qfim[i, j] = f_ij
+                qfim[j, i] = f_ij
+
+        return qfim
+
+    def step(
+        self,
+        params: np.ndarray,
+        gradient: np.ndarray,
+        qfim: np.ndarray
+    ) -> np.ndarray:
+        """
+        Perform natural gradient step.
+        """
+        # Regularize QFIM for numerical stability
+        qfim_reg = qfim + self.regularization * np.eye(len(params))
+
+        # Compute natural gradient: F^(-1) * ∇L
+        try:
+            natural_grad = np.linalg.solve(qfim_reg, gradient)
+        except np.linalg.LinAlgError:
+            # Fall back to standard gradient
+            natural_grad = gradient
+
+        return params - self.learning_rate * natural_grad
+```
+
+## 3. Gradient-Free Optimization Methods
+
+Gradient-free methods are crucial when gradient computation is expensive or unreliable.
+
+### 3.1 COBYLA (Constrained Optimization BY Linear Approximation)
+
+```python
+from scipy.optimize import minimize
+
+class COBYLAOptimizer:
+    """
+    COBYLA optimizer wrapper for quantum circuits.
+
+    Gradient-free, constraint-friendly optimizer.
+    Works well for small to medium parameter counts.
+    """
+
+    def __init__(
+        self,
+        maxiter: int = 100,
+        rhobeg: float = 0.5,
+        tol: float = 1e-6,
+        bounds: List[Tuple[float, float]] = None
+    ):
+        self.maxiter = maxiter
+        self.rhobeg = rhobeg
+        self.tol = tol
+        self.bounds = bounds
+        self.history: List[float] = []
+
+    def optimize(
+        self,
+        cost_function: Callable[[np.ndarray], float],
+        initial_params: np.ndarray
+    ) -> Tuple[np.ndarray, float]:
+        """Run COBYLA optimization."""
+        self.history = []
+
+        def tracked_cost(params):
+            cost = cost_function(params)
+            self.history.append(cost)
+            return cost
+
+        # Build constraints from bounds
+        constraints = []
+        if self.bounds:
+            for i, (low, high) in enumerate(self.bounds):
+                constraints.append({
+                    'type': 'ineq',
+                    'fun': lambda x, i=i, low=low: x[i] - low
+                })
+                constraints.append({
+                    'type': 'ineq',
+                    'fun': lambda x, i=i, high=high: high - x[i]
+                })
+
+        result = minimize(
+            tracked_cost,
+            initial_params,
+            method='COBYLA',
+            constraints=constraints,
+            options={
+                'maxiter': self.maxiter,
+                'rhobeg': self.rhobeg,
+                'tol': self.tol
+            }
+        )
+
+        return result.x, result.fun
+
+    def get_convergence_history(self) -> List[float]:
+        """Return optimization history."""
+        return self.history.copy()
+
+
+# Example usage
+cobyla = COBYLAOptimizer(
+    maxiter=100,
+    rhobeg=0.5,
+    bounds=[(0, 2*np.pi)] * 4
+)
+
+optimal_params, optimal_cost = cobyla.optimize(mock_vqe_cost, test_params)
+print(f"COBYLA: cost = {optimal_cost:.6f}, iterations = {len(cobyla.history)}")
+```
+
+### 3.2 SPSA (Simultaneous Perturbation Stochastic Approximation)
+
+```python
+class SPSAOptimizer:
+    """
+    SPSA optimizer for noisy quantum cost functions.
+
+    Key advantages:
+    - Only 2 function evaluations per iteration (vs 2n for finite diff)
+    - Robust to measurement noise
+    - Proven convergence for noisy objectives
+
+    Update rule:
+    θ_{k+1} = θ_k - a_k * g_k(θ_k)
+
+    where g_k is the stochastic gradient approximation:
+    g_k(θ) ≈ [f(θ + c_k*Δ) - f(θ - c_k*Δ)] / (2*c_k*Δ)
+    """
+
+    def __init__(
+        self,
+        maxiter: int = 100,
+        a: float = 0.1,      # Initial learning rate
+        c: float = 0.1,      # Initial perturbation
+        A: float = 10.0,     # Stability constant
+        alpha: float = 0.602,  # Learning rate decay
+        gamma: float = 0.101   # Perturbation decay
+    ):
+        self.maxiter = maxiter
+        self.a = a
+        self.c = c
+        self.A = A
+        self.alpha = alpha
+        self.gamma = gamma
+        self.history: List[Dict[str, Any]] = []
+
+    def optimize(
+        self,
+        cost_function: Callable[[np.ndarray], float],
+        initial_params: np.ndarray
+    ) -> Tuple[np.ndarray, float]:
+        """Run SPSA optimization."""
+        params = initial_params.copy()
+        n = len(params)
+        self.history = []
+
+        for k in range(self.maxiter):
+            # Compute decay factors
+            a_k = self.a / (k + 1 + self.A) ** self.alpha
+            c_k = self.c / (k + 1) ** self.gamma
+
+            # Generate random perturbation (Bernoulli ±1)
+            delta = np.random.choice([-1, 1], size=n).astype(float)
+
+            # Evaluate at perturbed points
+            params_plus = params + c_k * delta
+            params_minus = params - c_k * delta
+
+            cost_plus = cost_function(params_plus)
+            cost_minus = cost_function(params_minus)
+
+            # SPSA gradient estimate (only 2 evaluations!)
+            g_k = (cost_plus - cost_minus) / (2 * c_k * delta)
+
+            # Update parameters
+            params = params - a_k * g_k
+
+            # Record history
+            current_cost = (cost_plus + cost_minus) / 2  # Estimate
+            self.history.append({
+                'iteration': k,
+                'cost': current_cost,
+                'learning_rate': a_k,
+                'perturbation': c_k
+            })
+
+        final_cost = cost_function(params)
+        return params, final_cost
+
+    def get_hyperparameter_schedule(self, k: int) -> Dict[str, float]:
+        """Get hyperparameters at iteration k."""
+        return {
+            'a_k': self.a / (k + 1 + self.A) ** self.alpha,
+            'c_k': self.c / (k + 1) ** self.gamma
+        }
+
+
+# SPSA with calibrated hyperparameters
+class CalibratedSPSA(SPSAOptimizer):
+    """
+    SPSA with automatic hyperparameter calibration.
+
+    Uses initial evaluations to set appropriate scales.
+    """
+
+    def __init__(
+        self,
+        maxiter: int = 100,
+        calibration_samples: int = 10,
+        target_acceptance: float = 0.3
+    ):
+        super().__init__(maxiter)
+        self.calibration_samples = calibration_samples
+        self.target_acceptance = target_acceptance
+
+    def calibrate(
+        self,
+        cost_function: Callable[[np.ndarray], float],
+        initial_params: np.ndarray
+    ):
+        """Calibrate hyperparameters based on cost landscape."""
+        n = len(initial_params)
+
+        # Estimate gradient scale
+        grad_estimates = []
+        for _ in range(self.calibration_samples):
+            delta = np.random.choice([-1, 1], size=n).astype(float)
+            params_plus = initial_params + 0.1 * delta
+            params_minus = initial_params - 0.1 * delta
+
+            cost_plus = cost_function(params_plus)
+            cost_minus = cost_function(params_minus)
+
+            grad_est = np.abs(cost_plus - cost_minus) / 0.2
+            grad_estimates.append(grad_est)
+
+        avg_gradient = np.mean(grad_estimates)
+
+        # Set learning rate to achieve target step size
+        self.a = 0.1 / (avg_gradient + 1e-10)
+
+        # Set perturbation based on parameter scale
+        self.c = 0.1 * np.std(initial_params) if np.std(initial_params) > 0 else 0.1
+
+        print(f"Calibrated: a={self.a:.4f}, c={self.c:.4f}")
+```
+
+### 3.3 Nelder-Mead (Simplex Method)
+
+```python
+class NelderMeadOptimizer:
+    """
+    Nelder-Mead simplex optimizer.
+
+    Good for small parameter counts (<10).
+    Does not require gradient information.
+    """
+
+    def __init__(
+        self,
+        maxiter: int = 200,
+        maxfev: int = None,
+        xatol: float = 1e-4,
+        fatol: float = 1e-4,
+        adaptive: bool = True
+    ):
+        self.maxiter = maxiter
+        self.maxfev = maxfev
+        self.xatol = xatol
+        self.fatol = fatol
+        self.adaptive = adaptive
+        self.history: List[float] = []
+
+    def optimize(
+        self,
+        cost_function: Callable[[np.ndarray], float],
+        initial_params: np.ndarray
+    ) -> Tuple[np.ndarray, float]:
+        """Run Nelder-Mead optimization."""
+        self.history = []
+
+        def tracked_cost(params):
+            cost = cost_function(params)
+            self.history.append(cost)
+            return cost
+
+        result = minimize(
+            tracked_cost,
+            initial_params,
+            method='Nelder-Mead',
+            options={
+                'maxiter': self.maxiter,
+                'maxfev': self.maxfev or self.maxiter * len(initial_params),
+                'xatol': self.xatol,
+                'fatol': self.fatol,
+                'adaptive': self.adaptive
+            }
+        )
+
+        return result.x, result.fun
+```
+
+## 4. Optimizer Selection Criteria
+
+```
+OPTIMIZER SELECTION GUIDE
+=========================
+
+┌─────────────────┬────────────┬─────────────┬─────────────┬─────────────┐
+│ Optimizer       │ Noise      │ Parameters  │ Evaluations │ Constraints │
+│                 │ Tolerance  │ Count       │ per Iter    │ Support     │
+├─────────────────┼────────────┼─────────────┼─────────────┼─────────────┤
+│ COBYLA          │ Low        │ < 50        │ O(n)        │ Yes         │
+│ SPSA            │ High       │ Any         │ 2           │ No          │
+│ Nelder-Mead     │ Low        │ < 10        │ O(n)        │ No          │
+│ Adam            │ Medium     │ Any         │ 2n          │ Via proj.   │
+│ Natural Grad    │ Medium     │ < 100       │ O(n²)       │ No          │
+│ L-BFGS-B        │ Low        │ < 1000      │ 2n          │ Box         │
+└─────────────────┴────────────┴─────────────┴─────────────┴─────────────┘
+
+Decision Flow:
+                    ┌─────────────────┐
+                    │  High noise?    │
+                    └────────┬────────┘
+                       yes   │   no
+              ┌──────────────┴──────────────┐
+              ▼                             ▼
+        ┌───────────┐                ┌───────────────┐
+        │   SPSA    │                │ Need gradient │
+        │   works   │                │   info?       │
+        │   best    │                └───────┬───────┘
+        └───────────┘                   yes  │  no
+                                   ┌─────────┴─────────┐
+                                   ▼                   ▼
+                            ┌───────────┐       ┌───────────┐
+                            │ Adam or   │       │ COBYLA or │
+                            │ Nat. Grad │       │ N-Mead    │
+                            └───────────┘       └───────────┘
+```
+
+```python
+from enum import Enum
+
+class OptimizerType(Enum):
+    COBYLA = "cobyla"
+    SPSA = "spsa"
+    NELDER_MEAD = "nelder_mead"
+    ADAM = "adam"
+    NATURAL_GRADIENT = "natural_gradient"
+    LBFGSB = "lbfgsb"
+
+@dataclass
+class ProblemCharacteristics:
+    """Characteristics of the optimization problem."""
+    num_parameters: int
+    noise_level: float  # 0.0 = noiseless, 1.0 = very noisy
+    has_constraints: bool = False
+    gradient_available: bool = True
+    evaluation_budget: int = 1000
+
+def select_optimizer(
+    characteristics: ProblemCharacteristics
+) -> Tuple[OptimizerType, Dict[str, Any]]:
+    """
+    Select appropriate optimizer based on problem characteristics.
+
+    Returns optimizer type and recommended hyperparameters.
+    """
+    n = characteristics.num_parameters
+    noise = characteristics.noise_level
+    budget = characteristics.evaluation_budget
+
+    # High noise: SPSA is most robust
+    if noise > 0.3:
+        return OptimizerType.SPSA, {
+            'maxiter': min(budget // 2, 200),
+            'a': 0.1 / (1 + noise),  # Lower learning rate for high noise
+            'c': 0.1 * (1 + noise),  # Larger perturbation for high noise
+        }
+
+    # Constraints required: COBYLA
+    if characteristics.has_constraints:
+        return OptimizerType.COBYLA, {
+            'maxiter': min(budget // n, 200),
+            'rhobeg': 0.5,
+        }
+
+    # Small problems without gradient: Nelder-Mead
+    if n < 10 and not characteristics.gradient_available:
+        return OptimizerType.NELDER_MEAD, {
+            'maxiter': budget,
+            'adaptive': True,
+        }
+
+    # Large problems with gradient: Adam
+    if n > 50 and characteristics.gradient_available:
+        return OptimizerType.ADAM, {
+            'learning_rate': 0.01,
+            'maxiter': budget // (2 * n),  # Account for gradient evaluations
+        }
+
+    # Medium problems with gradient: Natural gradient
+    if characteristics.gradient_available and n < 100:
+        return OptimizerType.NATURAL_GRADIENT, {
+            'learning_rate': 0.1,
+            'maxiter': budget // (n * n),  # QFIM is expensive
+        }
+
+    # Default: COBYLA for safety
+    return OptimizerType.COBYLA, {
+        'maxiter': min(budget // n, 200),
+        'rhobeg': 0.5,
+    }
+
+
+# Example selection
+problem = ProblemCharacteristics(
+    num_parameters=20,
+    noise_level=0.15,
+    has_constraints=False,
+    gradient_available=True,
+    evaluation_budget=2000
+)
+
+optimizer_type, config = select_optimizer(problem)
+print(f"Recommended: {optimizer_type.value}")
+print(f"Configuration: {config}")
+```
+
+## 5. Hyperparameter Tuning
+
+```python
+from itertools import product
+
+class HyperparameterTuner:
+    """
+    Tune optimizer hyperparameters for quantum optimization.
+
+    Supports grid search and random search strategies.
+    """
+
+    def __init__(
+        self,
+        cost_function: Callable[[np.ndarray], float],
+        param_ranges: Dict[str, List[Any]],
+        num_trials: int = 10
+    ):
+        self.cost_function = cost_function
+        self.param_ranges = param_ranges
+        self.num_trials = num_trials
+        self.results: List[Dict] = []
+
+    def grid_search(
+        self,
+        initial_params: np.ndarray,
+        optimizer_class: type
+    ) -> Dict[str, Any]:
+        """
+        Exhaustive grid search over hyperparameter combinations.
+        """
+        param_names = list(self.param_ranges.keys())
+        param_values = list(self.param_ranges.values())
+
+        best_config = None
+        best_cost = float('inf')
+
+        for combination in product(*param_values):
+            config = dict(zip(param_names, combination))
+
+            # Run multiple trials for robustness
+            trial_costs = []
+            for _ in range(self.num_trials):
+                optimizer = optimizer_class(**config)
+                try:
+                    _, final_cost = optimizer.optimize(
+                        self.cost_function,
+                        initial_params.copy()
+                    )
+                    trial_costs.append(final_cost)
+                except Exception:
+                    trial_costs.append(float('inf'))
+
+            avg_cost = np.mean(trial_costs)
+            std_cost = np.std(trial_costs)
+
+            self.results.append({
+                'config': config,
+                'mean_cost': avg_cost,
+                'std_cost': std_cost,
+                'min_cost': np.min(trial_costs)
+            })
+
+            if avg_cost < best_cost:
+                best_cost = avg_cost
+                best_config = config
+
+        return {
+            'best_config': best_config,
+            'best_cost': best_cost,
+            'all_results': self.results
+        }
+
+    def random_search(
+        self,
+        initial_params: np.ndarray,
+        optimizer_class: type,
+        n_samples: int = 20
+    ) -> Dict[str, Any]:
+        """
+        Random search over hyperparameter space.
+
+        More efficient than grid search for high-dimensional
+        hyperparameter spaces.
+        """
+        best_config = None
+        best_cost = float('inf')
+
+        for _ in range(n_samples):
+            # Sample random configuration
+            config = {}
+            for name, values in self.param_ranges.items():
+                if isinstance(values[0], float):
+                    # Continuous range: uniform sampling
+                    config[name] = np.random.uniform(min(values), max(values))
+                else:
+                    # Discrete options: random choice
+                    config[name] = np.random.choice(values)
+
+            # Evaluate configuration
+            trial_costs = []
+            for _ in range(self.num_trials):
+                optimizer = optimizer_class(**config)
+                try:
+                    _, final_cost = optimizer.optimize(
+                        self.cost_function,
+                        initial_params.copy()
+                    )
+                    trial_costs.append(final_cost)
+                except Exception:
+                    trial_costs.append(float('inf'))
+
+            avg_cost = np.mean(trial_costs)
+
+            self.results.append({
+                'config': config,
+                'mean_cost': avg_cost
+            })
+
+            if avg_cost < best_cost:
+                best_cost = avg_cost
+                best_config = config
+
+        return {
+            'best_config': best_config,
+            'best_cost': best_cost
+        }
+
+
+# Example: Tune SPSA hyperparameters
+tuner = HyperparameterTuner(
+    cost_function=mock_vqe_cost,
+    param_ranges={
+        'a': [0.01, 0.05, 0.1, 0.2],
+        'c': [0.05, 0.1, 0.2],
+        'maxiter': [50, 100, 200]
+    },
+    num_trials=3
+)
+
+# result = tuner.grid_search(test_params, SPSAOptimizer)
+# print(f"Best SPSA config: {result['best_config']}")
+```
+
+## 6. Convergence Monitoring and Early Stopping
+
+```python
+from typing import Deque
+from collections import deque
+
+@dataclass
+class ConvergenceMetrics:
+    """Metrics for monitoring optimization convergence."""
+    current_cost: float
+    cost_change: float
+    gradient_norm: float
+    parameter_change: float
+    iteration: int
+
+class ConvergenceMonitor:
+    """
+    Monitor optimization convergence and implement early stopping.
+
+    Tracks multiple convergence criteria:
+    1. Cost improvement plateau
+    2. Gradient magnitude
+    3. Parameter stability
+    4. Maximum iterations
+    """
+
+    def __init__(
+        self,
+        patience: int = 20,
+        min_delta: float = 1e-6,
+        gradient_tol: float = 1e-5,
+        param_tol: float = 1e-6,
+        max_iterations: int = 1000,
+        window_size: int = 10
+    ):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.gradient_tol = gradient_tol
+        self.param_tol = param_tol
+        self.max_iterations = max_iterations
+        self.window_size = window_size
+
+        self.cost_history: Deque[float] = deque(maxlen=window_size)
+        self.best_cost: float = float('inf')
+        self.best_params: np.ndarray = None
+        self.stagnation_count: int = 0
+        self.iteration: int = 0
+
+    def update(
+        self,
+        cost: float,
+        params: np.ndarray,
+        gradient: np.ndarray = None
+    ) -> ConvergenceMetrics:
+        """Update monitor with new iteration data."""
+        self.iteration += 1
+
+        # Cost change
+        cost_change = 0.0 if len(self.cost_history) == 0 else cost - self.cost_history[-1]
+
+        # Gradient norm
+        gradient_norm = np.linalg.norm(gradient) if gradient is not None else float('nan')
+
+        # Parameter change
+        if self.best_params is not None:
+            param_change = np.linalg.norm(params - self.best_params)
+        else:
+            param_change = float('inf')
+
+        # Track best result
+        if cost < self.best_cost - self.min_delta:
+            self.best_cost = cost
+            self.best_params = params.copy()
+            self.stagnation_count = 0
+        else:
+            self.stagnation_count += 1
+
+        self.cost_history.append(cost)
+
+        return ConvergenceMetrics(
+            current_cost=cost,
+            cost_change=cost_change,
+            gradient_norm=gradient_norm,
+            parameter_change=param_change,
+            iteration=self.iteration
+        )
+
+    def should_stop(
+        self,
+        metrics: ConvergenceMetrics
+    ) -> Tuple[bool, str]:
+        """
+        Check if optimization should stop.
+
+        Returns (should_stop, reason).
+        """
+        # Maximum iterations
+        if self.iteration >= self.max_iterations:
+            return True, "max_iterations"
+
+        # Patience exhausted (no improvement)
+        if self.stagnation_count >= self.patience:
+            return True, "patience_exhausted"
+
+        # Gradient converged
+        if not np.isnan(metrics.gradient_norm) and metrics.gradient_norm < self.gradient_tol:
+            return True, "gradient_converged"
+
+        # Parameters stabilized
+        if metrics.parameter_change < self.param_tol:
+            return True, "parameters_stabilized"
+
+        # Cost variance is very low (stuck in local minimum)
+        if len(self.cost_history) == self.window_size:
+            cost_variance = np.var(list(self.cost_history))
+            if cost_variance < self.min_delta ** 2:
+                return True, "cost_plateau"
+
+        return False, "continue"
+
+    def get_best_result(self) -> Tuple[np.ndarray, float]:
+        """Return best parameters and cost found."""
+        return self.best_params, self.best_cost
+
+
+class EarlyStoppingCallback:
+    """
+    Callback for scipy optimizers with early stopping.
+    """
+
+    def __init__(self, monitor: ConvergenceMonitor):
+        self.monitor = monitor
+        self.stop_reason: Optional[str] = None
+
+    def __call__(self, params: np.ndarray, *args) -> bool:
+        """
+        Callback function for scipy.optimize.minimize.
+
+        Return True to stop optimization.
+        """
+        # Note: scipy callbacks don't receive cost directly
+        # We'd need to wrap the cost function to track this
+        return False
+
+
+# Example: Optimization with convergence monitoring
+def optimized_vqe_run(
+    cost_function: Callable[[np.ndarray], float],
+    initial_params: np.ndarray,
+    optimizer: SPSAOptimizer = None,
+    monitor: ConvergenceMonitor = None
+) -> Dict[str, Any]:
+    """Run VQE with convergence monitoring."""
+
+    if optimizer is None:
+        optimizer = SPSAOptimizer(maxiter=200)
+
+    if monitor is None:
+        monitor = ConvergenceMonitor(
+            patience=30,
+            min_delta=1e-5,
+            max_iterations=200
+        )
+
+    params = initial_params.copy()
+    n = len(params)
+
+    for k in range(optimizer.maxiter):
+        # SPSA update
+        a_k = optimizer.a / (k + 1 + optimizer.A) ** optimizer.alpha
+        c_k = optimizer.c / (k + 1) ** optimizer.gamma
+
+        delta = np.random.choice([-1, 1], size=n).astype(float)
+
+        cost_plus = cost_function(params + c_k * delta)
+        cost_minus = cost_function(params - c_k * delta)
+
+        g_k = (cost_plus - cost_minus) / (2 * c_k * delta)
+        params = params - a_k * g_k
+
+        # Monitor convergence
+        current_cost = (cost_plus + cost_minus) / 2
+        metrics = monitor.update(current_cost, params, g_k)
+
+        should_stop, reason = monitor.should_stop(metrics)
+        if should_stop:
+            break
+
+    best_params, best_cost = monitor.get_best_result()
+
+    return {
+        'optimal_params': best_params,
+        'optimal_cost': best_cost,
+        'iterations': monitor.iteration,
+        'stop_reason': reason if should_stop else 'max_iterations',
+        'convergence_history': list(monitor.cost_history)
+    }
+```
+
+## 7. Handling Noisy Objective Functions
+
+```python
+class NoisyObjectiveWrapper:
+    """
+    Wrapper to handle noisy quantum objective functions.
+
+    Implements noise reduction strategies:
+    1. Multiple evaluations with averaging
+    2. Moving average smoothing
+    3. Adaptive shot count
+    """
+
+    def __init__(
+        self,
+        base_function: Callable[[np.ndarray], float],
+        averaging_samples: int = 3,
+        use_median: bool = False,
+        min_shots: int = 100,
+        max_shots: int = 10000
+    ):
+        self.base_function = base_function
+        self.averaging_samples = averaging_samples
+        self.use_median = use_median
+        self.min_shots = min_shots
+        self.max_shots = max_shots
+        self.evaluation_count = 0
+        self.noise_estimates: List[float] = []
+
+    def __call__(self, params: np.ndarray) -> float:
+        """Evaluate with noise reduction."""
+        samples = []
+
+        for _ in range(self.averaging_samples):
+            samples.append(self.base_function(params))
+            self.evaluation_count += 1
+
+        # Track noise level
+        if len(samples) > 1:
+            self.noise_estimates.append(np.std(samples))
+
+        if self.use_median:
+            return np.median(samples)
+        else:
+            return np.mean(samples)
+
+    def get_noise_estimate(self) -> float:
+        """Estimate current noise level."""
+        if not self.noise_estimates:
+            return float('inf')
+        return np.mean(self.noise_estimates[-10:])
+
+    def adaptive_evaluate(
+        self,
+        params: np.ndarray,
+        target_precision: float = 0.01
+    ) -> Tuple[float, float]:
+        """
+        Evaluate with adaptive sampling to achieve target precision.
+
+        Returns (mean_estimate, standard_error).
+        """
+        samples = []
+
+        # Initial samples
+        for _ in range(self.averaging_samples):
+            samples.append(self.base_function(params))
+
+        # Add more samples if needed
+        while len(samples) < self.max_shots // self.min_shots:
+            std_error = np.std(samples) / np.sqrt(len(samples))
+
+            if std_error <= target_precision:
+                break
+
+            samples.append(self.base_function(params))
+
+        self.evaluation_count += len(samples)
+
+        return np.mean(samples), np.std(samples) / np.sqrt(len(samples))
+
+
+class RobustOptimizer:
+    """
+    Robust optimizer for noisy quantum objectives.
+
+    Combines multiple strategies:
+    1. SPSA with noise-adaptive hyperparameters
+    2. Multiple restarts
+    3. Noise-aware convergence criteria
+    """
+
+    def __init__(
+        self,
+        num_restarts: int = 3,
+        noise_threshold: float = 0.1
+    ):
+        self.num_restarts = num_restarts
+        self.noise_threshold = noise_threshold
+
+    def optimize(
+        self,
+        cost_function: Callable[[np.ndarray], float],
+        initial_params: np.ndarray,
+        param_bounds: List[Tuple[float, float]] = None
+    ) -> Dict[str, Any]:
+        """
+        Robust optimization with multiple restarts.
+        """
+        # Wrap with noise reduction
+        wrapped_fn = NoisyObjectiveWrapper(
+            cost_function,
+            averaging_samples=5
+        )
+
+        all_results = []
+
+        for restart in range(self.num_restarts):
+            # Random initialization for restarts
+            if restart == 0:
+                start_params = initial_params.copy()
+            else:
+                if param_bounds:
+                    start_params = np.array([
+                        np.random.uniform(low, high)
+                        for low, high in param_bounds
+                    ])
+                else:
+                    start_params = initial_params + np.random.normal(0, 0.5, len(initial_params))
+
+            # Estimate noise to adjust hyperparameters
+            noise_level = self._estimate_noise(wrapped_fn, start_params)
+
+            # Adjust SPSA parameters based on noise
+            optimizer = SPSAOptimizer(
+                maxiter=100,
+                a=0.1 / (1 + 2 * noise_level),
+                c=0.1 * (1 + noise_level)
+            )
+
+            optimal_params, optimal_cost = optimizer.optimize(
+                wrapped_fn,
+                start_params
+            )
+
+            all_results.append({
+                'params': optimal_params,
+                'cost': optimal_cost,
+                'restart': restart,
+                'noise_level': noise_level
+            })
+
+        # Return best result
+        best_result = min(all_results, key=lambda x: x['cost'])
+
+        return {
+            'optimal_params': best_result['params'],
+            'optimal_cost': best_result['cost'],
+            'all_restarts': all_results,
+            'total_evaluations': wrapped_fn.evaluation_count
+        }
+
+    def _estimate_noise(
+        self,
+        fn: Callable[[np.ndarray], float],
+        params: np.ndarray
+    ) -> float:
+        """Estimate noise level at a point."""
+        samples = [fn(params) for _ in range(5)]
+        return np.std(samples) / (np.abs(np.mean(samples)) + 1e-10)
+```
+
+## 8. Qiskit Integration Example
+
+```python
+# Complete VQE optimization workflow with Qiskit
+# Note: This is a conceptual example showing integration patterns
+
+class QiskitVQEOptimizer:
+    """
+    VQE optimizer using Qiskit with custom optimization strategies.
+    """
+
+    def __init__(
+        self,
+        ansatz_type: str = "EfficientSU2",
+        num_qubits: int = 4,
+        optimizer_type: str = "SPSA"
+    ):
+        self.ansatz_type = ansatz_type
+        self.num_qubits = num_qubits
+        self.optimizer_type = optimizer_type
+        self.convergence_history: List[float] = []
+
+    def create_cost_function(
+        self,
+        hamiltonian_coeffs: Dict[str, float],
+        backend_executor: Callable
+    ) -> Callable[[np.ndarray], float]:
+        """
+        Create parameterized cost function for VQE.
+        """
+        def cost_fn(params: np.ndarray) -> float:
+            # This would execute circuit on backend
+            # and compute expectation value
+            energy = backend_executor(params, hamiltonian_coeffs)
+            self.convergence_history.append(energy)
+            return energy
+
+        return cost_fn
+
+    def run(
+        self,
+        hamiltonian_coeffs: Dict[str, float],
+        backend_executor: Callable,
+        initial_params: np.ndarray = None
+    ) -> Dict[str, Any]:
+        """Execute VQE optimization."""
+
+        # Initialize parameters
+        num_params = self._get_num_parameters()
+        if initial_params is None:
+            initial_params = np.random.uniform(0, 2*np.pi, num_params)
+
+        # Create cost function
+        cost_fn = self.create_cost_function(hamiltonian_coeffs, backend_executor)
+
+        # Setup convergence monitoring
+        monitor = ConvergenceMonitor(
+            patience=30,
+            min_delta=1e-6,
+            max_iterations=500
+        )
+
+        # Select optimizer
+        if self.optimizer_type == "SPSA":
+            optimizer = CalibratedSPSA(maxiter=200)
+            optimizer.calibrate(cost_fn, initial_params)
+        elif self.optimizer_type == "COBYLA":
+            optimizer = COBYLAOptimizer(maxiter=200)
+        else:
+            optimizer = NelderMeadOptimizer(maxiter=200)
+
+        # Run optimization
+        optimal_params, optimal_energy = optimizer.optimize(cost_fn, initial_params)
+
+        return {
+            'optimal_params': optimal_params,
+            'ground_state_energy': optimal_energy,
+            'convergence_history': self.convergence_history,
+            'num_iterations': len(self.convergence_history),
+            'optimizer_used': self.optimizer_type
+        }
+
+    def _get_num_parameters(self) -> int:
+        """Get number of variational parameters."""
+        if self.ansatz_type == "EfficientSU2":
+            return 2 * self.num_qubits * 3  # Simplified
+        elif self.ansatz_type == "RealAmplitudes":
+            return self.num_qubits * 2
+        else:
+            return self.num_qubits * 2
+
+
+# Example usage pattern
+print("\nVQE Optimizer Configuration:")
+print("  Ansatz: EfficientSU2")
+print("  Qubits: 4")
+print("  Optimizer: SPSA with calibration")
+print("  Convergence: Patience=30, MinDelta=1e-6")
+```
+
+## Summary
+
+Classical optimization is a critical component of variational quantum algorithms:
+
+1. **Gradient-Based Methods**: Adam and natural gradient work well for smooth landscapes
+2. **Gradient-Free Methods**: SPSA and COBYLA are robust to noise
+3. **Optimizer Selection**: Match optimizer to problem characteristics
+4. **Hyperparameter Tuning**: Use grid or random search for optimization
+5. **Convergence Monitoring**: Track multiple metrics for reliable stopping
+6. **Noise Handling**: Use averaging and adaptive strategies for noisy objectives
+
+## Further Reading
+
+- Spall, J.C. "Implementation of the Simultaneous Perturbation Algorithm for Stochastic Optimization"
+- Sweke et al. "Stochastic gradient descent for hybrid quantum-classical optimization"
+- Qiskit Optimization Tutorials
+- PennyLane Optimization Documentation

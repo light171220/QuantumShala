@@ -1,0 +1,819 @@
+---
+title: "Dequantization and Classical Limits"
+description: "Understand when quantum linear algebra speedups hold and when classical algorithms can match quantum performance, including Tang's dequantization and sampling-based methods."
+duration: 75
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand Tang's dequantization of quantum recommendation systems
+- Analyze when quantum sampling assumptions enable classical speedups
+- Identify robust quantum advantages in linear algebra
+- Compare query complexity vs time complexity for quantum algorithms
+- Recognize the importance of data loading in quantum speedup claims
+
+## 1. The Dequantization Revolution
+
+In 2018, Ewin Tang's breakthrough showed that some claimed quantum speedups could be matched classically:
+
+<Definition term="Dequantization">
+Dequantization is the process of finding classical algorithms that match the performance of quantum algorithms by leveraging the same structural assumptions (like sampling access to data).
+</Definition>
+
+<Warning>
+Dequantization doesn't mean quantum computers are useless. It reveals that certain speedups came from data structure assumptions, not quantum mechanics itself.
+</Warning>
+
+## 2. Sample and Query Access
+
+The key insight: many quantum linear algebra algorithms assume special data access:
+
+<Definition term="Sample and Query Access">
+A vector $v \in \mathbb{R}^n$ has sample-and-query access if:
+1. **Query**: Access any entry $v_i$ in $O(1)$
+2. **Sample**: Sample index $i$ with probability $|v_i|^2 / \|v\|^2$ in $O(1)$
+3. **Norm**: Query $\|v\|$ in $O(1)$
+
+This is what quantum state preparation provides "for free."
+</Definition>
+
+```python
+import numpy as np
+from typing import Callable
+
+class SampleQueryAccess:
+    """
+    Data structure providing sample and query access to a vector.
+
+    This is the classical analog of quantum state access.
+    """
+
+    def __init__(self, v: np.ndarray):
+        """
+        Build sample-query data structure.
+
+        Args:
+            v: Vector to provide access to
+        """
+        self.v = v.copy()
+        self.n = len(v)
+        self.norm = np.linalg.norm(v)
+
+        # Build sampling tree (binary indexed tree for prefix sums)
+        self.sq_cumsum = np.cumsum(v ** 2)
+        self.total_sq = self.sq_cumsum[-1]
+
+    def query(self, i: int) -> float:
+        """Query entry v[i] in O(1)."""
+        return self.v[i]
+
+    def sample(self) -> int:
+        """Sample index i with probability |v_i|^2/||v||^2."""
+        u = np.random.random() * self.total_sq
+        return np.searchsorted(self.sq_cumsum, u)
+
+    def get_norm(self) -> float:
+        """Return ||v||."""
+        return self.norm
+
+class MatrixSampleQuery:
+    """
+    Sample-query access to matrix rows and entries.
+    """
+
+    def __init__(self, A: np.ndarray):
+        """
+        Build sample-query structure for matrix.
+
+        Args:
+            A: Matrix to provide access to
+        """
+        self.A = A.copy()
+        self.m, self.n = A.shape
+
+        # Row norms
+        self.row_norms = np.linalg.norm(A, axis=1)
+        self.frob_norm = np.linalg.norm(A, 'fro')
+
+        # Row sampling weights
+        self.row_weights = self.row_norms ** 2
+        self.row_cumsum = np.cumsum(self.row_weights)
+
+        # Column sampling for each row
+        self.row_sq = [np.cumsum(A[i]**2) for i in range(self.m)]
+
+    def query(self, i: int, j: int) -> float:
+        """Query entry A[i,j]."""
+        return self.A[i, j]
+
+    def sample_row(self) -> int:
+        """Sample row i with probability ||A_i||^2/||A||_F^2."""
+        u = np.random.random() * self.row_cumsum[-1]
+        return np.searchsorted(self.row_cumsum, u)
+
+    def sample_column(self, row: int) -> int:
+        """Sample column j from row with probability |A[row,j]|^2/||A_row||^2."""
+        u = np.random.random() * self.row_sq[row][-1]
+        return np.searchsorted(self.row_sq[row], u)
+
+    def get_row_norm(self, i: int) -> float:
+        """Return ||A_i||."""
+        return self.row_norms[i]
+
+    def get_frobenius_norm(self) -> float:
+        """Return ||A||_F."""
+        return self.frob_norm
+
+# Demonstrate sampling
+np.random.seed(42)
+v = np.array([1, 2, 3, 4, 5], dtype=float)
+sq_v = SampleQueryAccess(v)
+
+print("Sample-Query Access Demo")
+print("=" * 40)
+print(f"Vector: {v}")
+print(f"Norm: {sq_v.get_norm():.4f}")
+print(f"Query v[2]: {sq_v.query(2)}")
+
+# Sample distribution
+samples = [sq_v.sample() for _ in range(10000)]
+empirical = np.bincount(samples, minlength=len(v)) / 10000
+expected = v**2 / np.sum(v**2)
+
+print(f"\nSampling distribution:")
+print(f"Expected: {expected}")
+print(f"Empirical: {empirical}")
+```
+
+## 3. Tang's Dequantization of Recommendation Systems
+
+The quantum recommendation algorithm claimed exponential speedup. Tang showed classical can match it:
+
+```python
+import numpy as np
+
+def quantum_inspired_recommendation(A: np.ndarray, user_idx: int,
+                                      rank: int, n_samples: int) -> dict:
+    """
+    Quantum-inspired recommendation using sampling.
+
+    This is a simplified version of Tang's algorithm.
+
+    Args:
+        A: User-item rating matrix
+        user_idx: User to generate recommendations for
+        rank: Low-rank approximation parameter
+        n_samples: Number of samples for estimation
+
+    Returns:
+        Recommended items and analysis
+    """
+    m, n = A.shape
+    A_sq = MatrixSampleQuery(A)
+
+    # Step 1: Sample rows to build low-rank approximation
+    sampled_rows = []
+    row_samples = [A_sq.sample_row() for _ in range(n_samples)]
+
+    # Get approximate row space
+    for row_idx in set(row_samples):
+        count = row_samples.count(row_idx)
+        weight = A_sq.get_frobenius_norm() / (np.sqrt(n_samples) * A_sq.get_row_norm(row_idx))
+        sampled_rows.append((row_idx, weight, A[row_idx]))
+
+    # Step 2: Build approximate SVD using sampled rows
+    if len(sampled_rows) >= rank:
+        R = np.array([r[2] for r in sampled_rows[:rank]])
+        # Simple QR for orthogonal basis
+        Q, _ = np.linalg.qr(R.T)
+        V_approx = Q[:, :rank]  # Approximate right singular vectors
+    else:
+        V_approx = np.eye(n)[:, :rank]
+
+    # Step 3: Project user vector onto approximate subspace
+    user_vec = A[user_idx]
+    user_projected = V_approx @ (V_approx.T @ user_vec)
+
+    # Step 4: Generate recommendations (items with high projected values)
+    recommendations = np.argsort(user_projected)[::-1]
+
+    return {
+        'recommendations': recommendations[:10],
+        'projected_scores': user_projected[recommendations[:10]],
+        'n_samples_used': n_samples,
+        'effective_rank': len(sampled_rows)
+    }
+
+def compare_quantum_classical_recommendation(A: np.ndarray, user_idx: int,
+                                               rank: int) -> dict:
+    """
+    Compare quantum-inspired vs full SVD recommendation.
+    """
+    # Full SVD (classical baseline)
+    U, S, Vh = np.linalg.svd(A, full_matrices=False)
+
+    # Low-rank approximation
+    U_k = U[:, :rank]
+    S_k = S[:rank]
+    Vh_k = Vh[:rank, :]
+
+    A_k = U_k @ np.diag(S_k) @ Vh_k
+    true_recommendations = np.argsort(A_k[user_idx])[::-1][:10]
+
+    # Quantum-inspired
+    qi_result = quantum_inspired_recommendation(A, user_idx, rank, n_samples=100)
+    qi_recommendations = qi_result['recommendations']
+
+    # Overlap metric
+    overlap = len(set(true_recommendations) & set(qi_recommendations))
+
+    return {
+        'svd_recommendations': true_recommendations,
+        'qi_recommendations': qi_recommendations,
+        'overlap': overlap,
+        'precision': overlap / 10
+    }
+
+# Example
+np.random.seed(42)
+m, n = 100, 50  # 100 users, 50 items
+rank_true = 5
+
+# Low-rank rating matrix
+U = np.random.randn(m, rank_true)
+V = np.random.randn(rank_true, n)
+A = U @ V + 0.1 * np.random.randn(m, n)
+
+print("\nQuantum-Inspired Recommendation")
+print("=" * 40)
+
+result = compare_quantum_classical_recommendation(A, user_idx=0, rank=5)
+
+print(f"SVD recommendations: {result['svd_recommendations']}")
+print(f"QI recommendations:  {result['qi_recommendations']}")
+print(f"Overlap: {result['overlap']}/10")
+print(f"Precision: {result['precision']:.0%}")
+```
+
+## 4. What Does Dequantization Tell Us?
+
+<Definition term="Lessons from Dequantization">
+1. **Sampling assumptions matter**: If quantum gets sampling "free," classical can build it
+2. **Query vs time complexity**: Quantum query speedups may not translate to time speedups
+3. **Input model is key**: How data is provided determines possible speedups
+4. **Some advantages remain**: Not all quantum algorithms are dequantizable
+</Definition>
+
+```python
+import numpy as np
+
+def analyze_dequantization_conditions(problem: dict) -> dict:
+    """
+    Analyze whether a quantum algorithm is susceptible to dequantization.
+
+    Args:
+        problem: Problem specification
+
+    Returns:
+        Analysis of dequantization vulnerability
+    """
+    # Key factors
+    factors = {
+        'sampling_assumed': problem.get('quantum_sampling', False),
+        'low_rank_structure': problem.get('low_rank', False),
+        'output_is_samples': problem.get('sample_output', False),
+        'data_is_classical': problem.get('classical_data', True),
+        'qram_required': problem.get('needs_qram', False)
+    }
+
+    # Vulnerability score
+    vulnerability = 0
+    reasons = []
+
+    if factors['sampling_assumed']:
+        vulnerability += 2
+        reasons.append("Sampling access can be provided classically with preprocessing")
+
+    if factors['low_rank_structure']:
+        vulnerability += 2
+        reasons.append("Low-rank structure enables efficient classical sampling")
+
+    if factors['output_is_samples']:
+        vulnerability += 1
+        reasons.append("Sample output can often be matched by classical sampling")
+
+    if factors['data_is_classical']:
+        vulnerability += 1
+        reasons.append("Classical data requires O(n) loading, may dominate")
+
+    if factors['qram_required']:
+        vulnerability += 1
+        reasons.append("QRAM assumption enables classical SQ structure")
+
+    # Robust advantages
+    robust_factors = {
+        'superposition_essential': not factors['output_is_samples'],
+        'exponential_state_space': problem.get('exponential_states', False),
+        'interference_critical': problem.get('needs_interference', False),
+        'no_classical_analog': problem.get('quantum_native', False)
+    }
+
+    robustness = sum(robust_factors.values())
+
+    return {
+        'vulnerability_score': vulnerability,
+        'robustness_score': robustness,
+        'likely_dequantizable': vulnerability > robustness,
+        'vulnerability_reasons': reasons,
+        'robust_factors': robust_factors
+    }
+
+# Analyze different algorithms
+algorithms = [
+    {
+        'name': 'Quantum Recommendation',
+        'quantum_sampling': True,
+        'low_rank': True,
+        'sample_output': True,
+        'classical_data': True,
+        'needs_qram': True,
+        'exponential_states': False,
+        'needs_interference': False,
+        'quantum_native': False
+    },
+    {
+        'name': 'Quantum Simulation',
+        'quantum_sampling': False,
+        'low_rank': False,
+        'sample_output': False,
+        'classical_data': False,
+        'needs_qram': False,
+        'exponential_states': True,
+        'needs_interference': True,
+        'quantum_native': True
+    },
+    {
+        'name': 'HHL for PDE',
+        'quantum_sampling': True,
+        'low_rank': False,
+        'sample_output': True,
+        'classical_data': True,
+        'needs_qram': True,
+        'exponential_states': False,
+        'needs_interference': True,
+        'quantum_native': False
+    }
+]
+
+print("Dequantization Vulnerability Analysis")
+print("=" * 55)
+
+for alg in algorithms:
+    result = analyze_dequantization_conditions(alg)
+    status = "VULNERABLE" if result['likely_dequantizable'] else "ROBUST"
+    print(f"\n{alg['name']}: {status}")
+    print(f"  Vulnerability: {result['vulnerability_score']}, Robustness: {result['robustness_score']}")
+```
+
+## 5. Robust Quantum Advantages
+
+Some quantum advantages cannot be dequantized:
+
+<Definition term="Robust Quantum Advantages">
+Advantages that survive dequantization analysis:
+1. **Quantum simulation**: Simulating quantum systems with quantum computers
+2. **Unstructured search**: Grover's algorithm (provable quadratic speedup)
+3. **Cryptographic protocols**: Quantum key distribution, randomness generation
+4. **Certain optimization**: QAOA for specific problems
+</Definition>
+
+```python
+import numpy as np
+
+def identify_robust_advantages() -> list:
+    """
+    Catalog robust quantum advantages in linear algebra.
+    """
+    advantages = [
+        {
+            'algorithm': 'Quantum Simulation of Many-Body Systems',
+            'classical': 'O(exp(n))',
+            'quantum': 'O(poly(n))',
+            'why_robust': 'No classical structure to exploit - fundamentally quantum problem',
+            'applications': ['Condensed matter', 'Quantum chemistry', 'High-energy physics']
+        },
+        {
+            'algorithm': 'Quantum Linear Systems (sparse, well-conditioned)',
+            'classical': 'O(n * s * kappa)',
+            'quantum': 'O(polylog(n) * s * kappa)',
+            'why_robust': 'When output is used in further quantum computation',
+            'applications': ['Quantum ML pipeline', 'Hybrid algorithms']
+        },
+        {
+            'algorithm': 'Phase Estimation for Eigenstates',
+            'classical': 'Exponential in precision',
+            'quantum': 'Polynomial in precision',
+            'why_robust': 'Eigenstate is already quantum - no loading overhead',
+            'applications': ['Quantum chemistry', 'Material science']
+        },
+        {
+            'algorithm': 'Quantum Walks on Graphs',
+            'classical': 'O(n)',
+            'quantum': 'O(sqrt(n))',
+            'why_robust': 'Interference enables quadratic speedup for search',
+            'applications': ['Graph algorithms', 'Element distinctness']
+        }
+    ]
+
+    return advantages
+
+def quantum_pipeline_advantage():
+    """
+    Illustrate advantage when output feeds further quantum processing.
+    """
+    # Example: Quantum ML pipeline
+    # Input -> HHL -> Quantum Neural Network -> Measurement
+
+    pipeline = {
+        'stages': [
+            {'name': 'Data encoding', 'classical_cost': 'O(n)', 'quantum_cost': 'O(log n) with QRAM'},
+            {'name': 'Linear solve (HHL)', 'classical_cost': 'O(n^3)', 'quantum_cost': 'O(log n * poly(kappa))'},
+            {'name': 'Feature extraction', 'classical_cost': 'O(n)', 'quantum_cost': 'O(1) - quantum state'},
+            {'name': 'Classification', 'classical_cost': 'O(n)', 'quantum_cost': 'O(log n)'},
+            {'name': 'Output', 'classical_cost': 'O(1)', 'quantum_cost': 'O(1) measurement'}
+        ]
+    }
+
+    # Total costs
+    classical_total = "O(n^3)"
+    quantum_total = "O(polylog(n) * poly(kappa))"
+
+    # Key insight: intermediate quantum states don't need readout
+    key_insight = """
+    When HHL output |x> feeds directly into further quantum processing,
+    we avoid the O(n) readout cost. The full solution vector stays
+    encoded in amplitudes.
+    """
+
+    return {
+        'pipeline': pipeline,
+        'classical_total': classical_total,
+        'quantum_total': quantum_total,
+        'key_insight': key_insight
+    }
+
+# Display robust advantages
+print("\nRobust Quantum Advantages")
+print("=" * 55)
+
+advantages = identify_robust_advantages()
+for adv in advantages:
+    print(f"\n{adv['algorithm']}:")
+    print(f"  Classical: {adv['classical']}")
+    print(f"  Quantum: {adv['quantum']}")
+    print(f"  Why robust: {adv['why_robust']}")
+```
+
+## 6. Query Complexity vs Time Complexity
+
+<Warning>
+Query complexity measures oracle calls, not total operations. A quantum algorithm with fewer queries may still be slower due to:
+- State preparation overhead
+- Gate complexity per query
+- Classical pre/post-processing
+</Warning>
+
+```python
+import numpy as np
+
+def complexity_decomposition(algorithm: str, n: int, params: dict) -> dict:
+    """
+    Break down total complexity into components.
+
+    Args:
+        algorithm: Algorithm name
+        n: Problem size
+        params: Algorithm parameters
+
+    Returns:
+        Detailed complexity breakdown
+    """
+    if algorithm == 'HHL':
+        kappa = params.get('kappa', 10)
+        sparsity = params.get('sparsity', 10)
+        precision = params.get('precision', 0.01)
+
+        # Query complexity (number of matrix accesses)
+        query_complexity = np.log2(n) * sparsity * kappa / precision
+
+        # Gate complexity per query (Hamiltonian simulation)
+        gates_per_query = sparsity * np.log2(n)
+
+        # Total gate complexity
+        total_gates = query_complexity * gates_per_query
+
+        # State preparation (often dominates!)
+        state_prep_gates = n  # General case
+        state_prep_qram = np.log2(n)  # With QRAM
+
+        # Output extraction
+        output_full = n * (1 / precision**2)  # Tomography
+        output_sample = 1 / precision**2  # Single measurement
+
+        return {
+            'query_complexity': query_complexity,
+            'gates_per_query': gates_per_query,
+            'total_gates': total_gates,
+            'state_prep': {
+                'general': state_prep_gates,
+                'qram': state_prep_qram
+            },
+            'output': {
+                'full_vector': output_full,
+                'single_sample': output_sample
+            },
+            'total_realistic': state_prep_gates + total_gates + output_sample,
+            'total_optimistic': state_prep_qram + total_gates + output_sample
+        }
+
+    elif algorithm == 'Classical_CG':
+        kappa = params.get('kappa', 10)
+        sparsity = params.get('sparsity', 10)
+
+        # Conjugate gradient iterations
+        iterations = np.sqrt(kappa) * np.log(1/params.get('precision', 0.01))
+
+        # Work per iteration (sparse matrix-vector product)
+        work_per_iter = n * sparsity
+
+        return {
+            'iterations': iterations,
+            'work_per_iteration': work_per_iter,
+            'total_operations': iterations * work_per_iter
+        }
+
+    return {}
+
+# Compare query vs total complexity
+print("Query vs Total Complexity")
+print("=" * 50)
+
+n = 10**6
+params = {'kappa': 100, 'sparsity': 10, 'precision': 0.01}
+
+hhl = complexity_decomposition('HHL', n, params)
+cg = complexity_decomposition('Classical_CG', n, params)
+
+print(f"\nProblem: n = {n:,}, kappa = {params['kappa']}, sparsity = {params['sparsity']}")
+
+print(f"\nHHL Quantum Algorithm:")
+print(f"  Query complexity: {hhl['query_complexity']:.2e}")
+print(f"  Total gates: {hhl['total_gates']:.2e}")
+print(f"  State prep (general): {hhl['state_prep']['general']:.2e}")
+print(f"  State prep (QRAM): {hhl['state_prep']['qram']:.2e}")
+print(f"  Total (realistic): {hhl['total_realistic']:.2e}")
+print(f"  Total (optimistic): {hhl['total_optimistic']:.2e}")
+
+print(f"\nConjugate Gradient:")
+print(f"  Iterations: {cg['iterations']:.1f}")
+print(f"  Total operations: {cg['total_operations']:.2e}")
+
+speedup_realistic = cg['total_operations'] / hhl['total_realistic']
+speedup_optimistic = cg['total_operations'] / hhl['total_optimistic']
+
+print(f"\nSpeedup (realistic): {speedup_realistic:.2f}x")
+print(f"Speedup (optimistic): {speedup_optimistic:.2f}x")
+```
+
+## 7. The Data Loading Problem
+
+The critical bottleneck for classical data:
+
+```python
+import numpy as np
+
+def analyze_data_loading_overhead(data_size: int, data_type: str) -> dict:
+    """
+    Analyze the data loading overhead for quantum algorithms.
+
+    Args:
+        data_size: Size of classical data
+        data_type: Type of data structure
+
+    Returns:
+        Loading analysis
+    """
+    methods = {
+        'state_preparation': {
+            'general': data_size,
+            'description': 'Arbitrary amplitude encoding requires O(n) gates',
+            'example': 'Loading a classical vector into |psi>'
+        },
+        'qram': {
+            'general': np.log2(data_size),
+            'description': 'QRAM provides O(log n) access but hardware is speculative',
+            'example': 'Quantum random access to stored data'
+        },
+        'data_structure': {
+            'general': data_size,  # One-time preprocessing
+            'query': np.log2(data_size),
+            'description': 'Build classical data structure for efficient quantum access',
+            'example': 'KP-trees for sample-query access'
+        },
+        'structured_data': {
+            'general': np.log2(data_size) ** 2,
+            'description': 'Exploit structure (sparsity, low-rank) for efficient loading',
+            'example': 'Sparse matrices, tensor products'
+        }
+    }
+
+    # Impact on speedup
+    algorithm_speedup = np.log2(data_size) ** 2  # Typical quantum algorithm improvement
+
+    analysis = {}
+    for method, info in methods.items():
+        loading_cost = info['general']
+        effective_speedup = algorithm_speedup / loading_cost * data_size  # Relative to classical
+
+        analysis[method] = {
+            'cost': loading_cost,
+            'effective_speedup': effective_speedup,
+            'viable': effective_speedup > 1,
+            'description': info['description']
+        }
+
+    return analysis
+
+# Analyze for different data sizes
+print("Data Loading Overhead Analysis")
+print("=" * 55)
+
+for n in [10**3, 10**6, 10**9]:
+    print(f"\nData size n = {n:,}:")
+    analysis = analyze_data_loading_overhead(n, 'general')
+
+    for method, info in analysis.items():
+        status = "Viable" if info['viable'] else "Not viable"
+        print(f"  {method}: O({info['cost']:.2e}) - {status}")
+```
+
+## 8. When Does Quantum Win?
+
+<Definition term="Conditions for Genuine Quantum Advantage">
+Quantum linear algebra provides genuine advantage when:
+
+1. **Data is quantum**: Output of quantum sensors or simulations
+2. **Output is quantum**: Feeds into further quantum processing
+3. **Exponential state space**: Problem inherently requires superposition
+4. **Structured input**: Efficient state preparation possible
+5. **Sampling suffices**: Don't need full classical output
+</Definition>
+
+```python
+import numpy as np
+
+def quantum_advantage_checklist(scenario: dict) -> dict:
+    """
+    Evaluate quantum advantage potential using checklist.
+
+    Args:
+        scenario: Problem scenario description
+
+    Returns:
+        Detailed evaluation
+    """
+    criteria = {
+        'quantum_input': {
+            'question': 'Is input data already quantum?',
+            'score': 10 if scenario.get('quantum_input', False) else 0,
+            'reasoning': 'Avoids O(n) loading overhead'
+        },
+        'quantum_output': {
+            'question': 'Does output feed further quantum processing?',
+            'score': 10 if scenario.get('quantum_output', False) else 0,
+            'reasoning': 'Avoids O(n) readout overhead'
+        },
+        'exponential_size': {
+            'question': 'Is state space exponentially large?',
+            'score': 8 if scenario.get('exponential_states', False) else 0,
+            'reasoning': 'Classical cannot even store the state'
+        },
+        'efficient_loading': {
+            'question': 'Is efficient state preparation possible?',
+            'score': 7 if scenario.get('structured_data', False) else 0,
+            'reasoning': 'Structured data enables O(polylog n) loading'
+        },
+        'sample_output': {
+            'question': 'Is sampling output sufficient?',
+            'score': 5 if scenario.get('sampling_ok', False) else 0,
+            'reasoning': 'Avoids full state tomography'
+        },
+        'low_condition': {
+            'question': 'Is condition number moderate?',
+            'score': 5 if scenario.get('kappa', 1000) < 100 else 0,
+            'reasoning': 'Avoids O(kappa^2) cost dominating'
+        }
+    }
+
+    total_score = sum(c['score'] for c in criteria.values())
+    max_score = sum(10 if 'score' in c else 0 for c in criteria.values())
+
+    # Threshold for likely advantage
+    if total_score >= 30:
+        assessment = 'Strong quantum advantage expected'
+    elif total_score >= 20:
+        assessment = 'Possible quantum advantage'
+    elif total_score >= 10:
+        assessment = 'Marginal - depends on constants'
+    else:
+        assessment = 'Classical likely better'
+
+    return {
+        'criteria': criteria,
+        'total_score': total_score,
+        'max_score': max_score,
+        'percentage': total_score / max_score * 100,
+        'assessment': assessment
+    }
+
+# Evaluate scenarios
+scenarios = [
+    {
+        'name': 'Quantum chemistry ground state',
+        'quantum_input': False,  # Start from classical description
+        'quantum_output': False,  # Want energy (classical number)
+        'exponential_states': True,  # Many-body wavefunction
+        'structured_data': True,  # Molecular structure
+        'sampling_ok': True,  # Energy estimation via sampling
+        'kappa': 50
+    },
+    {
+        'name': 'Classical ML pipeline',
+        'quantum_input': False,
+        'quantum_output': False,
+        'exponential_states': False,
+        'structured_data': False,
+        'sampling_ok': True,
+        'kappa': 100
+    },
+    {
+        'name': 'Hybrid quantum optimization',
+        'quantum_input': False,
+        'quantum_output': True,  # QAOA uses quantum intermediate
+        'exponential_states': True,
+        'structured_data': True,
+        'sampling_ok': True,
+        'kappa': 10
+    }
+]
+
+print("\nQuantum Advantage Checklist Evaluation")
+print("=" * 55)
+
+for scenario in scenarios:
+    result = quantum_advantage_checklist(scenario)
+    print(f"\n{scenario['name']}:")
+    print(f"  Score: {result['total_score']}/{result['max_score']} ({result['percentage']:.0f}%)")
+    print(f"  Assessment: {result['assessment']}")
+```
+
+## 9. Current Research Directions
+
+Research continues to refine the boundary between quantum and classical:
+
+| Direction | Goal | Status |
+|-----------|------|--------|
+| Tighter dequantization | Find more classical algorithms | Ongoing |
+| Better QRAM | Make quantum data loading practical | Hardware challenges |
+| Quantum-native problems | Find problems where quantum is essential | Active research |
+| Hybrid algorithms | Combine classical and quantum optimally | NISQ focus |
+| Error mitigation | Make noisy quantum useful | Near-term priority |
+
+## 10. Summary
+
+Understanding dequantization reveals the true nature of quantum advantage:
+
+1. **Sampling assumptions**: Classical can match quantum when data has efficient sampling access
+2. **Input/output overhead**: Loading and extracting classical data can negate quantum speedups
+3. **Query vs time**: Query complexity hides significant practical costs
+4. **Robust advantages**: Exist for quantum simulation, certain optimization, cryptography
+5. **Hybrid future**: Best applications likely combine quantum and classical
+
+The key insight: quantum advantage is real but requires careful end-to-end analysis, not just asymptotic query complexity.
+
+<Tip>
+When evaluating quantum algorithm claims, always ask:
+1. What input model is assumed?
+2. What output is actually needed?
+3. What are the condition number and other problem-specific parameters?
+4. Is there structure that could enable classical speedup?
+</Tip>
+
+## Further Reading
+
+- Previous lesson: Linear System Applications
+- Related: HHL Algorithm, QSVT framework
+- Advanced: Fine-grained complexity theory, quantum-classical separations

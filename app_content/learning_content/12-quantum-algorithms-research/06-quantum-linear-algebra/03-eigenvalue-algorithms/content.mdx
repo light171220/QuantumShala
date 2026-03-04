@@ -1,0 +1,1100 @@
+---
+title: "Quantum Eigenvalue Algorithms: QPE and Quantum Eigensolvers"
+description: "Explore quantum algorithms for eigenvalue problems including quantum phase estimation variants, iterative quantum eigensolvers, and spectral analysis techniques."
+duration: 85
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Implement standard and iterative quantum phase estimation
+- Understand quantum eigenvalue estimation without full QPE
+- Compare fault-tolerant vs variational eigensolvers
+- Analyze spectral gap requirements and precision bounds
+- Apply eigenvalue algorithms to chemistry and optimization problems
+
+## 1. The Eigenvalue Problem in Quantum Computing
+
+Eigenvalue problems are central to quantum mechanics, quantum chemistry, and optimization. Given a Hermitian operator $H$, find eigenvalues $\lambda_j$ and eigenvectors $|u_j\rangle$ such that:
+
+$$H|u_j\rangle = \lambda_j|u_j\rangle$$
+
+<Definition term="Quantum Eigenvalue Problem">
+The quantum eigenvalue problem asks: given access to a unitary $U = e^{iH}$, estimate eigenvalues of $H$ with precision $\epsilon$ using quantum operations. Quantum algorithms can achieve exponential speedups in certain cases.
+</Definition>
+
+<Tip>
+Most quantum algorithms for eigenvalues are actually solving the **phase estimation** problem for $U = e^{iH}$, then extracting $\lambda_j$ from the phases $e^{i\lambda_j}$.
+</Tip>
+
+## 2. Standard Quantum Phase Estimation
+
+The standard QPE algorithm uses controlled unitaries and the Quantum Fourier Transform:
+
+<Formula>
+For unitary $U$ with eigenstate $|u_j\rangle$ and eigenvalue $e^{2\pi i\theta_j}$:
+$$\text{QPE}: |0\rangle^{\otimes n}|u_j\rangle \rightarrow |\tilde{\theta}_j\rangle|u_j\rangle$$
+where $|\tilde{\theta}_j\rangle$ is an n-bit approximation to $\theta_j$.
+</Formula>
+
+```python
+import numpy as np
+from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
+from qiskit.circuit.library import QFT
+from qiskit.quantum_info import Operator, Statevector
+
+def standard_qpe(unitary: np.ndarray, n_precision: int) -> QuantumCircuit:
+    """
+    Implement standard Quantum Phase Estimation.
+
+    Args:
+        unitary: Unitary matrix U = e^{iH}
+        n_precision: Number of precision qubits (determines accuracy)
+
+    Returns:
+        QPE circuit
+    """
+    n_system = int(np.log2(unitary.shape[0]))
+
+    # Registers
+    precision = QuantumRegister(n_precision, 'precision')
+    system = QuantumRegister(n_system, 'system')
+    classical = ClassicalRegister(n_precision, 'result')
+
+    qc = QuantumCircuit(precision, system, classical)
+
+    # Step 1: Hadamard on precision register
+    qc.h(precision)
+
+    # Step 2: Controlled-U^(2^k) operations
+    U = Operator(unitary)
+
+    for k in range(n_precision):
+        power = 2 ** k
+        U_power = U.power(power)
+        controlled_U = U_power.to_instruction().control(1)
+        qc.append(controlled_U, [precision[k]] + list(system))
+
+    # Step 3: Inverse QFT
+    qc.append(QFT(n_precision, inverse=True), precision)
+
+    # Step 4: Measurement
+    qc.measure(precision, classical)
+
+    return qc
+
+def estimate_phase_from_counts(counts: dict, n_precision: int) -> list:
+    """
+    Extract phase estimates from measurement counts.
+
+    Args:
+        counts: Measurement results
+        n_precision: Number of precision qubits
+
+    Returns:
+        List of (phase, probability) tuples
+    """
+    total_shots = sum(counts.values())
+    results = []
+
+    for bitstring, count in counts.items():
+        # Convert bitstring to integer
+        k = int(bitstring, 2)
+        # Phase estimate
+        phase = k / (2 ** n_precision)
+        probability = count / total_shots
+
+        if probability > 0.01:  # Filter noise
+            results.append({
+                'bitstring': bitstring,
+                'integer': k,
+                'phase': phase,
+                'eigenvalue': np.exp(2j * np.pi * phase),
+                'probability': probability
+            })
+
+    return sorted(results, key=lambda x: -x['probability'])
+
+# Example: QPE for diagonal unitary
+H = np.diag([0.2, 0.7])  # Eigenvalues 0.2 and 0.7
+U = np.diag(np.exp(2j * np.pi * np.diag(H)))
+
+print("Standard QPE Example")
+print("=" * 40)
+print(f"Hamiltonian H = diag({np.diag(H)})")
+print(f"True eigenvalues: {np.diag(H)}")
+
+qc = standard_qpe(U, n_precision=4)
+print(f"\nQPE circuit depth: {qc.depth()}")
+print(f"Precision qubits: 4 (resolution: 1/16 = 0.0625)")
+```
+
+## 3. Iterative Phase Estimation (IPEA)
+
+Iterative QPE uses fewer qubits by measuring one bit at a time:
+
+<Definition term="Iterative Phase Estimation">
+IPEA uses only one precision qubit, iterating $n$ times to extract $n$ bits of phase. Each iteration uses classically-controlled rotations based on previously measured bits.
+</Definition>
+
+<Warning>
+IPEA requires mid-circuit measurement and classical feedback, which adds complexity on current hardware. However, it dramatically reduces qubit requirements.
+</Warning>
+
+```python
+import numpy as np
+from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
+
+def iterative_qpe(unitary: np.ndarray, n_precision: int) -> list:
+    """
+    Implement Iterative Quantum Phase Estimation.
+
+    Uses only 1 ancilla qubit, measuring n_precision bits sequentially.
+
+    Args:
+        unitary: Unitary matrix U
+        n_precision: Number of precision bits to extract
+
+    Returns:
+        List of circuits for each iteration
+    """
+    n_system = int(np.log2(unitary.shape[0]))
+    circuits = []
+
+    for bit_index in range(n_precision - 1, -1, -1):
+        # Create circuit for this bit
+        ancilla = QuantumRegister(1, 'ancilla')
+        system = QuantumRegister(n_system, 'system')
+        c_bit = ClassicalRegister(1, f'bit_{bit_index}')
+
+        qc = QuantumCircuit(ancilla, system, c_bit)
+
+        # Hadamard on ancilla
+        qc.h(ancilla[0])
+
+        # Controlled-U^(2^k)
+        power = 2 ** bit_index
+        U_power = np.linalg.matrix_power(unitary, power)
+
+        # Apply controlled unitary
+        # (In practice, would use efficient decomposition)
+        controlled_U = np.eye(2 * unitary.shape[0], dtype=complex)
+        controlled_U[unitary.shape[0]:, unitary.shape[0]:] = U_power
+
+        # Note: Phase correction from previous bits would be applied here
+        # qc.rz(-correction_angle, ancilla[0])
+
+        qc.h(ancilla[0])
+        qc.measure(ancilla, c_bit)
+
+        circuits.append({
+            'bit_index': bit_index,
+            'circuit': qc,
+            'power': power
+        })
+
+    return circuits
+
+def simulate_ipea(unitary: np.ndarray, eigenstate: np.ndarray,
+                   n_precision: int) -> dict:
+    """
+    Simulate IPEA to extract phase of an eigenstate.
+
+    Args:
+        unitary: Unitary matrix
+        eigenstate: Eigenstate of U
+        n_precision: Number of precision bits
+
+    Returns:
+        Phase estimation result
+    """
+    from qiskit.quantum_info import Statevector
+
+    # Get true phase
+    eigenvalue = eigenstate.conj() @ unitary @ eigenstate
+    true_phase = np.angle(eigenvalue) / (2 * np.pi)
+    if true_phase < 0:
+        true_phase += 1
+
+    # Simulate bit extraction
+    measured_bits = []
+    phase_estimate = 0
+
+    for k in range(n_precision - 1, -1, -1):
+        # Probability of measuring 0
+        # Depends on phase and previous corrections
+        power = 2 ** k
+        phase_contribution = power * true_phase
+
+        # Simplified: extract bit of binary representation
+        bit_value = int(2 * true_phase * 2**k) % 2
+        measured_bits.append(bit_value)
+
+        phase_estimate += bit_value / (2 ** (n_precision - k))
+
+    return {
+        'true_phase': true_phase,
+        'measured_bits': measured_bits,
+        'estimated_phase': phase_estimate,
+        'error': abs(true_phase - phase_estimate)
+    }
+
+# Compare standard vs iterative QPE
+print("\nIterative QPE Comparison")
+print("=" * 40)
+
+H = np.diag([0.3, 0.8])
+U = np.diag(np.exp(2j * np.pi * np.diag(H)))
+eigenstate = np.array([1, 0])  # First eigenstate
+
+for n_bits in [4, 6, 8]:
+    result = simulate_ipea(U, eigenstate, n_bits)
+    print(f"\n{n_bits}-bit IPEA:")
+    print(f"  True phase: {result['true_phase']:.6f}")
+    print(f"  Estimated: {result['estimated_phase']:.6f}")
+    print(f"  Error: {result['error']:.6f}")
+    print(f"  Qubits needed: 1 ancilla + {int(np.log2(U.shape[0]))} system")
+```
+
+## 4. Robust Phase Estimation
+
+For noisy systems, robust variants improve reliability:
+
+```python
+import numpy as np
+from scipy.stats import vonmises
+
+def robust_phase_estimation(phases: np.ndarray, weights: np.ndarray = None) -> dict:
+    """
+    Robust phase estimation from multiple samples.
+
+    Uses circular statistics to handle phase wrapping.
+
+    Args:
+        phases: Array of phase estimates from measurements
+        weights: Optional weights for each estimate
+
+    Returns:
+        Robust phase estimate with confidence
+    """
+    if weights is None:
+        weights = np.ones(len(phases))
+    weights = weights / np.sum(weights)
+
+    # Convert to complex exponentials for circular mean
+    z = np.exp(2j * np.pi * phases)
+    z_mean = np.sum(weights * z)
+
+    # Circular mean
+    phase_mean = np.angle(z_mean) / (2 * np.pi)
+    if phase_mean < 0:
+        phase_mean += 1
+
+    # Circular variance (concentration parameter)
+    R = np.abs(z_mean)
+    circular_variance = 1 - R
+
+    # Confidence interval (approximate)
+    n_eff = 1 / np.sum(weights ** 2)  # Effective sample size
+    confidence = 1.96 * np.sqrt(circular_variance / n_eff)
+
+    return {
+        'phase_estimate': phase_mean,
+        'circular_variance': circular_variance,
+        'confidence_interval': confidence,
+        'concentration': R
+    }
+
+def qpe_with_heisenberg_limited_precision(
+    unitary: np.ndarray,
+    n_repetitions: int,
+    time_schedule: list = None
+) -> dict:
+    """
+    QPE achieving Heisenberg-limited precision.
+
+    Uses carefully chosen evolution times to achieve σ ∝ 1/T
+    instead of standard quantum limit σ ∝ 1/√T.
+
+    Args:
+        unitary: Unitary to analyze
+        n_repetitions: Number of independent runs
+        time_schedule: Evolution times (default: geometric)
+
+    Returns:
+        Phase estimate with Heisenberg-limited precision
+    """
+    eigenvalues = np.linalg.eigvals(unitary)
+    true_phases = np.angle(eigenvalues) / (2 * np.pi)
+
+    if time_schedule is None:
+        # Geometric schedule: t = 1, 2, 4, 8, ...
+        time_schedule = [2**k for k in range(n_repetitions)]
+
+    total_time = sum(time_schedule)
+
+    # Simulate measurements at each time
+    estimates = []
+    for t in time_schedule:
+        # Phase accumulates: e^{i*t*θ}
+        # Measurement gives estimate with precision ~ 1/t
+        # Simplified simulation
+        noise = np.random.normal(0, 1/(2*t))
+        estimate = true_phases[0] + noise  # First eigenvalue
+        estimate = estimate % 1  # Wrap to [0, 1)
+        estimates.append(estimate)
+
+    # Combine estimates robustly
+    weights = np.array(time_schedule) / total_time
+    result = robust_phase_estimation(np.array(estimates), weights)
+
+    # Heisenberg limit analysis
+    heisenberg_limit = 1 / total_time
+    actual_error = abs(result['phase_estimate'] - true_phases[0])
+
+    return {
+        **result,
+        'true_phase': true_phases[0],
+        'actual_error': actual_error,
+        'total_time': total_time,
+        'heisenberg_limit': heisenberg_limit,
+        'achieves_heisenberg': actual_error < 2 * heisenberg_limit
+    }
+
+# Demonstrate robust QPE
+print("Robust Phase Estimation")
+print("=" * 40)
+
+np.random.seed(42)
+U = np.diag([np.exp(2j * np.pi * 0.35)])
+
+result = qpe_with_heisenberg_limited_precision(U, n_repetitions=6)
+
+print(f"True phase: {result['true_phase']:.6f}")
+print(f"Estimated phase: {result['phase_estimate']:.6f}")
+print(f"Actual error: {result['actual_error']:.6f}")
+print(f"Heisenberg limit: {result['heisenberg_limit']:.6f}")
+print(f"Achieves Heisenberg limit: {result['achieves_heisenberg']}")
+```
+
+## 5. Variational Quantum Eigensolver (VQE)
+
+For near-term quantum computers, VQE uses a hybrid quantum-classical approach:
+
+<Definition term="Variational Quantum Eigensolver">
+VQE prepares parameterized quantum states $|\psi(\theta)\rangle$ and minimizes $\langle\psi(\theta)|H|\psi(\theta)\rangle$ using classical optimization. It finds ground state energy without full eigendecomposition.
+</Definition>
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+
+def create_ansatz_circuit(params: np.ndarray, n_qubits: int, depth: int):
+    """
+    Create parameterized ansatz for VQE.
+
+    Args:
+        params: Variational parameters
+        n_qubits: Number of qubits
+        depth: Circuit depth
+
+    Returns:
+        Ansatz state vector
+    """
+    # Simple hardware-efficient ansatz
+    # Alternating layers of single-qubit rotations and CNOTs
+
+    state = np.zeros(2**n_qubits, dtype=complex)
+    state[0] = 1  # Start in |0...0⟩
+
+    param_idx = 0
+
+    for d in range(depth):
+        # Single-qubit Ry rotations
+        for q in range(n_qubits):
+            theta = params[param_idx]
+            param_idx += 1
+
+            # Apply Ry(theta) to qubit q
+            cos = np.cos(theta / 2)
+            sin = np.sin(theta / 2)
+
+            new_state = np.zeros_like(state)
+            for i in range(len(state)):
+                bit = (i >> q) & 1
+                partner = i ^ (1 << q)
+
+                if bit == 0:
+                    new_state[i] += cos * state[i] - sin * state[partner]
+                else:
+                    new_state[i] += sin * state[partner ^ (1 << q)] + cos * state[i]
+
+            state = new_state / np.linalg.norm(new_state)
+
+        # Entangling layer (CNOTs)
+        for q in range(n_qubits - 1):
+            new_state = np.zeros_like(state)
+            for i in range(len(state)):
+                control_bit = (i >> q) & 1
+                if control_bit == 1:
+                    # Flip target bit
+                    new_state[i ^ (1 << (q + 1))] = state[i]
+                else:
+                    new_state[i] = state[i]
+            state = new_state
+
+    return state
+
+def vqe_cost_function(params: np.ndarray, hamiltonian: np.ndarray,
+                      n_qubits: int, depth: int) -> float:
+    """
+    Compute VQE cost function: ⟨ψ(θ)|H|ψ(θ)⟩
+
+    Args:
+        params: Variational parameters
+        hamiltonian: Hamiltonian matrix
+        n_qubits: Number of qubits
+        depth: Ansatz depth
+
+    Returns:
+        Energy expectation value
+    """
+    state = create_ansatz_circuit(params, n_qubits, depth)
+    energy = np.real(state.conj() @ hamiltonian @ state)
+    return energy
+
+def run_vqe(hamiltonian: np.ndarray, depth: int = 2,
+            n_iterations: int = 100) -> dict:
+    """
+    Run VQE to find ground state energy.
+
+    Args:
+        hamiltonian: Hamiltonian matrix
+        depth: Ansatz circuit depth
+        n_iterations: Maximum optimization iterations
+
+    Returns:
+        VQE results including energy and parameters
+    """
+    n_qubits = int(np.log2(hamiltonian.shape[0]))
+    n_params = n_qubits * depth
+
+    # Track optimization progress
+    history = []
+
+    def callback(params):
+        energy = vqe_cost_function(params, hamiltonian, n_qubits, depth)
+        history.append(energy)
+
+    # Random initialization
+    initial_params = np.random.uniform(0, 2*np.pi, n_params)
+
+    # Classical optimization
+    result = minimize(
+        lambda p: vqe_cost_function(p, hamiltonian, n_qubits, depth),
+        initial_params,
+        method='COBYLA',
+        callback=callback,
+        options={'maxiter': n_iterations}
+    )
+
+    # Exact ground state for comparison
+    eigenvalues = np.linalg.eigvalsh(hamiltonian)
+    exact_ground = eigenvalues[0]
+
+    return {
+        'vqe_energy': result.fun,
+        'exact_energy': exact_ground,
+        'error': result.fun - exact_ground,
+        'optimal_params': result.x,
+        'converged': result.success,
+        'iterations': len(history),
+        'history': history
+    }
+
+# Example: VQE for 2-qubit Heisenberg model
+def heisenberg_hamiltonian(J: float = 1.0, h: float = 0.5) -> np.ndarray:
+    """Create Heisenberg XXX Hamiltonian with field."""
+    # Pauli matrices
+    I = np.eye(2)
+    X = np.array([[0, 1], [1, 0]])
+    Y = np.array([[0, -1j], [1j, 0]])
+    Z = np.array([[1, 0], [0, -1]])
+
+    # Two-qubit terms
+    XX = np.kron(X, X)
+    YY = np.kron(Y, Y)
+    ZZ = np.kron(Z, Z)
+
+    # Field terms
+    ZI = np.kron(Z, I)
+    IZ = np.kron(I, Z)
+
+    H = J * (XX + YY + ZZ) + h * (ZI + IZ)
+    return np.real(H)
+
+print("\nVariational Quantum Eigensolver (VQE)")
+print("=" * 40)
+
+H = heisenberg_hamiltonian(J=1.0, h=0.5)
+print(f"Hamiltonian: 2-qubit Heisenberg XXX + field")
+print(f"Exact eigenvalues: {np.sort(np.linalg.eigvalsh(H))}")
+
+result = run_vqe(H, depth=3, n_iterations=200)
+
+print(f"\nVQE Results:")
+print(f"  VQE energy: {result['vqe_energy']:.6f}")
+print(f"  Exact ground state: {result['exact_energy']:.6f}")
+print(f"  Error: {result['error']:.6f}")
+print(f"  Converged: {result['converged']}")
+print(f"  Iterations: {result['iterations']}")
+```
+
+## 6. Quantum Subspace Methods
+
+For finding multiple eigenvalues, subspace methods are powerful:
+
+```python
+import numpy as np
+
+def quantum_subspace_expansion(hamiltonian: np.ndarray,
+                                reference_states: list,
+                                expansion_operators: list) -> dict:
+    """
+    Quantum Subspace Expansion (QSE) for excited states.
+
+    Builds effective Hamiltonian in expanded subspace and diagonalizes.
+
+    Args:
+        hamiltonian: Full Hamiltonian
+        reference_states: List of reference state vectors
+        expansion_operators: Operators to generate subspace
+
+    Returns:
+        Eigenvalues in subspace
+    """
+    # Build subspace from references and expansions
+    subspace = list(reference_states)
+
+    for ref in reference_states:
+        for op in expansion_operators:
+            expanded = op @ ref
+            expanded = expanded / np.linalg.norm(expanded)
+            subspace.append(expanded)
+
+    # Orthonormalize subspace
+    subspace_matrix = np.column_stack(subspace)
+    Q, R = np.linalg.qr(subspace_matrix)
+
+    # Keep non-trivial vectors
+    diag_R = np.abs(np.diag(R))
+    significant = diag_R > 1e-10
+    Q = Q[:, significant]
+
+    # Project Hamiltonian to subspace
+    H_eff = Q.T.conj() @ hamiltonian @ Q
+
+    # Overlap matrix (should be identity for orthonormal basis)
+    S = Q.T.conj() @ Q
+
+    # Solve generalized eigenvalue problem
+    eigenvalues, eigenvectors = np.linalg.eigh(H_eff)
+
+    # Full states
+    full_eigenstates = Q @ eigenvectors
+
+    return {
+        'eigenvalues': eigenvalues,
+        'eigenstates': full_eigenstates,
+        'subspace_dimension': Q.shape[1],
+        'effective_hamiltonian': H_eff
+    }
+
+def quantum_krylov_method(hamiltonian: np.ndarray,
+                          initial_state: np.ndarray,
+                          n_steps: int) -> dict:
+    """
+    Quantum Krylov subspace method for ground state.
+
+    Builds Krylov subspace {|ψ⟩, H|ψ⟩, H²|ψ⟩, ...} and finds
+    optimal combination.
+
+    Args:
+        hamiltonian: Hamiltonian matrix
+        initial_state: Starting state
+        n_steps: Number of Krylov vectors
+
+    Returns:
+        Ground state approximation
+    """
+    n = len(initial_state)
+
+    # Build Krylov basis
+    krylov_vectors = [initial_state / np.linalg.norm(initial_state)]
+
+    for k in range(n_steps - 1):
+        new_vec = hamiltonian @ krylov_vectors[-1]
+
+        # Orthogonalize against previous vectors
+        for prev in krylov_vectors:
+            new_vec = new_vec - np.vdot(prev, new_vec) * prev
+
+        norm = np.linalg.norm(new_vec)
+        if norm < 1e-12:
+            break
+
+        krylov_vectors.append(new_vec / norm)
+
+    # Build effective Hamiltonian in Krylov basis
+    K = np.column_stack(krylov_vectors)
+    H_krylov = K.T.conj() @ hamiltonian @ K
+
+    # Diagonalize
+    eigenvalues, eigenvectors = np.linalg.eigh(H_krylov)
+
+    # Construct approximate ground state
+    ground_coeffs = eigenvectors[:, 0]
+    ground_state = K @ ground_coeffs
+
+    # Exact comparison
+    exact_eigenvalues = np.linalg.eigvalsh(hamiltonian)
+
+    return {
+        'krylov_dimension': len(krylov_vectors),
+        'approximate_eigenvalues': eigenvalues,
+        'exact_eigenvalues': exact_eigenvalues[:len(eigenvalues)],
+        'ground_state': ground_state,
+        'ground_energy': eigenvalues[0],
+        'energy_error': eigenvalues[0] - exact_eigenvalues[0]
+    }
+
+# Example: Krylov method for random Hamiltonian
+print("\nQuantum Krylov Method")
+print("=" * 40)
+
+np.random.seed(42)
+n = 8
+H = np.random.randn(n, n)
+H = (H + H.T) / 2  # Make Hermitian
+
+initial = np.random.randn(n)
+initial = initial / np.linalg.norm(initial)
+
+for k in [3, 5, 7]:
+    result = quantum_krylov_method(H, initial, n_steps=k)
+    print(f"\nKrylov dimension {result['krylov_dimension']}:")
+    print(f"  Approx ground energy: {result['ground_energy']:.6f}")
+    print(f"  Exact ground energy: {result['exact_eigenvalues'][0]:.6f}")
+    print(f"  Error: {result['energy_error']:.6f}")
+```
+
+## 7. Spectral Gap and Precision Analysis
+
+The spectral gap determines algorithm performance:
+
+<Formula>
+Precision requirements for distinguishing eigenvalues:
+$$\epsilon < \frac{\Delta}{2}$$
+where $\Delta = \min_{i \neq j}|\lambda_i - \lambda_j|$ is the spectral gap.
+</Formula>
+
+```python
+import numpy as np
+
+def analyze_spectral_properties(hamiltonian: np.ndarray) -> dict:
+    """
+    Analyze spectral properties relevant for quantum eigensolvers.
+
+    Args:
+        hamiltonian: Hermitian matrix
+
+    Returns:
+        Spectral analysis results
+    """
+    eigenvalues = np.linalg.eigvalsh(hamiltonian)
+
+    # Spectral range
+    spectral_range = eigenvalues[-1] - eigenvalues[0]
+
+    # Gaps between consecutive eigenvalues
+    gaps = np.diff(eigenvalues)
+    min_gap = np.min(gaps)
+
+    # Ground state gap (energy gap)
+    ground_gap = eigenvalues[1] - eigenvalues[0]
+
+    # Required precision for QPE
+    required_precision_bits = int(np.ceil(-np.log2(min_gap / spectral_range))) + 2
+
+    # QPE circuit depth estimate
+    # Depth ~ 2^n for n precision bits
+    qpe_depth = 2 ** required_precision_bits
+
+    # VQE advantage: only needs to resolve ground state
+    vqe_required_precision = ground_gap / 10  # 10% of gap
+
+    return {
+        'eigenvalues': eigenvalues,
+        'spectral_range': spectral_range,
+        'min_gap': min_gap,
+        'ground_gap': ground_gap,
+        'required_precision_bits': required_precision_bits,
+        'qpe_depth_estimate': qpe_depth,
+        'vqe_precision_requirement': vqe_required_precision,
+        'recommendation': 'VQE' if ground_gap > min_gap * 2 else 'QPE'
+    }
+
+def compare_eigensolver_methods(hamiltonian: np.ndarray) -> dict:
+    """
+    Compare different quantum eigensolver approaches.
+
+    Args:
+        hamiltonian: Hamiltonian to analyze
+
+    Returns:
+        Method comparison
+    """
+    n = hamiltonian.shape[0]
+    n_qubits = int(np.log2(n))
+
+    spectral = analyze_spectral_properties(hamiltonian)
+
+    methods = {
+        'Standard QPE': {
+            'qubits': n_qubits + spectral['required_precision_bits'],
+            'depth': spectral['qpe_depth_estimate'] * n_qubits,
+            'outputs': 'All eigenvalues with precision',
+            'hardware': 'Fault-tolerant',
+            'shots_needed': 1  # Deterministic
+        },
+        'Iterative QPE': {
+            'qubits': n_qubits + 1,
+            'depth': spectral['qpe_depth_estimate'],
+            'outputs': 'One eigenvalue at a time',
+            'hardware': 'Mid-circuit measurement',
+            'shots_needed': spectral['required_precision_bits']
+        },
+        'VQE': {
+            'qubits': n_qubits,
+            'depth': 10 * n_qubits,  # Typical ansatz
+            'outputs': 'Ground state energy',
+            'hardware': 'Near-term (NISQ)',
+            'shots_needed': 1000  # For gradient estimation
+        },
+        'Quantum Krylov': {
+            'qubits': n_qubits + 1,
+            'depth': 5 * n_qubits,  # Few Hamiltonian applications
+            'outputs': 'Low-lying eigenvalues',
+            'hardware': 'Near-term',
+            'shots_needed': 100
+        }
+    }
+
+    return {
+        'spectral_analysis': spectral,
+        'methods': methods,
+        'recommended': spectral['recommendation']
+    }
+
+# Analysis example
+print("\nEigensolver Method Comparison")
+print("=" * 50)
+
+# Create test Hamiltonian (molecular-like)
+n = 4
+H = np.zeros((n, n))
+# Diagonal terms
+for i in range(n):
+    H[i, i] = i * 0.5
+# Coupling
+for i in range(n-1):
+    H[i, i+1] = H[i+1, i] = 0.2
+
+comparison = compare_eigensolver_methods(H)
+
+print(f"\nSpectral Analysis:")
+print(f"  Eigenvalues: {comparison['spectral_analysis']['eigenvalues']}")
+print(f"  Spectral range: {comparison['spectral_analysis']['spectral_range']:.4f}")
+print(f"  Min gap: {comparison['spectral_analysis']['min_gap']:.4f}")
+print(f"  Ground gap: {comparison['spectral_analysis']['ground_gap']:.4f}")
+
+print(f"\nMethod Comparison:")
+for method, props in comparison['methods'].items():
+    print(f"\n  {method}:")
+    print(f"    Qubits: {props['qubits']}")
+    print(f"    Depth: {props['depth']}")
+    print(f"    Hardware: {props['hardware']}")
+```
+
+## 8. Applications to Quantum Chemistry
+
+Eigenvalue algorithms are central to quantum chemistry:
+
+```python
+import numpy as np
+
+def create_h2_hamiltonian(bond_length: float = 0.74) -> dict:
+    """
+    Create simplified H2 molecular Hamiltonian in minimal basis.
+
+    Args:
+        bond_length: H-H bond length in Angstroms
+
+    Returns:
+        Hamiltonian and molecular data
+    """
+    # Simplified 2-qubit representation
+    # Real coefficients depend on bond length
+    # These are approximate values for demonstration
+
+    g0 = -0.81  # Constant
+    g1 = 0.17 * bond_length / 0.74  # Varies with R
+    g2 = -0.23
+    g3 = 0.17
+
+    # Pauli matrices
+    I = np.eye(2)
+    Z = np.array([[1, 0], [0, -1]])
+    X = np.array([[0, 1], [1, 0]])
+    Y = np.array([[0, -1j], [1j, 0]])
+
+    # Hamiltonian terms
+    II = np.kron(I, I)
+    ZI = np.kron(Z, I)
+    IZ = np.kron(I, Z)
+    ZZ = np.kron(Z, Z)
+    XX = np.kron(X, X)
+    YY = np.kron(Y, Y)
+
+    H = g0 * II + g1 * ZI + g2 * IZ + g3 * ZZ + g3 * (XX + YY)
+    H = np.real(H)  # Should be real for physical Hamiltonian
+
+    # Exact solution
+    eigenvalues = np.linalg.eigvalsh(H)
+
+    return {
+        'hamiltonian': H,
+        'bond_length': bond_length,
+        'n_qubits': 2,
+        'ground_energy': eigenvalues[0],
+        'all_energies': eigenvalues,
+        'fci_energy': eigenvalues[0]  # Full CI = exact for this small system
+    }
+
+def potential_energy_surface(bond_lengths: np.ndarray,
+                              method: str = 'exact') -> dict:
+    """
+    Compute potential energy surface for H2.
+
+    Args:
+        bond_lengths: Array of bond lengths to compute
+        method: 'exact', 'vqe', or 'qpe'
+
+    Returns:
+        Energy vs bond length data
+    """
+    energies = []
+
+    for R in bond_lengths:
+        mol_data = create_h2_hamiltonian(R)
+
+        if method == 'exact':
+            energy = mol_data['ground_energy']
+        elif method == 'vqe':
+            # Simplified VQE (would use real implementation)
+            vqe_result = run_vqe(mol_data['hamiltonian'], depth=2)
+            energy = vqe_result['vqe_energy']
+        else:  # QPE
+            energy = mol_data['ground_energy']  # Use exact for demo
+
+        energies.append(energy)
+
+    energies = np.array(energies)
+
+    # Find equilibrium
+    min_idx = np.argmin(energies)
+    eq_bond_length = bond_lengths[min_idx]
+    eq_energy = energies[min_idx]
+
+    return {
+        'bond_lengths': bond_lengths,
+        'energies': energies,
+        'equilibrium_length': eq_bond_length,
+        'equilibrium_energy': eq_energy,
+        'method': method
+    }
+
+# Compute H2 potential energy surface
+print("\nH2 Potential Energy Surface")
+print("=" * 40)
+
+bond_lengths = np.linspace(0.4, 2.0, 17)
+pes = potential_energy_surface(bond_lengths, method='exact')
+
+print(f"Equilibrium bond length: {pes['equilibrium_length']:.2f} Angstrom")
+print(f"Equilibrium energy: {pes['equilibrium_energy']:.4f} Hartree")
+
+# Show energies at key points
+print("\nEnergy vs Bond Length:")
+for R, E in zip(pes['bond_lengths'][::4], pes['energies'][::4]):
+    print(f"  R = {R:.2f} A: E = {E:.4f} Ha")
+```
+
+## 9. Error Analysis and Mitigation
+
+Understanding error sources is crucial for practical eigensolvers:
+
+```python
+import numpy as np
+
+def analyze_qpe_errors(true_phase: float, n_precision: int,
+                        noise_level: float = 0.0) -> dict:
+    """
+    Analyze error sources in quantum phase estimation.
+
+    Args:
+        true_phase: Actual phase to estimate
+        n_precision: Number of precision qubits
+        noise_level: Depolarizing noise strength
+
+    Returns:
+        Error analysis
+    """
+    # Discretization error
+    resolution = 1 / (2 ** n_precision)
+    discretization_error = resolution / 2  # Maximum
+
+    # Nearest representable phase
+    k_nearest = round(true_phase * 2**n_precision)
+    nearest_phase = k_nearest / (2 ** n_precision)
+    actual_discretization = abs(true_phase - nearest_phase)
+
+    # Noise-induced error (simplified model)
+    # Noise causes wrong bit flips
+    noise_error = noise_level * n_precision / 4
+
+    # Total error estimate
+    total_error = actual_discretization + noise_error
+
+    # Success probability (for non-exact phases)
+    # Probability of measuring correct k
+    delta = (true_phase - nearest_phase) * 2**n_precision
+    if abs(delta) < 0.01:
+        success_prob = 1.0
+    else:
+        success_prob = (np.sin(np.pi * delta) / (np.pi * delta)) ** 2
+
+    return {
+        'true_phase': true_phase,
+        'nearest_representable': nearest_phase,
+        'discretization_error': actual_discretization,
+        'noise_error': noise_error,
+        'total_error': total_error,
+        'success_probability': success_prob,
+        'resolution': resolution,
+        'bits_needed_for_chemical_accuracy': int(np.ceil(np.log2(1/1.6e-3)))  # 1 mHa
+    }
+
+def vqe_error_analysis(hamiltonian: np.ndarray,
+                        n_shots: int,
+                        noise_level: float = 0.0) -> dict:
+    """
+    Analyze error sources in VQE.
+
+    Args:
+        hamiltonian: System Hamiltonian
+        n_shots: Number of measurement shots
+        noise_level: Hardware noise level
+
+    Returns:
+        Error analysis
+    """
+    eigenvalues = np.linalg.eigvalsh(hamiltonian)
+    ground_energy = eigenvalues[0]
+    gap = eigenvalues[1] - eigenvalues[0]
+
+    # Statistical error from finite sampling
+    # Variance ~ ||H||²/n_shots
+    H_norm = np.linalg.norm(hamiltonian, ord=2)
+    statistical_error = H_norm / np.sqrt(n_shots)
+
+    # Optimization error (depends on landscape)
+    # Rough estimate: fraction of gap
+    optimization_error = gap * 0.1
+
+    # Hardware noise error
+    # Noise increases energy (biases toward maximally mixed state)
+    noise_error = noise_level * H_norm
+
+    # Ansatz expressibility error
+    # Depends on ansatz choice - assume good ansatz here
+    ansatz_error = gap * 0.05
+
+    return {
+        'ground_energy': ground_energy,
+        'gap': gap,
+        'statistical_error': statistical_error,
+        'optimization_error': optimization_error,
+        'noise_error': noise_error,
+        'ansatz_error': ansatz_error,
+        'total_error': statistical_error + optimization_error + noise_error + ansatz_error,
+        'shots_for_chemical_accuracy': int(np.ceil((H_norm / 1.6e-3) ** 2))
+    }
+
+# Error analysis example
+print("\nEigensolver Error Analysis")
+print("=" * 40)
+
+# QPE errors
+print("\nQPE Error Analysis:")
+for n_bits in [4, 6, 8, 10]:
+    result = analyze_qpe_errors(0.3141592, n_bits, noise_level=0.01)
+    print(f"  {n_bits} bits: disc_err={result['discretization_error']:.6f}, "
+          f"P(success)={result['success_probability']:.4f}")
+
+# VQE errors
+print("\nVQE Error Analysis:")
+H = heisenberg_hamiltonian()
+for n_shots in [100, 1000, 10000]:
+    result = vqe_error_analysis(H, n_shots, noise_level=0.01)
+    print(f"  {n_shots} shots: stat_err={result['statistical_error']:.6f}, "
+          f"total_err={result['total_error']:.6f}")
+```
+
+## 10. Summary and Algorithm Selection
+
+Choosing the right eigenvalue algorithm depends on the application:
+
+| Method | Best For | Precision | Hardware | Key Limitation |
+|--------|----------|-----------|----------|----------------|
+| Standard QPE | All eigenvalues | High | Fault-tolerant | Deep circuits |
+| Iterative QPE | Memory-limited | High | Mid-circuit measurement | Sequential |
+| VQE | Ground state | Medium | Near-term | Optimization landscape |
+| Quantum Krylov | Low-lying states | Medium | Near-term | Classical overhead |
+| QSVT-based | Matrix functions | High | Fault-tolerant | Complex setup |
+
+<Tip>
+For near-term applications, start with VQE for ground states or quantum Krylov for excited states. Move to QPE variants when fault-tolerant quantum computers become available.
+</Tip>
+
+## Summary
+
+Quantum eigenvalue algorithms provide powerful tools for extracting spectral information:
+
+1. **Standard QPE**: Full precision eigenvalue extraction using QFT
+2. **Iterative QPE**: Memory-efficient bit-by-bit extraction
+3. **VQE**: Hybrid approach for near-term ground state finding
+4. **Subspace Methods**: Quantum Krylov and subspace expansion for multiple eigenvalues
+5. **Spectral Analysis**: Gap requirements determine precision needs
+6. **Applications**: Quantum chemistry, optimization, condensed matter physics
+7. **Error Analysis**: Discretization, noise, and statistical errors all contribute
+
+The choice of method depends on available hardware, precision requirements, and whether ground state or full spectrum is needed.
+
+## Further Reading
+
+- Next lesson: Quantum SVD and low-rank approximation
+- Related: HHL Algorithm (uses eigenvalue extraction)
+- Advanced: Quantum Signal Processing for eigenvalue transforms

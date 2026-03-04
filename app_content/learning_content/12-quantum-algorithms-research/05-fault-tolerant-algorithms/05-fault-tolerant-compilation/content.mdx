@@ -1,0 +1,914 @@
+---
+title: "Fault-Tolerant Compilation"
+description: "Learn to compile quantum algorithms for fault-tolerant execution, including gate synthesis, circuit optimization, and logical-to-physical mapping."
+duration: 80
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the compilation pipeline from high-level algorithms to fault-tolerant circuits
+- Implement gate decomposition into native fault-tolerant gate sets
+- Apply circuit optimization techniques to minimize resource overhead
+- Design compilation strategies for different error correction codes
+- Analyze the trade-offs between circuit depth, width, and T-count
+
+## 1. The Fault-Tolerant Compilation Pipeline
+
+Compiling for fault-tolerant quantum computing differs fundamentally from NISQ compilation. We must transform arbitrary quantum circuits into forms compatible with error correction.
+
+<Definition term="Fault-Tolerant Compilation">
+The process of transforming a logical quantum circuit into a sequence of fault-tolerant operations that can be executed on error-corrected qubits while preserving the computation's correctness.
+</Definition>
+
+### 1.1 Compilation Stages
+
+```python
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional
+from enum import Enum
+import numpy as np
+
+class CompilationStage(Enum):
+    HIGH_LEVEL = "high_level"
+    GATE_SYNTHESIS = "gate_synthesis"
+    CLIFFORD_T = "clifford_t"
+    LOGICAL_CIRCUIT = "logical_circuit"
+    PHYSICAL_CIRCUIT = "physical_circuit"
+
+@dataclass
+class CompiledCircuit:
+    """Represents a circuit at various compilation stages."""
+    stage: CompilationStage
+    gates: List[Dict]
+    metadata: Dict
+
+class FaultTolerantCompiler:
+    """
+    Complete fault-tolerant compilation pipeline.
+    """
+
+    def __init__(self, code_type: str = "surface_code"):
+        self.code_type = code_type
+        self.native_gates = ['H', 'S', 'S_dag', 'CNOT', 'T', 'T_dag', 'MEASURE']
+
+    def compile(self, circuit: List[Dict]) -> CompiledCircuit:
+        """
+        Full compilation pipeline.
+
+        Stages:
+        1. Gate synthesis: Decompose to Clifford+T
+        2. T-count optimization
+        3. Logical circuit construction
+        4. Physical mapping
+        """
+        # Stage 1: Gate synthesis
+        clifford_t = self.synthesize_to_clifford_t(circuit)
+        print(f"After synthesis: {len(clifford_t)} gates")
+
+        # Stage 2: Optimization
+        optimized = self.optimize_t_count(clifford_t)
+        print(f"After T optimization: {len(optimized)} gates")
+
+        # Stage 3: Logical circuit
+        logical = self.construct_logical_circuit(optimized)
+
+        # Stage 4: Physical mapping
+        physical = self.map_to_physical(logical)
+
+        return CompiledCircuit(
+            stage=CompilationStage.PHYSICAL_CIRCUIT,
+            gates=physical,
+            metadata={
+                't_count': self.count_t_gates(optimized),
+                'logical_qubits': self.count_qubits(optimized),
+                'physical_qubits': self.estimate_physical_qubits(logical)
+            }
+        )
+
+    def synthesize_to_clifford_t(self, circuit: List[Dict]) -> List[Dict]:
+        """Decompose all gates to Clifford+T."""
+        result = []
+        for gate in circuit:
+            if gate['name'] in self.native_gates:
+                result.append(gate)
+            else:
+                decomposed = self.decompose_gate(gate)
+                result.extend(decomposed)
+        return result
+
+    def decompose_gate(self, gate: Dict) -> List[Dict]:
+        """Decompose a single gate to Clifford+T."""
+        name = gate['name']
+        qubits = gate.get('qubits', [0])
+
+        if name == 'X':
+            return [{'name': 'H', 'qubits': qubits},
+                    {'name': 'S', 'qubits': qubits},
+                    {'name': 'S', 'qubits': qubits},
+                    {'name': 'H', 'qubits': qubits}]
+
+        elif name == 'Y':
+            return [{'name': 'S', 'qubits': qubits},
+                    {'name': 'H', 'qubits': qubits},
+                    {'name': 'S', 'qubits': qubits},
+                    {'name': 'S', 'qubits': qubits},
+                    {'name': 'H', 'qubits': qubits},
+                    {'name': 'S_dag', 'qubits': qubits}]
+
+        elif name == 'Z':
+            return [{'name': 'S', 'qubits': qubits},
+                    {'name': 'S', 'qubits': qubits}]
+
+        elif name == 'Rx':
+            # Rx(theta) = HRz(theta)H
+            angle = gate.get('angle', 0)
+            rz_decomp = self.decompose_rz(angle, qubits[0])
+            return ([{'name': 'H', 'qubits': qubits}] +
+                    rz_decomp +
+                    [{'name': 'H', 'qubits': qubits}])
+
+        elif name == 'Ry':
+            # Ry(theta) = SHRz(theta)HS†
+            angle = gate.get('angle', 0)
+            rz_decomp = self.decompose_rz(angle, qubits[0])
+            return ([{'name': 'S', 'qubits': qubits},
+                    {'name': 'H', 'qubits': qubits}] +
+                    rz_decomp +
+                    [{'name': 'H', 'qubits': qubits},
+                    {'name': 'S_dag', 'qubits': qubits}])
+
+        elif name == 'Rz':
+            angle = gate.get('angle', 0)
+            return self.decompose_rz(angle, qubits[0])
+
+        elif name == 'Toffoli':
+            return self.decompose_toffoli(qubits)
+
+        elif name == 'CZ':
+            return [{'name': 'H', 'qubits': [qubits[1]]},
+                    {'name': 'CNOT', 'qubits': qubits},
+                    {'name': 'H', 'qubits': [qubits[1]]}]
+
+        else:
+            raise ValueError(f"Unknown gate: {name}")
+
+    def decompose_rz(self, angle: float, qubit: int) -> List[Dict]:
+        """Decompose Rz(angle) to Clifford+T."""
+        # Normalize angle
+        angle = angle % (2 * np.pi)
+
+        gates = []
+
+        # Handle exact multiples of pi/4
+        while angle >= np.pi - 0.001:
+            gates.append({'name': 'S', 'qubits': [qubit]})
+            gates.append({'name': 'S', 'qubits': [qubit]})
+            angle -= np.pi
+
+        while angle >= np.pi/2 - 0.001:
+            gates.append({'name': 'S', 'qubits': [qubit]})
+            angle -= np.pi/2
+
+        while angle >= np.pi/4 - 0.001:
+            gates.append({'name': 'T', 'qubits': [qubit]})
+            angle -= np.pi/4
+
+        # For remaining angle, approximate with more T gates
+        if angle > 0.01:
+            # Simplified approximation
+            n_t = int(np.ceil(angle / (np.pi/16)))
+            for _ in range(min(n_t, 10)):
+                gates.append({'name': 'T', 'qubits': [qubit]})
+
+        return gates
+
+    def decompose_toffoli(self, qubits: List[int]) -> List[Dict]:
+        """Decompose Toffoli to Clifford+T (7 T-gates)."""
+        c1, c2, t = qubits
+        return [
+            {'name': 'H', 'qubits': [t]},
+            {'name': 'CNOT', 'qubits': [c2, t]},
+            {'name': 'T_dag', 'qubits': [t]},
+            {'name': 'CNOT', 'qubits': [c1, t]},
+            {'name': 'T', 'qubits': [t]},
+            {'name': 'CNOT', 'qubits': [c2, t]},
+            {'name': 'T_dag', 'qubits': [t]},
+            {'name': 'CNOT', 'qubits': [c1, t]},
+            {'name': 'T', 'qubits': [c2]},
+            {'name': 'T', 'qubits': [t]},
+            {'name': 'H', 'qubits': [t]},
+            {'name': 'CNOT', 'qubits': [c1, c2]},
+            {'name': 'T', 'qubits': [c1]},
+            {'name': 'T_dag', 'qubits': [c2]},
+            {'name': 'CNOT', 'qubits': [c1, c2]},
+        ]
+
+    def optimize_t_count(self, circuit: List[Dict]) -> List[Dict]:
+        """Optimize to reduce T-count."""
+        optimized = []
+        i = 0
+
+        while i < len(circuit):
+            gate = circuit[i]
+
+            # Check for T-T_dag cancellation
+            if i < len(circuit) - 1:
+                next_gate = circuit[i + 1]
+                if self.gates_cancel(gate, next_gate):
+                    i += 2
+                    continue
+
+            optimized.append(gate)
+            i += 1
+
+        return optimized
+
+    def gates_cancel(self, g1: Dict, g2: Dict) -> bool:
+        """Check if two gates cancel."""
+        if g1['qubits'] != g2['qubits']:
+            return False
+        return ((g1['name'] == 'T' and g2['name'] == 'T_dag') or
+                (g1['name'] == 'T_dag' and g2['name'] == 'T') or
+                (g1['name'] == 'S' and g2['name'] == 'S_dag') or
+                (g1['name'] == 'S_dag' and g2['name'] == 'S'))
+
+    def construct_logical_circuit(self, circuit: List[Dict]) -> List[Dict]:
+        """Convert to logical operations on encoded qubits."""
+        # For surface codes, Clifford gates are transversal
+        # T gates require magic state injection
+        logical = []
+
+        for gate in circuit:
+            if gate['name'] in ['T', 'T_dag']:
+                # Insert magic state injection protocol
+                logical.extend(self.magic_state_injection(gate))
+            else:
+                logical.append({
+                    **gate,
+                    'type': 'transversal'
+                })
+
+        return logical
+
+    def magic_state_injection(self, t_gate: Dict) -> List[Dict]:
+        """Generate magic state injection circuit for T gate."""
+        qubit = t_gate['qubits'][0]
+        ancilla = f"magic_{qubit}"
+
+        return [
+            {'name': 'PREPARE_MAGIC', 'qubits': [ancilla], 'type': 'resource'},
+            {'name': 'CNOT', 'qubits': [qubit, ancilla], 'type': 'transversal'},
+            {'name': 'MEASURE', 'qubits': [qubit], 'type': 'destructive'},
+            {'name': 'S_CORRECTION', 'qubits': [ancilla], 'type': 'conditional'},
+        ]
+
+    def map_to_physical(self, logical: List[Dict]) -> List[Dict]:
+        """Map logical qubits to physical qubit layout."""
+        # Simplified: just mark as physical
+        return [{'physical': True, **g} for g in logical]
+
+    def count_t_gates(self, circuit: List[Dict]) -> int:
+        return sum(1 for g in circuit if g['name'] in ['T', 'T_dag'])
+
+    def count_qubits(self, circuit: List[Dict]) -> int:
+        qubits = set()
+        for g in circuit:
+            qubits.update(g.get('qubits', []))
+        return len(qubits)
+
+    def estimate_physical_qubits(self, logical: List[Dict]) -> int:
+        """Estimate physical qubits needed (code distance dependent)."""
+        n_logical = self.count_qubits(logical)
+        # Surface code: ~2d^2 physical per logical
+        d = 21  # Typical code distance
+        return n_logical * 2 * d * d
+
+# Example usage
+compiler = FaultTolerantCompiler()
+
+test_circuit = [
+    {'name': 'H', 'qubits': [0]},
+    {'name': 'Toffoli', 'qubits': [0, 1, 2]},
+    {'name': 'Rz', 'angle': np.pi/3, 'qubits': [0]},
+]
+
+result = compiler.compile(test_circuit)
+print(f"\nCompilation Results:")
+print(f"  T-count: {result.metadata['t_count']}")
+print(f"  Logical qubits: {result.metadata['logical_qubits']}")
+print(f"  Physical qubits: {result.metadata['physical_qubits']}")
+```
+
+## 2. Gate Decomposition Strategies
+
+### 2.1 Exact vs Approximate Decomposition
+
+<Formula>
+$$\text{Approximation error: } \|U - U_{approx}\| \leq \epsilon$$
+</Formula>
+
+```python
+class GateDecomposer:
+    """
+    Strategies for decomposing gates to Clifford+T.
+    """
+
+    def __init__(self, precision: float = 1e-3):
+        self.precision = precision
+
+    def decompose_rotation(
+        self,
+        axis: str,
+        angle: float,
+        qubit: int,
+        strategy: str = 'gridsynth'
+    ) -> List[Dict]:
+        """
+        Decompose arbitrary rotation to Clifford+T.
+
+        Args:
+            axis: 'x', 'y', or 'z'
+            angle: Rotation angle
+            qubit: Target qubit
+            strategy: 'exact', 'gridsynth', or 'solovay_kitaev'
+
+        Returns:
+            Gate sequence
+        """
+        if strategy == 'exact':
+            return self.exact_synthesis(axis, angle, qubit)
+        elif strategy == 'gridsynth':
+            return self.gridsynth(axis, angle, qubit)
+        else:
+            return self.solovay_kitaev(axis, angle, qubit)
+
+    def exact_synthesis(
+        self,
+        axis: str,
+        angle: float,
+        qubit: int
+    ) -> List[Dict]:
+        """
+        Exact synthesis for special angles.
+
+        Only works for angles that are multiples of pi/4.
+        """
+        angle = angle % (2 * np.pi)
+        gates = []
+
+        # Convert to Z-rotation basis
+        if axis == 'x':
+            gates.append({'name': 'H', 'qubits': [qubit]})
+        elif axis == 'y':
+            gates.append({'name': 'S_dag', 'qubits': [qubit]})
+            gates.append({'name': 'H', 'qubits': [qubit]})
+
+        # Decompose Z rotation
+        n_pi = int(round(angle / np.pi))
+        remaining = angle - n_pi * np.pi
+
+        for _ in range(n_pi % 2):
+            gates.append({'name': 'S', 'qubits': [qubit]})
+            gates.append({'name': 'S', 'qubits': [qubit]})
+
+        n_pi2 = int(round(remaining / (np.pi/2)))
+        remaining -= n_pi2 * np.pi/2
+
+        for _ in range(n_pi2 % 4):
+            gates.append({'name': 'S', 'qubits': [qubit]})
+
+        n_pi4 = int(round(remaining / (np.pi/4)))
+
+        for _ in range(n_pi4 % 8):
+            gates.append({'name': 'T', 'qubits': [qubit]})
+
+        # Convert back from Z-rotation basis
+        if axis == 'x':
+            gates.append({'name': 'H', 'qubits': [qubit]})
+        elif axis == 'y':
+            gates.append({'name': 'H', 'qubits': [qubit]})
+            gates.append({'name': 'S', 'qubits': [qubit]})
+
+        return gates
+
+    def gridsynth(
+        self,
+        axis: str,
+        angle: float,
+        qubit: int
+    ) -> List[Dict]:
+        """
+        Grid-based synthesis (Ross-Selinger algorithm).
+
+        Uses algebraic number theory for near-optimal T-count.
+        """
+        # Simplified implementation
+        # Real gridsynth uses Gaussian integers
+
+        gates = []
+
+        if axis == 'x':
+            gates.append({'name': 'H', 'qubits': [qubit]})
+
+        # Number of T gates scales as O(log(1/epsilon))
+        n_bits = int(np.ceil(-np.log2(self.precision)))
+
+        # Binary decomposition approach
+        angle_normalized = (angle / np.pi) % 2
+
+        for bit in range(n_bits):
+            power = 2 ** (-bit - 1)
+            if angle_normalized >= power:
+                angle_normalized -= power
+                # Add rotation of 2*pi*power
+                if bit == 0:
+                    gates.append({'name': 'S', 'qubits': [qubit]})
+                elif bit == 1:
+                    gates.append({'name': 'T', 'qubits': [qubit]})
+                else:
+                    # Need more sophisticated synthesis
+                    gates.extend(self.approximate_small_rotation(
+                        2 * np.pi * power, qubit))
+
+        if axis == 'x':
+            gates.append({'name': 'H', 'qubits': [qubit]})
+
+        return gates
+
+    def approximate_small_rotation(
+        self,
+        angle: float,
+        qubit: int
+    ) -> List[Dict]:
+        """Approximate small Z-rotation using Clifford+T."""
+        # Using identity: HTH ≈ exp(-i*pi/8 * X)
+        # Combined sequences can approximate arbitrary small angles
+
+        gates = []
+        remaining = abs(angle)
+        sign = 1 if angle > 0 else -1
+
+        # Each HT(H)T sequence gives approximately pi/8 rotation
+        while remaining > self.precision:
+            gates.extend([
+                {'name': 'H', 'qubits': [qubit]},
+                {'name': 'T' if sign > 0 else 'T_dag', 'qubits': [qubit]},
+                {'name': 'H', 'qubits': [qubit]},
+                {'name': 'T' if sign > 0 else 'T_dag', 'qubits': [qubit]},
+            ])
+            remaining -= np.pi / 8
+
+        return gates
+
+    def solovay_kitaev(
+        self,
+        axis: str,
+        angle: float,
+        qubit: int,
+        depth: int = 3
+    ) -> List[Dict]:
+        """
+        Solovay-Kitaev decomposition.
+
+        Achieves O(log^c(1/epsilon)) gate count.
+        """
+        # Simplified SK - real implementation is recursive
+
+        if axis == 'z':
+            target_angle = angle
+        elif axis == 'x':
+            target_angle = angle
+        else:
+            target_angle = angle
+
+        gates = []
+
+        # Initial approximation
+        gates.extend(self.exact_synthesis(axis, target_angle, qubit))
+
+        # Refinement iterations
+        for _ in range(depth):
+            # In full SK, compute error and decompose as commutator
+            # Here we just add small corrections
+            correction = self.approximate_small_rotation(
+                self.precision / (2 ** depth), qubit)
+            gates.extend(correction)
+
+        return gates
+
+# Example
+decomposer = GateDecomposer(precision=0.001)
+
+test_angles = [np.pi/4, np.pi/3, np.pi/5, 0.123]
+for angle in test_angles:
+    gates = decomposer.decompose_rotation('z', angle, 0, 'gridsynth')
+    t_count = sum(1 for g in gates if g['name'] in ['T', 'T_dag'])
+    print(f"Rz({angle:.4f}): {t_count} T gates, {len(gates)} total")
+```
+
+## 3. Circuit Optimization for Fault Tolerance
+
+### 3.1 T-Count Reduction
+
+```python
+class CircuitOptimizer:
+    """
+    Optimize circuits for fault-tolerant execution.
+    """
+
+    def __init__(self):
+        self.optimization_passes = [
+            self.cancel_inverse_gates,
+            self.merge_rotations,
+            self.commute_and_cancel,
+            self.phase_polynomial_optimization
+        ]
+
+    def optimize(self, circuit: List[Dict], passes: int = 3) -> List[Dict]:
+        """Apply optimization passes repeatedly."""
+        optimized = circuit.copy()
+
+        for _ in range(passes):
+            prev_len = len(optimized)
+            for opt_pass in self.optimization_passes:
+                optimized = opt_pass(optimized)
+
+            if len(optimized) == prev_len:
+                break  # No improvement
+
+        return optimized
+
+    def cancel_inverse_gates(self, circuit: List[Dict]) -> List[Dict]:
+        """Cancel adjacent inverse gate pairs."""
+        inverses = {
+            'T': 'T_dag', 'T_dag': 'T',
+            'S': 'S_dag', 'S_dag': 'S',
+            'H': 'H', 'X': 'X', 'Y': 'Y', 'Z': 'Z'
+        }
+
+        result = []
+        i = 0
+
+        while i < len(circuit):
+            if i < len(circuit) - 1:
+                g1, g2 = circuit[i], circuit[i + 1]
+
+                if (g1['qubits'] == g2['qubits'] and
+                    g1['name'] in inverses and
+                    inverses[g1['name']] == g2['name']):
+                    i += 2
+                    continue
+
+            result.append(circuit[i])
+            i += 1
+
+        return result
+
+    def merge_rotations(self, circuit: List[Dict]) -> List[Dict]:
+        """Merge consecutive rotations around same axis."""
+        result = []
+
+        for gate in circuit:
+            if not result:
+                result.append(gate)
+                continue
+
+            prev = result[-1]
+
+            # Check if both are same-axis rotations on same qubit
+            if (gate['qubits'] == prev['qubits'] and
+                gate['name'] == prev['name'] and
+                gate['name'] in ['T', 'S']):
+
+                # Count total rotation
+                if 'count' not in prev:
+                    prev['count'] = 1
+                prev['count'] += 1
+
+                # Handle T^8 = I, S^4 = I
+                modulus = 8 if prev['name'] == 'T' else 4
+                prev['count'] = prev['count'] % modulus
+
+                if prev['count'] == 0:
+                    result.pop()
+            else:
+                result.append(gate)
+
+        # Expand merged gates
+        expanded = []
+        for gate in result:
+            count = gate.get('count', 1)
+            for _ in range(count):
+                expanded.append({k: v for k, v in gate.items() if k != 'count'})
+
+        return expanded
+
+    def commute_and_cancel(self, circuit: List[Dict]) -> List[Dict]:
+        """
+        Use commutation rules to bring canceling gates together.
+        """
+        # Gates that commute with each other
+        commutation_rules = {
+            # Single-qubit gates commute if on different qubits
+            # T commutes with Z, S
+            # CNOT: control commutes with Z, target commutes with X
+        }
+
+        result = circuit.copy()
+
+        # Simple implementation: bubble sort-like approach
+        changed = True
+        while changed:
+            changed = False
+            for i in range(len(result) - 1):
+                g1, g2 = result[i], result[i + 1]
+
+                # Check if swapping enables cancellation
+                if self.can_commute(g1, g2):
+                    # Look ahead for potential cancellation
+                    if i + 2 < len(result):
+                        g3 = result[i + 2]
+                        if self.can_cancel(g2, g3):
+                            # Swap g1 and g2
+                            result[i], result[i + 1] = g2, g1
+                            changed = True
+
+        # Now cancel
+        return self.cancel_inverse_gates(result)
+
+    def can_commute(self, g1: Dict, g2: Dict) -> bool:
+        """Check if two gates commute."""
+        # Different qubits always commute
+        if set(g1['qubits']).isdisjoint(set(g2['qubits'])):
+            return True
+
+        # Same qubit: check specific rules
+        name1, name2 = g1['name'], g2['name']
+
+        # Z-type gates commute with each other
+        z_gates = ['T', 'T_dag', 'S', 'S_dag', 'Z']
+        if name1 in z_gates and name2 in z_gates:
+            return True
+
+        return False
+
+    def can_cancel(self, g1: Dict, g2: Dict) -> bool:
+        """Check if two gates cancel."""
+        if g1['qubits'] != g2['qubits']:
+            return False
+
+        cancel_pairs = [
+            ('T', 'T_dag'), ('T_dag', 'T'),
+            ('S', 'S_dag'), ('S_dag', 'S'),
+            ('H', 'H'), ('X', 'X'), ('Y', 'Y'), ('Z', 'Z')
+        ]
+
+        return (g1['name'], g2['name']) in cancel_pairs
+
+    def phase_polynomial_optimization(self, circuit: List[Dict]) -> List[Dict]:
+        """
+        Optimize using phase polynomial representation.
+
+        For {CNOT, T} circuits, represent phase as polynomial
+        over input bits and optimize algebraically.
+        """
+        # Identify {CNOT, T} subcircuits
+        # This is a simplified placeholder
+
+        return circuit  # Full implementation is complex
+
+# Example
+optimizer = CircuitOptimizer()
+
+# Circuit with optimization opportunities
+test_circuit = [
+    {'name': 'H', 'qubits': [0]},
+    {'name': 'T', 'qubits': [0]},
+    {'name': 'T', 'qubits': [0]},
+    {'name': 'T_dag', 'qubits': [0]},  # Partial cancel
+    {'name': 'CNOT', 'qubits': [0, 1]},
+    {'name': 'S', 'qubits': [1]},
+    {'name': 'S', 'qubits': [1]},
+    {'name': 'S', 'qubits': [1]},
+    {'name': 'S', 'qubits': [1]},  # S^4 = I
+    {'name': 'T', 'qubits': [0]},
+    {'name': 'T_dag', 'qubits': [0]},  # Cancel
+]
+
+original_t = sum(1 for g in test_circuit if g['name'] in ['T', 'T_dag'])
+optimized = optimizer.optimize(test_circuit)
+optimized_t = sum(1 for g in optimized if g['name'] in ['T', 'T_dag'])
+
+print(f"Original: {len(test_circuit)} gates, {original_t} T gates")
+print(f"Optimized: {len(optimized)} gates, {optimized_t} T gates")
+```
+
+## 4. Code-Specific Compilation
+
+### 4.1 Surface Code Compilation
+
+```python
+class SurfaceCodeCompiler:
+    """
+    Compiler targeting surface code fault-tolerant execution.
+    """
+
+    def __init__(self, code_distance: int = 21):
+        self.d = code_distance
+        self.lattice_surgery_ops = []
+
+    def compile_cnot(self, control: int, target: int) -> List[Dict]:
+        """
+        Compile CNOT using lattice surgery.
+
+        CNOT = (I ⊗ H) CZ (I ⊗ H)
+        CZ via ZZ measurement and corrections
+        """
+        return [
+            {'name': 'H', 'qubits': [target], 'type': 'transversal'},
+            {'name': 'ZZ_MEASURE', 'qubits': [control, target], 'type': 'lattice_surgery'},
+            {'name': 'CORRECTION', 'qubits': [target], 'type': 'pauli_frame'},
+            {'name': 'H', 'qubits': [target], 'type': 'transversal'},
+        ]
+
+    def compile_t_gate(self, qubit: int) -> List[Dict]:
+        """
+        Compile T gate via magic state injection.
+        """
+        ancilla = f"magic_{qubit}"
+
+        return [
+            {'name': 'DISTILL_MAGIC', 'qubits': [ancilla], 'type': 'factory'},
+            {'name': 'ZZ_MEASURE', 'qubits': [qubit, ancilla], 'type': 'lattice_surgery'},
+            {'name': 'MEASURE_Z', 'qubits': [ancilla], 'type': 'destructive'},
+            {'name': 'S_CONDITIONAL', 'qubits': [qubit], 'type': 'pauli_frame'},
+        ]
+
+    def schedule_operations(self, compiled: List[Dict]) -> List[List[Dict]]:
+        """
+        Schedule operations into time steps.
+
+        Constraints:
+        - Transversal gates: O(d) cycles
+        - Lattice surgery: O(d) cycles
+        - Magic state factories run in parallel
+        """
+        schedule = []
+        current_step = []
+
+        for op in compiled:
+            # Check dependencies
+            if self.can_parallelize(op, current_step):
+                current_step.append(op)
+            else:
+                if current_step:
+                    schedule.append(current_step)
+                current_step = [op]
+
+        if current_step:
+            schedule.append(current_step)
+
+        return schedule
+
+    def can_parallelize(self, op: Dict, current_step: List[Dict]) -> bool:
+        """Check if operation can run in parallel with current step."""
+        op_qubits = set(op.get('qubits', []))
+
+        for existing in current_step:
+            existing_qubits = set(existing.get('qubits', []))
+            if op_qubits & existing_qubits:  # Overlap
+                return False
+
+        return True
+
+    def estimate_resources(self, schedule: List[List[Dict]]) -> Dict:
+        """Estimate resource requirements."""
+        n_logical = set()
+        n_magic = 0
+        total_cycles = 0
+
+        for step in schedule:
+            for op in step:
+                n_logical.update(op.get('qubits', []))
+                if op['type'] == 'factory':
+                    n_magic += 1
+
+            total_cycles += self.d  # Each step takes O(d) cycles
+
+        n_physical_per_logical = 2 * self.d * self.d
+        magic_factory_qubits = 15 * self.d * self.d  # Per factory
+
+        return {
+            'logical_qubits': len(n_logical),
+            'physical_qubits': len(n_logical) * n_physical_per_logical,
+            'magic_factories': n_magic,
+            'total_physical': (len(n_logical) * n_physical_per_logical +
+                             n_magic * magic_factory_qubits),
+            'time_cycles': total_cycles,
+            'time_seconds': total_cycles * 1e-6  # Assuming 1us cycle
+        }
+
+# Example
+surface_compiler = SurfaceCodeCompiler(code_distance=21)
+
+# Compile a small circuit
+logical_circuit = [
+    {'name': 'H', 'qubits': [0]},
+    {'name': 'T', 'qubits': [0]},
+    {'name': 'CNOT', 'qubits': [0, 1]},
+    {'name': 'T', 'qubits': [1]},
+]
+
+compiled = []
+for gate in logical_circuit:
+    if gate['name'] == 'T':
+        compiled.extend(surface_compiler.compile_t_gate(gate['qubits'][0]))
+    elif gate['name'] == 'CNOT':
+        compiled.extend(surface_compiler.compile_cnot(*gate['qubits']))
+    else:
+        compiled.append({**gate, 'type': 'transversal'})
+
+schedule = surface_compiler.schedule_operations(compiled)
+resources = surface_compiler.estimate_resources(schedule)
+
+print(f"Compiled circuit: {len(compiled)} operations")
+print(f"Schedule: {len(schedule)} time steps")
+print(f"Resources: {resources}")
+```
+
+## 5. Handling Arbitrary Angle Rotations
+
+<Warning>
+Arbitrary rotations require synthesis to Clifford+T, which can produce many T gates. Minimizing these is critical for fault-tolerant execution.
+</Warning>
+
+```python
+def repeat_until_success_rotation(
+    angle: float,
+    precision: float = 1e-3
+) -> Tuple[List[Dict], float]:
+    """
+    Implement arbitrary rotation using repeat-until-success protocol.
+
+    RUS can achieve better T-count than deterministic synthesis
+    for some angles, at the cost of being probabilistic.
+    """
+    # For certain angles, RUS is more efficient
+    # Example: T-count for Rz(pi/2^k) via RUS is O(1) with high probability
+
+    gates = []
+    expected_attempts = 1.0
+
+    # Check if angle is close to a "magic" angle
+    magic_angles = [np.pi / (2 ** k) for k in range(2, 8)]
+
+    for magic in magic_angles:
+        if abs(angle - magic) < precision:
+            # Use RUS protocol
+            gates = [
+                {'name': 'ANCILLA_PREP', 'qubits': ['anc']},
+                {'name': 'CNOT', 'qubits': [0, 'anc']},
+                {'name': 'MEASURE', 'qubits': ['anc']},
+                {'name': 'CONDITIONAL_T', 'qubits': [0]},
+            ]
+            expected_attempts = 2.0  # Typical for RUS
+            return gates, expected_attempts
+
+    # Fall back to deterministic synthesis
+    decomposer = GateDecomposer(precision)
+    gates = decomposer.gridsynth('z', angle, 0)
+    return gates, 1.0
+
+# Analyze compilation of common rotations
+test_angles = [np.pi/8, np.pi/16, np.pi/32, np.pi/3]
+
+print("Rotation Compilation Analysis:")
+print("=" * 50)
+for angle in test_angles:
+    gates, attempts = repeat_until_success_rotation(angle)
+    t_count = sum(1 for g in gates if 'T' in g.get('name', ''))
+    print(f"Rz({angle:.4f}): {t_count} T gates, {attempts:.1f} expected attempts")
+```
+
+## Summary
+
+In this lesson, you learned fault-tolerant compilation:
+
+1. **Compilation Pipeline**: High-level to physical circuit transformation
+2. **Gate Decomposition**: Synthesizing arbitrary gates to Clifford+T
+3. **Circuit Optimization**: Reducing T-count and gate count
+4. **Code-Specific Compilation**: Surface code lattice surgery
+5. **Resource Trade-offs**: Balancing T-count, depth, and ancillas
+
+<Tip>
+Fault-tolerant compilation is an active research area. New techniques for T-count reduction, parallelization, and code-specific optimization continue to emerge, potentially reducing resource requirements significantly.
+</Tip>
+
+## Further Reading
+
+- Amy et al.: "A Meet-in-the-Middle Algorithm for Fast Synthesis of Depth-Optimal Circuits"
+- Fowler et al.: "Surface code implementation of block code state distillation"
+- Litinski: "A Game of Surface Codes: Large-Scale Quantum Computing with Lattice Surgery"

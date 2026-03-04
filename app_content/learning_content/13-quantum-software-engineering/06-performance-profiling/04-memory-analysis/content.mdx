@@ -1,0 +1,576 @@
+---
+title: "Memory Analysis"
+description: "Analyze memory usage in quantum computing workflows and optimize memory consumption."
+duration: 45
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+- Profile memory usage in quantum circuit simulations
+- Understand memory scaling with qubit count
+- Identify memory leaks in quantum workflows
+- Optimize memory consumption for large circuits
+- Implement memory-efficient quantum algorithms
+
+## 1. Understanding Memory in Quantum Computing
+
+Quantum simulation memory requirements grow exponentially with qubit count, making memory analysis critical for scalable quantum computing.
+
+```
+Memory Scaling in Quantum Simulation
+══════════════════════════════════════════════════════════════════
+
+ Qubits    State Vector Size    Memory Required
+ ──────    ─────────────────    ───────────────
+    10         2^10 = 1,024         16 KB
+    20         2^20 ≈ 1M            16 MB
+    30         2^30 ≈ 1B            16 GB
+    40         2^40 ≈ 1T            16 TB
+    50         2^50 ≈ 1P            16 PB
+
+ Memory = 2^n × 16 bytes (complex128)
+
+ ┌─────────────────────────────────────────────┐
+ │  Each additional qubit DOUBLES memory!     │
+ └─────────────────────────────────────────────┘
+```
+
+## 2. Memory Profiling Tools
+
+```python
+import tracemalloc
+import psutil
+import sys
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Callable
+from contextlib import contextmanager
+import numpy as np
+
+@dataclass
+class MemorySnapshot:
+    """Snapshot of memory state at a point in time."""
+    timestamp: float
+    current_mb: float
+    peak_mb: float
+    allocated_objects: int
+    label: str = ""
+
+    def __repr__(self):
+        return f"MemorySnapshot({self.label}: {self.current_mb:.2f} MB, peak: {self.peak_mb:.2f} MB)"
+
+
+class MemoryProfiler:
+    """Profile memory usage in quantum workflows."""
+
+    def __init__(self):
+        self.snapshots: List[MemorySnapshot] = []
+        self.start_memory: float = 0
+        self._tracing = False
+
+    def start(self):
+        """Start memory tracking."""
+        tracemalloc.start()
+        self._tracing = True
+        self.start_memory = self._get_current_mb()
+
+    def stop(self):
+        """Stop memory tracking."""
+        if self._tracing:
+            tracemalloc.stop()
+            self._tracing = False
+
+    def _get_current_mb(self) -> float:
+        """Get current memory usage in MB."""
+        if self._tracing:
+            current, _ = tracemalloc.get_traced_memory()
+            return current / (1024 * 1024)
+        return 0
+
+    def _get_peak_mb(self) -> float:
+        """Get peak memory usage in MB."""
+        if self._tracing:
+            _, peak = tracemalloc.get_traced_memory()
+            return peak / (1024 * 1024)
+        return 0
+
+    def snapshot(self, label: str = "") -> MemorySnapshot:
+        """Take a memory snapshot."""
+        import time
+        snap = MemorySnapshot(
+            timestamp=time.time(),
+            current_mb=self._get_current_mb(),
+            peak_mb=self._get_peak_mb(),
+            allocated_objects=len(tracemalloc.take_snapshot().traces),
+            label=label
+        )
+        self.snapshots.append(snap)
+        return snap
+
+    @contextmanager
+    def track_phase(self, name: str):
+        """Context manager to track memory for a phase."""
+        before = self.snapshot(f"{name}_start")
+        try:
+            yield
+        finally:
+            after = self.snapshot(f"{name}_end")
+            delta = after.current_mb - before.current_mb
+            print(f"  {name}: {delta:+.2f} MB (peak: {after.peak_mb:.2f} MB)")
+
+    def get_memory_delta(self) -> float:
+        """Get total memory change since start."""
+        return self._get_current_mb() - self.start_memory
+
+    def print_report(self):
+        """Print memory profiling report."""
+        print("\n" + "=" * 60)
+        print("MEMORY PROFILE REPORT")
+        print("=" * 60)
+
+        if not self.snapshots:
+            print("No snapshots recorded.")
+            return
+
+        print(f"Total snapshots: {len(self.snapshots)}")
+        print(f"Peak memory: {max(s.peak_mb for s in self.snapshots):.2f} MB")
+        print(f"Final memory: {self.snapshots[-1].current_mb:.2f} MB")
+
+        print("\nSnapshot Timeline:")
+        print("-" * 40)
+        for snap in self.snapshots:
+            print(f"  {snap.label:30s} {snap.current_mb:8.2f} MB")
+
+
+# Example usage
+profiler = MemoryProfiler()
+profiler.start()
+
+profiler.snapshot("initial")
+
+# Simulate creating quantum state
+with profiler.track_phase("state_creation"):
+    large_array = np.zeros((2**20,), dtype=np.complex128)
+
+with profiler.track_phase("computation"):
+    result = np.fft.fft(large_array)
+
+profiler.snapshot("final")
+profiler.print_report()
+profiler.stop()
+```
+
+## 3. Quantum Circuit Memory Analysis
+
+```python
+from typing import Tuple
+import gc
+
+class QuantumMemoryAnalyzer:
+    """Analyze memory usage of quantum circuits."""
+
+    def __init__(self):
+        self.profiler = MemoryProfiler()
+
+    def estimate_statevector_memory(self, num_qubits: int) -> Dict[str, float]:
+        """Estimate memory requirements for statevector simulation."""
+        # Complex128 = 16 bytes per amplitude
+        num_amplitudes = 2 ** num_qubits
+        bytes_needed = num_amplitudes * 16
+
+        return {
+            'num_qubits': num_qubits,
+            'num_amplitudes': num_amplitudes,
+            'bytes': bytes_needed,
+            'kb': bytes_needed / 1024,
+            'mb': bytes_needed / (1024 ** 2),
+            'gb': bytes_needed / (1024 ** 3)
+        }
+
+    def estimate_density_matrix_memory(self, num_qubits: int) -> Dict[str, float]:
+        """Estimate memory for density matrix simulation."""
+        # Density matrix is 2^n x 2^n
+        dim = 2 ** num_qubits
+        num_elements = dim * dim
+        bytes_needed = num_elements * 16
+
+        return {
+            'num_qubits': num_qubits,
+            'matrix_dimension': dim,
+            'num_elements': num_elements,
+            'bytes': bytes_needed,
+            'mb': bytes_needed / (1024 ** 2),
+            'gb': bytes_needed / (1024 ** 3)
+        }
+
+    def find_max_qubits(self, available_memory_gb: float,
+                        simulation_type: str = 'statevector') -> int:
+        """Find maximum qubits for available memory."""
+        available_bytes = available_memory_gb * (1024 ** 3)
+
+        # Leave 20% headroom for overhead
+        usable_bytes = available_bytes * 0.8
+
+        if simulation_type == 'statevector':
+            # Memory = 2^n * 16 bytes
+            # n = log2(memory / 16)
+            max_amplitudes = usable_bytes / 16
+            max_qubits = int(np.log2(max_amplitudes))
+        else:  # density_matrix
+            # Memory = 2^(2n) * 16 bytes
+            # 2n = log2(memory / 16)
+            max_elements = usable_bytes / 16
+            max_qubits = int(np.log2(max_elements) / 2)
+
+        return max_qubits
+
+    def profile_circuit_memory(self, circuit, backend=None) -> Dict:
+        """Profile memory usage during circuit execution."""
+        from qiskit import transpile
+        from qiskit_aer import AerSimulator
+
+        backend = backend or AerSimulator(method='statevector')
+
+        self.profiler.start()
+        results = {}
+
+        # Initial state
+        self.profiler.snapshot("before_transpilation")
+        gc.collect()
+
+        # Transpilation
+        with self.profiler.track_phase("transpilation"):
+            transpiled = transpile(circuit, backend=backend)
+
+        # Execution
+        with self.profiler.track_phase("execution"):
+            job = backend.run(transpiled)
+            result = job.result()
+
+        # Results processing
+        with self.profiler.track_phase("results"):
+            if hasattr(result, 'get_statevector'):
+                sv = result.get_statevector()
+                results['statevector_size'] = len(sv)
+
+        self.profiler.snapshot("final")
+
+        results['snapshots'] = self.profiler.snapshots
+        results['peak_memory_mb'] = max(s.peak_mb for s in self.profiler.snapshots)
+
+        self.profiler.stop()
+        return results
+
+
+# Memory estimation example
+analyzer = QuantumMemoryAnalyzer()
+
+print("Statevector Memory Requirements:")
+print("-" * 50)
+for n in [10, 15, 20, 25, 30]:
+    mem = analyzer.estimate_statevector_memory(n)
+    if mem['gb'] < 1:
+        print(f"  {n} qubits: {mem['mb']:.2f} MB")
+    else:
+        print(f"  {n} qubits: {mem['gb']:.2f} GB")
+
+print(f"\nMax qubits for 16GB RAM: {analyzer.find_max_qubits(16)}")
+print(f"Max qubits for 32GB RAM: {analyzer.find_max_qubits(32)}")
+```
+
+## 4. Detecting Memory Leaks
+
+```python
+import weakref
+from collections import defaultdict
+
+class MemoryLeakDetector:
+    """Detect memory leaks in quantum workflows."""
+
+    def __init__(self):
+        self.tracked_objects: Dict[str, List[weakref.ref]] = defaultdict(list)
+        self.allocation_counts: Dict[str, int] = defaultdict(int)
+
+    def track(self, obj, category: str = "default"):
+        """Track an object for leak detection."""
+        ref = weakref.ref(obj)
+        self.tracked_objects[category].append(ref)
+        self.allocation_counts[category] += 1
+
+    def check_leaks(self) -> Dict[str, Dict]:
+        """Check for memory leaks."""
+        gc.collect()  # Force garbage collection
+
+        results = {}
+        for category, refs in self.tracked_objects.items():
+            alive = sum(1 for ref in refs if ref() is not None)
+            total = len(refs)
+
+            results[category] = {
+                'total_allocated': total,
+                'still_alive': alive,
+                'collected': total - alive,
+                'potential_leak': alive > 0
+            }
+
+        return results
+
+    def print_report(self):
+        """Print leak detection report."""
+        leaks = self.check_leaks()
+
+        print("\n" + "=" * 60)
+        print("MEMORY LEAK DETECTION REPORT")
+        print("=" * 60)
+
+        has_leaks = False
+        for category, info in leaks.items():
+            status = "⚠️  LEAK" if info['potential_leak'] else "✓ OK"
+            print(f"\n{category}:")
+            print(f"  Total allocated: {info['total_allocated']}")
+            print(f"  Still alive: {info['still_alive']}")
+            print(f"  Status: {status}")
+
+            if info['potential_leak']:
+                has_leaks = True
+
+        if not has_leaks:
+            print("\n✓ No memory leaks detected!")
+
+
+class CircuitMemoryTracker:
+    """Track memory for circuit objects."""
+
+    def __init__(self):
+        self.detector = MemoryLeakDetector()
+        self.circuit_sizes: List[Tuple[int, float]] = []
+
+    def track_circuit(self, circuit):
+        """Track a circuit object."""
+        self.detector.track(circuit, "circuits")
+        size = sys.getsizeof(circuit)
+        self.circuit_sizes.append((circuit.num_qubits, size))
+
+    def track_result(self, result):
+        """Track a result object."""
+        self.detector.track(result, "results")
+
+    def analyze_growth(self) -> Dict:
+        """Analyze memory growth patterns."""
+        if len(self.circuit_sizes) < 2:
+            return {'growth_rate': 0, 'trend': 'insufficient_data'}
+
+        sizes = [s[1] for s in self.circuit_sizes]
+        growth_rate = (sizes[-1] - sizes[0]) / len(sizes)
+
+        return {
+            'initial_size': sizes[0],
+            'final_size': sizes[-1],
+            'growth_rate': growth_rate,
+            'trend': 'growing' if growth_rate > 0 else 'stable'
+        }
+```
+
+## 5. Memory Optimization Techniques
+
+```python
+class MemoryOptimizer:
+    """Optimize memory usage in quantum workflows."""
+
+    @staticmethod
+    def chunk_circuits(circuits: List, chunk_size: int = 10):
+        """Process circuits in chunks to limit memory."""
+        for i in range(0, len(circuits), chunk_size):
+            yield circuits[i:i + chunk_size]
+            gc.collect()  # Force cleanup between chunks
+
+    @staticmethod
+    def use_sparse_simulation(circuit, backend_options: Dict = None):
+        """Use sparse simulation for memory efficiency."""
+        from qiskit_aer import AerSimulator
+
+        options = backend_options or {}
+        options['method'] = 'matrix_product_state'  # MPS is memory-efficient
+
+        backend = AerSimulator(**options)
+        return backend
+
+    @staticmethod
+    def estimate_optimal_shots(num_qubits: int,
+                               available_memory_mb: float) -> int:
+        """Estimate optimal shot count for memory constraints."""
+        # Each measurement result needs ~8 bytes
+        bytes_per_shot = 8
+
+        # Leave memory for circuit and overhead
+        circuit_overhead_mb = 2 ** num_qubits * 16 / (1024 ** 2) * 0.1
+        available_for_shots = (available_memory_mb - circuit_overhead_mb) * 1024 * 1024
+
+        max_shots = int(available_for_shots / bytes_per_shot)
+        return min(max_shots, 100000)  # Cap at reasonable maximum
+
+    @staticmethod
+    def cleanup_after_execution(result, keep_counts: bool = True):
+        """Clean up result object to free memory."""
+        if keep_counts:
+            counts = result.get_counts() if hasattr(result, 'get_counts') else {}
+            del result
+            gc.collect()
+            return counts
+        else:
+            del result
+            gc.collect()
+            return None
+
+
+class StreamingCircuitProcessor:
+    """Process circuits with streaming to minimize memory."""
+
+    def __init__(self, backend, max_memory_mb: float = 1000):
+        self.backend = backend
+        self.max_memory_mb = max_memory_mb
+        self.profiler = MemoryProfiler()
+
+    def process_circuits_streaming(self, circuit_generator,
+                                    shots: int = 1000) -> List[Dict]:
+        """Process circuits with streaming execution."""
+        from qiskit import transpile
+
+        results = []
+        self.profiler.start()
+
+        for i, circuit in enumerate(circuit_generator):
+            # Check memory before processing
+            current_mem = self.profiler._get_current_mb()
+
+            if current_mem > self.max_memory_mb * 0.8:
+                gc.collect()
+                self.profiler.snapshot(f"gc_triggered_at_circuit_{i}")
+
+            # Process single circuit
+            transpiled = transpile(circuit, self.backend)
+            job = self.backend.run(transpiled, shots=shots)
+            result = job.result()
+
+            # Extract only needed data
+            counts = result.get_counts()
+            results.append({'circuit_index': i, 'counts': counts})
+
+            # Cleanup
+            del transpiled, job, result
+
+            if i % 10 == 0:
+                gc.collect()
+
+        self.profiler.stop()
+        return results
+```
+
+## 6. Memory-Efficient Algorithm Patterns
+
+```python
+class MemoryEfficientVQE:
+    """Memory-efficient VQE implementation."""
+
+    def __init__(self, ansatz, hamiltonian, backend=None):
+        self.ansatz = ansatz
+        self.hamiltonian = hamiltonian
+        self.backend = backend
+        self.memory_log: List[float] = []
+
+    def compute_expectation_chunked(self, parameters,
+                                      chunk_size: int = 5) -> float:
+        """Compute expectation value with memory chunking."""
+        from qiskit import transpile
+        from qiskit_aer import AerSimulator
+
+        backend = self.backend or AerSimulator()
+        total_expectation = 0.0
+
+        # Process Hamiltonian terms in chunks
+        terms = list(self.hamiltonian)
+
+        for chunk_start in range(0, len(terms), chunk_size):
+            chunk_terms = terms[chunk_start:chunk_start + chunk_size]
+
+            # Build circuits for this chunk only
+            circuits = []
+            for term in chunk_terms:
+                bound = self.ansatz.bind_parameters(parameters)
+                circuits.append(bound)
+
+            # Execute chunk
+            transpiled = transpile(circuits, backend)
+            job = backend.run(transpiled, shots=1000)
+            results = job.result()
+
+            # Process results
+            for i, term in enumerate(chunk_terms):
+                counts = results.get_counts(i)
+                expectation = self._compute_term_expectation(term, counts)
+                total_expectation += expectation
+
+            # Cleanup
+            del circuits, transpiled, job, results
+            gc.collect()
+
+            # Log memory
+            self.memory_log.append(psutil.Process().memory_info().rss / 1024 / 1024)
+
+        return total_expectation
+
+    def _compute_term_expectation(self, term, counts: Dict) -> float:
+        """Compute expectation value for single term."""
+        total_shots = sum(counts.values())
+        expectation = 0.0
+
+        for bitstring, count in counts.items():
+            parity = sum(int(b) for b in bitstring) % 2
+            sign = 1 - 2 * parity
+            expectation += sign * count / total_shots
+
+        return expectation
+
+
+def memory_profile_decorator(func):
+    """Decorator to profile memory usage of a function."""
+    def wrapper(*args, **kwargs):
+        tracemalloc.start()
+
+        result = func(*args, **kwargs)
+
+        current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        print(f"\n{func.__name__} Memory Profile:")
+        print(f"  Current: {current / 1024 / 1024:.2f} MB")
+        print(f"  Peak: {peak / 1024 / 1024:.2f} MB")
+
+        return result
+    return wrapper
+```
+
+## Summary
+
+| Memory Aspect | Key Considerations | Optimization Strategy |
+|--------------|-------------------|----------------------|
+| State Vector | 2^n × 16 bytes | Limit qubit count, use MPS |
+| Density Matrix | 2^(2n) × 16 bytes | Use statevector when possible |
+| Circuit Objects | Scales with gates | Cleanup after transpilation |
+| Results | Scales with shots | Extract counts, delete result |
+
+## Best Practices
+
+1. **Profile before optimizing** - Measure actual memory usage
+2. **Use streaming** - Process circuits in batches
+3. **Clean up aggressively** - Delete unused objects, call gc.collect()
+4. **Choose efficient methods** - MPS for shallow circuits
+5. **Monitor continuously** - Track memory throughout execution
+
+## Further Reading
+
+- Python Memory Profiling Documentation
+- Qiskit Aer Memory Management
+- NumPy Memory Optimization Guide
+- "Efficient Quantum Circuit Simulation" research papers
