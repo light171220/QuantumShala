@@ -1,0 +1,779 @@
+---
+title: "Quantum Policy Networks"
+description: "Learn to design and implement quantum circuits as policy networks for reinforcement learning, including encoding strategies and action sampling."
+estimatedMinutes: 60
+difficulty: "advanced"
+tags: ["quantum-policy", "variational-circuit", "state-encoding", "action-sampling", "policy-gradient", "quantum-control"]
+---
+
+# Quantum Policy Networks
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Design quantum circuits as policy representations
+- Implement state encoding strategies for RL
+- Extract action probabilities from quantum measurements
+- Compute policy gradients for quantum circuits
+- Handle discrete and continuous action spaces
+- Optimize quantum policies with parameter-shift
+
+## 1. Quantum Policy Architecture
+
+<Definition term="Quantum Policy">
+A parameterized quantum circuit π_θ(a|s) that takes an encoded state as input and produces a probability distribution over actions through measurement, serving as the policy for reinforcement learning.
+</Definition>
+
+<Formula>
+\text{Quantum Policy Pipeline:}
+\\[8pt]
+s \xrightarrow{\text{encode}} |s\rangle \xrightarrow{U(\theta)} |\psi(s,\theta)\rangle \xrightarrow{\text{measure}} \pi_\theta(a|s)
+\\[12pt]
+\text{Action probabilities: } \pi_\theta(a|s) = |\langle a|\psi(s,\theta)\rangle|^2
+</Formula>
+
+```python
+import numpy as np
+from typing import Tuple, List, Dict, Callable
+
+class QuantumPolicy:
+    """Quantum circuit as policy network."""
+
+    def __init__(self, n_qubits: int, n_actions: int, n_layers: int = 3):
+        self.n_qubits = n_qubits
+        self.n_actions = n_actions
+        self.n_layers = n_layers
+        self.dim = 2**n_qubits
+
+        # Variational parameters
+        params_per_layer = 2 * n_qubits  # RY, RZ per qubit
+        self.n_params = n_layers * params_per_layer
+        self.params = np.random.randn(self.n_params) * 0.1
+
+    def _ry_gate(self, theta: float) -> np.ndarray:
+        """RY rotation gate."""
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        return np.array([[c, -s], [s, c]])
+
+    def _rz_gate(self, theta: float) -> np.ndarray:
+        """RZ rotation gate."""
+        return np.array([[np.exp(-1j*theta/2), 0],
+                        [0, np.exp(1j*theta/2)]])
+
+    def _apply_gate(self, state: np.ndarray, gate: np.ndarray,
+                    qubit: int) -> np.ndarray:
+        """Apply single-qubit gate."""
+        full_gate = np.eye(1)
+        for q in range(self.n_qubits):
+            full_gate = np.kron(full_gate,
+                               gate if q == qubit else np.eye(2))
+        return full_gate @ state
+
+    def encode_state(self, s: np.ndarray) -> np.ndarray:
+        """Encode classical state into quantum state."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1.0  # Start with |0...0⟩
+
+        # Angle encoding: RY(π * s_i) on qubit i
+        for i in range(min(len(s), self.n_qubits)):
+            angle = np.pi * np.tanh(s[i])  # Bound to [-π, π]
+            ry = self._ry_gate(angle)
+            state = self._apply_gate(state, ry, i)
+
+        return state
+
+    def variational_circuit(self, state: np.ndarray) -> np.ndarray:
+        """Apply variational layers."""
+        params_per_layer = 2 * self.n_qubits
+
+        for layer in range(self.n_layers):
+            layer_params = self.params[layer*params_per_layer:
+                                       (layer+1)*params_per_layer]
+
+            # RY rotations
+            for q in range(self.n_qubits):
+                ry = self._ry_gate(layer_params[q])
+                state = self._apply_gate(state, ry, q)
+
+            # RZ rotations
+            for q in range(self.n_qubits):
+                rz = self._rz_gate(layer_params[self.n_qubits + q])
+                state = self._apply_gate(state, rz, q)
+
+            # Entanglement (except last layer)
+            if layer < self.n_layers - 1:
+                for q in range(self.n_qubits - 1):
+                    # CZ effect
+                    for i in range(self.dim):
+                        bits = format(i, f'0{self.n_qubits}b')
+                        if bits[q] == '1' and bits[q+1] == '1':
+                            state[i] *= -1
+
+        return state
+
+    def get_action_probabilities(self, s: np.ndarray) -> np.ndarray:
+        """Get probability distribution over actions."""
+        # Encode and process state
+        state = self.encode_state(s)
+        state = self.variational_circuit(state)
+
+        # Measure probabilities
+        probs = np.abs(state)**2
+
+        # Map to action space
+        if self.n_actions <= self.dim:
+            # Group measurement outcomes into actions
+            action_probs = np.zeros(self.n_actions)
+            outcomes_per_action = self.dim // self.n_actions
+
+            for a in range(self.n_actions):
+                start = a * outcomes_per_action
+                end = start + outcomes_per_action
+                action_probs[a] = probs[start:end].sum()
+
+            # Handle remainder
+            if self.dim % self.n_actions != 0:
+                action_probs[-1] += probs[self.n_actions * outcomes_per_action:].sum()
+        else:
+            # Pad with small probabilities
+            action_probs = np.zeros(self.n_actions)
+            action_probs[:self.dim] = probs
+            action_probs += 1e-10
+            action_probs /= action_probs.sum()
+
+        return action_probs
+
+    def sample_action(self, s: np.ndarray) -> int:
+        """Sample action from policy."""
+        probs = self.get_action_probabilities(s)
+        return np.random.choice(self.n_actions, p=probs)
+```
+
+## 2. State Encoding Strategies
+
+<Tip>
+The choice of state encoding significantly affects policy expressiveness. Angle encoding is simple but limited; amplitude encoding is powerful but expensive to prepare.
+</Tip>
+
+```python
+class StateEncoder:
+    """Various state encoding strategies for quantum policies."""
+
+    def __init__(self, n_qubits: int):
+        self.n_qubits = n_qubits
+        self.dim = 2**n_qubits
+
+    def _ry_gate(self, theta: float) -> np.ndarray:
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        return np.array([[c, -s], [s, c]])
+
+    def _rx_gate(self, theta: float) -> np.ndarray:
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        return np.array([[c, -1j*s], [-1j*s, c]])
+
+    def _rz_gate(self, theta: float) -> np.ndarray:
+        return np.array([[np.exp(-1j*theta/2), 0],
+                        [0, np.exp(1j*theta/2)]])
+
+    def _apply_gate(self, state: np.ndarray, gate: np.ndarray,
+                    qubit: int) -> np.ndarray:
+        full_gate = np.eye(1)
+        for q in range(self.n_qubits):
+            full_gate = np.kron(full_gate,
+                               gate if q == qubit else np.eye(2))
+        return full_gate @ state
+
+    def angle_encoding(self, s: np.ndarray) -> np.ndarray:
+        """Simple angle encoding: RY(s_i) on qubit i."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1.0
+
+        for i in range(min(len(s), self.n_qubits)):
+            ry = self._ry_gate(s[i])
+            state = self._apply_gate(state, ry, i)
+
+        return state
+
+    def dense_angle_encoding(self, s: np.ndarray) -> np.ndarray:
+        """Dense encoding: RY and RZ on each qubit."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1.0
+
+        for i in range(self.n_qubits):
+            if 2*i < len(s):
+                ry = self._ry_gate(s[2*i])
+                state = self._apply_gate(state, ry, i)
+            if 2*i + 1 < len(s):
+                rz = self._rz_gate(s[2*i + 1])
+                state = self._apply_gate(state, rz, i)
+
+        return state
+
+    def iqp_encoding(self, s: np.ndarray) -> np.ndarray:
+        """IQP-style encoding with feature interactions."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1.0
+
+        # Hadamard layer
+        for q in range(self.n_qubits):
+            h = np.array([[1, 1], [1, -1]]) / np.sqrt(2)
+            state = self._apply_gate(state, h, q)
+
+        # RZ encoding with single features
+        for i in range(min(len(s), self.n_qubits)):
+            rz = self._rz_gate(s[i])
+            state = self._apply_gate(state, rz, i)
+
+        # Feature interactions (ZZ)
+        for i in range(min(len(s)-1, self.n_qubits-1)):
+            phase = s[i] * s[i+1]
+            for basis in range(self.dim):
+                bits = format(basis, f'0{self.n_qubits}b')
+                if bits[i] == '1' and bits[i+1] == '1':
+                    state[basis] *= np.exp(1j * phase)
+
+        # Second Hadamard layer
+        for q in range(self.n_qubits):
+            h = np.array([[1, 1], [1, -1]]) / np.sqrt(2)
+            state = self._apply_gate(state, h, q)
+
+        return state
+
+    def amplitude_encoding(self, s: np.ndarray) -> np.ndarray:
+        """Amplitude encoding: state values become amplitudes."""
+        # Normalize to valid quantum state
+        if len(s) < self.dim:
+            padded = np.zeros(self.dim)
+            padded[:len(s)] = s
+            s = padded
+        else:
+            s = s[:self.dim]
+
+        norm = np.linalg.norm(s)
+        if norm > 0:
+            return s / norm
+        else:
+            state = np.zeros(self.dim, dtype=complex)
+            state[0] = 1.0
+            return state
+
+
+class RepeatedEncodingPolicy(QuantumPolicy):
+    """Policy with repeated encoding (data re-uploading)."""
+
+    def __init__(self, n_qubits: int, n_actions: int, n_layers: int = 3):
+        super().__init__(n_qubits, n_actions, n_layers)
+        self.encoder = StateEncoder(n_qubits)
+
+    def variational_circuit_with_reupload(self, s: np.ndarray) -> np.ndarray:
+        """Apply variational layers with state re-encoding."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1.0
+
+        params_per_layer = 2 * self.n_qubits
+
+        for layer in range(self.n_layers):
+            # Re-encode state at each layer
+            for i in range(min(len(s), self.n_qubits)):
+                angle = np.pi * np.tanh(s[i])
+                ry = self._ry_gate(angle)
+                state = self._apply_gate(state, ry, i)
+
+            # Variational rotations
+            layer_params = self.params[layer*params_per_layer:
+                                       (layer+1)*params_per_layer]
+
+            for q in range(self.n_qubits):
+                ry = self._ry_gate(layer_params[q])
+                rz = self._rz_gate(layer_params[self.n_qubits + q])
+                state = self._apply_gate(state, ry, q)
+                state = self._apply_gate(state, rz, q)
+
+            # Entanglement
+            if layer < self.n_layers - 1:
+                for q in range(self.n_qubits - 1):
+                    for i in range(self.dim):
+                        bits = format(i, f'0{self.n_qubits}b')
+                        if bits[q] == '1' and bits[q+1] == '1':
+                            state[i] *= -1
+
+        return state
+
+    def get_action_probabilities(self, s: np.ndarray) -> np.ndarray:
+        """Get action probabilities with re-uploading."""
+        state = self.variational_circuit_with_reupload(s)
+        probs = np.abs(state)**2
+
+        # Map to actions
+        action_probs = np.zeros(self.n_actions)
+        for a in range(self.n_actions):
+            action_probs[a] = probs[a] if a < len(probs) else 0
+
+        action_probs += 1e-10
+        return action_probs / action_probs.sum()
+```
+
+## 3. Action Extraction Methods
+
+<Definition term="Action Extraction">
+The process of converting quantum measurement outcomes into classical actions. Different strategies trade off between expressiveness and sampling efficiency.
+</Definition>
+
+```python
+class ActionExtractor:
+    """Methods to extract actions from quantum states."""
+
+    def __init__(self, n_qubits: int, n_actions: int):
+        self.n_qubits = n_qubits
+        self.n_actions = n_actions
+        self.dim = 2**n_qubits
+
+    def bitstring_to_action(self, probs: np.ndarray) -> np.ndarray:
+        """Map bitstring probabilities to action probabilities."""
+        action_probs = np.zeros(self.n_actions)
+
+        if self.n_actions <= self.dim:
+            # Group outcomes
+            outcomes_per_action = self.dim // self.n_actions
+            for a in range(self.n_actions):
+                start = a * outcomes_per_action
+                end = start + outcomes_per_action if a < self.n_actions - 1 else self.dim
+                action_probs[a] = probs[start:end].sum()
+        else:
+            # Cycle through outcomes
+            for i, p in enumerate(probs):
+                action_probs[i % self.n_actions] += p
+
+        return action_probs / (action_probs.sum() + 1e-10)
+
+    def expectation_to_action(self, state: np.ndarray) -> np.ndarray:
+        """Use qubit expectations to determine action probabilities."""
+        probs = np.abs(state)**2
+
+        # Compute ⟨Z_i⟩ for each qubit
+        expectations = np.zeros(self.n_qubits)
+        for q in range(self.n_qubits):
+            p0 = sum(probs[i] for i in range(self.dim)
+                     if (i >> (self.n_qubits - 1 - q)) & 1 == 0)
+            expectations[q] = 2 * p0 - 1  # Map [0,1] to [-1,1]
+
+        # Map expectations to action probabilities
+        if self.n_actions <= self.n_qubits:
+            raw = expectations[:self.n_actions]
+        else:
+            raw = np.tile(expectations,
+                         self.n_actions // self.n_qubits + 1)[:self.n_actions]
+
+        # Softmax to get probabilities
+        exp_vals = np.exp(raw - np.max(raw))
+        return exp_vals / exp_vals.sum()
+
+    def measured_bits_action(self, probs: np.ndarray,
+                              n_measure_qubits: int = 2) -> np.ndarray:
+        """Use specific qubits for action selection."""
+        n_measure = min(n_measure_qubits, self.n_qubits)
+        action_bins = 2**n_measure
+
+        action_probs = np.zeros(min(action_bins, self.n_actions))
+
+        for i, p in enumerate(probs):
+            # Extract measured qubit values
+            action_idx = (i >> (self.n_qubits - n_measure)) % len(action_probs)
+            action_probs[action_idx] += p
+
+        # Pad if needed
+        if self.n_actions > len(action_probs):
+            full_probs = np.zeros(self.n_actions)
+            full_probs[:len(action_probs)] = action_probs
+            full_probs += 1e-10
+            return full_probs / full_probs.sum()
+
+        return action_probs / (action_probs.sum() + 1e-10)
+
+
+class ContinuousActionPolicy(QuantumPolicy):
+    """Quantum policy for continuous action spaces."""
+
+    def __init__(self, n_qubits: int, action_dim: int, n_layers: int = 3,
+                 action_range: Tuple[float, float] = (-1.0, 1.0)):
+        super().__init__(n_qubits, action_dim, n_layers)
+        self.action_dim = action_dim
+        self.action_range = action_range
+
+    def get_action(self, s: np.ndarray) -> np.ndarray:
+        """Get continuous action from quantum circuit."""
+        state = self.encode_state(s)
+        state = self.variational_circuit(state)
+        probs = np.abs(state)**2
+
+        # Use expectations as action values
+        actions = np.zeros(self.action_dim)
+        for d in range(self.action_dim):
+            qubit = d % self.n_qubits
+            p0 = sum(probs[i] for i in range(self.dim)
+                     if (i >> (self.n_qubits - 1 - qubit)) & 1 == 0)
+            # Map [0,1] to action range
+            t = p0
+            actions[d] = (self.action_range[0] +
+                         t * (self.action_range[1] - self.action_range[0]))
+
+        return actions
+
+    def get_action_with_noise(self, s: np.ndarray,
+                               noise_std: float = 0.1) -> np.ndarray:
+        """Get action with exploration noise."""
+        action = self.get_action(s)
+        noise = np.random.randn(self.action_dim) * noise_std
+        noisy_action = action + noise
+
+        # Clip to action range
+        return np.clip(noisy_action, self.action_range[0], self.action_range[1])
+```
+
+## 4. Policy Gradient for Quantum Circuits
+
+<Warning>
+Quantum policy gradients combine the parameter-shift rule with RL policy gradient theorem. Careful variance reduction is essential for practical training.
+</Warning>
+
+<Formula>
+\text{Quantum Policy Gradient:}
+\\[8pt]
+\nabla_\theta J(\theta) = \mathbb{E}\left[\sum_t \gamma^t G_t \nabla_\theta \log \pi_\theta(a_t|s_t)\right]
+\\[8pt]
+\text{For quantum: } \frac{\partial \log \pi_\theta(a|s)}{\partial \theta_i} = \frac{1}{\pi_\theta(a|s)} \cdot \frac{\partial \pi_\theta(a|s)}{\partial \theta_i}
+\\[8pt]
+\text{where } \frac{\partial \pi_\theta}{\partial \theta_i} \text{ uses parameter-shift rule}
+</Formula>
+
+```python
+class QuantumPolicyGradient:
+    """Policy gradient computation for quantum policies."""
+
+    def __init__(self, policy: QuantumPolicy, gamma: float = 0.99):
+        self.policy = policy
+        self.gamma = gamma
+        self.shift = np.pi / 2
+
+    def compute_log_policy_gradient(self, s: np.ndarray,
+                                     a: int) -> np.ndarray:
+        """Compute ∇log π(a|s) using parameter-shift rule."""
+        gradients = np.zeros_like(self.policy.params)
+        original_params = self.policy.params.copy()
+
+        # Current policy probability
+        pi_a = self.policy.get_action_probabilities(s)[a]
+        eps = 1e-10
+
+        for i in range(len(self.policy.params)):
+            # Forward shift
+            self.policy.params = original_params.copy()
+            self.policy.params[i] += self.shift
+            pi_plus = self.policy.get_action_probabilities(s)[a]
+
+            # Backward shift
+            self.policy.params = original_params.copy()
+            self.policy.params[i] -= self.shift
+            pi_minus = self.policy.get_action_probabilities(s)[a]
+
+            # Parameter-shift for ∂π/∂θ
+            d_pi = (pi_plus - pi_minus) / 2
+
+            # ∂log(π)/∂θ = (1/π) * ∂π/∂θ
+            gradients[i] = d_pi / (pi_a + eps)
+
+        self.policy.params = original_params
+        return gradients
+
+    def reinforce_gradient(self, episode: List[Tuple]) -> np.ndarray:
+        """Compute REINFORCE gradient from episode.
+
+        episode: list of (state, action, reward) tuples
+        """
+        states = [e[0] for e in episode]
+        actions = [e[1] for e in episode]
+        rewards = [e[2] for e in episode]
+
+        # Compute returns
+        returns = []
+        G = 0
+        for r in reversed(rewards):
+            G = r + self.gamma * G
+            returns.insert(0, G)
+
+        # Normalize returns (variance reduction)
+        returns = np.array(returns)
+        if len(returns) > 1:
+            returns = (returns - returns.mean()) / (returns.std() + 1e-8)
+
+        # Accumulate gradients
+        total_gradient = np.zeros_like(self.policy.params)
+
+        for t, (s, a, G) in enumerate(zip(states, actions, returns)):
+            log_grad = self.compute_log_policy_gradient(s, a)
+            total_gradient += (self.gamma**t) * G * log_grad
+
+        return total_gradient
+
+    def update_policy(self, gradient: np.ndarray, learning_rate: float = 0.01):
+        """Update policy parameters."""
+        self.policy.params -= learning_rate * gradient
+
+
+class QuantumActorCritic:
+    """Quantum Actor-Critic algorithm."""
+
+    def __init__(self, n_qubits: int, n_actions: int,
+                 actor_lr: float = 0.01, critic_lr: float = 0.1,
+                 gamma: float = 0.99):
+        self.actor = QuantumPolicy(n_qubits, n_actions)
+        self.critic_V = np.zeros(100)  # Simplified: tabular critic
+        self.actor_lr = actor_lr
+        self.critic_lr = critic_lr
+        self.gamma = gamma
+        self.pg = QuantumPolicyGradient(self.actor, gamma)
+
+    def select_action(self, state_idx: int, state_vec: np.ndarray) -> int:
+        """Select action from quantum policy."""
+        return self.actor.sample_action(state_vec)
+
+    def update(self, state_idx: int, state_vec: np.ndarray,
+               action: int, reward: float,
+               next_state_idx: int, done: bool):
+        """Update actor and critic."""
+        # TD error
+        if done:
+            td_target = reward
+        else:
+            td_target = reward + self.gamma * self.critic_V[next_state_idx]
+        td_error = td_target - self.critic_V[state_idx]
+
+        # Critic update
+        self.critic_V[state_idx] += self.critic_lr * td_error
+
+        # Actor update
+        log_grad = self.pg.compute_log_policy_gradient(state_vec, action)
+        self.actor.params -= self.actor_lr * td_error * log_grad
+```
+
+## 5. Handling Different Action Spaces
+
+```python
+class DiscreteActionQuantumPolicy(QuantumPolicy):
+    """Optimized quantum policy for discrete actions."""
+
+    def __init__(self, n_qubits: int, n_actions: int, n_layers: int = 3):
+        super().__init__(n_qubits, n_actions, n_layers)
+
+        # Ensure enough qubits for actions
+        self.action_qubits = int(np.ceil(np.log2(max(n_actions, 2))))
+
+    def get_action_probabilities(self, s: np.ndarray) -> np.ndarray:
+        """Get discrete action probabilities."""
+        state = self.encode_state(s)
+        state = self.variational_circuit(state)
+        probs = np.abs(state)**2
+
+        # Measure action qubits
+        action_probs = np.zeros(self.n_actions)
+        n_other = self.n_qubits - self.action_qubits
+
+        for i, p in enumerate(probs):
+            action_bits = i >> n_other
+            if action_bits < self.n_actions:
+                action_probs[action_bits] += p
+
+        # Normalize
+        total = action_probs.sum()
+        if total > 0:
+            return action_probs / total
+        return np.ones(self.n_actions) / self.n_actions
+
+
+class MultiDiscreteQuantumPolicy:
+    """Quantum policy for multi-discrete action spaces."""
+
+    def __init__(self, n_qubits: int, action_dims: List[int], n_layers: int = 3):
+        self.n_qubits = n_qubits
+        self.action_dims = action_dims
+        self.n_action_components = len(action_dims)
+        self.n_layers = n_layers
+        self.dim = 2**n_qubits
+
+        # Assign qubits to action components
+        self.qubits_per_component = n_qubits // self.n_action_components
+
+        # Parameters
+        params_per_layer = 2 * n_qubits
+        self.params = np.random.randn(n_layers * params_per_layer) * 0.1
+
+    def get_action_probabilities(self, s: np.ndarray) -> List[np.ndarray]:
+        """Get probabilities for each action component."""
+        # Process state through circuit
+        state = self._run_circuit(s)
+        probs = np.abs(state)**2
+
+        # Extract probabilities for each component
+        action_probs = []
+        for c in range(self.n_action_components):
+            n_actions = self.action_dims[c]
+            component_probs = np.zeros(n_actions)
+
+            start_qubit = c * self.qubits_per_component
+            end_qubit = start_qubit + self.qubits_per_component
+
+            for i, p in enumerate(probs):
+                bits = format(i, f'0{self.n_qubits}b')
+                action_bits = bits[start_qubit:end_qubit]
+                action_idx = int(action_bits, 2) % n_actions
+                component_probs[action_idx] += p
+
+            component_probs /= (component_probs.sum() + 1e-10)
+            action_probs.append(component_probs)
+
+        return action_probs
+
+    def sample_action(self, s: np.ndarray) -> List[int]:
+        """Sample action for each component."""
+        probs_list = self.get_action_probabilities(s)
+        return [np.random.choice(len(p), p=p) for p in probs_list]
+
+    def _run_circuit(self, s: np.ndarray) -> np.ndarray:
+        """Run the quantum circuit."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1.0
+
+        # Simplified circuit implementation
+        for i in range(min(len(s), self.n_qubits)):
+            angle = np.pi * np.tanh(s[i])
+            c, sin = np.cos(angle/2), np.sin(angle/2)
+            # Apply rotation (simplified)
+            new_state = np.zeros_like(state)
+            for j in range(self.dim):
+                bits = list(format(j, f'0{self.n_qubits}b'))
+                if bits[i] == '0':
+                    new_state[j] += c * state[j]
+                    flipped = j | (1 << (self.n_qubits - 1 - i))
+                    new_state[flipped] += sin * state[j]
+                else:
+                    new_state[j] += c * state[j]
+                    flipped = j & ~(1 << (self.n_qubits - 1 - i))
+                    new_state[flipped] -= sin * state[j]
+            state = new_state
+
+        return state
+```
+
+## 6. Practical Training Considerations
+
+<Tip>
+Quantum policy training faces challenges including shot noise, barren plateaus, and long episode lengths. Batch updates and baseline subtraction help stabilize training.
+</Tip>
+
+```python
+class QuantumPolicyTrainer:
+    """Complete training system for quantum policies."""
+
+    def __init__(self, policy: QuantumPolicy, gamma: float = 0.99,
+                 lr: float = 0.01, baseline: bool = True):
+        self.policy = policy
+        self.gamma = gamma
+        self.lr = lr
+        self.use_baseline = baseline
+        self.pg = QuantumPolicyGradient(policy, gamma)
+
+        # Running baseline
+        self.baseline_value = 0.0
+        self.baseline_alpha = 0.1
+
+    def train_episode(self, env, max_steps: int = 100) -> Dict:
+        """Train on one episode."""
+        states, actions, rewards = [], [], []
+        state_vecs = []
+
+        state = env.reset()
+        state_vec = self._state_to_vector(state)
+
+        for _ in range(max_steps):
+            action = self.policy.sample_action(state_vec)
+
+            next_state, reward, done = env.step(action)
+            next_state_vec = self._state_to_vector(next_state)
+
+            states.append(state)
+            state_vecs.append(state_vec)
+            actions.append(action)
+            rewards.append(reward)
+
+            state = next_state
+            state_vec = next_state_vec
+
+            if done:
+                break
+
+        # Compute returns and update
+        episode = list(zip(state_vecs, actions, rewards))
+        gradient = self.pg.reinforce_gradient(episode)
+
+        # Apply baseline
+        total_return = sum(rewards)
+        if self.use_baseline:
+            advantage = total_return - self.baseline_value
+            gradient *= np.sign(advantage)
+            self.baseline_value += self.baseline_alpha * (
+                total_return - self.baseline_value)
+
+        # Update policy
+        self.policy.params -= self.lr * gradient
+
+        return {
+            'total_reward': total_return,
+            'episode_length': len(rewards),
+            'gradient_norm': np.linalg.norm(gradient)
+        }
+
+    def _state_to_vector(self, state) -> np.ndarray:
+        """Convert state to vector representation."""
+        if isinstance(state, np.ndarray):
+            return state
+        elif isinstance(state, (int, np.integer)):
+            # One-hot encoding for discrete states
+            vec = np.zeros(self.policy.n_qubits)
+            for i in range(self.policy.n_qubits):
+                vec[i] = (state >> i) & 1
+            return vec
+        else:
+            return np.array([state])
+
+    def train(self, env, n_episodes: int = 100,
+              verbose: bool = True) -> Dict:
+        """Full training loop."""
+        history = {'rewards': [], 'lengths': [], 'grad_norms': []}
+
+        for episode in range(n_episodes):
+            metrics = self.train_episode(env)
+
+            history['rewards'].append(metrics['total_reward'])
+            history['lengths'].append(metrics['episode_length'])
+            history['grad_norms'].append(metrics['gradient_norm'])
+
+            if verbose and (episode + 1) % 10 == 0:
+                avg_reward = np.mean(history['rewards'][-10:])
+                print(f"Episode {episode+1}: Avg reward = {avg_reward:.3f}")
+
+        return history
+```
+
+## Summary
+
+In this lesson, you learned:
+
+- **Quantum policy architecture**: Encoding states → variational circuit → measurement → action
+- **State encoding**: Angle, dense, IQP, and amplitude encoding strategies
+- **Action extraction**: Bitstring mapping, expectation-based, and qubit selection methods
+- **Policy gradients**: Parameter-shift combined with REINFORCE for quantum policies
+- **Action spaces**: Handling discrete, continuous, and multi-discrete actions
+- **Training**: Baseline subtraction, gradient normalization, and practical considerations
+
+Quantum policies offer expressive power through parameterized circuits while maintaining trainability through the parameter-shift rule.

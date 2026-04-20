@@ -1,0 +1,779 @@
+---
+title: "Barren Plateaus: Vanishing Gradients and Mitigation Strategies"
+description: "In-depth analysis of the barren plateau phenomenon in variational quantum circuits, its causes, detection methods, and strategies for mitigation."
+duration: 80
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the mathematical origins of barren plateaus
+- Identify circuits susceptible to vanishing gradients
+- Implement gradient variance analysis
+- Apply mitigation strategies including initialization and architecture design
+- Design trainable circuits avoiding barren plateaus
+
+## 1. The Barren Plateau Problem
+
+Barren plateaus are regions in the parameter landscape where gradients vanish exponentially with system size, making optimization impossible.
+
+<Definition term="Barren Plateau">
+A barren plateau occurs when the variance of the cost function gradient decreases exponentially with the number of qubits: $\text{Var}[\partial_\theta C] \leq F(n)$ where $F(n) \in O(b^{-n})$ for some $b > 1$.
+</Definition>
+
+<Formula>
+$$\text{Var}_\theta\left[\frac{\partial C}{\partial \theta_k}\right] \leq \frac{1}{2^n}$$
+</Formula>
+
+This means for $n = 50$ qubits, gradients are on the order of $10^{-15}$ - far below any measurable precision.
+
+```python
+import numpy as np
+from typing import Callable, List, Tuple, Dict
+from dataclasses import dataclass
+
+@dataclass
+class BarrenPlateauAnalysis:
+    """Results from barren plateau analysis."""
+    num_qubits: int
+    gradient_variances: np.ndarray
+    mean_gradient: float
+    gradient_concentration: float  # How concentrated around zero
+    is_barren: bool
+    theoretical_bound: float
+
+def analyze_gradient_variance(
+    cost_function: Callable[[np.ndarray], float],
+    num_params: int,
+    num_samples: int = 1000,
+    num_qubits: int = None
+) -> BarrenPlateauAnalysis:
+    """
+    Analyze gradient variance to detect barren plateaus.
+
+    Args:
+        cost_function: Function params -> cost value
+        num_params: Number of variational parameters
+        num_samples: Number of random parameter samples
+        num_qubits: Number of qubits for theoretical bound
+    """
+    gradients = []
+
+    for _ in range(num_samples):
+        # Random parameters
+        params = np.random.uniform(0, 2 * np.pi, num_params)
+
+        # Compute gradient using parameter shift
+        grad = np.zeros(num_params)
+        for i in range(num_params):
+            params_plus = params.copy()
+            params_plus[i] += np.pi / 2
+            params_minus = params.copy()
+            params_minus[i] -= np.pi / 2
+
+            grad[i] = (cost_function(params_plus) - cost_function(params_minus)) / 2
+
+        gradients.append(grad)
+
+    gradients = np.array(gradients)
+
+    # Compute variance for each parameter
+    gradient_variances = np.var(gradients, axis=0)
+
+    # Mean gradient (should be close to zero)
+    mean_gradient = np.mean(np.abs(gradients))
+
+    # Gradient concentration (fraction near zero)
+    threshold = 0.01
+    gradient_concentration = np.mean(np.abs(gradients) < threshold)
+
+    # Theoretical bound
+    if num_qubits:
+        theoretical_bound = 1 / (2 ** num_qubits)
+    else:
+        theoretical_bound = None
+
+    # Check if barren
+    is_barren = np.mean(gradient_variances) < 0.01
+
+    return BarrenPlateauAnalysis(
+        num_qubits=num_qubits or 0,
+        gradient_variances=gradient_variances,
+        mean_gradient=mean_gradient,
+        gradient_concentration=gradient_concentration,
+        is_barren=is_barren,
+        theoretical_bound=theoretical_bound
+    )
+```
+
+## 2. Causes of Barren Plateaus
+
+### Hardware-Efficient Ansatz Barren Plateaus
+
+Deep, highly expressive circuits tend to exhibit barren plateaus:
+
+```python
+def demonstrate_depth_scaling(
+    num_qubits: int,
+    max_depth: int
+) -> Dict[int, float]:
+    """
+    Show how gradient variance scales with circuit depth.
+    """
+    dim = 2 ** num_qubits
+
+    def create_circuit_cost(depth: int) -> Callable:
+        """Create cost function for circuit of given depth."""
+
+        def cost(params: np.ndarray) -> float:
+            # Initialize |0...0>
+            state = np.zeros(dim, dtype=complex)
+            state[0] = 1.0
+
+            param_idx = 0
+            for layer in range(depth):
+                # Apply rotations
+                for q in range(num_qubits):
+                    theta = params[param_idx]
+                    param_idx += 1
+                    state = apply_ry(state, q, theta, num_qubits)
+
+                # Apply CNOTs
+                for q in range(num_qubits - 1):
+                    state = apply_cnot(state, q, q + 1, num_qubits)
+
+            # Measure Z on first qubit
+            Z_exp = measure_z(state, 0, num_qubits)
+            return Z_exp
+
+        return cost
+
+    results = {}
+
+    for depth in range(1, max_depth + 1):
+        cost_fn = create_circuit_cost(depth)
+        num_params = depth * num_qubits
+
+        analysis = analyze_gradient_variance(
+            cost_fn,
+            num_params,
+            num_samples=500,
+            num_qubits=num_qubits
+        )
+
+        results[depth] = np.mean(analysis.gradient_variances)
+
+    return results
+
+def apply_ry(state: np.ndarray, qubit: int, theta: float, n: int) -> np.ndarray:
+    """Apply Ry gate to state."""
+    dim = 2 ** n
+    ry = np.array([
+        [np.cos(theta/2), -np.sin(theta/2)],
+        [np.sin(theta/2), np.cos(theta/2)]
+    ])
+
+    new_state = np.zeros(dim, dtype=complex)
+
+    for i in range(dim):
+        bit = (i >> (n - 1 - qubit)) & 1
+        j = i ^ (1 << (n - 1 - qubit))
+
+        if bit == 0:
+            new_state[i] += ry[0, 0] * state[i] + ry[0, 1] * state[j]
+            new_state[j] += ry[1, 0] * state[i] + ry[1, 1] * state[j]
+
+    return new_state
+
+def apply_cnot(state: np.ndarray, ctrl: int, tgt: int, n: int) -> np.ndarray:
+    """Apply CNOT gate."""
+    dim = 2 ** n
+    new_state = state.copy()
+
+    for i in range(dim):
+        if (i >> (n - 1 - ctrl)) & 1:
+            j = i ^ (1 << (n - 1 - tgt))
+            new_state[i], new_state[j] = state[j], state[i]
+
+    return new_state
+
+def measure_z(state: np.ndarray, qubit: int, n: int) -> float:
+    """Measure expectation value of Z on qubit."""
+    exp_val = 0.0
+    dim = 2 ** n
+
+    for i in range(dim):
+        bit = (i >> (n - 1 - qubit)) & 1
+        sign = 1 - 2 * bit  # +1 for |0>, -1 for |1>
+        exp_val += sign * np.abs(state[i]) ** 2
+
+    return exp_val
+```
+
+### Global vs Local Cost Functions
+
+Global cost functions (measuring all qubits) are more susceptible to barren plateaus:
+
+```python
+def compare_cost_function_locality(
+    num_qubits: int,
+    depth: int = 3
+) -> dict:
+    """
+    Compare gradient variance for local vs global cost functions.
+    """
+    dim = 2 ** num_qubits
+    num_params = depth * num_qubits * 2
+
+    def prepare_state(params: np.ndarray) -> np.ndarray:
+        """Prepare parameterized state."""
+        state = np.zeros(dim, dtype=complex)
+        state[0] = 1.0
+
+        param_idx = 0
+        for layer in range(depth):
+            for q in range(num_qubits):
+                state = apply_ry(state, q, params[param_idx], num_qubits)
+                param_idx += 1
+                state = apply_rz(state, q, params[param_idx], num_qubits)
+                param_idx += 1
+
+            for q in range(num_qubits - 1):
+                state = apply_cnot(state, q, q + 1, num_qubits)
+
+        return state
+
+    def local_cost(params: np.ndarray) -> float:
+        """Cost measuring only first qubit."""
+        state = prepare_state(params)
+        return measure_z(state, 0, num_qubits)
+
+    def global_cost(params: np.ndarray) -> float:
+        """Cost measuring all qubits."""
+        state = prepare_state(params)
+        total = 0
+        for q in range(num_qubits):
+            total += measure_z(state, q, num_qubits)
+        return total / num_qubits
+
+    def fidelity_cost(params: np.ndarray) -> float:
+        """Global fidelity-based cost (most susceptible)."""
+        state = prepare_state(params)
+        # Fidelity with |0...0>
+        return np.abs(state[0]) ** 2
+
+    # Analyze each
+    results = {}
+
+    for name, cost_fn in [
+        ("local_Z", local_cost),
+        ("global_Z", global_cost),
+        ("fidelity", fidelity_cost)
+    ]:
+        analysis = analyze_gradient_variance(
+            cost_fn, num_params, num_samples=500, num_qubits=num_qubits
+        )
+        results[name] = {
+            'mean_variance': np.mean(analysis.gradient_variances),
+            'is_barren': analysis.is_barren
+        }
+
+    return results
+
+def apply_rz(state: np.ndarray, qubit: int, theta: float, n: int) -> np.ndarray:
+    """Apply Rz gate."""
+    dim = 2 ** n
+    new_state = np.zeros(dim, dtype=complex)
+
+    for i in range(dim):
+        bit = (i >> (n - 1 - qubit)) & 1
+        phase = np.exp(-1j * theta / 2) if bit == 0 else np.exp(1j * theta / 2)
+        new_state[i] = phase * state[i]
+
+    return new_state
+```
+
+## 3. Mathematical Analysis
+
+The key result comes from integrating over the Haar measure:
+
+<Formula>
+$$\mathbb{E}_\theta[\partial_k C] = 0$$
+</Formula>
+
+<Formula>
+$$\text{Var}_\theta[\partial_k C] = \frac{\text{Tr}(O^2) - \text{Tr}(O)^2/d}{d^2 - 1} \cdot \text{Var}[\text{local terms}]$$
+</Formula>
+
+```python
+def theoretical_gradient_variance(
+    num_qubits: int,
+    cost_type: str = "global_z"
+) -> float:
+    """
+    Compute theoretical gradient variance bound.
+
+    Based on McClean et al. (2018) barren plateau theorem.
+    """
+    d = 2 ** num_qubits
+
+    if cost_type == "global_z":
+        # For sum of Z measurements
+        # Tr(O^2) = n (each Z has Tr(Z^2) = 2)
+        # Tr(O)^2/d = 0 (traceless)
+        tr_O_squared = num_qubits * 2 ** (num_qubits - 1) * 2
+        tr_O = 0
+
+        variance_bound = (tr_O_squared - tr_O**2 / d) / (d**2 - 1)
+
+    elif cost_type == "local_z":
+        # Single qubit Z measurement
+        # Much better scaling
+        variance_bound = 2 / (d + 1)
+
+    elif cost_type == "fidelity":
+        # |<0|psi>|^2 - worst case
+        variance_bound = 1 / (d * (d + 1))
+
+    else:
+        variance_bound = 1 / d  # Generic bound
+
+    return variance_bound
+
+def verify_theoretical_bound(
+    num_qubits_range: List[int],
+    depth: int = 3
+) -> dict:
+    """
+    Verify that empirical gradient variance matches theoretical bounds.
+    """
+    results = {'empirical': [], 'theoretical': [], 'qubits': []}
+
+    for n in num_qubits_range:
+        dim = 2 ** n
+        num_params = depth * n * 2
+
+        def cost(params):
+            state = np.zeros(dim, dtype=complex)
+            state[0] = 1.0
+            param_idx = 0
+            for layer in range(depth):
+                for q in range(n):
+                    state = apply_ry(state, q, params[param_idx], n)
+                    param_idx += 1
+                    state = apply_rz(state, q, params[param_idx], n)
+                    param_idx += 1
+                for q in range(n - 1):
+                    state = apply_cnot(state, q, q + 1, n)
+            return measure_z(state, 0, n)
+
+        analysis = analyze_gradient_variance(cost, num_params, 300, n)
+
+        results['qubits'].append(n)
+        results['empirical'].append(np.mean(analysis.gradient_variances))
+        results['theoretical'].append(theoretical_gradient_variance(n, "local_z"))
+
+    return results
+```
+
+## 4. Detection Methods
+
+```python
+class BarrenPlateauDetector:
+    """
+    Comprehensive barren plateau detection.
+    """
+
+    def __init__(self, cost_function: Callable, num_params: int):
+        self.cost_fn = cost_function
+        self.num_params = num_params
+
+    def gradient_variance_test(
+        self,
+        num_samples: int = 500
+    ) -> dict:
+        """
+        Test gradient variance across random initializations.
+        """
+        all_gradients = []
+
+        for _ in range(num_samples):
+            params = np.random.uniform(0, 2 * np.pi, self.num_params)
+            grad = self._compute_gradient(params)
+            all_gradients.append(grad)
+
+        all_gradients = np.array(all_gradients)
+
+        return {
+            'variance_per_param': np.var(all_gradients, axis=0),
+            'mean_variance': np.mean(np.var(all_gradients, axis=0)),
+            'gradient_norm_mean': np.mean(np.linalg.norm(all_gradients, axis=1)),
+            'gradient_norm_std': np.std(np.linalg.norm(all_gradients, axis=1))
+        }
+
+    def landscape_flatness_test(
+        self,
+        num_samples: int = 100,
+        step_sizes: List[float] = [0.1, 0.5, 1.0]
+    ) -> dict:
+        """
+        Test how flat the landscape is by measuring cost changes.
+        """
+        results = {}
+
+        for step in step_sizes:
+            cost_changes = []
+
+            for _ in range(num_samples):
+                params = np.random.uniform(0, 2 * np.pi, self.num_params)
+                c1 = self.cost_fn(params)
+
+                # Random direction
+                direction = np.random.randn(self.num_params)
+                direction = direction / np.linalg.norm(direction)
+
+                c2 = self.cost_fn(params + step * direction)
+                cost_changes.append(np.abs(c2 - c1))
+
+            results[f'step_{step}'] = {
+                'mean_change': np.mean(cost_changes),
+                'std_change': np.std(cost_changes),
+                'max_change': np.max(cost_changes)
+            }
+
+        return results
+
+    def hessian_analysis(
+        self,
+        params: np.ndarray = None,
+        eps: float = 0.01
+    ) -> dict:
+        """
+        Analyze Hessian eigenvalues (curvature).
+        """
+        if params is None:
+            params = np.random.uniform(0, 2 * np.pi, self.num_params)
+
+        # Approximate Hessian using finite differences
+        n = self.num_params
+        hessian = np.zeros((n, n))
+
+        grad0 = self._compute_gradient(params)
+
+        for i in range(n):
+            params_shifted = params.copy()
+            params_shifted[i] += eps
+            grad_shifted = self._compute_gradient(params_shifted)
+            hessian[:, i] = (grad_shifted - grad0) / eps
+
+        # Symmetrize
+        hessian = (hessian + hessian.T) / 2
+
+        eigenvalues = np.linalg.eigvalsh(hessian)
+
+        return {
+            'eigenvalues': eigenvalues,
+            'max_eigenvalue': np.max(np.abs(eigenvalues)),
+            'min_eigenvalue': np.min(np.abs(eigenvalues)),
+            'condition_number': np.max(np.abs(eigenvalues)) / (np.min(np.abs(eigenvalues)) + 1e-10),
+            'mean_curvature': np.mean(np.abs(eigenvalues))
+        }
+
+    def _compute_gradient(self, params: np.ndarray) -> np.ndarray:
+        """Compute gradient using parameter shift."""
+        grad = np.zeros(self.num_params)
+        for i in range(self.num_params):
+            p_plus = params.copy()
+            p_plus[i] += np.pi / 2
+            p_minus = params.copy()
+            p_minus[i] -= np.pi / 2
+            grad[i] = (self.cost_fn(p_plus) - self.cost_fn(p_minus)) / 2
+        return grad
+```
+
+## 5. Mitigation Strategies
+
+### Strategy 1: Shallow Circuits with Local Cost Functions
+
+```python
+def create_shallow_local_circuit(
+    num_qubits: int,
+    max_depth: int = 2
+) -> Callable:
+    """
+    Create circuit designed to avoid barren plateaus.
+
+    Uses shallow depth and local measurements.
+    """
+    dim = 2 ** num_qubits
+    num_params = max_depth * num_qubits * 2
+
+    def circuit_cost(params: np.ndarray) -> float:
+        state = np.zeros(dim, dtype=complex)
+        state[0] = 1.0
+
+        param_idx = 0
+
+        for layer in range(max_depth):
+            # Local rotations only
+            for q in range(num_qubits):
+                state = apply_ry(state, q, params[param_idx], num_qubits)
+                param_idx += 1
+                state = apply_rz(state, q, params[param_idx], num_qubits)
+                param_idx += 1
+
+            # Nearest-neighbor entanglement only
+            for q in range(0, num_qubits - 1, 2):
+                state = apply_cnot(state, q, q + 1, num_qubits)
+
+        # LOCAL cost: measure only first qubit
+        return measure_z(state, 0, num_qubits)
+
+    return circuit_cost, num_params
+```
+
+### Strategy 2: Identity Initialization
+
+```python
+def identity_initialization(
+    num_params: int,
+    noise_scale: float = 0.01
+) -> np.ndarray:
+    """
+    Initialize parameters near identity (all zeros with small noise).
+
+    This keeps the circuit close to trivial at start, avoiding
+    the exponentially flat regions.
+    """
+    return np.random.randn(num_params) * noise_scale
+
+def layer_by_layer_training(
+    cost_function: Callable,
+    num_layers: int,
+    params_per_layer: int,
+    epochs_per_layer: int = 50,
+    learning_rate: float = 0.1
+) -> np.ndarray:
+    """
+    Train one layer at a time to avoid barren plateaus.
+
+    Start with shallow circuit, gradually add depth.
+    """
+    all_params = []
+
+    for layer in range(num_layers):
+        # Initialize new layer parameters
+        new_params = identity_initialization(params_per_layer)
+        all_params.extend(new_params.tolist())
+
+        params = np.array(all_params)
+
+        # Train only new layer (freeze previous)
+        for epoch in range(epochs_per_layer):
+            grad = np.zeros(len(params))
+
+            # Only compute gradients for current layer
+            start_idx = layer * params_per_layer
+            end_idx = (layer + 1) * params_per_layer
+
+            for i in range(start_idx, end_idx):
+                p_plus = params.copy()
+                p_plus[i] += np.pi / 2
+                p_minus = params.copy()
+                p_minus[i] -= np.pi / 2
+                grad[i] = (cost_function(p_plus) - cost_function(p_minus)) / 2
+
+            # Update only current layer
+            params[start_idx:end_idx] -= learning_rate * grad[start_idx:end_idx]
+
+        all_params = params.tolist()
+
+    return np.array(all_params)
+```
+
+### Strategy 3: Correlation-Aware Ansatze
+
+```python
+def create_problem_inspired_ansatz(
+    problem_structure: Dict,
+    num_qubits: int
+) -> Tuple[Callable, int]:
+    """
+    Create ansatz inspired by problem structure.
+
+    For problems with local interactions, use matching circuit structure.
+    """
+    dim = 2 ** num_qubits
+
+    # Extract which qubits interact in the problem
+    interactions = problem_structure.get('interactions', [])
+
+    # Number of parameters based on interactions
+    num_params = num_qubits * 2 + len(interactions)
+
+    def cost(params: np.ndarray) -> float:
+        state = np.zeros(dim, dtype=complex)
+        state[0] = 1.0
+
+        param_idx = 0
+
+        # Single qubit rotations
+        for q in range(num_qubits):
+            state = apply_ry(state, q, params[param_idx], num_qubits)
+            param_idx += 1
+            state = apply_rz(state, q, params[param_idx], num_qubits)
+            param_idx += 1
+
+        # Entanglement matching problem structure
+        for q1, q2 in interactions:
+            # Parameterized ZZ interaction
+            state = apply_cnot(state, q1, q2, num_qubits)
+            state = apply_rz(state, q2, params[param_idx], num_qubits)
+            state = apply_cnot(state, q1, q2, num_qubits)
+            param_idx += 1
+
+        return measure_z(state, 0, num_qubits)
+
+    return cost, num_params
+```
+
+### Strategy 4: Adaptive Learning Rate
+
+```python
+def adaptive_training_for_barren_plateaus(
+    cost_function: Callable,
+    num_params: int,
+    max_epochs: int = 500,
+    initial_lr: float = 0.5,
+    gradient_threshold: float = 0.001
+) -> dict:
+    """
+    Training with adaptive learning rate to handle flat regions.
+    """
+    params = identity_initialization(num_params, noise_scale=0.1)
+    learning_rate = initial_lr
+
+    history = {'cost': [], 'grad_norm': [], 'lr': []}
+
+    consecutive_small_grads = 0
+
+    for epoch in range(max_epochs):
+        # Compute gradient
+        grad = np.zeros(num_params)
+        for i in range(num_params):
+            p_plus = params.copy()
+            p_plus[i] += np.pi / 2
+            p_minus = params.copy()
+            p_minus[i] -= np.pi / 2
+            grad[i] = (cost_function(p_plus) - cost_function(p_minus)) / 2
+
+        grad_norm = np.linalg.norm(grad)
+
+        # Check for barren plateau
+        if grad_norm < gradient_threshold:
+            consecutive_small_grads += 1
+            # Increase learning rate to escape flat region
+            learning_rate = min(learning_rate * 1.5, 2.0)
+        else:
+            consecutive_small_grads = 0
+            # Normal learning rate decay
+            learning_rate = max(learning_rate * 0.99, 0.01)
+
+        # Add noise if stuck
+        if consecutive_small_grads > 10:
+            params += np.random.randn(num_params) * 0.1
+            consecutive_small_grads = 0
+
+        # Update
+        params = params - learning_rate * grad
+
+        # Record
+        cost = cost_function(params)
+        history['cost'].append(cost)
+        history['grad_norm'].append(grad_norm)
+        history['lr'].append(learning_rate)
+
+        # Early stopping if converged
+        if len(history['cost']) > 20:
+            if np.std(history['cost'][-20:]) < 1e-6:
+                break
+
+    return {'params': params, 'history': history}
+```
+
+## 6. Designing Barren-Plateau-Free Circuits
+
+<Tip>
+Key principles for avoiding barren plateaus:
+1. Use shallow circuits (depth O(log n))
+2. Prefer local cost functions
+3. Initialize near identity
+4. Match circuit structure to problem structure
+5. Train layer by layer
+</Tip>
+
+```python
+def design_trainable_circuit(
+    num_qubits: int,
+    problem_type: str = "classification"
+) -> dict:
+    """
+    Design circuit guaranteed to avoid severe barren plateaus.
+    """
+    recommendations = {
+        'num_qubits': num_qubits,
+        'max_depth': int(np.log2(num_qubits)) + 1,  # Logarithmic depth
+        'entanglement': 'nearest_neighbor',  # Local entanglement
+        'cost_function': 'local_observable',
+        'initialization': 'near_identity',
+        'training_strategy': 'layer_by_layer'
+    }
+
+    if problem_type == "classification":
+        recommendations['measurement'] = 'single_qubit_Z'
+        recommendations['output_processing'] = 'sigmoid'
+    elif problem_type == "regression":
+        recommendations['measurement'] = 'few_qubit_weighted_Z'
+        recommendations['output_processing'] = 'linear'
+    elif problem_type == "optimization":
+        recommendations['measurement'] = 'problem_hamiltonian'
+        recommendations['output_processing'] = 'none'
+
+    # Estimate gradient variance
+    estimated_variance = 1 / (2 ** (recommendations['max_depth']))
+
+    recommendations['estimated_trainability'] = (
+        'good' if estimated_variance > 0.01 else
+        'moderate' if estimated_variance > 0.001 else
+        'poor'
+    )
+
+    return recommendations
+```
+
+## Summary
+
+In this lesson, you learned about barren plateaus:
+
+1. **The Problem**: Gradients vanish exponentially with system size
+2. **Causes**: Deep circuits, global cost functions, high expressibility
+3. **Detection**: Gradient variance analysis, landscape flatness tests
+4. **Mitigation Strategies**:
+   - Shallow circuits with local costs
+   - Identity initialization
+   - Layer-by-layer training
+   - Problem-inspired ansatze
+   - Adaptive learning rates
+5. **Design Principles**: Logarithmic depth, local measurements, structural matching
+
+<Warning>
+Barren plateaus are a fundamental challenge for variational quantum algorithms. Any claims of quantum advantage must carefully address trainability concerns.
+</Warning>
+
+## Further Reading
+
+- Next lesson: Generalization Bounds
+- Related: Quantum Neural Networks
+- Research: McClean et al. "Barren plateaus in quantum neural network training landscapes"

@@ -1,0 +1,658 @@
+---
+title: "Elliptic Curve Foundations for Isogeny Cryptography"
+description: "Master the mathematical foundations of elliptic curves needed to understand isogeny-based cryptography. Learn curve arithmetic, the group law, and key properties that enable post-quantum constructions."
+duration: 75
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand elliptic curves over finite fields
+- Implement the group law (point addition and doubling)
+- Explain the j-invariant and curve isomorphism classes
+- Describe supersingular vs ordinary curves
+- Connect elliptic curve properties to cryptographic applications
+
+## 1. Introduction to Elliptic Curves
+
+<Definition term="Elliptic Curve">
+An elliptic curve $E$ over a field $K$ is a smooth projective curve of genus 1 with a specified point $O$ (the point at infinity). In Weierstrass form:
+
+$$E: y^2 = x^3 + ax + b$$
+
+where $4a^3 + 27b^2 \neq 0$ (non-singular condition).
+</Definition>
+
+```python
+import numpy as np
+from typing import Tuple, Optional, List
+from dataclasses import dataclass
+
+def elliptic_curve_overview():
+    """Overview of elliptic curves for cryptography."""
+    print("ELLIPTIC CURVES FOR ISOGENY CRYPTOGRAPHY")
+    print("=" * 70)
+    
+    overview = """
+    WHY ELLIPTIC CURVES?
+    ━━━━━━━━━━━━━━━━━━━━
+    
+    Elliptic curves provide:
+    • Rich algebraic structure (group law)
+    • Connections to number theory
+    • Efficient computation
+    • Foundation for both classical and post-quantum crypto
+    
+    CLASSICAL ECC (vulnerable to quantum):
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ • ECDH, ECDSA based on discrete log in E(F_p)                      │
+    │ • Security: Given P, kP, hard to find k                            │
+    │ • BROKEN by Shor's algorithm on quantum computer                   │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    ISOGENY-BASED CRYPTO (quantum-resistant attempt):
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ • Security based on finding isogenies between curves               │
+    │ • NOT the discrete log problem                                     │
+    │ • SIDH/SIKE: broken in 2022 (classical attack!)                    │
+    │ • CSIDH: still secure but slow                                     │
+    │ • Active research area                                             │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    THIS MODULE COVERS:
+    
+    1. Elliptic curve foundations (this lesson)
+    2. Isogeny fundamentals
+    3. SIDH/SIKE history and design
+    4. The devastating 2022 attack
+    5. CSIDH alternative
+    6. Future of isogeny cryptography
+    """
+    print(overview)
+
+elliptic_curve_overview()
+
+
+@dataclass
+class Point:
+    """Point on an elliptic curve (affine coordinates)."""
+    x: Optional[int]
+    y: Optional[int]
+    
+    def is_infinity(self) -> bool:
+        """Check if this is the point at infinity."""
+        return self.x is None and self.y is None
+    
+    @classmethod
+    def infinity(cls) -> 'Point':
+        """Return the point at infinity (identity element)."""
+        return cls(None, None)
+    
+    def __repr__(self):
+        if self.is_infinity():
+            return "O (infinity)"
+        return f"({self.x}, {self.y})"
+
+
+class EllipticCurve:
+    """
+    Elliptic curve over a prime field F_p.
+    
+    Weierstrass form: y² = x³ + ax + b (mod p)
+    """
+    
+    def __init__(self, a: int, b: int, p: int):
+        """
+        Initialize elliptic curve y² = x³ + ax + b over F_p.
+        
+        Args:
+            a, b: Curve coefficients
+            p: Prime modulus
+        """
+        self.a = a % p
+        self.b = b % p
+        self.p = p
+        
+        # Check non-singularity
+        discriminant = (4 * pow(a, 3, p) + 27 * pow(b, 2, p)) % p
+        if discriminant == 0:
+            raise ValueError("Singular curve (discriminant = 0)")
+    
+    def is_on_curve(self, P: Point) -> bool:
+        """Check if point P is on the curve."""
+        if P.is_infinity():
+            return True
+        
+        lhs = pow(P.y, 2, self.p)
+        rhs = (pow(P.x, 3, self.p) + self.a * P.x + self.b) % self.p
+        return lhs == rhs
+    
+    def add(self, P: Point, Q: Point) -> Point:
+        """
+        Add two points on the curve.
+        
+        Group law:
+        - P + O = P (identity)
+        - P + (-P) = O (inverse)
+        - P + Q uses chord-and-tangent method
+        """
+        # Identity cases
+        if P.is_infinity():
+            return Q
+        if Q.is_infinity():
+            return P
+        
+        # P + (-P) = O
+        if P.x == Q.x and (P.y + Q.y) % self.p == 0:
+            return Point.infinity()
+        
+        # Compute slope
+        if P.x == Q.x and P.y == Q.y:
+            # Point doubling: tangent line
+            # λ = (3x² + a) / (2y)
+            num = (3 * pow(P.x, 2, self.p) + self.a) % self.p
+            den = (2 * P.y) % self.p
+        else:
+            # Point addition: secant line
+            # λ = (y₂ - y₁) / (x₂ - x₁)
+            num = (Q.y - P.y) % self.p
+            den = (Q.x - P.x) % self.p
+        
+        # Modular inverse
+        den_inv = pow(den, self.p - 2, self.p)  # Fermat's little theorem
+        lam = (num * den_inv) % self.p
+        
+        # New point
+        x3 = (pow(lam, 2, self.p) - P.x - Q.x) % self.p
+        y3 = (lam * (P.x - x3) - P.y) % self.p
+        
+        return Point(x3, y3)
+    
+    def negate(self, P: Point) -> Point:
+        """Return -P (additive inverse)."""
+        if P.is_infinity():
+            return P
+        return Point(P.x, (-P.y) % self.p)
+    
+    def scalar_mult(self, k: int, P: Point) -> Point:
+        """
+        Compute k*P using double-and-add.
+        
+        This is the operation underlying ECDH security.
+        """
+        if k == 0 or P.is_infinity():
+            return Point.infinity()
+        
+        if k < 0:
+            k = -k
+            P = self.negate(P)
+        
+        result = Point.infinity()
+        addend = P
+        
+        while k > 0:
+            if k & 1:
+                result = self.add(result, addend)
+            addend = self.add(addend, addend)
+            k >>= 1
+        
+        return result
+    
+    def j_invariant(self) -> int:
+        """
+        Compute the j-invariant of the curve.
+        
+        j = 1728 * (4a³) / (4a³ + 27b²)
+        
+        Two curves are isomorphic over algebraic closure iff same j-invariant.
+        """
+        num = 1728 * 4 * pow(self.a, 3, self.p) % self.p
+        den = (4 * pow(self.a, 3, self.p) + 27 * pow(self.b, 2, self.p)) % self.p
+        den_inv = pow(den, self.p - 2, self.p)
+        return (num * den_inv) % self.p
+
+
+def demonstrate_curve_arithmetic():
+    """Demonstrate elliptic curve operations."""
+    print("\nELLIPTIC CURVE ARITHMETIC")
+    print("=" * 65)
+    
+    # Small curve for demonstration: y² = x³ + 2x + 3 over F_97
+    p = 97
+    E = EllipticCurve(a=2, b=3, p=p)
+    
+    print(f"Curve: y² = x³ + {E.a}x + {E.b} over F_{p}")
+    print(f"j-invariant: {E.j_invariant()}")
+    
+    # Find a point on the curve
+    def find_point(E):
+        for x in range(E.p):
+            rhs = (pow(x, 3, E.p) + E.a * x + E.b) % E.p
+            # Check if rhs is a quadratic residue
+            if pow(rhs, (E.p - 1) // 2, E.p) == 1:
+                # Find square root (works for p ≡ 3 mod 4)
+                y = pow(rhs, (E.p + 1) // 4, E.p)
+                return Point(x, y)
+        return None
+    
+    P = find_point(E)
+    print(f"\nBase point P: {P}")
+    print(f"P on curve: {E.is_on_curve(P)}")
+    
+    # Point operations
+    P2 = E.add(P, P)
+    print(f"\n2P = P + P: {P2}")
+    print(f"2P on curve: {E.is_on_curve(P2)}")
+    
+    P3 = E.add(P2, P)
+    print(f"3P = 2P + P: {P3}")
+    
+    # Scalar multiplication
+    P10 = E.scalar_mult(10, P)
+    print(f"10P: {P10}")
+    
+    # Verify group law
+    P_neg = E.negate(P)
+    P_plus_neg = E.add(P, P_neg)
+    print(f"\nP + (-P) = {P_plus_neg}")
+
+demonstrate_curve_arithmetic()
+```
+
+## 2. The j-Invariant and Isomorphism Classes
+
+<Definition term="j-Invariant">
+The j-invariant is a value that classifies elliptic curves up to isomorphism over the algebraic closure. Two curves $E_1$ and $E_2$ are isomorphic over $\bar{K}$ if and only if $j(E_1) = j(E_2)$.
+
+$$j(E) = 1728 \cdot \frac{4a^3}{4a^3 + 27b^2}$$
+</Definition>
+
+```python
+def j_invariant_analysis():
+    """Explain the j-invariant and its importance."""
+    print("\nTHE j-INVARIANT")
+    print("=" * 65)
+    
+    explanation = """
+    INTUITION:
+    ━━━━━━━━━━
+    
+    The j-invariant captures the "shape" of an elliptic curve.
+    
+    • Different a, b can give isomorphic curves
+    • j-invariant is the unique identifier of the shape
+    • Isogenies connect curves with DIFFERENT j-invariants
+    
+    
+    SPECIAL VALUES:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ j = 0:    y² = x³ + b       (no x term, extra automorphisms)       │
+    │ j = 1728: y² = x³ + ax      (no constant term)                     │
+    │ Other j:  Generic curves                                           │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    
+    SUPERSINGULAR CURVES (crucial for isogeny crypto):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Over F_p² (not F_p), there are special "supersingular" curves:
+    
+    • Finite number: approximately (p-1)/12 for large p
+    • Form a connected "isogeny graph"  
+    • No point of order p (unlike ordinary curves)
+    • |E(F_p²)| = (p±1)² for supersingular E
+    
+    SIDH/SIKE used supersingular curves over F_p²
+    """
+    print(explanation)
+    
+    # Demonstrate j-invariant
+    print("\nj-INVARIANT EXAMPLES:")
+    print("-" * 50)
+    
+    p = 97
+    
+    # Different curves, compute j-invariants
+    curves = [
+        (2, 3),
+        (5, 7),
+        (0, 1),   # j = 0 case
+        (1, 0),   # j = 1728 case
+    ]
+    
+    for a, b in curves:
+        try:
+            E = EllipticCurve(a, b, p)
+            j = E.j_invariant()
+            print(f"y² = x³ + {a}x + {b}:  j = {j}")
+        except ValueError as e:
+            print(f"y² = x³ + {a}x + {b}:  {e}")
+
+j_invariant_analysis()
+```
+
+## 3. Supersingular vs Ordinary Curves
+
+```python
+def supersingular_curves():
+    """Explain supersingular curves."""
+    print("\nSUPERSINGULAR VS ORDINARY CURVES")
+    print("=" * 70)
+    
+    explanation = """
+    ORDINARY CURVES:
+    ━━━━━━━━━━━━━━━━
+    
+    Most elliptic curves are "ordinary":
+    • |E(F_p)| = p + 1 - t where |t| ≤ 2√p (Hasse bound)
+    • t is the "trace of Frobenius"
+    • Have points of order p in E(F_p^k) for some k
+    • Used in classical ECC (ECDH, ECDSA)
+    
+    
+    SUPERSINGULAR CURVES:
+    ━━━━━━━━━━━━━━━━━━━━━
+    
+    Special curves with t ≡ 0 (mod p):
+    • |E(F_p)| = p + 1 (for p > 3)
+    • No points of order p
+    • Finite number over F_p² (about p/12)
+    • Endomorphism ring is a maximal order in a quaternion algebra
+    
+    
+    WHY SUPERSINGULAR FOR ISOGENY CRYPTO?
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ 1. Rich structure: Many isogenies between supersingular curves     │
+    │ 2. Connected graph: Can reach any SS curve from any other          │
+    │ 3. Computable: Isogenies can be efficiently computed               │
+    │ 4. Hard problem: Finding the isogeny path (was thought to be)      │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    
+    SUPERSINGULAR j-INVARIANTS (over F_p²):
+    
+    For p ≡ 3 (mod 4):
+    • j = 1728 is always supersingular
+    • Additional SS j-values exist
+    
+    Example for p = 11:
+    • Number of SS curves ≈ (11-1)/12 ≈ 1
+    • j = 0 and j = 1728 (mod 11)
+    
+    
+    THE SUPERSINGULAR ISOGENY GRAPH:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Vertices: Supersingular j-invariants
+    Edges: Isogenies of fixed degree ℓ
+    
+    Properties:
+    • (ℓ+1)-regular graph (each vertex has ℓ+1 edges)
+    • Ramanujan graph (excellent expansion properties)
+    • Random walk mixes rapidly
+    
+    This graph structure was the foundation of SIDH/SIKE.
+    """
+    print(explanation)
+
+
+def count_supersingular(p: int) -> int:
+    """
+    Estimate number of supersingular j-invariants over F_p².
+    
+    Approximately ⌊p/12⌋ + ε where ε ∈ {0, 1, 2}
+    """
+    # Exact formula involves class numbers
+    # This is a rough approximation
+    base = p // 12
+    
+    # Adjustments based on p mod 12
+    if p % 12 == 1:
+        return base
+    elif p % 12 == 5:
+        return base + 1
+    elif p % 12 == 7:
+        return base + 1
+    elif p % 12 == 11:
+        return base + 2
+    else:
+        return base + 1
+
+
+def demonstrate_supersingular():
+    """Demonstrate supersingular curve properties."""
+    print("\nSUPERSINGULAR CURVE COUNTS")
+    print("-" * 50)
+    
+    primes = [11, 23, 59, 83, 107, 431, 503]
+    
+    print(f"{'p':<8} {'p mod 12':<10} {'Est. SS curves':<15}")
+    print("-" * 35)
+    
+    for p in primes:
+        count = count_supersingular(p)
+        print(f"{p:<8} {p % 12:<10} ~{count}")
+
+supersingular_curves()
+demonstrate_supersingular()
+```
+
+## 4. The Group Structure E(F_p)
+
+```python
+def group_structure():
+    """Explain the group structure of elliptic curves."""
+    print("\nGROUP STRUCTURE E(F_p)")
+    print("=" * 70)
+    
+    explanation = """
+    ABELIAN GROUP:
+    ━━━━━━━━━━━━━━
+    
+    The points E(F_p) form an abelian group under point addition:
+    
+    • Identity: O (point at infinity)
+    • Closure: P + Q ∈ E(F_p) for all P, Q ∈ E(F_p)
+    • Associativity: (P + Q) + R = P + (Q + R)
+    • Inverse: P + (-P) = O
+    • Commutativity: P + Q = Q + P
+    
+    
+    GROUP ORDER:
+    ━━━━━━━━━━━━
+    
+    |E(F_p)| = p + 1 - t  where |t| ≤ 2√p
+    
+    The group is isomorphic to:
+    
+    E(F_p) ≅ Z_n  or  E(F_p) ≅ Z_{n₁} × Z_{n₂}  where n₂ | n₁
+    
+    
+    TORSION SUBGROUPS:
+    ━━━━━━━━━━━━━━━━━━
+    
+    E[n] = {P ∈ E : nP = O}  (n-torsion points)
+    
+    Over algebraically closed field:
+    E[n] ≅ Z_n × Z_n  (for gcd(n, char) = 1)
+    
+    These torsion subgroups are CRUCIAL for SIDH:
+    • SIDH uses E[2^a] and E[3^b] torsion
+    • Different parties walk through different torsion
+    
+    
+    GENERATING POINTS:
+    ━━━━━━━━━━━━━━━━━━
+    
+    If E(F_p) ≅ Z_n, a generator G satisfies:
+    • ord(G) = n
+    • Every point P = kG for some k
+    
+    For ECDH: Given G, kG, hard to find k (discrete log)
+    For isogeny: Different hardness assumption
+    """
+    print(explanation)
+
+
+class CurveGroupAnalyzer:
+    """Analyze group structure of elliptic curve."""
+    
+    def __init__(self, E: EllipticCurve):
+        self.E = E
+    
+    def find_all_points(self) -> List[Point]:
+        """Find all points on the curve (for small p)."""
+        if self.E.p > 1000:
+            raise ValueError("Field too large for enumeration")
+        
+        points = [Point.infinity()]
+        
+        for x in range(self.E.p):
+            rhs = (pow(x, 3, self.E.p) + self.E.a * x + self.E.b) % self.E.p
+            
+            # Check if quadratic residue
+            if rhs == 0:
+                points.append(Point(x, 0))
+            elif pow(rhs, (self.E.p - 1) // 2, self.E.p) == 1:
+                # Find square roots
+                if self.E.p % 4 == 3:
+                    y = pow(rhs, (self.E.p + 1) // 4, self.E.p)
+                    points.append(Point(x, y))
+                    points.append(Point(x, self.E.p - y))
+                else:
+                    # Tonelli-Shanks would be needed
+                    # Simplified: try all values
+                    for y in range(self.E.p):
+                        if pow(y, 2, self.E.p) == rhs:
+                            points.append(Point(x, y))
+                            break
+        
+        return points
+    
+    def point_order(self, P: Point) -> int:
+        """Compute the order of a point."""
+        if P.is_infinity():
+            return 1
+        
+        Q = P
+        order = 1
+        max_order = self.E.p + 1 + 2 * int(self.E.p ** 0.5)  # Hasse bound
+        
+        while not Q.is_infinity() and order <= max_order:
+            Q = self.E.add(Q, P)
+            order += 1
+        
+        return order if Q.is_infinity() else -1
+
+
+def demonstrate_group_structure():
+    """Demonstrate elliptic curve group structure."""
+    print("\nGROUP STRUCTURE DEMONSTRATION")
+    print("-" * 50)
+    
+    # Small curve for demonstration
+    p = 23
+    E = EllipticCurve(a=1, b=1, p=p)
+    analyzer = CurveGroupAnalyzer(E)
+    
+    points = analyzer.find_all_points()
+    print(f"Curve: y² = x³ + x + 1 over F_{p}")
+    print(f"Number of points: {len(points)}")
+    print(f"(Hasse bound: {p + 1 - 2*int(p**0.5)} to {p + 1 + 2*int(p**0.5)})")
+    
+    # Find a generator
+    for P in points[1:6]:  # Skip infinity, check first few
+        order = analyzer.point_order(P)
+        print(f"Point {P}: order = {order}")
+        if order == len(points):
+            print(f"  ^ This is a generator!")
+            break
+
+group_structure()
+demonstrate_group_structure()
+```
+
+## 5. Connection to Cryptography
+
+```python
+def crypto_connection():
+    """Connect elliptic curve theory to cryptography."""
+    print("\nFROM CURVES TO CRYPTOGRAPHY")
+    print("=" * 70)
+    
+    connection = """
+    CLASSICAL ECC (Quantum-Vulnerable):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    ECDH Key Exchange:
+    1. Public: Curve E, base point G of order n
+    2. Alice: secret a, publishes aG
+    3. Bob: secret b, publishes bG  
+    4. Shared: a(bG) = b(aG) = abG
+    
+    Security: ECDLP (given G, kG, find k) is hard classically
+    BUT: Shor's algorithm solves ECDLP in polynomial time!
+    
+    
+    ISOGENY-BASED CRYPTO (Post-Quantum Attempt):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Key Insight: Use MAPS BETWEEN CURVES instead of points on curves
+    
+    SIDH (Supersingular Isogeny Diffie-Hellman):
+    1. Public: Supersingular curve E₀
+    2. Alice: secret isogeny φ_A: E₀ → E_A
+    3. Bob: secret isogeny φ_B: E₀ → E_B
+    4. Shared: E_AB = φ_A(E_B) ≅ φ_B(E_A)
+    
+    Security assumption: Finding the isogeny is hard
+    
+    WHAT WENT WRONG:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ SIDH published auxiliary torsion points to enable key exchange     │
+    │                                                                     │
+    │ In 2022: This auxiliary data enabled devastating attack!           │
+    │                                                                     │
+    │ The isogeny path could be recovered in polynomial time             │
+    │ using techniques from algebraic geometry                            │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    
+    KEY MATHEMATICAL OBJECTS:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    For isogeny crypto you need to understand:
+    
+    1. Isogenies: Group homomorphisms between curves
+    2. Kernels: Finite subgroups that define isogenies
+    3. Dual isogenies: Every isogeny has a "reverse"
+    4. Degree: Number of kernel points
+    5. j-invariants: Curve identity up to isomorphism
+    
+    These are covered in the next lesson!
+    """
+    print(connection)
+
+crypto_connection()
+```
+
+## Summary
+
+In this lesson, you learned the elliptic curve foundations for isogeny cryptography:
+
+1. **Weierstrass Form**: $y^2 = x^3 + ax + b$ defines elliptic curves
+2. **Group Law**: Points form abelian group under geometric addition
+3. **j-Invariant**: Classifies curves up to isomorphism
+4. **Supersingular Curves**: Special curves with |E(F_p)| = p+1
+5. **Torsion Subgroups**: E[n] points crucial for SIDH
+6. **Classical vs Isogeny**: Different hardness assumptions
+
+These foundations enable understanding of isogeny-based cryptographic constructions.
+
+## Further Reading
+
+- Next lesson: Isogeny Fundamentals
+- Related: Silverman's "Arithmetic of Elliptic Curves"
+- Advanced: Quaternion algebras and endomorphism rings

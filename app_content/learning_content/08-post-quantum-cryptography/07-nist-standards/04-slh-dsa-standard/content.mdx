@@ -1,0 +1,403 @@
+---
+title: "SLH-DSA: The Hash-Based Signature Standard"
+description: "Deep dive into FIPS 205 SLH-DSA (SPHINCS+), providing conservative signatures with minimal cryptographic assumptions relying only on hash function security."
+duration: 70
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+- Understand SLH-DSA's hypertree and FORS construction
+- Compare all 12 parameter set variants
+- Explain why hash-only security provides maximum confidence
+- Choose between small and fast variants for your application
+
+## 1. SLH-DSA Overview
+
+```python
+def slh_dsa_overview():
+    """Overview of FIPS 205 SLH-DSA."""
+    print("FIPS 205: SLH-DSA (Stateless Hash-Based DSA)")
+    print("=" * 70)
+    
+    print("""
+    WHY SLH-DSA EXISTS
+    ━━━━━━━━━━━━━━━━━━
+    
+    SLH-DSA provides CONSERVATIVE signatures with minimal assumptions:
+    
+    ┌─────────────────────────────────────────────────────────────────┐
+    │ ML-DSA security relies on:                                      │
+    │   • Module-LWE being hard                                       │
+    │   • Module-SIS being hard                                       │
+    │   • Hash functions being secure                                 │
+    │                                                                 │
+    │ SLH-DSA security relies on:                                     │
+    │   • Hash functions being secure (ONLY!)                         │
+    │                                                                 │
+    │ If lattice problems are broken → ML-DSA fails, SLH-DSA survives │
+    │ If hash functions are broken → Both fail (unlikely)             │
+    └─────────────────────────────────────────────────────────────────┘
+    
+    Hash functions have:
+    • 30+ years of intensive analysis
+    • Well-understood security properties
+    • Multiple backup options (SHA-2, SHA-3, SHAKE)
+    
+    SLH-DSA is the "insurance policy" for post-quantum signatures.
+    
+    
+    CONSTRUCTION OVERVIEW:
+    ━━━━━━━━━━━━━━━━━━━━━━
+    
+    SLH-DSA uses a three-layer construction:
+    
+    Level 0: WOTS+ (Winternitz One-Time Signature)
+             • Signs individual messages
+             • Can only be used ONCE safely
+    
+    Level 1: FORS (Forest of Random Subsets)
+             • Few-time signature scheme
+             • Allows multiple signatures
+    
+    Level 2: HYPERTREE (Tree of Merkle Trees)
+             • Authenticates FORS keys
+             • Links everything to root public key
+    
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                    [Root Public Key]                            │
+    │                          │                                      │
+    │                    [HYPERTREE]                                  │
+    │                    /    │    \\                                  │
+    │               [Layer] [Layer] [Layer]                           │
+    │                          │                                      │
+    │                    [FORS Trees]                                 │
+    │                          │                                      │
+    │                    [WOTS+ Signatures]                           │
+    │                          │                                      │
+    │                    [Message]                                    │
+    └─────────────────────────────────────────────────────────────────┘
+    """)
+
+slh_dsa_overview()
+```
+
+## 2. All 12 Parameter Sets
+
+```python
+class SLHDSAParameters:
+    """All 12 SLH-DSA parameter sets from FIPS 205."""
+    
+    PARAMS = {
+        # 128-bit security (Category 1)
+        'SLH-DSA-SHA2-128s': {
+            'hash': 'SHA2', 'security': 128, 'variant': 'small',
+            'pk_bytes': 32, 'sk_bytes': 64, 'sig_bytes': 7856,
+            'sign_ops': 'slower', 'verify_ops': 'fast'
+        },
+        'SLH-DSA-SHA2-128f': {
+            'hash': 'SHA2', 'security': 128, 'variant': 'fast',
+            'pk_bytes': 32, 'sk_bytes': 64, 'sig_bytes': 17088,
+            'sign_ops': 'faster', 'verify_ops': 'fast'
+        },
+        'SLH-DSA-SHAKE-128s': {
+            'hash': 'SHAKE', 'security': 128, 'variant': 'small',
+            'pk_bytes': 32, 'sk_bytes': 64, 'sig_bytes': 7856,
+            'sign_ops': 'slower', 'verify_ops': 'fast'
+        },
+        'SLH-DSA-SHAKE-128f': {
+            'hash': 'SHAKE', 'security': 128, 'variant': 'fast',
+            'pk_bytes': 32, 'sk_bytes': 64, 'sig_bytes': 17088,
+            'sign_ops': 'faster', 'verify_ops': 'fast'
+        },
+        
+        # 192-bit security (Category 3)
+        'SLH-DSA-SHA2-192s': {
+            'hash': 'SHA2', 'security': 192, 'variant': 'small',
+            'pk_bytes': 48, 'sk_bytes': 96, 'sig_bytes': 16224,
+            'sign_ops': 'slower', 'verify_ops': 'fast'
+        },
+        'SLH-DSA-SHA2-192f': {
+            'hash': 'SHA2', 'security': 192, 'variant': 'fast',
+            'pk_bytes': 48, 'sk_bytes': 96, 'sig_bytes': 35664,
+            'sign_ops': 'faster', 'verify_ops': 'fast'
+        },
+        'SLH-DSA-SHAKE-192s': {
+            'hash': 'SHAKE', 'security': 192, 'variant': 'small',
+            'pk_bytes': 48, 'sk_bytes': 96, 'sig_bytes': 16224,
+            'sign_ops': 'slower', 'verify_ops': 'fast'
+        },
+        'SLH-DSA-SHAKE-192f': {
+            'hash': 'SHAKE', 'security': 192, 'variant': 'fast',
+            'pk_bytes': 48, 'sk_bytes': 96, 'sig_bytes': 35664,
+            'sign_ops': 'faster', 'verify_ops': 'fast'
+        },
+        
+        # 256-bit security (Category 5)
+        'SLH-DSA-SHA2-256s': {
+            'hash': 'SHA2', 'security': 256, 'variant': 'small',
+            'pk_bytes': 64, 'sk_bytes': 128, 'sig_bytes': 29792,
+            'sign_ops': 'slower', 'verify_ops': 'fast'
+        },
+        'SLH-DSA-SHA2-256f': {
+            'hash': 'SHA2', 'security': 256, 'variant': 'fast',
+            'pk_bytes': 64, 'sk_bytes': 128, 'sig_bytes': 49856,
+            'sign_ops': 'faster', 'verify_ops': 'fast'
+        },
+        'SLH-DSA-SHAKE-256s': {
+            'hash': 'SHAKE', 'security': 256, 'variant': 'small',
+            'pk_bytes': 64, 'sk_bytes': 128, 'sig_bytes': 29792,
+            'sign_ops': 'slower', 'verify_ops': 'fast'
+        },
+        'SLH-DSA-SHAKE-256f': {
+            'hash': 'SHAKE', 'security': 256, 'variant': 'fast',
+            'pk_bytes': 64, 'sk_bytes': 128, 'sig_bytes': 49856,
+            'sign_ops': 'faster', 'verify_ops': 'fast'
+        },
+    }
+    
+    @classmethod
+    def display_all(cls):
+        """Display all parameter sets."""
+        print("\nSLH-DSA PARAMETER SETS (FIPS 205)")
+        print("=" * 70)
+        
+        print("""
+    NAMING CONVENTION: SLH-DSA-{HASH}-{SECURITY}{VARIANT}
+    
+    • HASH: SHA2 or SHAKE
+    • SECURITY: 128, 192, or 256 bits
+    • VARIANT: s (small signatures) or f (fast signing)
+        """)
+        
+        print(f"{'Name':<24} {'PK(B)':<8} {'Sig(B)':<10} {'Signing':<10}")
+        print("-" * 55)
+        
+        for name, p in cls.PARAMS.items():
+            print(f"{name:<24} {p['pk_bytes']:<8} {p['sig_bytes']:<10,} {p['sign_ops']:<10}")
+    
+    @classmethod
+    def compare_variants(cls):
+        """Compare small vs fast variants."""
+        print("\n\nSMALL vs FAST TRADEOFF:")
+        print("-" * 55)
+        print("""
+    ┌─────────────────────────────────────────────────────────────────┐
+    │ SMALL (s) variants:                                            │
+    │   • Signature ~2x smaller                                      │
+    │   • Signing ~10x slower                                        │
+    │   • Best for: Bandwidth-constrained, infrequent signing        │
+    │                                                                 │
+    │ FAST (f) variants:                                             │
+    │   • Signing ~10x faster                                        │
+    │   • Signature ~2x larger                                       │
+    │   • Best for: High-volume signing, time-sensitive              │
+    └─────────────────────────────────────────────────────────────────┘
+        """)
+
+SLHDSAParameters.display_all()
+SLHDSAParameters.compare_variants()
+```
+
+## 3. When to Use SLH-DSA
+
+```python
+def when_to_use():
+    """Decision guide for SLH-DSA vs ML-DSA."""
+    print("\nWHEN TO USE SLH-DSA")
+    print("=" * 70)
+    
+    print("""
+    ✓ USE SLH-DSA WHEN:
+    ━━━━━━━━━━━━━━━━━━━
+    
+    1. MAXIMUM SECURITY CONFIDENCE NEEDED
+       • Government/military long-term secrets
+       • Critical infrastructure
+       • When "what if lattices break?" is a concern
+       • Archive signatures that must last 50+ years
+    
+    2. SIGNATURE SIZE IS NOT CRITICAL
+       • Firmware signing (sign once, ship to many)
+       • Software/code signing
+       • Certificate authority operations
+       • Document signing for archival
+    
+    3. SIGNING SPEED IS NOT CRITICAL
+       • Offline signing operations
+       • Low-volume signing (< 100/day)
+       • Batch signing scenarios
+    
+    
+    ✗ USE ML-DSA INSTEAD WHEN:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    1. SIGNATURE SIZE MATTERS
+       • TLS handshakes
+       • Blockchain transactions
+       • Mobile/IoT applications
+       • High-bandwidth cost environments
+    
+    2. HIGH-VOLUME SIGNING
+       • API authentication
+       • Real-time systems
+       • Thousands of signatures per second
+    
+    
+    DIRECT COMPARISON:
+    ┌────────────────────────┬────────────────────┬────────────────────┐
+    │ Property               │ ML-DSA-65          │ SLH-DSA-SHA2-128s  │
+    ├────────────────────────┼────────────────────┼────────────────────┤
+    │ Public Key             │ 1,952 B            │ 32 B               │
+    │ Secret Key             │ 4,032 B            │ 64 B               │
+    │ Signature              │ 3,309 B            │ 7,856 B            │
+    │ Security assumption    │ Lattice problems   │ Hash functions     │
+    │ Confidence level       │ High               │ Maximum            │
+    │ Signing speed          │ Fast (~0.3 ms)     │ Slower (~10-50 ms) │
+    │ Verification speed     │ Fast               │ Fast               │
+    └────────────────────────┴────────────────────┴────────────────────┘
+    
+    NOTE: SLH-DSA has TINY public keys but LARGE signatures!
+    """)
+
+when_to_use()
+```
+
+## 4. Implementation Example
+
+```python
+import hashlib
+import secrets
+
+class SLHDSADemo:
+    """Simplified SLH-DSA demonstration."""
+    
+    def __init__(self, variant: str = 'SLH-DSA-SHA2-128s'):
+        self.variant = variant
+        self.params = SLHDSAParameters.PARAMS[variant]
+    
+    def keygen(self):
+        """Generate key pair."""
+        sk_seed = secrets.token_bytes(self.params['sk_bytes'] // 2)
+        pk_seed = secrets.token_bytes(self.params['pk_bytes'] // 2)
+        
+        # In real implementation: build hypertree, compute root
+        pk = hashlib.sha256(pk_seed).digest()[:self.params['pk_bytes']]
+        sk = sk_seed + pk
+        
+        return pk, sk
+    
+    def sign(self, sk: bytes, message: bytes) -> bytes:
+        """Sign a message."""
+        # Real implementation:
+        # 1. Randomize message index
+        # 2. Generate FORS signature
+        # 3. Generate WOTS+ signature
+        # 4. Include authentication path in hypertree
+        
+        sig_data = hashlib.sha256(sk + message).digest()
+        signature = sig_data + secrets.token_bytes(
+            self.params['sig_bytes'] - len(sig_data)
+        )
+        return signature
+    
+    def verify(self, pk: bytes, message: bytes, sig: bytes) -> bool:
+        """Verify a signature."""
+        return len(sig) == self.params['sig_bytes']
+
+
+def demo():
+    print("\nSLH-DSA DEMONSTRATION")
+    print("-" * 50)
+    
+    slh = SLHDSADemo('SLH-DSA-SHA2-128s')
+    
+    pk, sk = slh.keygen()
+    print(f"Public key:  {len(pk)} bytes (tiny!)")
+    print(f"Secret key:  {len(sk)} bytes")
+    
+    msg = b"Sign this document for long-term archival"
+    sig = slh.sign(sk, msg)
+    print(f"Signature:   {len(sig):,} bytes (large but confident)")
+    
+    valid = slh.verify(pk, msg, sig)
+    print(f"Valid: {valid}")
+
+demo()
+```
+
+## 5. FIPS 205 Compliance
+
+```python
+def fips_compliance():
+    """FIPS 205 compliance requirements."""
+    print("\nFIPS 205 COMPLIANCE REQUIREMENTS")
+    print("=" * 70)
+    
+    print("""
+    HASH FUNCTION CHOICES:
+    ━━━━━━━━━━━━━━━━━━━━━━━
+    
+    SHA2 variants:
+    • Use SHA-256 (128-bit), SHA-256 (192-bit), SHA-256 (256-bit)
+    • Widely deployed, hardware acceleration common
+    • Recommended for compatibility
+    
+    SHAKE variants:
+    • Use SHAKE256 as XOF (extendable output function)
+    • More flexible, variable output length
+    • Slightly newer, less hardware support
+    
+    
+    RANDOMNESS REQUIREMENTS:
+    ━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    SLH-DSA requires randomness in signing:
+    • opt_rand: Optional randomizer in signature
+    • Can be deterministic (opt_rand = pk.seed)
+    • Or randomized (opt_rand = random bytes)
+    
+    Randomized is recommended for side-channel resistance.
+    
+    
+    STATE MANAGEMENT:
+    ━━━━━━━━━━━━━━━━━━
+    
+    SLH-DSA is STATELESS (unlike XMSS/LMS):
+    • No need to track which keys have been used
+    • Same key pair can sign unlimited messages
+    • Simpler deployment and backup
+    
+    This is the "SL" in SLH-DSA: Stateless!
+    """)
+
+fips_compliance()
+```
+
+## Summary
+
+In this lesson, you learned about SLH-DSA (FIPS 205):
+
+1. **Purpose**: Conservative backup with hash-only security
+2. **Construction**: WOTS+ → FORS → Hypertree
+3. **12 Variants**: SHA2/SHAKE × 128/192/256 × small/fast
+4. **Tradeoff**: Tiny public keys but large signatures
+5. **Use case**: Long-term archival, maximum confidence
+6. **Stateless**: No state tracking required
+
+SLH-DSA is the insurance policy against lattice cryptanalysis breakthroughs.
+
+## Further Reading
+
+- FIPS 205 specification
+- SPHINCS+ paper and website
+- Hash-based signature survey papers
+
+- FIPS 205 official document
+- NIST SLH-DSA parameter recommendations
+- Hash-based signature implementations
+
+- Implementation case studies and best practices
+- Community resources and forums
+

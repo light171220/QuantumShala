@@ -1,0 +1,282 @@
+---
+title: "Approximate QFT"
+description: "Learn how to reduce circuit depth by approximating the QFT with controlled precision."
+duration: 35
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the need for approximate QFT in practice
+- Analyze gate count vs. precision tradeoffs
+- Implement approximate QFT with truncated rotations
+- Calculate error bounds for approximation
+
+## 1. The Problem with Exact QFT
+
+The exact QFT circuit for n qubits requires controlled rotations with increasingly small angles:
+
+<Formula>
+$$R_k = \begin{pmatrix} 1 & 0 \\ 0 & e^{2\pi i/2^k} \end{pmatrix}$$
+</Formula>
+
+For large n, we need rotations as small as 2π/2ⁿ, which poses practical problems:
+
+```python
+import numpy as np
+
+def analyze_rotations(n_qubits):
+    """Analyze the rotation angles needed for exact QFT."""
+    print(f"QFT on {n_qubits} qubits:")
+    print(f"{'Gate':>10} {'Angle (rad)':>15} {'Angle (deg)':>15} {'Precision':>12}")
+    print("-" * 55)
+    
+    for k in range(1, n_qubits + 1):
+        angle = 2 * np.pi / (2**k)
+        degrees = np.degrees(angle)
+        precision = f"1/{2**k}"
+        print(f"{'R_' + str(k):>10} {angle:>15.6f} {degrees:>15.4f}° {precision:>12}")
+
+analyze_rotations(10)
+print("\n⚠️ R_10 requires rotation of 0.35°!")
+print("   Hardware may not support such precision.")
+```
+
+## 2. The Approximate QFT Idea
+
+<Definition term="Approximate QFT">
+The approximate QFT truncates controlled rotations with angle smaller than a threshold, reducing gate count while maintaining bounded error.
+</Definition>
+
+Key insight: Small rotations contribute minimally to the final result.
+
+```python
+import numpy as np
+
+def rotation_contribution(k, n):
+    """
+    Estimate contribution of R_k gate to the final state.
+    Smaller k = larger rotation = more important.
+    """
+    angle = 2 * np.pi / (2**k)
+    # Maximum phase error from omitting this gate
+    max_error = np.abs(1 - np.exp(1j * angle))
+    return max_error
+
+print("Gate contribution to final state:")
+print(f"{'Gate':>8} {'Max Error':>12} {'% of π':>10}")
+print("-" * 32)
+
+for k in range(1, 12):
+    error = rotation_contribution(k, 10)
+    pct = error / np.pi * 100
+    keep = "KEEP" if k <= 5 else "truncate"
+    print(f"R_{k:>2} {error:>12.6f} {pct:>10.2f}% {keep:>10}")
+```
+
+## 3. Truncation Strategy
+
+For an n-qubit QFT, we keep only rotations R_k where k ≤ m (cutoff parameter):
+
+```python
+import numpy as np
+
+def exact_qft_gates(n):
+    """Count gates in exact QFT."""
+    hadamards = n
+    controlled_rotations = n * (n - 1) // 2
+    swaps = n // 2
+    return hadamards, controlled_rotations, swaps
+
+def approximate_qft_gates(n, m):
+    """
+    Count gates in approximate QFT with cutoff m.
+    Only keep controlled-R_k where k ≤ m.
+    """
+    hadamards = n
+    # For each qubit j, we apply controlled rotations from qubits j+1 to min(j+m, n-1)
+    controlled_rotations = 0
+    for j in range(n):
+        # Number of controlled rotations on qubit j
+        rotations_on_j = min(m, n - 1 - j)
+        controlled_rotations += max(0, rotations_on_j)
+    swaps = n // 2
+    return hadamards, controlled_rotations, swaps
+
+print("Gate count comparison (n qubits, cutoff m):")
+print(f"{'n':>4} {'m':>4} {'Exact CR':>12} {'Approx CR':>12} {'Reduction':>12}")
+print("-" * 50)
+
+for n in [10, 20, 50, 100]:
+    _, exact_cr, _ = exact_qft_gates(n)
+    for m in [3, 5, 10]:
+        if m < n:
+            _, approx_cr, _ = approximate_qft_gates(n, m)
+            reduction = (1 - approx_cr / exact_cr) * 100
+            print(f"{n:>4} {m:>4} {exact_cr:>12} {approx_cr:>12} {reduction:>11.1f}%")
+```
+
+## 4. Error Analysis
+
+The total error from truncation can be bounded:
+
+<Formula>
+$$\epsilon \leq \frac{n(n-1)}{2} \cdot \frac{2\pi}{2^{m+1}} \approx \frac{\pi n^2}{2^{m+1}}$$
+</Formula>
+
+For practical applications, m = O(log n) suffices!
+
+```python
+import numpy as np
+
+def max_approximation_error(n, m):
+    """
+    Upper bound on total error from truncating at cutoff m.
+    """
+    # Number of omitted gates
+    omitted = 0
+    for k in range(m + 1, n + 1):
+        # How many R_k gates are there?
+        count = max(0, n - k)
+        omitted += count
+    
+    # Each omitted R_k contributes at most 2π/2^k error
+    total_error = 0
+    for k in range(m + 1, n + 1):
+        count = max(0, n - k)
+        error_per_gate = 2 * np.pi / (2**k)
+        total_error += count * error_per_gate
+    
+    return total_error
+
+print("Error bounds for approximate QFT:")
+print(f"{'n':>6} {'m':>6} {'Max Error':>15} {'Bits Accuracy':>15}")
+print("-" * 45)
+
+for n in [10, 20, 50]:
+    for m in [3, 5, 8, 10]:
+        if m < n:
+            error = max_approximation_error(n, m)
+            bits = -np.log2(error) if error > 0 else float('inf')
+            print(f"{n:>6} {m:>6} {error:>15.6f} {bits:>15.1f}")
+```
+
+## 5. Implementation
+
+```python
+import numpy as np
+
+def approximate_qft_matrix(n, cutoff):
+    """
+    Create approximate QFT matrix with rotation cutoff.
+    Only include R_k gates where k ≤ cutoff.
+    """
+    N = 2**n
+    
+    # Start with exact QFT
+    omega = np.exp(2j * np.pi / N)
+    exact_qft = np.array([[omega**(j*k) for k in range(N)] 
+                          for j in range(N)]) / np.sqrt(N)
+    
+    # For approximate version, we modify the phases
+    # This is a simplified demonstration
+    approx_qft = np.zeros((N, N), dtype=complex)
+    
+    for j in range(N):
+        for k in range(N):
+            # Compute phase with truncated precision
+            phase = 0
+            for b in range(min(cutoff, n)):
+                if (k >> b) & 1:
+                    phase += j / (2**(b+1))
+            approx_qft[j, k] = np.exp(2j * np.pi * phase)
+    
+    return approx_qft / np.sqrt(N)
+
+def compare_exact_vs_approximate(n, cutoff):
+    """Compare exact and approximate QFT."""
+    N = 2**n
+    
+    # Exact QFT
+    omega = np.exp(2j * np.pi / N)
+    exact = np.array([[omega**(j*k) for k in range(N)] 
+                      for j in range(N)]) / np.sqrt(N)
+    
+    # Approximate QFT
+    approx = approximate_qft_matrix(n, cutoff)
+    
+    # Compute error (Frobenius norm)
+    error = np.linalg.norm(exact - approx) / np.linalg.norm(exact)
+    
+    return error
+
+print("Approximation error (relative Frobenius norm):")
+print(f"{'n':>4} {'cutoff':>8} {'Error':>15}")
+print("-" * 30)
+
+for n in [3, 4, 5]:
+    for cutoff in range(1, n + 1):
+        error = compare_exact_vs_approximate(n, cutoff)
+        status = "EXACT" if error < 1e-10 else ""
+        print(f"{n:>4} {cutoff:>8} {error:>15.6f} {status}")
+```
+
+## 6. Practical Considerations
+
+<Tip>
+In NISQ devices, the approximate QFT is essential:
+- Reduces circuit depth (critical for decoherence)
+- Fewer two-qubit gates (main error source)
+- Logarithmic depth O(n log n) vs quadratic O(n²)
+</Tip>
+
+```python
+import numpy as np
+
+def circuit_depth_comparison(n_qubits):
+    """Compare circuit depths."""
+    exact_depth = n_qubits * (n_qubits + 1) // 2  # O(n²)
+    
+    results = []
+    for m in [2, 3, 5, int(np.log2(n_qubits)) + 1]:
+        if m < n_qubits:
+            approx_depth = n_qubits * min(m, n_qubits)  # O(n·m)
+            results.append((m, approx_depth))
+    
+    return exact_depth, results
+
+print("Circuit depth comparison:")
+for n in [10, 20, 50, 100]:
+    exact, approx_list = circuit_depth_comparison(n)
+    print(f"\nn = {n} qubits:")
+    print(f"  Exact QFT depth: ~{exact}")
+    for m, depth in approx_list:
+        reduction = (1 - depth/exact) * 100
+        print(f"  Approx (m={m}): ~{depth} ({reduction:.0f}% reduction)")
+```
+
+## Summary
+
+In this lesson, you learned:
+
+- Exact QFT requires exponentially small rotations
+- Approximate QFT truncates small rotations (R_k for k > m)
+- Gate count reduces from O(n²) to O(n·m)
+- With m = O(log n), error remains bounded
+- Essential for practical quantum computing on NISQ devices
+
+## Key Formulas
+
+| Aspect | Exact QFT | Approximate QFT (cutoff m) |
+|--------|-----------|---------------------------|
+| Controlled rotations | O(n²) | O(n·m) |
+| Circuit depth | O(n²) | O(n·m) |
+| Rotation precision | 2π/2ⁿ | 2π/2ᵐ |
+| Error | 0 | O(n²/2ᵐ) |
+
+## Further Reading
+
+- Next: QFT Applications
+- Related: Quantum Phase Estimation uses approximate QFT

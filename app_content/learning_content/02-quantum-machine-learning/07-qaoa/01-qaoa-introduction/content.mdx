@@ -1,0 +1,470 @@
+---
+title: "Introduction to QAOA"
+description: "Learn the Quantum Approximate Optimization Algorithm, its structure, and motivation for solving combinatorial optimization problems."
+---
+
+# Introduction to QAOA
+
+The Quantum Approximate Optimization Algorithm (QAOA) is a hybrid quantum-classical algorithm designed for combinatorial optimization problems. It provides a framework for leveraging quantum computers to find approximate solutions to NP-hard problems.
+
+## Combinatorial Optimization
+
+Many important problems involve finding optimal configurations from discrete choices.
+
+<Definition>
+**Combinatorial Optimization**: Given a cost function C(z) over binary strings z ∈ {0,1}ⁿ, find:
+
+$$z^* = \arg\min_z C(z)$$
+
+Examples include MaxCut, traveling salesman, and portfolio optimization.
+</Definition>
+
+```python
+import numpy as np
+
+def example_cost_functions():
+    """Examples of combinatorial cost functions."""
+
+    # MaxCut: maximize edges cut by partition
+    def maxcut_cost(z, edges):
+        """
+        MaxCut cost function.
+        z: binary string (as list/array)
+        edges: list of (i, j) edges with weights
+        """
+        cost = 0
+        for i, j, w in edges:
+            if z[i] != z[j]:
+                cost += w
+        return cost
+
+    # Simple 4-node graph
+    edges = [(0, 1, 1), (1, 2, 1), (2, 3, 1), (3, 0, 1), (0, 2, 1)]
+
+    print("MaxCut Example (4-node cycle with diagonal):")
+    print("Edges:", edges)
+    print()
+
+    # Evaluate all configurations
+    for i in range(16):
+        z = [int(b) for b in format(i, '04b')]
+        cost = maxcut_cost(z, edges)
+        print(f"  z={z} -> cost={cost}")
+
+example_cost_functions()
+```
+
+## The QAOA Algorithm
+
+QAOA uses alternating applications of cost and mixer operators.
+
+<Formula>
+**QAOA Ansatz**: For p layers:
+
+$$|\psi(\gamma, \beta)\rangle = \prod_{l=1}^{p} e^{-i\beta_l B} e^{-i\gamma_l C} |+\rangle^{\otimes n}$$
+
+Where:
+- C is the cost Hamiltonian (diagonal in computational basis)
+- B is the mixer Hamiltonian (typically $\sum_j X_j$)
+- γ, β are variational parameters
+</Formula>
+
+<Tip>
+QAOA can be viewed as a discretized version of adiabatic quantum computing. Higher p (depth) allows better approximations to the optimal solution.
+</Tip>
+
+```python
+import numpy as np
+
+class QAOACircuit:
+    """
+    Basic QAOA circuit implementation.
+    """
+
+    def __init__(self, n_qubits, cost_hamiltonian, p=1):
+        """
+        Initialize QAOA circuit.
+
+        Args:
+            n_qubits: Number of qubits
+            cost_hamiltonian: Function(z) -> cost
+            p: Number of QAOA layers
+        """
+        self.n = n_qubits
+        self.cost_fn = cost_hamiltonian
+        self.p = p
+        self.dim = 2 ** n_qubits
+
+    def initial_state(self):
+        """Create uniform superposition |+⟩^n."""
+        state = np.ones(self.dim, dtype=complex) / np.sqrt(self.dim)
+        return state
+
+    def apply_cost_unitary(self, state, gamma):
+        """Apply e^(-i*gamma*C)."""
+        new_state = np.zeros_like(state)
+        for z in range(self.dim):
+            # Cost for this basis state
+            z_bits = [int(b) for b in format(z, f'0{self.n}b')]
+            cost = self.cost_fn(z_bits)
+            # Apply phase
+            new_state[z] = state[z] * np.exp(-1j * gamma * cost)
+        return new_state
+
+    def apply_mixer_unitary(self, state, beta):
+        """Apply e^(-i*beta*B) where B = sum X_j."""
+        # For each qubit, apply e^(-i*beta*X)
+        for q in range(self.n):
+            state = self._apply_rx(state, q, 2 * beta)
+        return state
+
+    def _apply_rx(self, state, qubit, theta):
+        """Apply RX rotation to a qubit."""
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        new_state = np.zeros_like(state)
+
+        for z in range(self.dim):
+            bit = (z >> (self.n - 1 - qubit)) & 1
+            z_flip = z ^ (1 << (self.n - 1 - qubit))
+
+            if bit == 0:
+                new_state[z] += c * state[z] - 1j * s * state[z_flip]
+            else:
+                new_state[z] += c * state[z] - 1j * s * state[z_flip]
+
+        return new_state
+
+    def run(self, gammas, betas):
+        """Run QAOA circuit with given parameters."""
+        state = self.initial_state()
+
+        for l in range(self.p):
+            state = self.apply_cost_unitary(state, gammas[l])
+            state = self.apply_mixer_unitary(state, betas[l])
+
+        return state
+
+    def expectation(self, gammas, betas):
+        """Compute expected cost."""
+        state = self.run(gammas, betas)
+        exp_cost = 0
+
+        for z in range(self.dim):
+            prob = np.abs(state[z]) ** 2
+            z_bits = [int(b) for b in format(z, f'0{self.n}b')]
+            exp_cost += prob * self.cost_fn(z_bits)
+
+        return np.real(exp_cost)
+
+# Example: Simple 2-qubit problem
+def simple_cost(z):
+    """Cost = z0 XOR z1 (want to maximize, so negate for minimization)."""
+    return -(z[0] ^ z[1])
+
+qaoa = QAOACircuit(n_qubits=2, cost_hamiltonian=simple_cost, p=1)
+
+# Test
+gammas = [np.pi/4]
+betas = [np.pi/4]
+state = qaoa.run(gammas, betas)
+
+print("QAOA Circuit Example")
+print("=" * 40)
+print(f"Final state probabilities:")
+for z in range(4):
+    prob = np.abs(state[z])**2
+    z_bits = format(z, '02b')
+    print(f"  |{z_bits}⟩: {prob:.4f}")
+
+print(f"\nExpected cost: {qaoa.expectation(gammas, betas):.4f}")
+```
+
+## Cost Hamiltonian
+
+The cost Hamiltonian encodes the optimization problem.
+
+<Definition>
+**Cost Hamiltonian**: A diagonal operator in the computational basis:
+
+$$C = \sum_z C(z) |z\rangle\langle z|$$
+
+For many problems, this can be written in terms of Pauli Z operators.
+</Definition>
+
+```python
+import numpy as np
+
+def maxcut_to_hamiltonian(edges, n_qubits):
+    """
+    Convert MaxCut problem to Hamiltonian.
+
+    MaxCut: C = sum over edges (1 - Z_i Z_j) / 2
+
+    Args:
+        edges: List of (i, j, weight) tuples
+        n_qubits: Number of qubits
+
+    Returns:
+        Cost function and Hamiltonian matrix
+    """
+    dim = 2 ** n_qubits
+    H = np.zeros((dim, dim))
+
+    for z in range(dim):
+        z_bits = [int(b) for b in format(z, f'0{n_qubits}b')]
+        cost = 0
+        for i, j, w in edges:
+            # Edge contributes w if endpoints differ
+            zi = 1 - 2 * z_bits[i]  # Convert 0,1 to +1,-1
+            zj = 1 - 2 * z_bits[j]
+            cost += w * (1 - zi * zj) / 2
+        H[z, z] = cost
+
+    def cost_fn(z):
+        cost = 0
+        for i, j, w in edges:
+            cost += w * (z[i] ^ z[j])  # XOR = 1 if different
+        return cost
+
+    return cost_fn, H
+
+# Example
+edges = [(0, 1, 1), (1, 2, 1), (2, 0, 1)]  # Triangle
+cost_fn, H_maxcut = maxcut_to_hamiltonian(edges, 3)
+
+print("MaxCut Hamiltonian (Triangle Graph)")
+print("=" * 40)
+print("\nEdges:", edges)
+print("\nDiagonal elements (costs):")
+for z in range(8):
+    z_bits = format(z, '03b')
+    print(f"  |{z_bits}⟩: cost = {H_maxcut[z,z]:.1f}")
+
+optimal = np.argmax(np.diag(H_maxcut))
+print(f"\nOptimal: |{format(optimal, '03b')}⟩ with cost {H_maxcut[optimal,optimal]:.1f}")
+```
+
+## Mixer Hamiltonian
+
+The mixer enables transitions between computational basis states.
+
+<Warning>
+The standard X-mixer doesn't preserve constraints. For constrained problems, specialized mixers are needed.
+</Warning>
+
+```python
+import numpy as np
+
+def standard_mixer(n_qubits):
+    """
+    Standard mixer B = sum_j X_j.
+
+    Returns Hamiltonian matrix.
+    """
+    dim = 2 ** n_qubits
+    B = np.zeros((dim, dim), dtype=complex)
+
+    # X acts as bit flip
+    for q in range(n_qubits):
+        for z in range(dim):
+            z_flip = z ^ (1 << (n_qubits - 1 - q))
+            B[z, z_flip] += 1
+
+    return B
+
+def mixer_unitary(n_qubits, beta):
+    """Compute e^(-i*beta*B)."""
+    B = standard_mixer(n_qubits)
+    eigenvalues, V = np.linalg.eigh(B)
+    D = np.diag(np.exp(-1j * beta * eigenvalues))
+    return V @ D @ V.conj().T
+
+# Example
+n = 2
+B = standard_mixer(n)
+
+print("Standard Mixer (2 qubits)")
+print("=" * 40)
+print("\nMixer Hamiltonian B = X_0 + X_1:")
+print(B.real)
+
+print("\nMixer eigenvalues:", np.linalg.eigvalsh(B))
+
+# Effect of mixer
+beta = np.pi/4
+U_mix = mixer_unitary(n, beta)
+print(f"\nMixer unitary e^(-i*{beta:.2f}*B):")
+print(np.abs(U_mix).round(3))
+```
+
+## Connection to Adiabatic Computing
+
+QAOA approximates the adiabatic algorithm.
+
+<Definition>
+**Adiabatic Computing**: Evolve from ground state of B to ground state of C:
+
+$$H(s) = (1-s)B + sC, \quad s: 0 \to 1$$
+
+QAOA discretizes this evolution into p steps.
+</Definition>
+
+```python
+import numpy as np
+
+def adiabatic_vs_qaoa(cost_H, mixer_H, total_time=10, n_steps=100, p_qaoa=1):
+    """
+    Compare adiabatic evolution with QAOA.
+
+    Args:
+        cost_H: Cost Hamiltonian
+        mixer_H: Mixer Hamiltonian
+        total_time: Total evolution time
+        n_steps: Number of discretization steps
+        p_qaoa: Number of QAOA layers
+    """
+    n = int(np.log2(len(cost_H)))
+    dim = len(cost_H)
+
+    # Initial state (ground state of mixer)
+    eigenvalues, eigenvectors = np.linalg.eigh(mixer_H)
+    state = eigenvectors[:, 0]
+
+    # Adiabatic evolution
+    dt = total_time / n_steps
+    for step in range(n_steps):
+        s = step / n_steps
+        H = (1 - s) * mixer_H + s * cost_H
+        # Trotter step
+        U = np.linalg.matrix_exp(-1j * dt * H)
+        state = U @ state
+
+    adiabatic_cost = np.real(state.conj() @ cost_H @ state)
+
+    # QAOA (optimized)
+    from scipy.optimize import minimize
+
+    def qaoa_cost_fn(params):
+        gammas = params[:p_qaoa]
+        betas = params[p_qaoa:]
+
+        qaoa_state = np.ones(dim, dtype=complex) / np.sqrt(dim)
+        for l in range(p_qaoa):
+            # Cost unitary
+            qaoa_state = np.linalg.matrix_exp(-1j * gammas[l] * cost_H) @ qaoa_state
+            # Mixer unitary
+            qaoa_state = np.linalg.matrix_exp(-1j * betas[l] * mixer_H) @ qaoa_state
+
+        return np.real(qaoa_state.conj() @ cost_H @ qaoa_state)
+
+    # Optimize QAOA parameters
+    result = minimize(
+        lambda p: -qaoa_cost_fn(p),  # Maximize
+        x0=np.random.uniform(0, np.pi, 2*p_qaoa),
+        method='COBYLA'
+    )
+    qaoa_cost = -result.fun
+
+    # Optimal cost
+    optimal_cost = np.max(np.diag(cost_H))
+
+    return {
+        'adiabatic': adiabatic_cost,
+        'qaoa': qaoa_cost,
+        'optimal': optimal_cost,
+        'adiabatic_approx': adiabatic_cost / optimal_cost,
+        'qaoa_approx': qaoa_cost / optimal_cost
+    }
+
+# Example: 3-qubit MaxCut
+edges = [(0, 1, 1), (1, 2, 1), (2, 0, 1)]
+_, cost_H = maxcut_to_hamiltonian(edges, 3)
+mixer_H = standard_mixer(3)
+
+result = adiabatic_vs_qaoa(cost_H, mixer_H, p_qaoa=2)
+
+print("Adiabatic vs QAOA Comparison")
+print("=" * 40)
+print(f"Optimal cost: {result['optimal']:.4f}")
+print(f"Adiabatic cost: {result['adiabatic']:.4f} ({result['adiabatic_approx']*100:.1f}%)")
+print(f"QAOA (p=2) cost: {result['qaoa']:.4f} ({result['qaoa_approx']*100:.1f}%)")
+```
+
+## QAOA Depth and Performance
+
+Circuit depth p affects solution quality.
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+
+def qaoa_depth_analysis(cost_fn, n_qubits, max_p=5):
+    """
+    Analyze QAOA performance vs depth.
+    """
+    dim = 2 ** n_qubits
+
+    # Build cost Hamiltonian
+    H_cost = np.zeros((dim, dim))
+    for z in range(dim):
+        z_bits = [int(b) for b in format(z, f'0{n_qubits}b')]
+        H_cost[z, z] = cost_fn(z_bits)
+
+    H_mixer = standard_mixer(n_qubits)
+    optimal = np.max(np.diag(H_cost))
+
+    results = []
+
+    for p in range(1, max_p + 1):
+        def objective(params):
+            gammas = params[:p]
+            betas = params[p:]
+
+            state = np.ones(dim, dtype=complex) / np.sqrt(dim)
+            for l in range(p):
+                state = np.linalg.matrix_exp(-1j * gammas[l] * H_cost) @ state
+                state = np.linalg.matrix_exp(-1j * betas[l] * H_mixer) @ state
+
+            return -np.real(state.conj() @ H_cost @ state)
+
+        # Multiple random starts
+        best_cost = -np.inf
+        for _ in range(5):
+            res = minimize(objective, np.random.uniform(0, np.pi, 2*p), method='COBYLA')
+            if -res.fun > best_cost:
+                best_cost = -res.fun
+
+        results.append({
+            'p': p,
+            'cost': best_cost,
+            'approx_ratio': best_cost / optimal
+        })
+
+    return results
+
+# Simple MaxCut on triangle
+def triangle_cost(z):
+    return (z[0] ^ z[1]) + (z[1] ^ z[2]) + (z[0] ^ z[2])
+
+print("QAOA Depth Analysis")
+print("=" * 40)
+
+results = qaoa_depth_analysis(triangle_cost, n_qubits=3, max_p=4)
+
+print(f"\n{'p':<5} {'Cost':<10} {'Approx Ratio':<15}")
+print("-" * 30)
+for r in results:
+    print(f"{r['p']:<5} {r['cost']:<10.4f} {r['approx_ratio']:<15.2%}")
+```
+
+## Summary
+
+QAOA provides a framework for quantum optimization:
+
+1. **Cost Hamiltonian** encodes the problem in diagonal form
+2. **Mixer Hamiltonian** enables exploration of solution space
+3. **Alternating layers** of cost and mixer unitaries
+4. **Classical optimization** finds optimal parameters
+5. **Depth p** controls approximation quality
+
+The next lessons cover problem formulations, specialized mixers, and applications.

@@ -1,0 +1,984 @@
+---
+title: "Near-Term Quantum Counting and Sampling"
+description: "Explore near-term approaches to quantum counting and amplitude estimation, including approximate amplitude estimation, variational quantum counting, and applications to Monte Carlo methods."
+duration: 45
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the limitations of standard QPE-based amplitude estimation on NISQ devices
+- Implement approximate amplitude estimation algorithms suitable for near-term hardware
+- Design variational quantum counting circuits
+- Apply quantum-enhanced Monte Carlo methods for financial and scientific applications
+- Analyze trade-offs between circuit depth and estimation accuracy
+
+## 1. Introduction to Quantum Amplitude Estimation
+
+Amplitude estimation is a fundamental quantum primitive that underlies quantum speedups for counting, Monte Carlo integration, and optimization. However, the standard QPE-based approach requires deep circuits unsuitable for NISQ devices.
+
+<Definition term="Amplitude Estimation">
+The task of estimating the probability amplitude a = |<good|psi>|^2 where |psi> = A|0> is prepared by a unitary A and |good> represents marked/successful states. Standard quantum amplitude estimation achieves this with quadratic speedup over classical sampling.
+</Definition>
+
+<Formula>
+$$\text{Classical: } O(1/\epsilon^2) \text{ samples} \quad \text{Quantum: } O(1/\epsilon) \text{ queries to } A$$
+</Formula>
+
+### The NISQ Challenge
+
+```python
+import numpy as np
+from typing import List, Dict, Tuple, Callable
+from dataclasses import dataclass
+
+@dataclass
+class AmplitudeEstimationTask:
+    """Represents an amplitude estimation problem."""
+    state_preparation: Callable  # A operator
+    oracle: Callable  # Marks good states
+    n_qubits: int
+    true_amplitude: float  # For testing/validation
+
+class QPEAmplitudeEstimation:
+    """
+    Standard QPE-based amplitude estimation.
+
+    Requires O(1/epsilon) controlled-A operations in series,
+    making it impractical for NISQ devices.
+    """
+
+    def __init__(self, task: AmplitudeEstimationTask):
+        self.task = task
+
+    def estimate_circuit_depth(self, precision_bits: int) -> Dict:
+        """
+        Estimate circuit requirements for QPE-based AE.
+        """
+        n_controlled_ops = 2 ** precision_bits - 1
+
+        # Each controlled-A might require O(depth_A) gates
+        assumed_a_depth = 10  # Typical state prep depth
+
+        return {
+            'precision_bits': precision_bits,
+            'n_controlled_A': n_controlled_ops,
+            'total_depth_estimate': n_controlled_ops * assumed_a_depth,
+            'auxiliary_qubits': precision_bits,
+            'feasible_on_nisq': n_controlled_ops * assumed_a_depth < 50
+        }
+
+# Example: Estimating depth requirements
+task = AmplitudeEstimationTask(
+    state_preparation=None,
+    oracle=None,
+    n_qubits=4,
+    true_amplitude=0.25
+)
+
+qpe_ae = QPEAmplitudeEstimation(task)
+
+print("QPE-based Amplitude Estimation Depth Analysis")
+print("=" * 50)
+for precision in range(2, 8):
+    depth_info = qpe_ae.estimate_circuit_depth(precision)
+    status = "feasible" if depth_info['feasible_on_nisq'] else "TOO DEEP"
+    print(f"  {precision} bits: depth ~ {depth_info['total_depth_estimate']:,} ({status})")
+```
+
+## 2. Iterative Amplitude Estimation
+
+Iterative Amplitude Estimation (IAE) achieves near-optimal query complexity while keeping circuits shallow by using classical post-processing instead of QPE.
+
+<Definition term="Iterative Amplitude Estimation">
+An amplitude estimation algorithm that uses maximum likelihood estimation over multiple Grover iterations with different numbers of iterations, avoiding the deep quantum Fourier transform circuit of standard QPE.
+</Definition>
+
+<Formula>
+$$P(k | m, a) = \sin^2((2m+1)\arcsin(\sqrt{a}))$$
+</Formula>
+
+where $m$ is the number of Grover iterations and $k$ is the number of "good" measurement outcomes.
+
+```python
+from scipy.optimize import minimize_scalar
+from scipy.stats import binom
+
+class IterativeAmplitudeEstimation:
+    """
+    Iterative Amplitude Estimation using Maximum Likelihood.
+
+    Reference: Suzuki et al., "Amplitude estimation without phase estimation"
+    """
+
+    def __init__(self, n_qubits: int):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+
+    def grover_iterate(
+        self,
+        state: np.ndarray,
+        good_states: List[int]
+    ) -> np.ndarray:
+        """
+        Apply one Grover iteration Q = A S_0 A^dag S_chi.
+
+        Args:
+            state: Current quantum state
+            good_states: Indices of marked/good states
+
+        Returns:
+            State after one Grover iteration
+        """
+        # Oracle: flip phase of good states
+        state = state.copy()
+        for idx in good_states:
+            state[idx] *= -1
+
+        # Diffusion: reflect about |s> = A|0>
+        # D = 2|s><s| - I
+        uniform = np.ones(self.dim) / np.sqrt(self.dim)
+        state = 2 * np.dot(uniform, state) * uniform - state
+
+        return state
+
+    def measure_probability(
+        self,
+        state: np.ndarray,
+        good_states: List[int],
+        n_shots: int
+    ) -> Tuple[int, int]:
+        """
+        Simulate measurement and return (good_counts, total_shots).
+        """
+        prob_good = sum(np.abs(state[idx]) ** 2 for idx in good_states)
+        good_counts = np.random.binomial(n_shots, prob_good)
+        return good_counts, n_shots
+
+    def theoretical_probability(
+        self,
+        amplitude: float,
+        n_iterations: int
+    ) -> float:
+        """
+        Theoretical probability of measuring good state after m iterations.
+
+        P(good | m, a) = sin^2((2m+1) * arcsin(sqrt(a)))
+        """
+        theta = np.arcsin(np.sqrt(amplitude))
+        return np.sin((2 * n_iterations + 1) * theta) ** 2
+
+    def likelihood(
+        self,
+        amplitude: float,
+        measurement_data: List[Tuple[int, int, int]]
+    ) -> float:
+        """
+        Compute likelihood of amplitude given measurement data.
+
+        Args:
+            amplitude: Candidate amplitude value
+            measurement_data: List of (n_iterations, good_counts, total_shots)
+        """
+        if amplitude <= 0 or amplitude >= 1:
+            return 0.0
+
+        log_likelihood = 0.0
+
+        for m, k, n in measurement_data:
+            p = self.theoretical_probability(amplitude, m)
+            p = np.clip(p, 1e-10, 1 - 1e-10)
+
+            # Binomial log-likelihood
+            log_likelihood += k * np.log(p) + (n - k) * np.log(1 - p)
+
+        return np.exp(log_likelihood)
+
+    def maximum_likelihood_estimate(
+        self,
+        measurement_data: List[Tuple[int, int, int]]
+    ) -> Tuple[float, float]:
+        """
+        Find MLE amplitude estimate.
+
+        Returns:
+            (estimate, confidence_interval_width)
+        """
+        def neg_log_likelihood(a):
+            if a <= 0 or a >= 1:
+                return 1e10
+            ll = 0.0
+            for m, k, n in measurement_data:
+                p = self.theoretical_probability(a, m)
+                p = np.clip(p, 1e-10, 1 - 1e-10)
+                ll += k * np.log(p) + (n - k) * np.log(1 - p)
+            return -ll
+
+        result = minimize_scalar(
+            neg_log_likelihood,
+            bounds=(0.001, 0.999),
+            method='bounded'
+        )
+
+        estimate = result.x
+
+        # Confidence interval via Fisher information (approximate)
+        total_shots = sum(n for _, _, n in measurement_data)
+        ci_width = 1.96 / np.sqrt(total_shots)  # Simplified
+
+        return estimate, ci_width
+
+    def run_estimation(
+        self,
+        initial_state: np.ndarray,
+        good_states: List[int],
+        iteration_schedule: List[int],
+        shots_per_circuit: int
+    ) -> Dict:
+        """
+        Run iterative amplitude estimation.
+
+        Args:
+            initial_state: Prepared state A|0>
+            good_states: Indices of marked states
+            iteration_schedule: Number of Grover iterations per circuit
+            shots_per_circuit: Measurement shots per circuit
+
+        Returns:
+            Estimation results
+        """
+        measurement_data = []
+
+        for m in iteration_schedule:
+            # Apply m Grover iterations
+            state = initial_state.copy()
+            for _ in range(m):
+                state = self.grover_iterate(state, good_states)
+
+            # Measure
+            good_counts, total = self.measure_probability(
+                state, good_states, shots_per_circuit
+            )
+            measurement_data.append((m, good_counts, total))
+
+        # MLE
+        estimate, ci = self.maximum_likelihood_estimate(measurement_data)
+
+        # True amplitude for comparison
+        true_amp = sum(np.abs(initial_state[idx]) ** 2 for idx in good_states)
+
+        return {
+            'estimate': estimate,
+            'confidence_interval': ci,
+            'true_amplitude': true_amp,
+            'error': abs(estimate - true_amp),
+            'measurement_data': measurement_data,
+            'total_queries': sum(
+                m * shots for m, _, shots in
+                [(m, k, n) for m, k, n in measurement_data]
+            )
+        }
+
+# Example: Run iterative amplitude estimation
+iae = IterativeAmplitudeEstimation(n_qubits=3)
+
+# Create state with known amplitude
+np.random.seed(42)
+initial_state = np.zeros(8, dtype=complex)
+initial_state[0] = np.sqrt(0.3)
+initial_state[1] = np.sqrt(0.2)
+initial_state[2:] = np.sqrt(0.5 / 6)
+initial_state /= np.linalg.norm(initial_state)
+
+good_states = [0, 1]  # First two states are "good"
+
+print("Iterative Amplitude Estimation")
+print("=" * 50)
+print(f"True amplitude: {sum(np.abs(initial_state[idx])**2 for idx in good_states):.4f}")
+
+# Run with different schedules
+schedules = [
+    [0, 1, 2, 3],
+    [0, 1, 2, 4, 8],
+    [0, 1, 3, 5, 7]
+]
+
+for schedule in schedules:
+    result = iae.run_estimation(
+        initial_state,
+        good_states,
+        schedule,
+        shots_per_circuit=100
+    )
+    print(f"\nSchedule {schedule}:")
+    print(f"  Estimate: {result['estimate']:.4f} +/- {result['confidence_interval']:.4f}")
+    print(f"  Error: {result['error']:.4f}")
+```
+
+## 3. Variational Quantum Counting
+
+Variational approaches to amplitude estimation use parameterized circuits optimized to maximize the probability of correct estimation.
+
+<Tip>
+Variational quantum counting can achieve good accuracy with very shallow circuits by shifting complexity from circuit depth to classical optimization.
+</Tip>
+
+```python
+class VariationalQuantumCounting:
+    """
+    Variational approach to quantum counting/amplitude estimation.
+
+    Uses a parameterized circuit to prepare a state whose measurement
+    statistics encode the target amplitude.
+    """
+
+    def __init__(self, n_qubits: int, n_counting_qubits: int):
+        self.n_qubits = n_qubits  # Problem qubits
+        self.n_counting = n_counting_qubits  # Counting register
+        self.total_qubits = n_qubits + n_counting_qubits
+        self.dim = 2 ** self.total_qubits
+
+    def build_variational_circuit(
+        self,
+        params: np.ndarray,
+        n_layers: int
+    ) -> List[Dict]:
+        """
+        Build variational circuit for counting.
+
+        Structure:
+        1. Prepare counting register in superposition
+        2. Apply controlled operations based on counting qubits
+        3. Variational rotation layers
+        """
+        circuit = []
+        param_idx = 0
+
+        # Hadamard on counting qubits
+        for i in range(self.n_counting):
+            circuit.append({
+                'gate': 'H',
+                'qubit': self.n_qubits + i
+            })
+
+        # Variational layers
+        for layer in range(n_layers):
+            # Parameterized rotations on all qubits
+            for q in range(self.total_qubits):
+                circuit.append({
+                    'gate': 'RY',
+                    'qubit': q,
+                    'param_idx': param_idx
+                })
+                param_idx += 1
+
+            # Entangling layer
+            for q in range(self.total_qubits - 1):
+                circuit.append({
+                    'gate': 'CX',
+                    'control': q,
+                    'target': q + 1
+                })
+
+        return circuit, param_idx
+
+    def simulate_circuit(
+        self,
+        params: np.ndarray,
+        initial_state: np.ndarray,
+        n_layers: int
+    ) -> np.ndarray:
+        """
+        Simulate variational circuit execution.
+        """
+        # Start with initial state tensored with |+>^m
+        counting_plus = np.ones(2 ** self.n_counting) / np.sqrt(2 ** self.n_counting)
+        state = np.kron(initial_state, counting_plus)
+
+        # Apply variational layers
+        circuit, n_params = self.build_variational_circuit(params, n_layers)
+        param_idx = 0
+
+        for gate in circuit:
+            if gate['gate'] == 'H':
+                state = self._apply_h(state, gate['qubit'])
+            elif gate['gate'] == 'RY':
+                angle = params[gate['param_idx']]
+                state = self._apply_ry(state, gate['qubit'], angle)
+            elif gate['gate'] == 'CX':
+                state = self._apply_cx(state, gate['control'], gate['target'])
+
+        return state
+
+    def _apply_h(self, state: np.ndarray, qubit: int) -> np.ndarray:
+        """Apply Hadamard gate."""
+        new_state = np.zeros_like(state)
+        for idx in range(len(state)):
+            partner = idx ^ (1 << qubit)
+            bit = (idx >> qubit) & 1
+            if bit == 0:
+                new_state[idx] += state[idx] / np.sqrt(2)
+                new_state[partner] += state[idx] / np.sqrt(2)
+            else:
+                new_state[idx] += state[partner] / np.sqrt(2)
+                new_state[idx] -= state[idx] / np.sqrt(2)
+        return new_state
+
+    def _apply_ry(self, state: np.ndarray, qubit: int, angle: float) -> np.ndarray:
+        """Apply RY gate."""
+        new_state = np.zeros_like(state)
+        c, s = np.cos(angle / 2), np.sin(angle / 2)
+
+        for idx in range(len(state)):
+            partner = idx ^ (1 << qubit)
+            bit = (idx >> qubit) & 1
+
+            if bit == 0:
+                new_state[idx] += c * state[idx]
+                new_state[partner] += s * state[idx]
+            else:
+                new_state[idx] += c * state[idx]
+                new_state[partner] -= s * state[idx]
+
+        return new_state
+
+    def _apply_cx(self, state: np.ndarray, ctrl: int, tgt: int) -> np.ndarray:
+        """Apply CNOT gate."""
+        new_state = state.copy()
+        for idx in range(len(state)):
+            if (idx >> ctrl) & 1:
+                partner = idx ^ (1 << tgt)
+                new_state[idx], new_state[partner] = state[partner], state[idx]
+        return new_state
+
+    def extract_amplitude_estimate(
+        self,
+        state: np.ndarray,
+        good_states: List[int]
+    ) -> float:
+        """
+        Extract amplitude estimate from counting register measurement.
+        """
+        # Trace out problem qubits, measure counting qubits
+        counting_probs = np.zeros(2 ** self.n_counting)
+
+        for idx in range(len(state)):
+            counting_bits = idx >> self.n_qubits
+            counting_probs[counting_bits] += np.abs(state[idx]) ** 2
+
+        # Estimate is encoded in peak of distribution
+        peak_idx = np.argmax(counting_probs)
+
+        # Convert to amplitude estimate
+        theta_estimate = np.pi * peak_idx / (2 ** self.n_counting)
+        amplitude_estimate = np.sin(theta_estimate) ** 2
+
+        return amplitude_estimate
+
+    def optimize_circuit(
+        self,
+        initial_problem_state: np.ndarray,
+        good_states: List[int],
+        true_amplitude: float,
+        n_layers: int,
+        max_iterations: int = 100
+    ) -> Dict:
+        """
+        Optimize variational parameters for counting.
+        """
+        from scipy.optimize import minimize
+
+        _, n_params = self.build_variational_circuit(np.zeros(100), n_layers)
+
+        def loss(params):
+            state = self.simulate_circuit(params, initial_problem_state, n_layers)
+            estimate = self.extract_amplitude_estimate(state, good_states)
+            return (estimate - true_amplitude) ** 2
+
+        # Random initialization
+        initial_params = np.random.randn(n_params) * 0.1
+
+        result = minimize(
+            loss,
+            initial_params,
+            method='COBYLA',
+            options={'maxiter': max_iterations}
+        )
+
+        final_state = self.simulate_circuit(
+            result.x, initial_problem_state, n_layers
+        )
+        final_estimate = self.extract_amplitude_estimate(final_state, good_states)
+
+        return {
+            'optimal_params': result.x,
+            'estimate': final_estimate,
+            'true_amplitude': true_amplitude,
+            'error': abs(final_estimate - true_amplitude),
+            'n_params': n_params,
+            'success': result.success
+        }
+
+# Example
+vqc = VariationalQuantumCounting(n_qubits=2, n_counting_qubits=3)
+
+# Problem state with known amplitude
+problem_state = np.array([0.6, 0.8, 0, 0], dtype=complex)
+problem_state /= np.linalg.norm(problem_state)
+good_states = [0]  # First state is good
+true_amp = np.abs(problem_state[0]) ** 2
+
+print("\nVariational Quantum Counting")
+print("=" * 50)
+print(f"True amplitude: {true_amp:.4f}")
+
+result = vqc.optimize_circuit(
+    problem_state,
+    good_states,
+    true_amp,
+    n_layers=2,
+    max_iterations=100
+)
+print(f"VQC estimate: {result['estimate']:.4f}")
+print(f"Error: {result['error']:.4f}")
+print(f"Parameters: {result['n_params']}")
+```
+
+## 4. Applications to Monte Carlo Methods
+
+<Definition term="Quantum Monte Carlo Integration">
+Using quantum amplitude estimation to estimate integrals or expectations with quadratic speedup over classical Monte Carlo: O(1/epsilon) queries instead of O(1/epsilon^2) samples.
+</Definition>
+
+<Formula>
+$$\mathbb{E}[f(X)] = \sum_x p(x) f(x) \approx a = |\langle good | \psi \rangle|^2$$
+</Formula>
+
+### 4.1 Option Pricing Example
+
+```python
+class QuantumOptionPricing:
+    """
+    European option pricing using quantum amplitude estimation.
+
+    The option payoff is encoded as an amplitude, allowing
+    quadratic speedup in estimating expected payoff.
+    """
+
+    def __init__(
+        self,
+        spot_price: float,
+        strike_price: float,
+        volatility: float,
+        risk_free_rate: float,
+        time_to_maturity: float,
+        n_price_qubits: int = 4
+    ):
+        self.S0 = spot_price
+        self.K = strike_price
+        self.sigma = volatility
+        self.r = risk_free_rate
+        self.T = time_to_maturity
+        self.n_qubits = n_price_qubits
+
+    def black_scholes_price(self, option_type: str = 'call') -> float:
+        """
+        Classical Black-Scholes price for reference.
+        """
+        from scipy.stats import norm
+
+        d1 = (np.log(self.S0 / self.K) +
+              (self.r + 0.5 * self.sigma ** 2) * self.T) / \
+             (self.sigma * np.sqrt(self.T))
+        d2 = d1 - self.sigma * np.sqrt(self.T)
+
+        if option_type == 'call':
+            price = (self.S0 * norm.cdf(d1) -
+                     self.K * np.exp(-self.r * self.T) * norm.cdf(d2))
+        else:
+            price = (self.K * np.exp(-self.r * self.T) * norm.cdf(-d2) -
+                     self.S0 * norm.cdf(-d1))
+
+        return price
+
+    def discretize_price_distribution(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Discretize log-normal price distribution for quantum encoding.
+        """
+        n_states = 2 ** self.n_qubits
+
+        # Price range (3 sigma)
+        mu = np.log(self.S0) + (self.r - 0.5 * self.sigma ** 2) * self.T
+        std = self.sigma * np.sqrt(self.T)
+
+        prices = np.exp(np.linspace(mu - 3*std, mu + 3*std, n_states))
+
+        # Log-normal probabilities
+        log_prices = np.log(prices)
+        probs = np.exp(-0.5 * ((log_prices - mu) / std) ** 2)
+        probs /= probs.sum()
+
+        return prices, probs
+
+    def prepare_price_state(self) -> np.ndarray:
+        """
+        Prepare quantum state encoding price distribution.
+        """
+        prices, probs = self.discretize_price_distribution()
+        amplitudes = np.sqrt(probs)
+        return amplitudes.astype(complex)
+
+    def payoff_oracle(
+        self,
+        state: np.ndarray,
+        option_type: str = 'call'
+    ) -> np.ndarray:
+        """
+        Apply payoff oracle that marks states with positive payoff.
+
+        For call: payoff = max(S - K, 0)
+        For put: payoff = max(K - S, 0)
+        """
+        prices, _ = self.discretize_price_distribution()
+
+        marked_state = state.copy()
+        for idx, price in enumerate(prices):
+            if option_type == 'call':
+                payoff = max(price - self.K, 0)
+            else:
+                payoff = max(self.K - price, 0)
+
+            # Mark with phase if payoff > 0
+            if payoff > 0:
+                # Encode payoff magnitude in amplitude
+                # This is simplified - full version would use auxiliary qubits
+                marked_state[idx] *= payoff / self.S0
+
+        # Renormalize
+        marked_state /= np.linalg.norm(marked_state)
+
+        return marked_state
+
+    def quantum_price_estimate(
+        self,
+        n_iterations: int = 10,
+        shots: int = 1000
+    ) -> Dict:
+        """
+        Estimate option price using approximate amplitude estimation.
+        """
+        # Prepare initial state
+        price_state = self.prepare_price_state()
+
+        # Apply payoff oracle
+        payoff_state = self.payoff_oracle(price_state)
+
+        # Use iterative AE
+        iae = IterativeAmplitudeEstimation(self.n_qubits)
+
+        # Good states are those with payoff > 0
+        prices, _ = self.discretize_price_distribution()
+        good_states = [i for i, p in enumerate(prices) if p > self.K]
+
+        if not good_states:
+            return {'estimate': 0.0, 'classical': self.black_scholes_price()}
+
+        result = iae.run_estimation(
+            price_state,
+            good_states,
+            list(range(n_iterations)),
+            shots
+        )
+
+        # Scale amplitude to price
+        discount = np.exp(-self.r * self.T)
+        estimated_price = result['estimate'] * self.S0 * discount
+
+        return {
+            'quantum_estimate': estimated_price,
+            'classical_bs': self.black_scholes_price(),
+            'amplitude': result['estimate'],
+            'queries': result['total_queries']
+        }
+
+# Example: Price a European call option
+option = QuantumOptionPricing(
+    spot_price=100,
+    strike_price=100,
+    volatility=0.2,
+    risk_free_rate=0.05,
+    time_to_maturity=1.0,
+    n_price_qubits=4
+)
+
+print("\nQuantum Option Pricing")
+print("=" * 50)
+print(f"Spot: ${option.S0}, Strike: ${option.K}")
+print(f"Volatility: {option.sigma*100}%, Risk-free: {option.r*100}%")
+
+bs_price = option.black_scholes_price()
+print(f"\nBlack-Scholes price: ${bs_price:.4f}")
+
+quantum_result = option.quantum_price_estimate(n_iterations=5, shots=500)
+print(f"Quantum estimate: ${quantum_result['quantum_estimate']:.4f}")
+print(f"Queries used: {quantum_result['queries']}")
+```
+
+### 4.2 Quantum Enhanced Sampling
+
+```python
+class QuantumEnhancedMonteCarlo:
+    """
+    Quantum-enhanced Monte Carlo estimation using
+    approximate amplitude estimation techniques.
+    """
+
+    def __init__(self, n_qubits: int):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+
+    def encode_distribution(
+        self,
+        probabilities: np.ndarray
+    ) -> np.ndarray:
+        """
+        Encode probability distribution as quantum state.
+        """
+        amplitudes = np.sqrt(probabilities)
+        return amplitudes.astype(complex)
+
+    def encode_function(
+        self,
+        function_values: np.ndarray,
+        max_value: float
+    ) -> np.ndarray:
+        """
+        Encode function values f(x) into amplitudes.
+
+        Uses rotation to encode f/max as sin^2(theta).
+        """
+        normalized = function_values / max_value
+        angles = np.arcsin(np.sqrt(np.clip(normalized, 0, 1)))
+        return angles
+
+    def estimate_expectation(
+        self,
+        probabilities: np.ndarray,
+        function_values: np.ndarray,
+        n_circuits: int = 10,
+        shots_per_circuit: int = 100
+    ) -> Dict:
+        """
+        Estimate E[f(X)] using quantum amplitude estimation.
+        """
+        # True expectation
+        true_expectation = np.sum(probabilities * function_values)
+
+        # Classical Monte Carlo estimate
+        samples = np.random.choice(
+            len(probabilities),
+            size=n_circuits * shots_per_circuit,
+            p=probabilities
+        )
+        classical_estimate = np.mean(function_values[samples])
+        classical_std = np.std(function_values[samples]) / np.sqrt(len(samples))
+
+        # Quantum estimate (simplified simulation)
+        state = self.encode_distribution(probabilities)
+
+        # Weight by function values
+        weighted_state = state * np.sqrt(np.maximum(function_values, 0))
+        weighted_state /= np.linalg.norm(weighted_state)
+
+        # Amplitude of weighted state gives sqrt(E[f])
+        amplitude = np.linalg.norm(weighted_state) ** 2
+
+        # Use IAE for better estimate
+        iae = IterativeAmplitudeEstimation(self.n_qubits)
+        good_states = list(range(self.dim))  # All states with f > 0
+
+        iae_result = iae.run_estimation(
+            weighted_state,
+            good_states,
+            list(range(n_circuits)),
+            shots_per_circuit
+        )
+
+        quantum_estimate = iae_result['estimate'] * np.max(function_values)
+
+        return {
+            'true_expectation': true_expectation,
+            'classical_estimate': classical_estimate,
+            'classical_std': classical_std,
+            'quantum_estimate': quantum_estimate,
+            'quantum_queries': iae_result['total_queries'],
+            'speedup_factor': (classical_std / 0.01) ** 2 / iae_result['total_queries']
+        }
+
+# Example: Estimate expectation of a function
+qmc = QuantumEnhancedMonteCarlo(n_qubits=4)
+
+# Define distribution and function
+n_states = 16
+probabilities = np.random.dirichlet(np.ones(n_states))
+function_values = np.random.exponential(scale=10, size=n_states)
+
+print("\nQuantum Enhanced Monte Carlo")
+print("=" * 50)
+
+result = qmc.estimate_expectation(
+    probabilities,
+    function_values,
+    n_circuits=10,
+    shots_per_circuit=100
+)
+
+print(f"True E[f(X)]: {result['true_expectation']:.4f}")
+print(f"Classical MC: {result['classical_estimate']:.4f} +/- {result['classical_std']:.4f}")
+print(f"Quantum Est.: {result['quantum_estimate']:.4f}")
+print(f"Quantum queries: {result['quantum_queries']}")
+```
+
+## 5. Trade-offs and Practical Considerations
+
+<Warning>
+Near-term amplitude estimation involves significant trade-offs between circuit depth, measurement overhead, and estimation accuracy. The quadratic speedup is typically not achievable on current NISQ devices.
+</Warning>
+
+```python
+class AmplitudeEstimationAnalysis:
+    """
+    Analyze trade-offs in near-term amplitude estimation.
+    """
+
+    @staticmethod
+    def compare_methods(
+        true_amplitude: float,
+        target_precision: float,
+        max_circuit_depth: int
+    ) -> Dict:
+        """
+        Compare different AE methods for given constraints.
+        """
+        methods = {}
+
+        # Classical sampling
+        classical_samples = int((1 / target_precision) ** 2)
+        methods['classical'] = {
+            'samples': classical_samples,
+            'circuit_depth': 1,
+            'total_queries': classical_samples,
+            'feasible': True
+        }
+
+        # Standard QPE-based AE
+        precision_bits = int(np.ceil(np.log2(1 / target_precision)))
+        qpe_depth = 2 ** precision_bits
+        methods['qpe_ae'] = {
+            'samples': 1,
+            'circuit_depth': qpe_depth,
+            'total_queries': qpe_depth,
+            'feasible': qpe_depth <= max_circuit_depth
+        }
+
+        # Iterative AE
+        max_iterations = int(np.pi / (4 * target_precision))
+        n_schedules = int(np.log2(max_iterations)) + 1
+        iae_total = max_iterations * n_schedules * 100  # shots per schedule
+        methods['iterative_ae'] = {
+            'samples': n_schedules * 100,
+            'circuit_depth': max_iterations,
+            'total_queries': iae_total,
+            'feasible': max_iterations <= max_circuit_depth
+        }
+
+        # Variational QC
+        methods['variational_qc'] = {
+            'samples': 1000,  # Optimization iterations
+            'circuit_depth': 10,  # Shallow variational circuit
+            'total_queries': 1000 * 10,
+            'feasible': True
+        }
+
+        return methods
+
+    @staticmethod
+    def recommend_method(
+        problem_size: int,
+        target_precision: float,
+        device_max_depth: int,
+        device_error_rate: float
+    ) -> str:
+        """
+        Recommend best method for given constraints.
+        """
+        # Effective depth considering errors
+        effective_max_depth = int(device_max_depth * (1 - device_error_rate) ** 10)
+
+        methods = AmplitudeEstimationAnalysis.compare_methods(
+            0.5,  # Doesn't matter for recommendation
+            target_precision,
+            effective_max_depth
+        )
+
+        # Score methods
+        scores = {}
+        for name, info in methods.items():
+            if not info['feasible']:
+                scores[name] = float('inf')
+            else:
+                # Prefer fewer total queries, penalize depth
+                scores[name] = (info['total_queries'] *
+                               (1 + 0.1 * info['circuit_depth']))
+
+        return min(scores, key=scores.get)
+
+# Analysis example
+print("\nAmplitude Estimation Method Comparison")
+print("=" * 50)
+
+analysis = AmplitudeEstimationAnalysis()
+methods = analysis.compare_methods(
+    true_amplitude=0.3,
+    target_precision=0.01,
+    max_circuit_depth=100
+)
+
+print(f"\nTarget precision: 1%")
+print(f"Max circuit depth: 100")
+print(f"\n{'Method':<20} {'Queries':<15} {'Depth':<10} {'Feasible':<10}")
+print("-" * 55)
+for name, info in methods.items():
+    print(f"{name:<20} {info['total_queries']:<15} {info['circuit_depth']:<10} {str(info['feasible']):<10}")
+
+recommended = analysis.recommend_method(
+    problem_size=10,
+    target_precision=0.01,
+    device_max_depth=50,
+    device_error_rate=0.01
+)
+print(f"\nRecommended method: {recommended}")
+```
+
+## Summary
+
+In this lesson, you learned about near-term approaches to quantum amplitude estimation:
+
+1. **NISQ Limitations**: Standard QPE-based AE requires deep circuits unsuitable for current hardware
+2. **Iterative AE**: Maximum likelihood estimation over multiple Grover iterations
+3. **Variational QC**: Shallow circuits optimized for amplitude estimation
+4. **Monte Carlo Applications**: Option pricing and expectation estimation
+5. **Trade-offs**: Balancing circuit depth, query complexity, and accuracy
+
+<Tip>
+For near-term applications, iterative amplitude estimation often provides the best balance between accuracy and circuit depth. Variational methods are useful when optimization overhead is acceptable.
+</Tip>
+
+## Further Reading
+
+- Suzuki, Y. et al. (2020). "Amplitude estimation without phase estimation"
+- Grinko, D. et al. (2021). "Iterative quantum amplitude estimation"
+- Stamatopoulos, N. et al. (2020). "Option Pricing using Quantum Computers"
+- Woerner, S. & Egger, D. (2019). "Quantum risk analysis"

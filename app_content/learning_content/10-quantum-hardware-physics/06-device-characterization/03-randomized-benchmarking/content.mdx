@@ -1,0 +1,577 @@
+---
+title: "Randomized Benchmarking: Measuring Gate Fidelity"
+description: "Learn randomized benchmarking protocols for measuring average gate fidelity."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Explain the principles and advantages of randomized benchmarking
+- Implement standard Clifford randomized benchmarking protocols
+- Use interleaved RB to characterize individual gate errors
+- Apply simultaneous RB to detect and quantify crosstalk
+- Interpret RB results and convert to gate fidelity metrics
+
+## 1. Introduction to Randomized Benchmarking
+
+Randomized benchmarking (RB) is a scalable, robust protocol for measuring the average fidelity of quantum gates. Unlike process tomography, RB is insensitive to state preparation and measurement (SPAM) errors.
+
+<Definition term="Randomized Benchmarking">
+Randomized benchmarking is a protocol that estimates the average error rate of a gate set by measuring the decay of the survival probability as a function of the number of random gates applied. The decay rate directly gives the average gate fidelity.
+</Definition>
+
+### Why Randomized Benchmarking?
+
+<Tip>
+Traditional process tomography requires exponentially many measurements and is sensitive to SPAM errors. RB overcomes both limitations by averaging over random gate sequences.
+</Tip>
+
+| Method | Measurements | SPAM Sensitivity | Scalability |
+|--------|--------------|------------------|-------------|
+| Process Tomography | O(4^n) | High | Poor |
+| Gate Set Tomography | O(4^n) | Self-consistent | Poor |
+| Randomized Benchmarking | O(poly(n)) | Low | Good |
+
+## 2. Standard Clifford RB Protocol
+
+### The Clifford Group
+
+Standard RB uses the Clifford group - gates that map Pauli operators to Pauli operators:
+
+<Formula>
+$$C \cdot P \cdot C^\dagger = \pm P'$$
+</Formula>
+
+where $P, P' \in \{I, X, Y, Z\}$.
+
+For a single qubit, there are 24 Clifford gates. Common generators:
+- Hadamard (H)
+- Phase gate (S)
+- Pauli gates (X, Y, Z)
+
+### RB Protocol Steps
+
+```
+1. Choose sequence lengths: m = [1, 2, 4, 8, 16, ...]
+2. For each length m:
+   a. Generate K random sequences of m Clifford gates
+   b. Compute recovery gate that returns state to |0>
+   c. For each sequence:
+      - Initialize in |0>
+      - Apply m random Cliffords
+      - Apply recovery Clifford
+      - Measure in computational basis
+   d. Record average survival probability
+3. Fit exponential decay to extract error rate
+```
+
+<Example>
+```python
+import numpy as np
+from scipy.optimize import curve_fit
+
+# Single-qubit Clifford gates (as indices)
+CLIFFORD_GATES = list(range(24))
+
+def random_clifford_sequence(length):
+    """Generate a random sequence of Clifford gate indices."""
+    return np.random.choice(CLIFFORD_GATES, size=length)
+
+def compute_recovery_gate(sequence):
+    """
+    Compute the Clifford gate that inverts the sequence.
+
+    The inverse of C_m ... C_2 C_1 is C_1^dag C_2^dag ... C_m^dag
+    which is also a Clifford gate.
+    """
+    # In practice, this is computed by tracking the Pauli frame
+    # or using a lookup table for Clifford multiplication
+    # Here we return a placeholder
+    return inverse_clifford(compose_cliffords(sequence))
+
+def rb_sequence_fidelity(qubit, sequence, recovery, num_shots=1000):
+    """
+    Run a single RB sequence and return survival probability.
+    """
+    count_0 = 0
+
+    for _ in range(num_shots):
+        qubit.reset()
+
+        # Apply random Cliffords
+        for cliff_idx in sequence:
+            qubit.apply_clifford(cliff_idx)
+
+        # Apply recovery
+        qubit.apply_clifford(recovery)
+
+        # Measure
+        if qubit.measure() == 0:
+            count_0 += 1
+
+    return count_0 / num_shots
+
+def run_standard_rb(qubit, sequence_lengths, num_sequences=30, num_shots=1000):
+    """
+    Run standard randomized benchmarking.
+
+    Args:
+        qubit: Qubit object
+        sequence_lengths: List of sequence lengths m
+        num_sequences: Number of random sequences per length
+        num_shots: Measurement shots per sequence
+
+    Returns:
+        Dictionary with sequence lengths, fidelities, and fitted parameters
+    """
+    fidelities = []
+    fidelity_errors = []
+
+    for m in sequence_lengths:
+        sequence_fidelities = []
+
+        for _ in range(num_sequences):
+            # Generate random Clifford sequence
+            seq = random_clifford_sequence(m)
+
+            # Compute recovery gate
+            recovery = compute_recovery_gate(seq)
+
+            # Measure fidelity
+            f = rb_sequence_fidelity(qubit, seq, recovery, num_shots)
+            sequence_fidelities.append(f)
+
+        # Average over sequences
+        fidelities.append(np.mean(sequence_fidelities))
+        fidelity_errors.append(np.std(sequence_fidelities) / np.sqrt(num_sequences))
+
+    return {
+        'lengths': np.array(sequence_lengths),
+        'fidelities': np.array(fidelities),
+        'errors': np.array(fidelity_errors)
+    }
+```
+</Example>
+
+### The RB Decay Model
+
+The survival probability decays exponentially:
+
+<Formula>
+$$F(m) = A \cdot p^m + B$$
+</Formula>
+
+where:
+- $m$ is the number of Cliffords
+- $p$ is the depolarizing parameter
+- $A$ accounts for SPAM errors (ideally A = 0.5 for single qubit)
+- $B$ is the asymptotic value (ideally B = 0.5)
+
+### Converting to Gate Fidelity
+
+The average gate fidelity is:
+
+<Formula>
+$$F_{gate} = 1 - \frac{(1-p)(d-1)}{d}$$
+</Formula>
+
+For a single qubit ($d = 2$):
+
+<Formula>
+$$F_{gate} = 1 - \frac{1-p}{2} = \frac{1+p}{2}$$
+</Formula>
+
+The error per Clifford (EPC) is:
+
+<Formula>
+$$r = \frac{(1-p)(d-1)}{d} = 1 - F_{gate}$$
+</Formula>
+
+```python
+def rb_decay_model(m, A, p, B):
+    """Standard RB decay model: F(m) = A * p^m + B"""
+    return A * p**m + B
+
+def fit_rb_data(lengths, fidelities, fidelity_errors=None):
+    """
+    Fit RB data to extract depolarizing parameter and gate fidelity.
+    """
+    # Initial guesses
+    p0 = [0.5, 0.99, 0.5]
+    bounds = ([0, 0, 0], [1, 1, 1])
+
+    if fidelity_errors is not None:
+        popt, pcov = curve_fit(
+            rb_decay_model, lengths, fidelities,
+            p0=p0, bounds=bounds,
+            sigma=fidelity_errors, absolute_sigma=True
+        )
+    else:
+        popt, pcov = curve_fit(
+            rb_decay_model, lengths, fidelities,
+            p0=p0, bounds=bounds
+        )
+
+    A, p, B = popt
+    p_error = np.sqrt(pcov[1, 1])
+
+    # Calculate gate fidelity (single qubit)
+    d = 2
+    r = (1 - p) * (d - 1) / d  # Error per Clifford
+    F_gate = 1 - r
+
+    # Error propagation
+    r_error = p_error * (d - 1) / d
+
+    return {
+        'A': A,
+        'p': p,
+        'p_error': p_error,
+        'B': B,
+        'error_per_clifford': r,
+        'epc_error': r_error,
+        'gate_fidelity': F_gate,
+        'fidelity_error': r_error
+    }
+```
+
+## 3. Interleaved Randomized Benchmarking
+
+Interleaved RB isolates the error of a specific gate by comparing standard RB to sequences with the target gate interleaved.
+
+<Definition term="Interleaved RB">
+Interleaved RB measures the fidelity of a specific gate G by comparing the decay rate of random Clifford sequences to sequences where G is inserted between each random Clifford.
+</Definition>
+
+### Interleaved RB Protocol
+
+```
+Standard RB:  C_1 - C_2 - C_3 - ... - C_m - R
+Interleaved:  C_1 - G - C_2 - G - C_3 - G - ... - C_m - G - R'
+```
+
+The ratio of decay parameters gives the gate fidelity:
+
+<Formula>
+$$F_G = 1 - \frac{(1 - p_G/p_{ref})(d-1)}{d}$$
+</Formula>
+
+```python
+def run_interleaved_rb(qubit, target_gate, sequence_lengths,
+                       num_sequences=30, num_shots=1000):
+    """
+    Run interleaved RB to characterize a specific gate.
+
+    Args:
+        qubit: Qubit object
+        target_gate: The gate to characterize (Clifford index or gate function)
+        sequence_lengths: List of sequence lengths
+        num_sequences: Random sequences per length
+        num_shots: Shots per sequence
+
+    Returns:
+        Reference and interleaved RB results
+    """
+    # Run standard (reference) RB
+    ref_fidelities = []
+    int_fidelities = []
+
+    for m in sequence_lengths:
+        ref_seq_fidelities = []
+        int_seq_fidelities = []
+
+        for _ in range(num_sequences):
+            # Generate random Clifford sequence
+            seq = random_clifford_sequence(m)
+
+            # Standard RB
+            recovery_ref = compute_recovery_gate(seq)
+            f_ref = rb_sequence_fidelity(qubit, seq, recovery_ref, num_shots)
+            ref_seq_fidelities.append(f_ref)
+
+            # Interleaved RB
+            interleaved_seq = interleave_gate(seq, target_gate)
+            recovery_int = compute_recovery_gate(interleaved_seq)
+            f_int = rb_sequence_fidelity(qubit, interleaved_seq, recovery_int, num_shots)
+            int_seq_fidelities.append(f_int)
+
+        ref_fidelities.append(np.mean(ref_seq_fidelities))
+        int_fidelities.append(np.mean(int_seq_fidelities))
+
+    # Fit both curves
+    ref_result = fit_rb_data(sequence_lengths, ref_fidelities)
+    int_result = fit_rb_data(sequence_lengths, int_fidelities)
+
+    # Calculate gate-specific fidelity
+    p_ref = ref_result['p']
+    p_int = int_result['p']
+
+    d = 2  # Single qubit
+    p_gate = p_int / p_ref
+    r_gate = (1 - p_gate) * (d - 1) / d
+    F_gate = 1 - r_gate
+
+    return {
+        'reference': ref_result,
+        'interleaved': int_result,
+        'gate_fidelity': F_gate,
+        'gate_error': r_gate
+    }
+
+def interleave_gate(sequence, gate):
+    """Insert target gate after each Clifford in the sequence."""
+    interleaved = []
+    for cliff in sequence:
+        interleaved.append(cliff)
+        interleaved.append(gate)
+    return interleaved
+```
+
+## 4. Simultaneous Randomized Benchmarking
+
+Simultaneous RB detects crosstalk by comparing RB results when qubits are benchmarked in isolation vs. simultaneously.
+
+<Definition term="Simultaneous RB">
+Simultaneous RB runs RB sequences on multiple qubits at the same time, detecting crosstalk errors that only appear when qubits are operated together.
+</Definition>
+
+### Detecting Crosstalk
+
+```python
+def run_simultaneous_rb(qubits, sequence_lengths, num_sequences=30, num_shots=1000):
+    """
+    Run simultaneous RB on multiple qubits.
+
+    Args:
+        qubits: List of qubit objects
+        sequence_lengths: List of sequence lengths
+        num_sequences: Random sequences per length
+        num_shots: Shots per sequence
+
+    Returns:
+        Individual and simultaneous RB results
+    """
+    num_qubits = len(qubits)
+
+    # Run individual RB for each qubit
+    individual_results = []
+    for q in qubits:
+        result = run_standard_rb(q, sequence_lengths, num_sequences, num_shots)
+        individual_results.append(fit_rb_data(result['lengths'], result['fidelities']))
+
+    # Run simultaneous RB
+    sim_fidelities = {i: [] for i in range(num_qubits)}
+
+    for m in sequence_lengths:
+        seq_fidelities = {i: [] for i in range(num_qubits)}
+
+        for _ in range(num_sequences):
+            # Generate independent random sequences for each qubit
+            sequences = [random_clifford_sequence(m) for _ in range(num_qubits)]
+            recoveries = [compute_recovery_gate(seq) for seq in sequences]
+
+            # Run all sequences simultaneously
+            for _ in range(num_shots):
+                for q in qubits:
+                    q.reset()
+
+                # Apply gates in parallel
+                for gate_idx in range(m):
+                    for i, q in enumerate(qubits):
+                        q.apply_clifford(sequences[i][gate_idx])
+
+                # Apply recoveries
+                for i, q in enumerate(qubits):
+                    q.apply_clifford(recoveries[i])
+
+                # Measure all qubits
+                results = [q.measure() for q in qubits]
+
+                for i, r in enumerate(results):
+                    if r == 0:
+                        seq_fidelities[i].append(1)
+                    else:
+                        seq_fidelities[i].append(0)
+
+        for i in range(num_qubits):
+            sim_fidelities[i].append(np.mean(seq_fidelities[i]))
+
+    # Fit simultaneous results
+    sim_results = []
+    for i in range(num_qubits):
+        result = fit_rb_data(sequence_lengths, sim_fidelities[i])
+        sim_results.append(result)
+
+    # Compare individual vs simultaneous
+    crosstalk_analysis = []
+    for i in range(num_qubits):
+        individual_epc = individual_results[i]['error_per_clifford']
+        simultaneous_epc = sim_results[i]['error_per_clifford']
+        crosstalk_error = simultaneous_epc - individual_epc
+
+        crosstalk_analysis.append({
+            'qubit': i,
+            'individual_epc': individual_epc,
+            'simultaneous_epc': simultaneous_epc,
+            'crosstalk_error': crosstalk_error,
+            'crosstalk_significant': crosstalk_error > 2 * individual_results[i]['epc_error']
+        })
+
+    return {
+        'individual': individual_results,
+        'simultaneous': sim_results,
+        'crosstalk': crosstalk_analysis
+    }
+```
+
+### Interpreting Crosstalk Results
+
+If simultaneous EPC > individual EPC, crosstalk is present:
+
+<Formula>
+$$r_{crosstalk} = r_{simultaneous} - r_{individual}$$
+</Formula>
+
+<Warning>
+Crosstalk can significantly degrade multi-qubit algorithm performance even when individual qubit gates have high fidelity. Always characterize simultaneous operation in multi-qubit systems.
+</Warning>
+
+## 5. Two-Qubit Randomized Benchmarking
+
+For two-qubit gates, RB uses the two-qubit Clifford group (11,520 elements).
+
+### Two-Qubit RB Protocol
+
+```python
+def run_two_qubit_rb(qubit_pair, sequence_lengths, num_sequences=30, num_shots=1000):
+    """
+    Run two-qubit Clifford RB.
+
+    Two-qubit Cliffords can be decomposed into:
+    - Single-qubit Cliffords on each qubit
+    - At most 3 CNOT gates
+    """
+    # Similar structure to single-qubit RB
+    # but using 2-qubit Clifford gates
+
+    fidelities = []
+
+    for m in sequence_lengths:
+        seq_fidelities = []
+
+        for _ in range(num_sequences):
+            # Generate random 2-qubit Clifford sequence
+            seq = random_two_qubit_clifford_sequence(m)
+            recovery = compute_two_qubit_recovery(seq)
+
+            # Measure fidelity (return to |00>)
+            f = two_qubit_rb_fidelity(qubit_pair, seq, recovery, num_shots)
+            seq_fidelities.append(f)
+
+        fidelities.append(np.mean(seq_fidelities))
+
+    # Fit with d=4 for two qubits
+    result = fit_rb_data_general(sequence_lengths, fidelities, d=4)
+
+    return result
+
+def fit_rb_data_general(lengths, fidelities, d=2):
+    """
+    Fit RB data for d-dimensional system.
+    """
+    popt, pcov = curve_fit(rb_decay_model, lengths, fidelities,
+                           p0=[0.5, 0.99, 0.5], bounds=([0,0,0], [1,1,1]))
+
+    A, p, B = popt
+
+    # General formula for error per Clifford
+    r = (1 - p) * (d - 1) / d
+    F_gate = 1 - r
+
+    return {
+        'p': p,
+        'error_per_clifford': r,
+        'gate_fidelity': F_gate,
+        'dimension': d
+    }
+```
+
+## 6. Practical Considerations
+
+### Choosing Sequence Lengths
+
+<Tip>
+Distribute sequence lengths logarithmically, with more points where the decay is steepest (near 1/r where r is the error rate).
+</Tip>
+
+```python
+def optimal_rb_lengths(estimated_error, max_length=1000):
+    """
+    Generate optimal sequence lengths for RB.
+
+    Args:
+        estimated_error: Rough estimate of error per Clifford
+        max_length: Maximum sequence length
+
+    Returns:
+        Array of sequence lengths
+    """
+    # Decay length scale
+    decay_length = 1 / estimated_error if estimated_error > 0 else 1000
+
+    # Logarithmic spacing up to several decay lengths
+    max_m = min(max_length, int(5 * decay_length))
+
+    lengths = np.unique(np.logspace(0, np.log10(max_m), 20).astype(int))
+    lengths = lengths[lengths > 0]
+
+    return lengths
+```
+
+### Number of Random Sequences
+
+Statistical error in EPC scales as:
+
+<Formula>
+$$\sigma_r \propto \frac{1}{\sqrt{K \cdot N}}$$
+</Formula>
+
+where K is sequences per length and N is shots per sequence. Typically use K = 30-100.
+
+### Pulse-Level Considerations
+
+For accurate RB, ensure:
+- Clifford gates are calibrated
+- Frame tracking is correct
+- Virtual Z gates are properly accounted for
+
+## 7. Summary
+
+Randomized benchmarking is essential for characterizing quantum gates:
+
+1. **Standard RB**: Average error rate over Clifford group
+2. **Interleaved RB**: Error rate of specific gates
+3. **Simultaneous RB**: Crosstalk detection
+4. **Two-qubit RB**: Entangling gate characterization
+
+Key advantages:
+- SPAM-insensitive
+- Scalable
+- Provides single metric for gate quality
+
+Typical values for state-of-the-art systems:
+- Single-qubit EPC: 10^-4 to 10^-3
+- Two-qubit EPC: 10^-3 to 10^-2
+
+<Tip>
+RB measures average fidelity, which may hide coherent errors. Use gate set tomography or Pauli error analysis for detailed error characterization.
+</Tip>
+
+## Further Reading
+
+- Magesan et al., "Scalable and Robust Randomized Benchmarking" (2011)
+- Knill et al., "Randomized benchmarking of quantum gates" (2008)
+- Next lesson: Gate Set Tomography - full gate characterization

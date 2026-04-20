@@ -1,0 +1,633 @@
+---
+title: "Quantum Model Training"
+description: "Training quantum credit scoring models using hybrid classical-quantum optimization, including gradient-based and gradient-free methods."
+keywords: ["model training", "optimization", "parameter shift", "variational circuits", "hybrid computing"]
+---
+
+# Quantum Model Training
+
+Training variational quantum models requires hybrid classical-quantum optimization. This lesson covers training techniques for quantum credit scoring models.
+
+<Definition term="Hybrid Quantum-Classical Training">
+An optimization approach where quantum circuits with trainable parameters are executed on quantum hardware, while a classical optimizer updates the parameters based on measured outputs to minimize a loss function.
+</Definition>
+
+## Training Loop Overview
+
+```python
+import numpy as np
+
+def training_loop_overview():
+    """Overview of quantum model training loop."""
+
+    print("Hybrid Quantum-Classical Training Loop")
+    print("=" * 55)
+
+    steps = [
+        {
+            'step': 1,
+            'name': 'Initialize Parameters',
+            'where': 'Classical',
+            'description': 'Random initialization of circuit parameters θ'
+        },
+        {
+            'step': 2,
+            'name': 'Encode Data',
+            'where': 'Quantum',
+            'description': 'Load credit features into quantum state |ψ(x)⟩'
+        },
+        {
+            'step': 3,
+            'name': 'Apply Variational Circuit',
+            'where': 'Quantum',
+            'description': 'Apply parameterized gates U(θ)|ψ(x)⟩'
+        },
+        {
+            'step': 4,
+            'name': 'Measure Output',
+            'where': 'Quantum',
+            'description': 'Measure qubits to get prediction'
+        },
+        {
+            'step': 5,
+            'name': 'Compute Loss',
+            'where': 'Classical',
+            'description': 'Calculate loss from predictions and labels'
+        },
+        {
+            'step': 6,
+            'name': 'Compute Gradients',
+            'where': 'Hybrid',
+            'description': 'Use parameter shift rule on quantum computer'
+        },
+        {
+            'step': 7,
+            'name': 'Update Parameters',
+            'where': 'Classical',
+            'description': 'Apply gradient descent: θ = θ - η∇L'
+        }
+    ]
+
+    for step in steps:
+        print(f"\nStep {step['step']}: {step['name']}")
+        print(f"  Where: {step['where']}")
+        print(f"  Action: {step['description']}")
+
+    return steps
+
+training_loop_overview()
+```
+
+## Parameter Shift Rule
+
+The parameter shift rule enables exact gradient computation for quantum circuits.
+
+```python
+def parameter_shift_demo():
+    """Demonstrate parameter shift rule for gradient computation."""
+
+    print("Parameter Shift Rule")
+    print("=" * 50)
+
+    print("\nTheory:")
+    print("  For a gate R(θ) = exp(-iθG/2) where G² = I:")
+    print("  ∂f/∂θ = (f(θ + π/2) - f(θ - π/2)) / 2")
+
+    class ParameterShiftGradient:
+        """Compute gradients using parameter shift rule."""
+
+        def __init__(self, n_qubits=4, n_layers=2):
+            self.n_qubits = n_qubits
+            self.n_layers = n_layers
+            self.dim = 2**n_qubits
+            self.n_params = n_qubits * n_layers
+
+        def encode(self, x):
+            """Simple encoding."""
+            state = np.zeros(self.dim, dtype=complex)
+            for i in range(self.dim):
+                phase = sum(x[q % len(x)] for q in range(self.n_qubits) if (i >> q) & 1)
+                state[i] = np.exp(1j * phase) / np.sqrt(self.dim)
+            return state
+
+        def apply_circuit(self, state, params):
+            """Apply parameterized circuit."""
+            for layer in range(self.n_layers):
+                for q in range(self.n_qubits):
+                    param_idx = layer * self.n_qubits + q
+                    angle = params[param_idx]
+
+                    # Apply RY rotation
+                    new_state = np.zeros_like(state)
+                    c, s = np.cos(angle/2), np.sin(angle/2)
+
+                    for i in range(self.dim):
+                        bit = (i >> q) & 1
+                        partner = i ^ (1 << q)
+
+                        if bit == 0:
+                            new_state[i] += c * state[i] - s * state[partner]
+                        else:
+                            new_state[i] += s * state[i ^ (1 << q)] + c * state[i]
+
+                    state = new_state
+
+            return state
+
+        def expectation(self, state):
+            """Measure expectation of Z on first qubit."""
+            probs = np.abs(state)**2
+            exp_z = sum(probs[i] * (1 if not (i & 1) else -1) for i in range(self.dim))
+            return exp_z
+
+        def forward(self, x, params):
+            """Full forward pass."""
+            state = self.encode(x)
+            state = self.apply_circuit(state, params)
+            return self.expectation(state)
+
+        def gradient_parameter_shift(self, x, params):
+            """Compute gradient using parameter shift rule."""
+            grad = np.zeros_like(params)
+            shift = np.pi / 2
+
+            for i in range(len(params)):
+                # f(θ + π/2)
+                params_plus = params.copy()
+                params_plus[i] += shift
+                f_plus = self.forward(x, params_plus)
+
+                # f(θ - π/2)
+                params_minus = params.copy()
+                params_minus[i] -= shift
+                f_minus = self.forward(x, params_minus)
+
+                grad[i] = (f_plus - f_minus) / 2
+
+            return grad
+
+        def gradient_finite_diff(self, x, params, eps=0.01):
+            """Compute gradient using finite differences (for comparison)."""
+            grad = np.zeros_like(params)
+
+            for i in range(len(params)):
+                params_plus = params.copy()
+                params_plus[i] += eps
+                f_plus = self.forward(x, params_plus)
+
+                params_minus = params.copy()
+                params_minus[i] -= eps
+                f_minus = self.forward(x, params_minus)
+
+                grad[i] = (f_plus - f_minus) / (2 * eps)
+
+            return grad
+
+    # Test
+    model = ParameterShiftGradient(n_qubits=4, n_layers=2)
+    x = np.array([0.3, 0.7, 0.5, 0.2])
+    params = np.random.randn(model.n_params) * 0.1
+
+    grad_ps = model.gradient_parameter_shift(x, params)
+    grad_fd = model.gradient_finite_diff(x, params)
+
+    print(f"\nParameter shift gradient: {grad_ps[:4]}...")
+    print(f"Finite diff gradient:    {grad_fd[:4]}...")
+    print(f"Difference: {np.max(np.abs(grad_ps - grad_fd)):.6f}")
+
+    return model
+
+parameter_shift_demo()
+```
+
+<Formula expression="\frac{\partial f}{\partial \theta} = \frac{f(\theta + \pi/2) - f(\theta - \pi/2)}{2}" description="Parameter shift rule for gradient computation of rotation gates" />
+
+## Training Implementation
+
+```python
+def full_training_implementation():
+    """Complete training implementation for quantum credit scoring."""
+
+    print("Full Quantum Credit Scoring Training")
+    print("=" * 55)
+
+    class QuantumCreditModel:
+        """Quantum model for credit scoring."""
+
+        def __init__(self, n_qubits=4, n_layers=2, learning_rate=0.1):
+            self.n_qubits = n_qubits
+            self.n_layers = n_layers
+            self.dim = 2**n_qubits
+            self.lr = learning_rate
+
+            # Initialize parameters
+            self.params = np.random.randn(n_qubits * n_layers) * 0.1
+            self.loss_history = []
+
+        def encode(self, x):
+            """Encode features."""
+            state = np.zeros(self.dim, dtype=complex)
+            for i in range(self.dim):
+                amplitude = 1.0
+                for q in range(self.n_qubits):
+                    angle = x[q % len(x)] * np.pi
+                    bit = (i >> q) & 1
+                    if bit == 0:
+                        amplitude *= np.cos(angle/2)
+                    else:
+                        amplitude *= np.sin(angle/2)
+                state[i] = amplitude
+            return state
+
+        def variational_layer(self, state, layer_params):
+            """Apply one variational layer."""
+            for q in range(self.n_qubits):
+                angle = layer_params[q]
+                new_state = np.zeros_like(state)
+                c, s = np.cos(angle/2), np.sin(angle/2)
+
+                for i in range(self.dim):
+                    if not ((i >> q) & 1):
+                        j = i | (1 << q)
+                        new_state[i] = c * state[i] - s * state[j]
+                        new_state[j] = s * state[i] + c * state[j]
+
+                state = new_state
+            return state
+
+        def forward(self, x):
+            """Forward pass."""
+            state = self.encode(x)
+
+            for layer in range(self.n_layers):
+                start = layer * self.n_qubits
+                end = (layer + 1) * self.n_qubits
+                state = self.variational_layer(state, self.params[start:end])
+
+            # Probability of measuring 0 on first qubit
+            prob_0 = sum(np.abs(state[i])**2 for i in range(self.dim) if not (i & 1))
+            return prob_0
+
+        def loss(self, X, y):
+            """Binary cross-entropy loss."""
+            probs = np.array([self.forward(x) for x in X])
+            probs = np.clip(probs, 1e-10, 1 - 1e-10)
+
+            # y=0 (no default) should have high prob_0
+            # y=1 (default) should have low prob_0
+            bce = -np.mean((1-y) * np.log(probs) + y * np.log(1 - probs))
+            return bce
+
+        def compute_gradients(self, X, y):
+            """Compute gradients using parameter shift rule."""
+            grad = np.zeros_like(self.params)
+            shift = np.pi / 2
+
+            for i in range(len(self.params)):
+                # Positive shift
+                self.params[i] += shift
+                loss_plus = self.loss(X, y)
+
+                # Negative shift
+                self.params[i] -= 2 * shift
+                loss_minus = self.loss(X, y)
+
+                # Restore
+                self.params[i] += shift
+
+                grad[i] = (loss_plus - loss_minus) / 2
+
+            return grad
+
+        def train_step(self, X, y):
+            """Single training step."""
+            grad = self.compute_gradients(X, y)
+            self.params -= self.lr * grad
+
+            current_loss = self.loss(X, y)
+            self.loss_history.append(current_loss)
+
+            return current_loss
+
+        def fit(self, X, y, epochs=50, batch_size=None, verbose=True):
+            """Train the model."""
+            n = len(X)
+
+            for epoch in range(epochs):
+                if batch_size is not None and batch_size < n:
+                    # Mini-batch
+                    idx = np.random.choice(n, batch_size, replace=False)
+                    X_batch, y_batch = X[idx], y[idx]
+                else:
+                    X_batch, y_batch = X, y
+
+                loss = self.train_step(X_batch, y_batch)
+
+                if verbose and epoch % 10 == 0:
+                    acc = self.score(X, y)
+                    print(f"Epoch {epoch:3d}: Loss = {loss:.4f}, Accuracy = {acc:.2%}")
+
+            return self
+
+        def predict_proba(self, X):
+            """Predict probabilities."""
+            return np.array([self.forward(x) for x in X])
+
+        def predict(self, X, threshold=0.5):
+            """Predict classes."""
+            probs = self.predict_proba(X)
+            return (probs < threshold).astype(int)
+
+        def score(self, X, y):
+            """Compute accuracy."""
+            return np.mean(self.predict(X) == y)
+
+    # Generate data
+    np.random.seed(42)
+    n_samples = 100
+    X = np.random.randn(n_samples, 4) * 0.5
+    y = (X[:, 0] + X[:, 1] - 0.3 * X[:, 2] > 0).astype(int)
+
+    print(f"Training on {n_samples} samples...")
+
+    model = QuantumCreditModel(n_qubits=4, n_layers=2, learning_rate=0.3)
+    model.fit(X, y, epochs=50, batch_size=20)
+
+    print(f"\nFinal accuracy: {model.score(X, y):.2%}")
+
+    return model
+
+full_training_implementation()
+```
+
+<Tip>
+For credit scoring, use mini-batch training to reduce the number of quantum circuit evaluations per epoch. This makes training more practical on real quantum hardware with limited access.
+</Tip>
+
+## Gradient-Free Optimization
+
+When gradient computation is expensive, gradient-free methods can be effective.
+
+```python
+def gradient_free_optimization():
+    """Gradient-free optimization methods for quantum circuits."""
+
+    print("Gradient-Free Optimization Methods")
+    print("=" * 55)
+
+    class GradientFreeOptimizers:
+        """Collection of gradient-free optimizers."""
+
+        @staticmethod
+        def cobyla(objective, x0, maxiter=100):
+            """COBYLA optimizer (Constrained Optimization BY Linear Approximation)."""
+            from scipy.optimize import minimize
+            result = minimize(objective, x0, method='COBYLA',
+                            options={'maxiter': maxiter, 'rhobeg': 0.5})
+            return result.x, result.fun
+
+        @staticmethod
+        def nelder_mead(objective, x0, maxiter=100):
+            """Nelder-Mead simplex method."""
+            n = len(x0)
+            simplex = [x0]
+
+            # Create initial simplex
+            for i in range(n):
+                point = x0.copy()
+                point[i] += 0.5
+                simplex.append(point)
+
+            simplex = np.array(simplex)
+            values = [objective(s) for s in simplex]
+
+            for iteration in range(maxiter):
+                # Sort by function value
+                order = np.argsort(values)
+                simplex = simplex[order]
+                values = [values[i] for i in order]
+
+                # Centroid of all but worst
+                centroid = np.mean(simplex[:-1], axis=0)
+
+                # Reflection
+                reflected = centroid + (centroid - simplex[-1])
+                f_reflected = objective(reflected)
+
+                if values[0] <= f_reflected < values[-2]:
+                    simplex[-1] = reflected
+                    values[-1] = f_reflected
+                elif f_reflected < values[0]:
+                    # Expansion
+                    expanded = centroid + 2 * (reflected - centroid)
+                    f_expanded = objective(expanded)
+                    if f_expanded < f_reflected:
+                        simplex[-1] = expanded
+                        values[-1] = f_expanded
+                    else:
+                        simplex[-1] = reflected
+                        values[-1] = f_reflected
+                else:
+                    # Contraction
+                    contracted = centroid + 0.5 * (simplex[-1] - centroid)
+                    f_contracted = objective(contracted)
+                    if f_contracted < values[-1]:
+                        simplex[-1] = contracted
+                        values[-1] = f_contracted
+                    else:
+                        # Shrink
+                        for i in range(1, len(simplex)):
+                            simplex[i] = simplex[0] + 0.5 * (simplex[i] - simplex[0])
+                            values[i] = objective(simplex[i])
+
+            best_idx = np.argmin(values)
+            return simplex[best_idx], values[best_idx]
+
+        @staticmethod
+        def spsa(objective, x0, maxiter=100, a=0.1, c=0.1):
+            """Simultaneous Perturbation Stochastic Approximation."""
+            x = x0.copy()
+            n = len(x)
+
+            for k in range(1, maxiter + 1):
+                # Learning rate schedule
+                ak = a / (k + 1)**0.602
+                ck = c / (k + 1)**0.101
+
+                # Random perturbation direction
+                delta = np.random.choice([-1, 1], size=n)
+
+                # Evaluate at perturbed points
+                y_plus = objective(x + ck * delta)
+                y_minus = objective(x - ck * delta)
+
+                # Gradient approximation
+                ghat = (y_plus - y_minus) / (2 * ck * delta)
+
+                # Update
+                x = x - ak * ghat
+
+            return x, objective(x)
+
+    # Test with quantum model
+    def create_quantum_objective(X, y, n_qubits=4, n_layers=2):
+        """Create objective function for quantum model."""
+        dim = 2**n_qubits
+
+        def objective(params):
+            total_loss = 0
+
+            for x, label in zip(X, y):
+                # Simple forward pass
+                state = np.ones(dim, dtype=complex) / np.sqrt(dim)
+
+                for layer in range(n_layers):
+                    for q in range(n_qubits):
+                        angle = params[layer * n_qubits + q] + x[q % len(x)]
+                        for i in range(dim):
+                            if (i >> q) & 1:
+                                state[i] *= np.exp(1j * angle)
+
+                prob_0 = sum(np.abs(state[i])**2 for i in range(dim) if not (i & 1))
+                prob_0 = np.clip(prob_0, 1e-10, 1 - 1e-10)
+
+                if label == 0:
+                    total_loss -= np.log(prob_0)
+                else:
+                    total_loss -= np.log(1 - prob_0)
+
+            return total_loss / len(X)
+
+        return objective
+
+    # Generate data
+    np.random.seed(42)
+    X = np.random.randn(30, 4) * 0.5
+    y = (X[:, 0] + X[:, 1] > 0).astype(int)
+
+    objective = create_quantum_objective(X, y)
+    x0 = np.random.randn(8) * 0.1
+
+    print("Comparing optimizers:")
+
+    optimizers = GradientFreeOptimizers()
+
+    # SPSA
+    params_spsa, loss_spsa = optimizers.spsa(objective, x0.copy(), maxiter=100)
+    print(f"  SPSA: Final loss = {loss_spsa:.4f}")
+
+    # Nelder-Mead
+    params_nm, loss_nm = optimizers.nelder_mead(objective, x0.copy(), maxiter=100)
+    print(f"  Nelder-Mead: Final loss = {loss_nm:.4f}")
+
+    return optimizers
+
+gradient_free_optimization()
+```
+
+## Handling Barren Plateaus
+
+```python
+def barren_plateaus_demo():
+    """Demonstrate and mitigate barren plateaus."""
+
+    print("Barren Plateaus in Quantum Training")
+    print("=" * 55)
+
+    print("\nWhat are Barren Plateaus?")
+    print("  - Gradients become exponentially small with circuit depth")
+    print("  - Makes training difficult for deep random circuits")
+    print("  - More severe with more qubits")
+
+    def analyze_gradient_variance(n_qubits_list, n_layers, n_samples=20):
+        """Analyze gradient variance vs number of qubits."""
+        results = []
+
+        for n_qubits in n_qubits_list:
+            dim = 2**n_qubits
+            n_params = n_qubits * n_layers
+            grad_norms = []
+
+            for _ in range(n_samples):
+                params = np.random.randn(n_params) * 2 * np.pi
+                x = np.random.randn(n_qubits)
+
+                # Compute gradient numerically
+                grad = np.zeros(n_params)
+                eps = 0.01
+
+                for i in range(n_params):
+                    # Simplified objective
+                    def objective(p):
+                        state = np.ones(dim, dtype=complex) / np.sqrt(dim)
+                        for layer in range(n_layers):
+                            for q in range(n_qubits):
+                                angle = p[layer * n_qubits + q]
+                                for idx in range(dim):
+                                    if (idx >> q) & 1:
+                                        state[idx] *= np.exp(1j * angle)
+                        return sum(np.abs(state[idx])**2 * (1 if not (idx & 1) else -1)
+                                 for idx in range(dim))
+
+                    p_plus = params.copy()
+                    p_plus[i] += eps
+                    p_minus = params.copy()
+                    p_minus[i] -= eps
+
+                    grad[i] = (objective(p_plus) - objective(p_minus)) / (2 * eps)
+
+                grad_norms.append(np.linalg.norm(grad))
+
+            results.append({
+                'n_qubits': n_qubits,
+                'mean_grad_norm': np.mean(grad_norms),
+                'std_grad_norm': np.std(grad_norms)
+            })
+
+        return results
+
+    print("\nGradient variance analysis:")
+    results = analyze_gradient_variance([2, 3, 4, 5], n_layers=2)
+    for r in results:
+        print(f"  {r['n_qubits']} qubits: "
+              f"||∇|| = {r['mean_grad_norm']:.4f} ± {r['std_grad_norm']:.4f}")
+
+    print("\nMitigation Strategies:")
+    strategies = [
+        "1. Use shallow circuits (fewer layers)",
+        "2. Initialize parameters close to identity",
+        "3. Use structured ansätze (hardware-efficient)",
+        "4. Layer-wise training",
+        "5. Use local cost functions"
+    ]
+    for s in strategies:
+        print(f"  {s}")
+
+    return results
+
+barren_plateaus_demo()
+```
+
+<Warning>
+Barren plateaus can make quantum credit scoring models untrainable. Start with shallow circuits and gradually increase depth while monitoring gradient magnitudes.
+</Warning>
+
+## Summary
+
+Quantum model training for credit scoring:
+
+| Method | Gradient | Overhead | Best For |
+|--------|----------|----------|----------|
+| Parameter Shift | Exact | 2 evals per param | NISQ devices |
+| Finite Difference | Approximate | 2 evals per param | Simulation |
+| SPSA | Stochastic | 2 evals total | Many parameters |
+| COBYLA | None | Varies | Small models |
+
+Key takeaways:
+
+- Hybrid training alternates quantum evaluation with classical optimization
+- Parameter shift rule gives exact gradients for rotation gates
+- Gradient-free methods reduce quantum circuit evaluations
+- Barren plateaus limit trainability of deep circuits
+- Mini-batch training reduces quantum resource requirements
+- Monitor gradient norms to detect training issues

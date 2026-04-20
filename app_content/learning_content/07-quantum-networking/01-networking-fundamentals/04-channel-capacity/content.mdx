@@ -1,0 +1,495 @@
+---
+title: "Quantum Channel Capacity"
+description: "Understanding the capacity limits of quantum channels for transmitting classical and quantum information"
+---
+
+# Quantum Channel Capacity
+
+Quantum channels have different capacities for transmitting classical bits, quantum bits, and private (secret) bits. Understanding these limits is crucial for network design.
+
+## Types of Channel Capacity
+
+```
+Quantum Channel Capacities:
+═══════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────┐
+│                      Quantum Channel ε                          │
+│                            │                                     │
+│     ┌──────────────────────┼──────────────────────┐             │
+│     │                      │                      │             │
+│     ▼                      ▼                      ▼             │
+│ ┌────────┐          ┌────────────┐          ┌────────┐         │
+│ │   C    │          │     Q      │          │   P    │         │
+│ │Classical│          │  Quantum   │          │Private │         │
+│ │Capacity│          │  Capacity  │          │Capacity│         │
+│ └────────┘          └────────────┘          └────────┘         │
+│                                                                  │
+│ C(ε) = max classical bits per channel use                      │
+│ Q(ε) = max qubits per channel use                              │
+│ P(ε) = max private bits per channel use                        │
+│                                                                  │
+│ Relationship: P(ε) ≥ Q(ε), and often P(ε) = Q(ε) + S(ε)        │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+
+Hierarchy of Capacities:
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                  │
+│  C_EA ≥ C ≥ C_1 (Classical capacities)                          │
+│   │     │    │                                                   │
+│   │     │    └── One-shot classical capacity                    │
+│   │     └── Regularized classical capacity                       │
+│   └── Entanglement-assisted capacity                            │
+│                                                                  │
+│  Q ≤ ½ C_EA (Quantum capacity bounded by EA classical)          │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+import numpy as np
+from dataclasses import dataclass
+from typing import Tuple, Callable
+from scipy.linalg import logm
+
+def von_neumann_entropy(rho: np.ndarray) -> float:
+    """
+    Calculate von Neumann entropy S(ρ) = -Tr(ρ log ρ).
+    """
+    eigenvalues = np.linalg.eigvalsh(rho)
+    # Filter out zero eigenvalues to avoid log(0)
+    eigenvalues = eigenvalues[eigenvalues > 1e-15]
+    return -np.sum(eigenvalues * np.log2(eigenvalues))
+
+def binary_entropy(p: float) -> float:
+    """Binary entropy function H(p) = -p log p - (1-p) log(1-p)."""
+    if p <= 0 or p >= 1:
+        return 0
+    return -p * np.log2(p) - (1 - p) * np.log2(1 - p)
+
+@dataclass
+class ChannelCapacity:
+    """
+    Calculate various channel capacities.
+    """
+
+    def __init__(self, channel_type: str, parameter: float):
+        """
+        Initialize channel.
+
+        Args:
+            channel_type: 'depolarizing', 'erasure', 'amplitude_damping'
+            parameter: Error probability or damping rate
+        """
+        self.channel_type = channel_type
+        self.p = parameter
+
+    def classical_capacity(self) -> float:
+        """
+        Calculate classical capacity C(ε).
+
+        For simple channels, this is the Holevo capacity.
+        """
+        if self.channel_type == 'depolarizing':
+            # C = 1 - H(p) for qubit depolarizing with parameter p
+            # More precisely: C = 1 - h((1+3p/4)/2) for depolarizing
+            if self.p >= 3/4:
+                return 0
+            return 1 - binary_entropy((1 + (1 - 4*self.p/3))/2)
+
+        elif self.channel_type == 'erasure':
+            # Erasure channel: C = 1 - p (erasure probability)
+            return 1 - self.p
+
+        elif self.channel_type == 'amplitude_damping':
+            # Amplitude damping: requires optimization
+            # Approximate: C ≈ max over input of I(X:Y)
+            gamma = self.p
+            if gamma >= 1:
+                return 0
+            # Simplified bound
+            return (1 - gamma) * (1 - binary_entropy(gamma / (2 - gamma)))
+
+        return 0
+
+    def quantum_capacity(self) -> float:
+        """
+        Calculate quantum capacity Q(ε).
+
+        Q = max{0, lim(1/n) max I_c(ρ, ε^⊗n)}
+        where I_c is coherent information.
+        """
+        if self.channel_type == 'depolarizing':
+            # Q = 1 - 2H(p) for p < 1/4 (approximate)
+            if self.p >= 1/4:
+                return 0
+            return max(0, 1 - 2 * binary_entropy(self.p))
+
+        elif self.channel_type == 'erasure':
+            # Q = 1 - 2p for p < 1/2
+            if self.p >= 0.5:
+                return 0
+            return 1 - 2 * self.p
+
+        elif self.channel_type == 'amplitude_damping':
+            # Q requires optimization
+            gamma = self.p
+            if gamma >= 0.5:
+                return 0
+            return max(0, 1 - binary_entropy(gamma) - gamma * np.log2(1/gamma - 1))
+
+        return 0
+
+    def private_capacity(self) -> float:
+        """
+        Calculate private classical capacity P(ε).
+
+        For degradable channels: P = Q
+        """
+        # For many channels, P = Q
+        return self.quantum_capacity()
+
+    def entanglement_assisted_capacity(self) -> float:
+        """
+        Calculate entanglement-assisted classical capacity C_EA.
+
+        C_EA = max S(ρ) + S(ε(ρ)) - S((I⊗ε)(|φ⟩⟨φ|))
+        """
+        if self.channel_type == 'depolarizing':
+            # C_EA = 2(1 - H((1+sqrt(1-p))/2)) approximately
+            if self.p >= 1:
+                return 0
+            return 2 * (1 - binary_entropy((1 + np.sqrt(1 - self.p))/2))
+
+        elif self.channel_type == 'erasure':
+            # C_EA = 2(1 - p)
+            return 2 * (1 - self.p)
+
+        return self.classical_capacity()
+
+    def summary(self) -> str:
+        """Generate capacity summary."""
+        return f"""
+CHANNEL CAPACITY SUMMARY: {self.channel_type} (p={self.p:.3f})
+═══════════════════════════════════════════════════════════════
+
+Classical Capacity C:              {self.classical_capacity():.4f} bits/use
+Quantum Capacity Q:                {self.quantum_capacity():.4f} qubits/use
+Private Capacity P:                {self.private_capacity():.4f} private bits/use
+Entanglement-Assisted C_EA:        {self.entanglement_assisted_capacity():.4f} bits/use
+
+Relationships:
+  C_EA ≥ C:  {self.entanglement_assisted_capacity() >= self.classical_capacity()}
+  P ≥ Q:     {self.private_capacity() >= self.quantum_capacity() - 1e-10}
+"""
+
+# Compare capacities for different error rates
+print("Channel Capacities vs Error Rate")
+print("=" * 60)
+for p in [0.01, 0.05, 0.1, 0.2]:
+    cap = ChannelCapacity('depolarizing', p)
+    print(f"\nDepolarizing p={p}:")
+    print(f"  C={cap.classical_capacity():.3f}, Q={cap.quantum_capacity():.3f}, "
+          f"P={cap.private_capacity():.3f}, C_EA={cap.entanglement_assisted_capacity():.3f}")
+```
+
+## The Holevo Bound
+
+```
+Holevo Bound (Holevo-Schumacher-Westmoreland):
+═══════════════════════════════════════════════════════════════════
+
+The maximum classical information extractable from quantum states:
+
+χ = S(ρ) - Σᵢ pᵢ S(ρᵢ)
+
+where:
+• ρ = Σᵢ pᵢ ρᵢ is the average state
+• pᵢ is the probability of state ρᵢ
+• S(ρ) is von Neumann entropy
+
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                  │
+│  Alice prepares state ρᵢ with probability pᵢ                   │
+│                                                                  │
+│        ρ₁, p₁                                                   │
+│        ρ₂, p₂    ────▶  Quantum Channel  ────▶  Bob measures    │
+│        ρ₃, p₃                                                   │
+│        ...                                                       │
+│                                                                  │
+│  Bob's mutual information I(X:Y) ≤ χ ≤ S(ρ)                     │
+│                                                                  │
+│  For orthogonal states: χ = H(p₁, p₂, ...) (Shannon entropy)   │
+│  For identical states:  χ = 0                                   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+
+Implications:
+• One qubit can carry at most 1 classical bit (without entanglement)
+• Non-orthogonal states reduce accessible information
+• Super-dense coding: 2 bits per qubit with shared entanglement!
+```
+
+```python
+class HolevoBound:
+    """
+    Calculate and analyze Holevo bound.
+    """
+
+    def calculate_holevo_chi(
+        self,
+        states: list,
+        probabilities: list
+    ) -> float:
+        """
+        Calculate Holevo χ for an ensemble.
+
+        Args:
+            states: List of density matrices
+            probabilities: Corresponding probabilities
+        """
+        # Average state
+        rho_avg = sum(p * rho for p, rho in zip(probabilities, states))
+
+        # Holevo quantity
+        chi = von_neumann_entropy(rho_avg)
+        for p, rho in zip(probabilities, states):
+            chi -= p * von_neumann_entropy(rho)
+
+        return chi
+
+    def orthogonal_states_example(self) -> dict:
+        """Example with orthogonal states (maximum χ)."""
+        # |0⟩⟨0| and |1⟩⟨1|
+        rho0 = np.array([[1, 0], [0, 0]], dtype=complex)
+        rho1 = np.array([[0, 0], [0, 1]], dtype=complex)
+
+        states = [rho0, rho1]
+        probs = [0.5, 0.5]
+
+        chi = self.calculate_holevo_chi(states, probs)
+
+        return {
+            "description": "Orthogonal states |0⟩ and |1⟩",
+            "chi": chi,
+            "max_classical_bits": chi,
+            "note": "Achieves full 1 bit for equal probabilities"
+        }
+
+    def non_orthogonal_example(self, overlap: float = 0.5) -> dict:
+        """Example with non-orthogonal states."""
+        # |ψ₁⟩ = |0⟩, |ψ₂⟩ = cos(θ)|0⟩ + sin(θ)|1⟩
+        theta = np.arccos(overlap)
+
+        psi1 = np.array([1, 0], dtype=complex)
+        psi2 = np.array([np.cos(theta), np.sin(theta)], dtype=complex)
+
+        rho1 = np.outer(psi1, psi1.conj())
+        rho2 = np.outer(psi2, psi2.conj())
+
+        states = [rho1, rho2]
+        probs = [0.5, 0.5]
+
+        chi = self.calculate_holevo_chi(states, probs)
+
+        return {
+            "description": f"Non-orthogonal states with overlap {overlap}",
+            "chi": chi,
+            "reduction": 1 - chi,
+            "note": "Overlap reduces extractable information"
+        }
+
+    def superdense_coding_capacity(self) -> dict:
+        """
+        Superdense coding: 2 classical bits per qubit with entanglement.
+        """
+        return {
+            "description": "Superdense coding with shared Bell pair",
+            "classical_bits_per_qubit": 2,
+            "mechanism": "Alice encodes 2 bits by applying I, X, Z, or XZ",
+            "requirement": "Pre-shared entangled pair",
+            "note": "Beats Holevo bound using prior entanglement!"
+        }
+
+# Demonstrate Holevo bound
+holevo = HolevoBound()
+
+print("HOLEVO BOUND EXAMPLES")
+print("=" * 50)
+
+orth = holevo.orthogonal_states_example()
+print(f"\n{orth['description']}")
+print(f"  χ = {orth['chi']:.4f} bits")
+
+for overlap in [0.9, 0.7, 0.5, 0.3]:
+    nonorth = holevo.non_orthogonal_example(overlap)
+    print(f"\n{nonorth['description']}")
+    print(f"  χ = {nonorth['chi']:.4f} bits (reduction: {nonorth['reduction']:.4f})")
+
+sdc = holevo.superdense_coding_capacity()
+print(f"\n{sdc['description']}")
+print(f"  Capacity: {sdc['classical_bits_per_qubit']} bits/qubit")
+```
+
+## Practical QKD Key Rates
+
+```
+QKD Key Rate Formula (BB84):
+═══════════════════════════════════════════════════════════════════
+
+Secret Key Rate:
+
+R = R_raw × [1 - h(e_bit) - h(e_phase)] × η_det × η_basis
+
+where:
+• R_raw = source rate × fiber transmission
+• e_bit = bit error rate (from noise)
+• e_phase = phase error rate (estimated)
+• h(x) = -x log x - (1-x) log(1-x)  (binary entropy)
+• η_det = detector efficiency
+• η_basis = probability of matching basis (1/2 for BB84)
+
+┌─────────────────────────────────────────────────────────────────┐
+│ Parameter          │ Typical Value      │ Impact               │
+├────────────────────┼────────────────────┼──────────────────────┤
+│ Source rate        │ 1-100 MHz          │ Linear with rate     │
+│ Fiber loss         │ 0.2 dB/km          │ Exponential decay    │
+│ Detector efficiency│ 10-90%             │ Linear               │
+│ Error rate (QBER)  │ 1-5%               │ Threshold ~11%       │
+│ Basis efficiency   │ 50% (BB84)         │ Fixed protocol loss  │
+└────────────────────┴────────────────────┴──────────────────────┘
+
+Maximum Tolerable QBER:
+┌─────────────────────────────────────────────────────────────────┐
+│ Protocol    │ Max QBER    │ Notes                              │
+├─────────────┼─────────────┼────────────────────────────────────┤
+│ BB84        │ ~11%        │ 1 - 2h(e) > 0                     │
+│ Six-state   │ ~12.6%      │ Extra basis improves bound        │
+│ SARG04      │ ~10.95%     │ Better against PNS attacks        │
+│ E91         │ ~11%        │ Similar to BB84                    │
+└─────────────┴─────────────┴────────────────────────────────────┘
+```
+
+```python
+class QKDKeyRate:
+    """
+    Calculate practical QKD key rates.
+    """
+
+    def __init__(self):
+        self.source_rate_hz = 1e9      # 1 GHz
+        self.detector_efficiency = 0.25  # 25%
+        self.dark_count_rate = 1e3      # 1 kHz
+        self.fiber_loss_db_per_km = 0.2
+
+    def fiber_transmission(self, distance_km: float) -> float:
+        """Calculate fiber transmission probability."""
+        loss_db = self.fiber_loss_db_per_km * distance_km
+        return 10 ** (-loss_db / 10)
+
+    def raw_detection_rate(self, distance_km: float) -> float:
+        """Calculate raw detection rate."""
+        eta = self.fiber_transmission(distance_km)
+        return self.source_rate_hz * eta * self.detector_efficiency * 0.5  # 50% basis
+
+    def qber_from_dark_counts(self, distance_km: float) -> float:
+        """Estimate QBER from dark counts."""
+        signal_rate = self.raw_detection_rate(distance_km)
+        dark_rate = self.dark_count_rate
+
+        if signal_rate + dark_rate == 0:
+            return 0.5  # No signal
+
+        # Dark counts contribute 50% error rate on average
+        qber = 0.5 * dark_rate / (signal_rate + dark_rate)
+        return qber
+
+    def secret_key_rate(
+        self,
+        distance_km: float,
+        intrinsic_qber: float = 0.01
+    ) -> float:
+        """
+        Calculate secret key rate for BB84.
+
+        Args:
+            distance_km: Fiber distance
+            intrinsic_qber: Intrinsic error rate from source/detectors
+        """
+        # Total QBER
+        dark_qber = self.qber_from_dark_counts(distance_km)
+        total_qber = intrinsic_qber + dark_qber
+
+        if total_qber >= 0.11:  # Above threshold
+            return 0
+
+        # Raw rate
+        raw_rate = self.raw_detection_rate(distance_km)
+
+        # Secret fraction: 1 - 2h(e) (for symmetric channel)
+        h_e = binary_entropy(total_qber)
+        secret_fraction = max(0, 1 - 2 * h_e)
+
+        return raw_rate * secret_fraction
+
+    def plot_key_rate(self, max_distance: float = 200) -> list:
+        """Calculate key rate vs distance."""
+        distances = np.linspace(0, max_distance, 100)
+        rates = [self.secret_key_rate(d) for d in distances]
+        return list(zip(distances, rates))
+
+    def distance_at_rate(self, target_rate: float) -> float:
+        """Find maximum distance for given key rate."""
+        for d in np.linspace(0, 500, 1000):
+            if self.secret_key_rate(d) < target_rate:
+                return d
+        return 500
+
+    def rate_report(self, distance_km: float) -> str:
+        """Generate detailed rate report."""
+        return f"""
+QKD KEY RATE ANALYSIS
+═══════════════════════════════════════════════════════════════
+
+Distance: {distance_km} km
+
+Transmission:
+  Fiber loss:         {self.fiber_loss_db_per_km * distance_km:.1f} dB
+  Transmission:       {self.fiber_transmission(distance_km):.2e}
+
+Detection:
+  Raw detection rate: {self.raw_detection_rate(distance_km):.2e} Hz
+  QBER (dark counts): {self.qber_from_dark_counts(distance_km)*100:.3f}%
+  Total QBER:         {(0.01 + self.qber_from_dark_counts(distance_km))*100:.3f}%
+
+Secret Key:
+  Secret fraction:    {max(0, 1 - 2*binary_entropy(0.01 + self.qber_from_dark_counts(distance_km))):.4f}
+  Secret key rate:    {self.secret_key_rate(distance_km):.2e} bits/s
+
+Maximum distances:
+  At 1 Mbps:          {self.distance_at_rate(1e6):.1f} km
+  At 1 kbps:          {self.distance_at_rate(1e3):.1f} km
+  At 1 bps:           {self.distance_at_rate(1):.1f} km
+"""
+
+# Calculate QKD rates
+qkd = QKDKeyRate()
+for distance in [10, 50, 100, 150]:
+    rate = qkd.secret_key_rate(distance)
+    print(f"Distance {distance} km: Secret key rate = {rate:.2e} bits/s")
+
+print(qkd.rate_report(50))
+```
+
+## Summary
+
+Channel capacity fundamentals:
+
+1. **Multiple capacities**: Classical (C), quantum (Q), private (P), entanglement-assisted (C_EA)
+2. **Holevo bound**: Maximum 1 classical bit per qubit (without entanglement)
+3. **Quantum capacity**: Always ≤ classical capacity; can be zero even when C > 0
+4. **QKD rates**: Determined by loss, error rates, and protocol efficiency
+5. **Practical limits**: ~100 km without repeaters at ~1 kbps
+
+Understanding capacity limits guides protocol design and network architecture.

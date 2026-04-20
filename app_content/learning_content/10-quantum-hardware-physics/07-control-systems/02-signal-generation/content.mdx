@@ -1,0 +1,690 @@
+---
+title: "Microwave Signal Generation"
+description: "Master the techniques for generating precise microwave signals to control superconducting qubits."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Explain IQ modulation and its application to qubit control
+- Design microwave signal chains for qubit drive and readout
+- Calculate phase noise requirements and their impact on gate fidelity
+- Implement sideband modulation and DRAG pulse techniques
+- Analyze and calibrate mixer imperfections
+
+## 1. Introduction to Microwave Control
+
+Superconducting qubits operate at microwave frequencies, typically 4-8 GHz. Controlling these qubits requires generating microwave pulses with extraordinary precision in amplitude, frequency, and phase.
+
+<Definition term="Microwave Pulse">
+A shaped burst of electromagnetic energy at GHz frequencies used to drive qubit rotations. The pulse envelope determines the rotation angle, while the carrier phase sets the rotation axis on the Bloch sphere.
+</Definition>
+
+The challenge is significant: we need to control:
+- **Amplitude** to within 0.1% for high-fidelity gates
+- **Phase** to within 0.1 degrees for coherent operations
+- **Frequency** to within kHz for spectroscopic precision
+- **Timing** to within picoseconds across multiple channels
+
+## 2. IQ Modulation Fundamentals
+
+### The IQ Representation
+
+Any sinusoidal signal can be decomposed into In-phase (I) and Quadrature (Q) components:
+
+<Formula>
+$$s(t) = I(t)\cos(\omega_{LO}t) - Q(t)\sin(\omega_{LO}t)$$
+</Formula>
+
+This is equivalent to:
+
+<Formula>
+$$s(t) = A(t)\cos(\omega_{LO}t + \phi(t))$$
+</Formula>
+
+where:
+- $A(t) = \sqrt{I(t)^2 + Q(t)^2}$ is the amplitude envelope
+- $\phi(t) = \arctan(Q(t)/I(t))$ is the phase
+
+<Tip>
+IQ modulation allows independent control of amplitude and phase using two baseband signals. This is essential for qubit control where we need to create arbitrary rotations on the Bloch sphere.
+</Tip>
+
+### Connection to Qubit Control
+
+For a qubit driven at frequency $\omega_d$, the Hamiltonian in the rotating frame is:
+
+<Formula>
+$$H_{drive} = \frac{\Omega(t)}{2}(\cos\phi \cdot \sigma_x + \sin\phi \cdot \sigma_y)$$
+</Formula>
+
+where $\Omega(t)$ is the Rabi frequency (proportional to amplitude) and $\phi$ is the phase.
+
+The I and Q components directly map to X and Y rotations:
+- **I component** ($\cos\phi$): Drives X rotations
+- **Q component** ($\sin\phi$): Drives Y rotations
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def generate_iq_pulse(pulse_type, duration_ns, amplitude, phase_deg,
+                       sample_rate_GHz=1.0, sigma_ns=None):
+    """
+    Generate IQ pulse waveforms for qubit control.
+
+    Args:
+        pulse_type: 'gaussian', 'square', 'drag'
+        duration_ns: Pulse duration in nanoseconds
+        amplitude: Peak amplitude (normalized)
+        phase_deg: Rotation axis angle in degrees
+        sample_rate_GHz: Sample rate in GHz
+        sigma_ns: Gaussian sigma (for gaussian/drag pulses)
+
+    Returns:
+        t, I, Q arrays
+    """
+    num_samples = int(duration_ns * sample_rate_GHz)
+    t = np.linspace(0, duration_ns, num_samples)
+    phase_rad = np.deg2rad(phase_deg)
+
+    if sigma_ns is None:
+        sigma_ns = duration_ns / 4
+
+    # Generate envelope
+    if pulse_type == 'gaussian':
+        center = duration_ns / 2
+        envelope = amplitude * np.exp(-(t - center)**2 / (2 * sigma_ns**2))
+    elif pulse_type == 'square':
+        envelope = amplitude * np.ones_like(t)
+    elif pulse_type == 'drag':
+        center = duration_ns / 2
+        gaussian = np.exp(-(t - center)**2 / (2 * sigma_ns**2))
+        # DRAG correction: derivative of Gaussian
+        drag_coeff = 0.5  # Scaled by anharmonicity
+        derivative = -(t - center) / sigma_ns**2 * gaussian
+        envelope = amplitude * gaussian
+        q_correction = amplitude * drag_coeff * derivative
+    else:
+        raise ValueError(f"Unknown pulse type: {pulse_type}")
+
+    # Apply phase to get I and Q
+    if pulse_type == 'drag':
+        I = envelope * np.cos(phase_rad) - q_correction * np.sin(phase_rad)
+        Q = envelope * np.sin(phase_rad) + q_correction * np.cos(phase_rad)
+    else:
+        I = envelope * np.cos(phase_rad)
+        Q = envelope * np.sin(phase_rad)
+
+    return t, I, Q
+
+# Example: Generate different pulse types
+fig, axes = plt.subplots(2, 3, figsize=(12, 6))
+
+for idx, (ptype, phase) in enumerate([
+    ('gaussian', 0), ('gaussian', 90), ('gaussian', 45),
+    ('drag', 0), ('drag', 90), ('square', 0)
+]):
+    ax = axes[idx // 3, idx % 3]
+    t, I, Q = generate_iq_pulse(ptype, 20, 1.0, phase)
+    ax.plot(t, I, 'b-', label='I')
+    ax.plot(t, Q, 'r-', label='Q')
+    ax.set_title(f'{ptype}, phase={phase}deg')
+    ax.legend()
+    ax.set_xlabel('Time (ns)')
+    ax.grid(True)
+
+plt.tight_layout()
+plt.show()
+```
+
+## 3. Signal Generation Architectures
+
+### Architecture 1: IF + Mixing
+
+The traditional approach uses intermediate frequency (IF) signals upconverted by a mixer:
+
+```
+┌─────────┐     ┌─────────┐     ┌─────────┐
+│  DAC I  │────▶│         │     │         │
+│  (IF)   │     │   IQ    │────▶│  Filter │────▶ To Qubit
+│  DAC Q  │────▶│  Mixer  │     │         │
+└─────────┘     └────┬────┘     └─────────┘
+                     │
+              ┌──────▼──────┐
+              │     LO      │
+              │ (Microwave) │
+              └─────────────┘
+```
+
+**Mixer output:**
+
+<Formula>
+$$s_{RF}(t) = I(t)\cos(\omega_{LO}t) - Q(t)\sin(\omega_{LO}t)$$
+</Formula>
+
+**Advantages:**
+- Lower-speed DACs (100 MHz - 1 GHz bandwidth)
+- Mature technology, many commercial options
+
+**Disadvantages:**
+- Mixer imperfections (LO leakage, IQ imbalance, sideband suppression)
+- Additional calibration required
+- Phase coherence between LO and IF must be maintained
+
+### Architecture 2: Direct RF Synthesis
+
+Modern systems generate signals directly at qubit frequencies:
+
+```
+┌─────────────────┐
+│  High-Speed DAC │────▶ Filter ────▶ Amplifier ────▶ To Qubit
+│  (6+ GSPS)      │
+└─────────────────┘
+```
+
+**Advantages:**
+- No mixer imperfections
+- Simpler signal chain
+- Better phase coherence
+
+**Disadvantages:**
+- Expensive high-speed DACs
+- Higher power consumption
+- Limited by DAC analog bandwidth
+
+<Warning>
+Direct RF synthesis requires DACs with sample rates at least 2x the qubit frequency (Nyquist), but practically 4-5x for good signal quality. A 6 GHz qubit needs a ~25+ GSPS DAC for direct synthesis, or clever use of Nyquist zones.
+</Warning>
+
+### Architecture 3: Nyquist Zone Synthesis
+
+DAC output contains images at $f_{out} = |n \cdot f_s \pm f_{IF}|$ where n is the Nyquist zone:
+
+```python
+def calculate_nyquist_images(f_if_MHz, f_sample_GHz, num_zones=4):
+    """Calculate DAC output frequencies in different Nyquist zones."""
+    f_s = f_sample_GHz * 1000  # Convert to MHz
+    images = []
+
+    for n in range(num_zones):
+        # Upper sideband of zone n
+        f_upper = n * f_s + f_if_MHz
+        # Lower sideband of zone n
+        f_lower = n * f_s - f_if_MHz
+        images.append({
+            'zone': n,
+            'upper_MHz': f_upper,
+            'lower_MHz': abs(f_lower)
+        })
+
+    return images
+
+# Example: 250 MHz IF, 2 GSPS sample rate
+images = calculate_nyquist_images(250, 2.0)
+print("Nyquist zone outputs for 250 MHz IF @ 2 GSPS:")
+for img in images:
+    print(f"  Zone {img['zone']}: {img['lower_MHz']:.0f} MHz, {img['upper_MHz']:.0f} MHz")
+```
+
+Using the 2nd or 3rd Nyquist zone with bandpass filtering allows synthesis at higher frequencies with lower sample rate DACs.
+
+## 4. Local Oscillator Requirements
+
+### Phase Noise
+
+Phase noise is fluctuation in the oscillator phase, characterized by the power spectral density $\mathcal{L}(f)$ in dBc/Hz at offset frequency f.
+
+<Definition term="Phase Noise">
+Random fluctuations in the phase of an oscillator signal, typically specified as the single-sideband noise power relative to the carrier power in a 1 Hz bandwidth at a given offset frequency from the carrier.
+</Definition>
+
+**Impact on Qubits:**
+
+Phase noise causes dephasing of the qubit. The accumulated phase error during a gate of duration $\tau$ is:
+
+<Formula>
+$$\sigma_\phi^2 = \int_{1/\tau}^{f_{max}} S_\phi(f) df$$
+</Formula>
+
+where $S_\phi(f) = 2 \mathcal{L}(f)$ is the two-sided phase noise spectral density.
+
+### Phase Noise Requirements
+
+For 99.99% gate fidelity, phase error must be < 0.01 radians (0.6 degrees):
+
+```python
+import numpy as np
+
+def calculate_phase_noise_requirement(gate_fidelity, gate_time_ns):
+    """
+    Calculate required phase noise for target gate fidelity.
+
+    Args:
+        gate_fidelity: Target fidelity (e.g., 0.9999)
+        gate_time_ns: Gate duration in nanoseconds
+
+    Returns:
+        Required phase noise in dBc/Hz at 10 kHz offset
+    """
+    # Maximum allowed phase error
+    max_phase_error_rad = np.sqrt(1 - gate_fidelity) * np.pi
+
+    # Approximate integration bandwidth: 1/tau to 10 MHz
+    f_low = 1 / (gate_time_ns * 1e-9)  # Hz
+    f_high = 10e6  # 10 MHz
+
+    # Assuming 1/f^2 phase noise (typical for good oscillators)
+    # integral of L(f) from f_low to f_high ~ L(f_ref) * f_ref^2 * (1/f_low - 1/f_high)
+    # For simplicity, approximate as noise at 10 kHz integrated over bandwidth
+    integration_bw = f_high - f_low
+
+    # Required S_phi (rad^2/Hz)
+    S_phi_required = max_phase_error_rad**2 / integration_bw
+
+    # Convert to dBc/Hz (L = S_phi / 2)
+    L_dBc_Hz = 10 * np.log10(S_phi_required / 2)
+
+    return {
+        'max_phase_error_deg': np.rad2deg(max_phase_error_rad),
+        'integration_bw_MHz': integration_bw / 1e6,
+        'required_phase_noise_dBc_Hz': L_dBc_Hz
+    }
+
+# Example: 99.99% fidelity, 20 ns gate
+req = calculate_phase_noise_requirement(0.9999, 20)
+print(f"Phase noise requirement for 99.99% fidelity, 20 ns gate:")
+print(f"  Max phase error: {req['max_phase_error_deg']:.2f} degrees")
+print(f"  Required phase noise: {req['required_phase_noise_dBc_Hz']:.0f} dBc/Hz")
+```
+
+Typical requirements:
+- **-100 dBc/Hz at 10 kHz offset** for high-fidelity gates
+- Modern synthesizers achieve -120 dBc/Hz or better
+
+## 5. IQ Mixer Calibration
+
+### Mixer Imperfections
+
+Real IQ mixers have several imperfections:
+
+<Definition term="LO Leakage">
+Carrier signal from the local oscillator that appears at the output even when I=Q=0. Caused by isolation limitations and DC offsets.
+</Definition>
+
+<Definition term="IQ Imbalance">
+Differences in gain and phase between the I and Q paths, causing imperfect cancellation of the unwanted sideband.
+</Definition>
+
+### Mathematical Model
+
+The actual mixer output is:
+
+<Formula>
+$$s_{RF}(t) = (1+\epsilon_I)I(t)\cos(\omega_{LO}t + \theta_I) - (1+\epsilon_Q)Q(t)\sin(\omega_{LO}t + \theta_Q) + V_{LO}$$
+</Formula>
+
+where:
+- $\epsilon_I, \epsilon_Q$ are gain imbalances
+- $\theta_I, \theta_Q$ are phase imbalances
+- $V_{LO}$ is LO leakage
+
+### Calibration Procedure
+
+```python
+import numpy as np
+
+def calculate_mixer_calibration(measured_sideband_dBc, measured_lo_leakage_dBc):
+    """
+    Calculate IQ mixer calibration parameters.
+
+    Args:
+        measured_sideband_dBc: Unwanted sideband level (dB relative to wanted)
+        measured_lo_leakage_dBc: LO leakage level (dB relative to carrier)
+
+    Returns:
+        Dictionary with estimated imperfections and corrections
+    """
+    # Sideband suppression relates to IQ imbalance
+    # For small imbalance: sideband_power ~ (epsilon^2 + theta^2) / 4
+    # If -30 dBc sideband, then sqrt(eps^2 + theta^2) ~ 0.063
+
+    imbalance_linear = 2 * 10**(measured_sideband_dBc / 20)
+
+    # Assume equal contribution from amplitude and phase
+    amplitude_imbalance_percent = imbalance_linear / np.sqrt(2) * 100
+    phase_imbalance_deg = np.rad2deg(imbalance_linear / np.sqrt(2))
+
+    # LO leakage relates to DC offsets
+    # V_LO / V_signal = 10^(leakage_dBc/20)
+    lo_leakage_ratio = 10**(measured_lo_leakage_dBc / 20)
+
+    return {
+        'estimated_amplitude_imbalance_%': amplitude_imbalance_percent,
+        'estimated_phase_imbalance_deg': phase_imbalance_deg,
+        'lo_leakage_ratio': lo_leakage_ratio,
+        'recommended_i_offset': -lo_leakage_ratio * 0.5,  # Approximate
+        'recommended_q_offset': -lo_leakage_ratio * 0.5
+    }
+
+# Example: -35 dBc sideband, -40 dBc LO leakage
+cal = calculate_mixer_calibration(-35, -40)
+print("Mixer Calibration Analysis:")
+for key, value in cal.items():
+    print(f"  {key}: {value:.4f}")
+```
+
+### Digital Predistortion
+
+Modern systems use digital predistortion to compensate mixer imperfections:
+
+<Formula>
+$$\begin{pmatrix} I_{corrected} \\ Q_{corrected} \end{pmatrix} = \begin{pmatrix} a_{11} & a_{12} \\ a_{21} & a_{22} \end{pmatrix} \begin{pmatrix} I_{original} \\ Q_{original} \end{pmatrix} + \begin{pmatrix} \Delta I \\ \Delta Q \end{pmatrix}$$
+</Formula>
+
+The matrix corrects for IQ imbalance, and the offset corrects for LO leakage.
+
+## 6. DRAG Pulses
+
+### The Leakage Problem
+
+Simple Gaussian pulses can excite transitions to the |2⟩ state due to the finite bandwidth of the pulse overlapping with the |1⟩→|2⟩ transition:
+
+<Formula>
+$$\omega_{12} = \omega_{01} + \alpha$$
+</Formula>
+
+where $\alpha$ is the anharmonicity (typically -200 to -300 MHz).
+
+### DRAG (Derivative Removal by Adiabatic Gate)
+
+DRAG adds a derivative component to the quadrature channel:
+
+<Formula>
+$$I(t) = \Omega(t)$$
+$$Q(t) = -\frac{\dot{\Omega}(t)}{2\alpha}$$
+</Formula>
+
+<Tip>
+DRAG pulses reduce leakage to the |2⟩ state by adding a correction proportional to the derivative of the main pulse. The correction amplitude scales inversely with the anharmonicity.
+</Tip>
+
+### DRAG Implementation
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def generate_drag_pulse(duration_ns, amplitude, anharmonicity_MHz,
+                         sigma_ns=None, sample_rate_GHz=2.0):
+    """
+    Generate a DRAG pulse for leakage suppression.
+
+    Args:
+        duration_ns: Pulse duration
+        amplitude: Pulse amplitude (Rabi frequency in rad/ns)
+        anharmonicity_MHz: Qubit anharmonicity (negative for transmon)
+        sigma_ns: Gaussian sigma
+        sample_rate_GHz: Sample rate
+
+    Returns:
+        t, I, Q, envelope arrays
+    """
+    if sigma_ns is None:
+        sigma_ns = duration_ns / 4
+
+    num_samples = int(duration_ns * sample_rate_GHz)
+    t = np.linspace(0, duration_ns, num_samples)
+    dt = t[1] - t[0]  # ns
+
+    center = duration_ns / 2
+    anharmonicity_rad_ns = 2 * np.pi * anharmonicity_MHz / 1000  # Convert to rad/ns
+
+    # Gaussian envelope
+    envelope = amplitude * np.exp(-(t - center)**2 / (2 * sigma_ns**2))
+
+    # Derivative of Gaussian
+    d_envelope = -(t - center) / sigma_ns**2 * envelope
+
+    # DRAG correction
+    drag_coeff = -1 / (2 * anharmonicity_rad_ns)  # Note: alpha is negative
+    q_drag = drag_coeff * d_envelope
+
+    return t, envelope, q_drag, envelope
+
+# Generate and plot DRAG pulse
+t, I, Q, env = generate_drag_pulse(20, 0.1, -250)
+
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+
+ax1.plot(t, I, 'b-', linewidth=2, label='I (Gaussian)')
+ax1.plot(t, Q, 'r-', linewidth=2, label='Q (DRAG correction)')
+ax1.set_ylabel('Amplitude')
+ax1.legend()
+ax1.grid(True)
+ax1.set_title('DRAG Pulse Components')
+
+# Show the effect on leakage
+ax2.plot(t, np.sqrt(I**2 + Q**2), 'k-', linewidth=2, label='|Amplitude|')
+ax2.plot(t, np.angle(I + 1j*Q), 'g--', linewidth=2, label='Phase')
+ax2.set_xlabel('Time (ns)')
+ax2.set_ylabel('Amplitude / Phase (rad)')
+ax2.legend()
+ax2.grid(True)
+
+plt.tight_layout()
+plt.show()
+```
+
+### Optimal DRAG Coefficient
+
+The optimal DRAG coefficient depends on the qubit parameters and gate calibration:
+
+<Formula>
+$$\beta_{DRAG} = -\frac{\lambda}{4\alpha}$$
+</Formula>
+
+where $\lambda$ is a scaling factor typically determined experimentally (often close to 1).
+
+## 7. Sideband Modulation
+
+### Single Sideband (SSB) Modulation
+
+To generate a tone at $\omega_{LO} + \omega_{IF}$:
+
+<Formula>
+$$I(t) = \cos(\omega_{IF}t)$$
+$$Q(t) = \sin(\omega_{IF}t)$$
+</Formula>
+
+This produces only the upper sideband; the lower sideband is cancelled.
+
+### Multiple Frequency Generation
+
+For multiplexed readout, generate multiple tones:
+
+```python
+def generate_multitone_iq(frequencies_MHz, amplitudes, duration_ns,
+                           sample_rate_GHz=2.0, phases_deg=None):
+    """
+    Generate IQ signals for multiple simultaneous frequencies.
+
+    Args:
+        frequencies_MHz: List of IF frequencies
+        amplitudes: List of amplitudes
+        duration_ns: Signal duration
+        sample_rate_GHz: Sample rate
+        phases_deg: List of phases (optional)
+
+    Returns:
+        t, I, Q arrays
+    """
+    num_samples = int(duration_ns * sample_rate_GHz)
+    t = np.linspace(0, duration_ns, num_samples)
+
+    if phases_deg is None:
+        phases_deg = [0] * len(frequencies_MHz)
+
+    I = np.zeros_like(t)
+    Q = np.zeros_like(t)
+
+    for f_MHz, amp, phase in zip(frequencies_MHz, amplitudes, phases_deg):
+        omega = 2 * np.pi * f_MHz / 1000  # Convert to rad/ns
+        phi = np.deg2rad(phase)
+
+        I += amp * np.cos(omega * t + phi)
+        Q += amp * np.sin(omega * t + phi)
+
+    return t, I, Q
+
+# Example: 4-tone multiplexed readout
+freqs = [50, 100, 150, 200]  # MHz offsets
+amps = [1, 1, 1, 1]
+
+t, I, Q = generate_multitone_iq(freqs, amps, 1000)
+
+# Plot time domain and spectrum
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6))
+
+ax1.plot(t[:500], I[:500], 'b-', alpha=0.7)
+ax1.plot(t[:500], Q[:500], 'r-', alpha=0.7)
+ax1.set_xlabel('Time (ns)')
+ax1.set_ylabel('Amplitude')
+ax1.set_title('Multitone IQ Signals (first 500 ns)')
+ax1.legend(['I', 'Q'])
+
+# FFT
+from scipy.fft import fft, fftfreq
+n = len(t)
+yf = fft(I + 1j*Q)
+xf = fftfreq(n, 1/(sample_rate_GHz*1000)) # MHz
+
+ax2.plot(xf[:n//2], 2/n * np.abs(yf[:n//2]))
+ax2.set_xlabel('Frequency (MHz)')
+ax2.set_ylabel('Amplitude')
+ax2.set_title('Spectrum')
+ax2.set_xlim(0, 300)
+
+plt.tight_layout()
+plt.show()
+```
+
+## 8. Practical Signal Generation Example
+
+### Complete Pulse Generation Pipeline
+
+```python
+import numpy as np
+
+class MicrowavePulseGenerator:
+    """
+    Complete microwave pulse generator for qubit control.
+    """
+
+    def __init__(self, sample_rate_GHz, if_freq_MHz, qubit_anharmonicity_MHz):
+        self.sample_rate = sample_rate_GHz  # GHz
+        self.if_freq = if_freq_MHz  # MHz
+        self.anharmonicity = qubit_anharmonicity_MHz  # MHz (negative)
+
+        # Mixer calibration (to be updated)
+        self.i_offset = 0.0
+        self.q_offset = 0.0
+        self.amplitude_imbalance = 0.0  # fractional
+        self.phase_imbalance = 0.0  # radians
+
+    def apply_mixer_calibration(self, I, Q):
+        """Apply digital predistortion for mixer correction."""
+        # Correct IQ imbalance
+        I_cal = I * (1 + self.amplitude_imbalance)
+        Q_cal = Q * np.cos(self.phase_imbalance) + I * np.sin(self.phase_imbalance)
+
+        # Correct DC offsets (LO leakage)
+        I_cal += self.i_offset
+        Q_cal += self.q_offset
+
+        return I_cal, Q_cal
+
+    def generate_x_rotation(self, angle_deg, duration_ns, use_drag=True):
+        """Generate pulse for X rotation."""
+        return self._generate_rotation(angle_deg, duration_ns, 0, use_drag)
+
+    def generate_y_rotation(self, angle_deg, duration_ns, use_drag=True):
+        """Generate pulse for Y rotation."""
+        return self._generate_rotation(angle_deg, duration_ns, 90, use_drag)
+
+    def _generate_rotation(self, angle_deg, duration_ns, phase_deg, use_drag):
+        """Generate arbitrary rotation pulse."""
+        num_samples = int(duration_ns * self.sample_rate)
+        t = np.linspace(0, duration_ns, num_samples)
+
+        # Gaussian envelope
+        sigma = duration_ns / 4
+        center = duration_ns / 2
+        amplitude = np.deg2rad(angle_deg) / duration_ns  # Approximate
+
+        envelope = amplitude * np.exp(-(t - center)**2 / (2 * sigma**2))
+
+        # Apply rotation phase
+        phase_rad = np.deg2rad(phase_deg)
+        I_env = envelope * np.cos(phase_rad)
+        Q_env = envelope * np.sin(phase_rad)
+
+        # DRAG correction
+        if use_drag:
+            d_envelope = -(t - center) / sigma**2 * amplitude * \
+                         np.exp(-(t - center)**2 / (2 * sigma**2))
+            alpha_rad_ns = 2 * np.pi * self.anharmonicity / 1000
+            drag_coeff = -1 / (2 * alpha_rad_ns)
+            Q_drag = drag_coeff * d_envelope
+            Q_env += Q_drag * np.cos(phase_rad)
+            I_env -= Q_drag * np.sin(phase_rad)
+
+        # Modulate to IF frequency
+        omega_if = 2 * np.pi * self.if_freq / 1000  # rad/ns
+        I = I_env * np.cos(omega_if * t) - Q_env * np.sin(omega_if * t)
+        Q = I_env * np.sin(omega_if * t) + Q_env * np.cos(omega_if * t)
+
+        # Apply mixer calibration
+        I, Q = self.apply_mixer_calibration(I, Q)
+
+        return t, I, Q
+
+# Example usage
+gen = MicrowavePulseGenerator(
+    sample_rate_GHz=2.0,
+    if_freq_MHz=100,
+    qubit_anharmonicity_MHz=-250
+)
+
+# Generate X90 pulse
+t, I, Q = gen.generate_x_rotation(90, 20)
+print(f"Generated X90 pulse: {len(t)} samples over {t[-1]:.1f} ns")
+```
+
+## 9. Summary
+
+Microwave signal generation for quantum control requires:
+
+1. **IQ modulation** enables independent control of amplitude and phase for arbitrary qubit rotations
+
+2. **Architecture choices** between IF+mixing and direct synthesis have different trade-offs in complexity, calibration, and performance
+
+3. **Phase noise** from local oscillators causes dephasing; -100 dBc/Hz or better is needed for high-fidelity gates
+
+4. **Mixer calibration** corrects IQ imbalance and LO leakage through digital predistortion
+
+5. **DRAG pulses** suppress leakage to higher qubit states by adding derivative corrections
+
+6. **Sideband modulation** enables frequency multiplexing for efficient readout
+
+<Tip>
+The quality of microwave signal generation directly limits gate fidelity. Invest time in understanding and calibrating your signal chain - the few percent improvement in calibration can mean the difference between useful and unusable quantum operations.
+</Tip>
+
+## Further Reading
+
+- Motzoi et al., "Simple Pulses for Elimination of Leakage in Weakly Nonlinear Qubits" (2009)
+- Next lesson: FPGA-Based Real-Time Control

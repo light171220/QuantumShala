@@ -1,0 +1,739 @@
+---
+title: "Containerization for Quantum Applications"
+description: "Learn to containerize quantum applications using Docker, ensuring reproducible environments across development, testing, and production. Master multi-stage builds, dependency management, and orchestration for quantum workloads."
+duration: 50
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Create optimized Docker images for quantum applications with proper dependency management
+- Implement multi-stage builds to minimize image size while maintaining functionality
+- Configure containers for quantum simulator and hardware access
+- Set up Docker Compose for local quantum development environments
+- Handle sensitive credentials securely in containerized quantum applications
+- Orchestrate quantum workloads using Kubernetes patterns
+
+## 1. Why Containerize Quantum Applications?
+
+Containerization solves the "works on my machine" problem that is especially prevalent in quantum computing due to complex dependency chains and hardware-specific configurations.
+
+<Definition term="Container">
+A lightweight, standalone, executable package that includes everything needed to run an application: code, runtime, system tools, libraries, and settings. Containers isolate software from its surroundings and ensure uniform operation across environments.
+</Definition>
+
+### Benefits for Quantum Development
+
+| Challenge | Container Solution |
+|-----------|-------------------|
+| Complex dependencies (Qiskit, Cirq, PennyLane) | Locked versions in image |
+| Inconsistent Python environments | Reproducible base image |
+| Hardware credential management | Secret injection at runtime |
+| CI/CD environment parity | Same image across stages |
+| Team onboarding | Single `docker run` command |
+
+<Formula>
+$$\text{Reproducibility} = f(\text{Code} + \text{Dependencies} + \text{Configuration} + \text{Environment})$$
+</Formula>
+
+Containers capture all four components, ensuring experiments can be reproduced exactly.
+
+## 2. Basic Dockerfile for Quantum Applications
+
+Let's start with a basic Dockerfile for a Qiskit-based application.
+
+```dockerfile
+# Dockerfile
+# Basic quantum application container
+
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    libopenblas-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY src/ ./src/
+COPY circuits/ ./circuits/
+
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash quantum && \
+    chown -R quantum:quantum /app
+USER quantum
+
+# Default command
+CMD ["python", "-m", "src.quantum_app"]
+```
+
+### Requirements File for Quantum Stack
+
+```txt
+# requirements.txt
+# Core quantum libraries
+qiskit>=1.0.0
+qiskit-aer>=0.14.0
+qiskit-ibm-runtime>=0.20.0
+
+# Scientific computing
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Visualization and utilities
+matplotlib>=3.7.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+```
+
+<Warning>
+Always pin your dependencies to specific versions in production images. Use `pip freeze > requirements.txt` after testing to capture exact versions.
+</Warning>
+
+## 3. Multi-Stage Builds for Optimized Images
+
+Multi-stage builds separate the build environment from the runtime environment, resulting in smaller, more secure images.
+
+```dockerfile
+# Dockerfile.multistage
+# Optimized multi-stage build for quantum applications
+
+# ============================================
+# Stage 1: Builder
+# ============================================
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    libopenblas-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ============================================
+# Stage 2: Test Runner
+# ============================================
+FROM builder AS tester
+
+COPY requirements-dev.txt .
+RUN pip install --no-cache-dir -r requirements-dev.txt
+
+COPY . .
+
+# Run tests during build
+RUN pytest tests/unit/ -v --tb=short
+
+# ============================================
+# Stage 3: Production Runtime
+# ============================================
+FROM python:3.11-slim AS runtime
+
+# Install only runtime system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libopenblas0 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/cache/apt/*
+
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /app
+
+# Copy application code
+COPY src/ ./src/
+COPY circuits/ ./circuits/
+
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash --uid 1000 quantum && \
+    chown -R quantum:quantum /app
+
+USER quantum
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import qiskit; print(qiskit.__version__)" || exit 1
+
+# Labels for metadata
+LABEL org.opencontainers.image.title="Quantum Application" \
+      org.opencontainers.image.description="Production quantum computing application" \
+      org.opencontainers.image.version="1.0.0" \
+      org.opencontainers.image.vendor="QuantumTeam"
+
+EXPOSE 8000
+
+CMD ["python", "-m", "src.quantum_app"]
+```
+
+<Tip>
+The multi-stage build produces an image without build tools (gcc, g++), significantly reducing the attack surface and image size.
+</Tip>
+
+### Image Size Comparison
+
+```bash
+# Single-stage build
+docker build -t quantum-app:single .
+# Size: ~2.1 GB
+
+# Multi-stage build
+docker build -f Dockerfile.multistage -t quantum-app:multi .
+# Size: ~850 MB
+
+# With additional optimization (slim base + cleanup)
+# Size: ~650 MB
+```
+
+## 4. Handling Quantum Hardware Credentials
+
+Securely managing IBM Quantum or other provider credentials is critical in containerized environments.
+
+<Warning>
+Never bake credentials into Docker images! They persist in image layers and can be extracted by anyone with access to the image.
+</Warning>
+
+### Runtime Secret Injection
+
+```dockerfile
+# Dockerfile with secret handling
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# ... (install dependencies)
+
+COPY src/ ./src/
+
+# Create credentials directory with proper permissions
+RUN mkdir -p /home/quantum/.qiskit && \
+    useradd --create-home --shell /bin/bash quantum && \
+    chown -R quantum:quantum /home/quantum /app
+
+USER quantum
+
+# Credentials are injected at runtime, not build time
+# The entrypoint script handles credential setup
+COPY --chown=quantum:quantum docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["python", "-m", "src.quantum_app"]
+```
+
+```bash
+#!/bin/bash
+# docker-entrypoint.sh
+
+set -e
+
+# Configure IBM Quantum credentials if provided
+if [ -n "$IBM_QUANTUM_TOKEN" ]; then
+    echo "Configuring IBM Quantum credentials..."
+
+    mkdir -p ~/.qiskit
+    cat > ~/.qiskit/qiskit-ibm.json << EOF
+{
+    "default-ibm-quantum": {
+        "channel": "ibm_quantum",
+        "token": "${IBM_QUANTUM_TOKEN}",
+        "instance": "${IBM_QUANTUM_INSTANCE:-ibm-q/open/main}"
+    }
+}
+EOF
+    chmod 600 ~/.qiskit/qiskit-ibm.json
+    echo "Credentials configured."
+else
+    echo "No IBM_QUANTUM_TOKEN provided, running in simulator-only mode."
+fi
+
+# Execute the main command
+exec "$@"
+```
+
+### Running with Secrets
+
+```bash
+# Method 1: Environment variables
+docker run -e IBM_QUANTUM_TOKEN="your-token" quantum-app
+
+# Method 2: Docker secrets (Docker Swarm)
+echo "your-token" | docker secret create ibm_quantum_token -
+docker service create \
+    --secret ibm_quantum_token \
+    --env IBM_QUANTUM_TOKEN_FILE=/run/secrets/ibm_quantum_token \
+    quantum-app
+
+# Method 3: Mount secrets file
+docker run -v ~/.qiskit:/home/quantum/.qiskit:ro quantum-app
+```
+
+## 5. Docker Compose for Development
+
+Docker Compose simplifies local development with multiple services.
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  quantum-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: quantum-app:dev
+    container_name: quantum-dev
+    volumes:
+      # Mount source for hot reload during development
+      - ./src:/app/src:ro
+      - ./circuits:/app/circuits:ro
+      # Mount results directory for persistence
+      - ./data/results:/app/data/results
+    environment:
+      - PYTHONPATH=/app
+      - LOG_LEVEL=DEBUG
+      - QISKIT_IN_PARALLEL=TRUE
+    env_file:
+      - .env.local
+    ports:
+      - "8000:8000"
+    networks:
+      - quantum-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import qiskit"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile.jupyter
+    image: quantum-jupyter:dev
+    container_name: quantum-jupyter
+    volumes:
+      - ./notebooks:/home/quantum/notebooks
+      - ./src:/home/quantum/src:ro
+      - ./data:/home/quantum/data
+    environment:
+      - JUPYTER_TOKEN=quantum-dev
+    env_file:
+      - .env.local
+    ports:
+      - "8888:8888"
+    networks:
+      - quantum-net
+
+  # Redis for caching simulation results
+  cache:
+    image: redis:7-alpine
+    container_name: quantum-cache
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks:
+      - quantum-net
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: quantum-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - quantum-net
+
+networks:
+  quantum-net:
+    driver: bridge
+
+volumes:
+  redis-data:
+```
+
+### Jupyter Dockerfile
+
+```dockerfile
+# Dockerfile.jupyter
+FROM python:3.11-slim
+
+WORKDIR /home/quantum
+
+# Install Jupyter and quantum dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ libopenblas-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
+    jupyterlab \
+    ipywidgets \
+    qiskit[visualization]
+
+# Create user
+RUN useradd --create-home --shell /bin/bash --uid 1000 quantum && \
+    chown -R quantum:quantum /home/quantum
+
+USER quantum
+
+EXPOSE 8888
+
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser"]
+```
+
+### Development Commands
+
+```bash
+# Start all services
+docker-compose up -d
+
+# View logs
+docker-compose logs -f quantum-app
+
+# Run tests in container
+docker-compose exec quantum-app pytest tests/ -v
+
+# Access Jupyter
+# Open http://localhost:8888?token=quantum-dev
+
+# Stop and clean up
+docker-compose down -v
+```
+
+## 6. Production Kubernetes Deployment
+
+For production deployments, Kubernetes provides orchestration, scaling, and management capabilities.
+
+<Example>
+**Kubernetes Deployment for Quantum Service**
+
+```yaml
+# k8s/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quantum-service
+  namespace: quantum
+  labels:
+    app: quantum-service
+    version: v1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: quantum-service
+  template:
+    metadata:
+      labels:
+        app: quantum-service
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+    spec:
+      serviceAccountName: quantum-service
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: quantum-app
+          image: registry.example.com/quantum-app:1.0.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: QISKIT_IN_PARALLEL
+              value: "TRUE"
+            - name: IBM_QUANTUM_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: quantum-credentials
+                  key: ibm-token
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: circuit-cache
+              mountPath: /app/cache
+      volumes:
+        - name: circuit-cache
+          emptyDir:
+            sizeLimit: 1Gi
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: quantum-service
+                topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: quantum-service
+  namespace: quantum
+spec:
+  selector:
+    app: quantum-service
+  ports:
+    - port: 80
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: quantum-credentials
+  namespace: quantum
+type: Opaque
+stringData:
+  ibm-token: ${IBM_QUANTUM_TOKEN}  # Injected via CI/CD
+```
+</Example>
+
+### Horizontal Pod Autoscaler
+
+```yaml
+# k8s/hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: quantum-service-hpa
+  namespace: quantum
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: quantum-service
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+```
+
+## 7. GPU-Enabled Containers for Simulation
+
+For large quantum simulations, GPU acceleration can dramatically improve performance.
+
+```dockerfile
+# Dockerfile.gpu
+# GPU-enabled quantum simulation container
+
+FROM nvidia/cuda:12.1-runtime-ubuntu22.04
+
+# Install Python and dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create virtual environment
+RUN python3.11 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install GPU-enabled libraries
+COPY requirements-gpu.txt .
+RUN pip install --no-cache-dir -r requirements-gpu.txt
+
+# Verify GPU access
+RUN python -c "import cupy; print(f'CuPy version: {cupy.__version__}')"
+
+WORKDIR /app
+COPY src/ ./src/
+
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash quantum && \
+    chown -R quantum:quantum /app
+
+USER quantum
+
+CMD ["python", "-m", "src.quantum_app"]
+```
+
+```txt
+# requirements-gpu.txt
+qiskit>=1.0.0
+qiskit-aer-gpu>=0.14.0
+cupy-cuda12x>=12.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+```
+
+```bash
+# Run with GPU access
+docker run --gpus all \
+    -e NVIDIA_VISIBLE_DEVICES=all \
+    quantum-app:gpu
+```
+
+## 8. Best Practices Summary
+
+### Security Checklist
+
+```markdown
+## Container Security Checklist
+
+- [ ] Use non-root user
+- [ ] Pin base image versions
+- [ ] Scan images for vulnerabilities (trivy, snyk)
+- [ ] Never embed secrets in images
+- [ ] Use read-only file systems where possible
+- [ ] Set resource limits
+- [ ] Use distroless or minimal base images
+- [ ] Sign images with cosign
+```
+
+### Optimization Tips
+
+```python
+# src/quantum_app/container_utils.py
+"""Utilities for running in containers."""
+import os
+from functools import lru_cache
+
+def is_container() -> bool:
+    """Detect if running inside a container."""
+    return (
+        os.path.exists('/.dockerenv') or
+        os.environ.get('KUBERNETES_SERVICE_HOST') is not None
+    )
+
+def get_optimal_workers() -> int:
+    """Get optimal worker count respecting container limits."""
+    import multiprocessing
+
+    if is_container():
+        # Respect CPU limits in containers
+        cpu_limit = os.environ.get('CPU_LIMIT')
+        if cpu_limit:
+            return int(float(cpu_limit))
+
+        # Try to read cgroup limits
+        try:
+            with open('/sys/fs/cgroup/cpu/cpu.cfs_quota_us') as f:
+                quota = int(f.read())
+            with open('/sys/fs/cgroup/cpu/cpu.cfs_period_us') as f:
+                period = int(f.read())
+            if quota > 0:
+                return max(1, quota // period)
+        except Exception:
+            pass
+
+    return multiprocessing.cpu_count()
+
+@lru_cache()
+def get_memory_limit_mb() -> int:
+    """Get memory limit in MB, respecting container constraints."""
+    if is_container():
+        try:
+            with open('/sys/fs/cgroup/memory/memory.limit_in_bytes') as f:
+                limit = int(f.read())
+                return limit // (1024 * 1024)
+        except Exception:
+            pass
+
+    import psutil
+    return psutil.virtual_memory().total // (1024 * 1024)
+```
+
+## Summary
+
+In this lesson, you learned how to containerize quantum applications effectively:
+
+1. **Basic Dockerfiles**: Creating images with proper dependency management
+2. **Multi-Stage Builds**: Optimizing image size and security
+3. **Credential Management**: Securely injecting secrets at runtime
+4. **Docker Compose**: Local development environments with multiple services
+5. **Kubernetes**: Production deployment patterns with scaling
+6. **GPU Support**: Enabling accelerated simulation
+
+<Tip>
+Start with a simple Dockerfile and iterate. Add multi-stage builds and optimizations as your understanding grows and production requirements become clearer.
+</Tip>
+
+## Further Reading
+
+- Next lesson: Monitoring Quantum Applications
+- Related: CI/CD for Quantum Applications
+- Advanced: Infrastructure as Code for Quantum Systems

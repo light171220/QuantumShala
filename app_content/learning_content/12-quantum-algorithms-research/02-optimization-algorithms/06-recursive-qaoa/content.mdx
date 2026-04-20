@@ -1,0 +1,665 @@
+---
+title: "Recursive QAOA: Correlation-Based Variable Elimination"
+description: "Master Recursive QAOA (RQAOA), an enhanced variational algorithm that iteratively eliminates variables based on correlation measurements"
+---
+
+# Recursive QAOA: Correlation-Based Variable Elimination
+
+## Learning Objectives
+
+By the end of this lesson, you will be able to:
+- Understand the motivation and theory behind Recursive QAOA
+- Implement correlation measurement from QAOA output states
+- Apply variable elimination based on correlation analysis
+- Perform graph reduction while preserving problem structure
+- Implement complete RQAOA with backtracking for solution reconstruction
+- Compare RQAOA performance against standard QAOA
+
+## Introduction to Recursive QAOA
+
+Recursive QAOA (RQAOA) is an enhancement to the standard QAOA that uses correlation information from the variational output state to iteratively reduce problem size.
+
+<Definition term="Recursive QAOA">
+An iterative algorithm that alternates between running QAOA, measuring correlations between variables, eliminating the most strongly correlated variable pair, and reducing the problem graph until a small enough instance can be solved exactly.
+</Definition>
+
+### Motivation for RQAOA
+
+Standard QAOA has several limitations:
+- Performance may degrade with problem size
+- Barren plateaus become problematic for deep circuits
+- Limited circuit depth restricts expressibility
+
+RQAOA addresses these by:
+1. Extracting classical information (correlations) from quantum states
+2. Using this information to simplify the problem
+3. Recursively applying the process to smaller instances
+
+<Tip>
+RQAOA is particularly effective on problems with natural cluster structure, where strongly correlated variables can be identified reliably.
+</Tip>
+
+## Correlation Measurement
+
+### ZZ Correlations
+
+The key insight of RQAOA is that the QAOA output state contains valuable correlation information beyond just the expected objective value.
+
+<Formula name="ZZ Correlation">
+$$\langle Z_i Z_j \rangle = \sum_{\mathbf{x}} p(\mathbf{x}) \cdot z_i(\mathbf{x}) \cdot z_j(\mathbf{x})$$
+
+where $z_i(\mathbf{x}) = 1 - 2x_i$ maps bit values to $\pm 1$.
+</Formula>
+
+The correlation indicates whether variables tend to have the same or opposite values:
+- $\langle Z_i Z_j \rangle \approx +1$: Variables tend to have the same value
+- $\langle Z_i Z_j \rangle \approx -1$: Variables tend to have opposite values
+- $\langle Z_i Z_j \rangle \approx 0$: Variables are uncorrelated
+
+### Computing Correlations from Measurements
+
+```python
+import numpy as np
+from typing import Dict, Tuple
+
+def compute_zz_correlations(counts: Dict[str, int],
+                             num_qubits: int) -> Tuple[Dict, np.ndarray]:
+    """
+    Compute ZZ correlations from measurement counts.
+
+    Args:
+        counts: Measurement outcomes {bitstring: count}
+        num_qubits: Number of qubits
+
+    Returns:
+        correlations: Dict mapping (i, j) to <Z_i Z_j>
+        z_expectations: Array of <Z_i> for each qubit
+    """
+    total_shots = sum(counts.values())
+
+    # Single qubit expectations
+    z_expectations = np.zeros(num_qubits)
+
+    for bitstring, count in counts.items():
+        # Convert to +1/-1 (0 -> +1, 1 -> -1)
+        # Note: Qiskit returns bitstrings in reverse order
+        bits = [1 - 2 * int(b) for b in bitstring[::-1]]
+
+        for i in range(num_qubits):
+            z_expectations[i] += bits[i] * count / total_shots
+
+    # Two-qubit correlations
+    correlations = {}
+
+    for i in range(num_qubits):
+        for j in range(i + 1, num_qubits):
+            zz = 0.0
+            for bitstring, count in counts.items():
+                bits = [1 - 2 * int(b) for b in bitstring[::-1]]
+                zz += bits[i] * bits[j] * count / total_shots
+            correlations[(i, j)] = zz
+
+    return correlations, z_expectations
+```
+
+### Connected Correlations
+
+For more robust analysis, we often use **connected correlations** (covariances):
+
+<Formula name="Connected Correlation">
+$$\langle Z_i Z_j \rangle_c = \langle Z_i Z_j \rangle - \langle Z_i \rangle \langle Z_j \rangle$$
+</Formula>
+
+This removes the contribution from individual variable biases:
+
+```python
+def compute_connected_correlations(
+    zz_correlations: Dict[Tuple[int, int], float],
+    z_expectations: np.ndarray
+) -> Dict[Tuple[int, int], float]:
+    """
+    Compute connected correlations (covariances).
+    """
+    connected = {}
+
+    for (i, j), zz in zz_correlations.items():
+        connected[(i, j)] = zz - z_expectations[i] * z_expectations[j]
+
+    return connected
+```
+
+## Variable Elimination
+
+### The Elimination Rule
+
+When we identify a strongly correlated pair $(i, j)$, we eliminate variable $j$ by fixing its relationship to $i$:
+
+<Definition term="Variable Elimination">
+Given correlation $\langle Z_i Z_j \rangle$:
+- If positive (same partition): Set $s_j = s_i$
+- If negative (opposite partition): Set $s_j = -s_i$
+
+This removes one degree of freedom from the optimization problem.
+</Definition>
+
+### Finding the Strongest Correlation
+
+```python
+def find_strongest_correlation(
+    correlations: Dict[Tuple[int, int], float]
+) -> Tuple[int, int, float, str]:
+    """
+    Find the variable pair with strongest absolute correlation.
+
+    Returns:
+        (i, j, correlation_value, relation_type)
+        where relation_type is 'same' if positive, 'opposite' if negative
+    """
+    best_pair = None
+    best_abs_val = -1
+    best_val = 0
+
+    for (i, j), val in correlations.items():
+        if abs(val) > best_abs_val:
+            best_abs_val = abs(val)
+            best_val = val
+            best_pair = (i, j)
+
+    relation = 'same' if best_val > 0 else 'opposite'
+
+    return best_pair[0], best_pair[1], best_val, relation
+```
+
+## Graph Reduction
+
+### Reduction Rules
+
+When eliminating variable $j$ in favor of $i$, we must update the graph:
+
+<Formula name="Graph Reduction Rules">
+For MaxCut with edge $(j, k)$ where $k \neq i$:
+
+**Same relation** ($s_j = s_i$):
+$$\text{Edge }(j, k) \to \text{Edge }(i, k)$$
+
+**Opposite relation** ($s_j = -s_i$):
+$$\text{Edge }(j, k) \to \text{Edge }(i, k) \text{ with negated weight}$$
+
+The edge $(i, j)$ itself:
+- Same relation: contributes 0 (never cut)
+- Opposite relation: contributes constant +1 (always cut)
+</Formula>
+
+### Implementation
+
+```python
+from collections import defaultdict
+from typing import List
+
+def reduce_graph(edges: List[Tuple[int, int]],
+                 eliminate: int,
+                 reference: int,
+                 relation: str) -> Tuple[List[Tuple[int, int]], int]:
+    """
+    Reduce graph by eliminating one variable.
+
+    Args:
+        edges: List of edges (i, j)
+        eliminate: Variable to eliminate
+        reference: Variable to keep (eliminate will be related to this)
+        relation: 'same' or 'opposite'
+
+    Returns:
+        new_edges: Updated edge list
+        constant: Constant added to objective
+    """
+    edge_weights = defaultdict(int)
+    constant = 0
+
+    for (u, v) in edges:
+        # Handle the edge between eliminated and reference
+        if (u == eliminate and v == reference) or \
+           (u == reference and v == eliminate):
+            if relation == 'opposite':
+                # Edge is always cut
+                constant += 1
+            # For 'same', edge is never cut (contributes 0)
+            continue
+
+        # Remap eliminated variable to reference
+        new_u = reference if u == eliminate else u
+        new_v = reference if v == eliminate else v
+
+        # Handle weight sign for opposite relation
+        weight = 1
+        if relation == 'opposite':
+            if u == eliminate or v == eliminate:
+                weight = -1  # Flip the contribution
+
+        # Skip self-loops
+        if new_u == new_v:
+            continue
+
+        # Canonical edge ordering
+        edge = (min(new_u, new_v), max(new_u, new_v))
+        edge_weights[edge] += weight
+
+    # Convert to edge list, filtering zero-weight edges
+    new_edges = [(u, v) for (u, v), w in edge_weights.items() if w != 0]
+
+    return new_edges, constant
+```
+
+<Warning>
+When edges with opposite weights combine (due to negation), they may cancel out. Always filter zero-weight edges after reduction.
+</Warning>
+
+## The Complete RQAOA Algorithm
+
+### Algorithm Overview
+
+<Example title="RQAOA Algorithm">
+```
+Algorithm: Recursive QAOA
+Input: Graph G = (V, E), QAOA depth p, cutoff size c
+
+1. Initialize: active_vertices = V, current_edges = E
+2. While |active_vertices| > c:
+   a. Run QAOA on current graph
+   b. Compute correlations from output
+   c. Find strongest correlation (i, j)
+   d. Determine relation (same/opposite)
+   e. Reduce graph by eliminating j
+   f. Record elimination in history
+3. Solve remaining small problem exactly
+4. Backtrack to reconstruct full solution
+5. Return solution and objective value
+```
+</Example>
+
+### Full Implementation
+
+```python
+from qiskit import QuantumCircuit, transpile
+from qiskit_aer import AerSimulator
+from qiskit.circuit import Parameter
+from scipy.optimize import minimize
+
+class RecursiveQAOA:
+    """
+    Complete Recursive QAOA implementation.
+    """
+
+    def __init__(self, p: int = 1, cutoff: int = 3, num_shots: int = 1000):
+        self.p = p
+        self.cutoff = cutoff
+        self.num_shots = num_shots
+        self.backend = AerSimulator()
+
+    def solve(self, edges: List[Tuple[int, int]],
+              num_vertices: int) -> Dict:
+        """Main solver routine."""
+        current_edges = edges.copy()
+        active = list(range(num_vertices))
+        eliminations = []
+        total_constant = 0
+
+        while len(active) > self.cutoff:
+            # Remap to consecutive indices for QAOA
+            idx_map = {v: i for i, v in enumerate(active)}
+            local_edges = [
+                (idx_map[u], idx_map[v])
+                for (u, v) in current_edges
+                if u in idx_map and v in idx_map
+            ]
+
+            # Run QAOA
+            qaoa_result = self._run_qaoa(local_edges, len(active))
+
+            # Compute correlations
+            corr, _ = compute_zz_correlations(
+                qaoa_result['counts'], len(active)
+            )
+
+            # Find strongest correlation
+            local_i, local_j, corr_val, relation = \
+                find_strongest_correlation(corr)
+
+            # Map back to original indices
+            orig_i = active[local_i]
+            orig_j = active[local_j]
+
+            # Reduce graph
+            current_edges, const = reduce_graph(
+                current_edges, orig_j, orig_i, relation
+            )
+            total_constant += const
+            active.remove(orig_j)
+
+            # Record elimination
+            eliminations.append({
+                'eliminate': orig_j,
+                'reference': orig_i,
+                'relation': relation,
+                'correlation': corr_val
+            })
+
+        # Solve remaining problem exactly
+        idx_map = {v: i for i, v in enumerate(active)}
+        local_edges = [
+            (idx_map[u], idx_map[v])
+            for (u, v) in current_edges
+            if u in idx_map and v in idx_map
+        ]
+        exact_sol = self._exact_solve(local_edges, len(active))
+
+        # Map to original indices
+        partial = {active[i]: v for i, v in exact_sol.items()}
+
+        # Backtrack to full solution
+        full_solution = self._backtrack(
+            partial, eliminations, num_vertices
+        )
+
+        return {
+            'solution': full_solution,
+            'cut_value': self._compute_cut(full_solution, edges),
+            'num_recursions': len(eliminations),
+            'eliminations': eliminations,
+            'constant': total_constant
+        }
+
+    def _run_qaoa(self, edges: List[Tuple[int, int]],
+                  num_qubits: int) -> Dict:
+        """Run QAOA optimization."""
+        if not edges or num_qubits == 0:
+            return {'counts': {'0' * max(1, num_qubits): self.num_shots}}
+
+        # Create parameterized circuit
+        gammas = [Parameter(f'g{i}') for i in range(self.p)]
+        betas = [Parameter(f'b{i}') for i in range(self.p)]
+
+        qc = QuantumCircuit(num_qubits, num_qubits)
+        qc.h(range(num_qubits))
+
+        for l in range(self.p):
+            # Cost layer
+            for (i, j) in edges:
+                qc.rzz(gammas[l], i, j)
+            # Mixer layer
+            for q in range(num_qubits):
+                qc.rx(2 * betas[l], q)
+
+        qc.measure(range(num_qubits), range(num_qubits))
+
+        # Optimization
+        def evaluate(params):
+            param_dict = {gammas[i]: params[i] for i in range(self.p)}
+            param_dict.update({
+                betas[i]: params[self.p + i] for i in range(self.p)
+            })
+            bound = qc.assign_parameters(param_dict)
+            transpiled = transpile(bound, self.backend)
+            job = self.backend.run(transpiled, shots=self.num_shots)
+            counts = job.result().get_counts()
+
+            # Compute expected cut value
+            exp = 0
+            for bs, count in counts.items():
+                bits = [int(b) for b in bs[::-1]]
+                cut = sum(1 for (i, j) in edges if bits[i] != bits[j])
+                exp += cut * count / self.num_shots
+            return -exp  # Minimize negative
+
+        x0 = np.array([np.pi/4] * self.p + [np.pi/8] * self.p)
+        result = minimize(evaluate, x0, method='COBYLA',
+                         options={'maxiter': 50})
+
+        # Get final measurement counts
+        opt_params = result.x
+        param_dict = {gammas[i]: opt_params[i] for i in range(self.p)}
+        param_dict.update({
+            betas[i]: opt_params[self.p + i] for i in range(self.p)
+        })
+        bound = qc.assign_parameters(param_dict)
+        transpiled = transpile(bound, self.backend)
+        job = self.backend.run(transpiled, shots=self.num_shots)
+        counts = job.result().get_counts()
+
+        return {'counts': counts, 'value': -result.fun}
+
+    def _exact_solve(self, edges: List[Tuple[int, int]],
+                     num_qubits: int) -> Dict[int, int]:
+        """Brute force exact solution."""
+        if num_qubits == 0:
+            return {}
+
+        best_sol = None
+        best_cut = -1
+
+        for b in range(2**num_qubits):
+            bits = [int(x) for x in format(b, f'0{num_qubits}b')]
+            cut = sum(1 for (i, j) in edges if bits[i] != bits[j])
+            if cut > best_cut:
+                best_cut = cut
+                best_sol = {i: bits[i] for i in range(num_qubits)}
+
+        return best_sol
+
+    def _backtrack(self, partial: Dict[int, int],
+                   eliminations: List[Dict],
+                   num_vertices: int) -> str:
+        """Reconstruct full solution from reduced solution."""
+        solution = partial.copy()
+
+        # Process eliminations in reverse order
+        for elim in reversed(eliminations):
+            ref_val = solution[elim['reference']]
+            if elim['relation'] == 'same':
+                solution[elim['eliminate']] = ref_val
+            else:
+                solution[elim['eliminate']] = 1 - ref_val
+
+        return ''.join(str(solution[i]) for i in range(num_vertices))
+
+    def _compute_cut(self, solution: str,
+                     edges: List[Tuple[int, int]]) -> int:
+        """Compute cut value for a solution."""
+        bits = [int(b) for b in solution]
+        return sum(1 for (i, j) in edges if bits[i] != bits[j])
+```
+
+## Backtracking: Solution Reconstruction
+
+The backtracking phase is crucial for recovering the full solution from the reduced one.
+
+<Definition term="Backtracking">
+The process of reconstructing eliminated variables by traversing the elimination history in reverse order. Each eliminated variable's value is determined by its reference variable and the recorded relation.
+</Definition>
+
+```python
+def backtrack_solution(partial_solution: Dict[int, int],
+                        eliminations: List[Dict],
+                        num_vertices: int) -> str:
+    """
+    Reconstruct full solution from partial solution on reduced graph.
+
+    Args:
+        partial_solution: {vertex: value} for remaining vertices
+        eliminations: List of elimination records in order performed
+        num_vertices: Original number of vertices
+
+    Returns:
+        Full solution as bitstring
+    """
+    solution = partial_solution.copy()
+
+    # Process in reverse order
+    for elim in reversed(eliminations):
+        ref_val = solution[elim['reference']]
+
+        if elim['relation'] == 'same':
+            # Eliminated variable has same value as reference
+            solution[elim['eliminate']] = ref_val
+        else:
+            # Eliminated variable has opposite value
+            solution[elim['eliminate']] = 1 - ref_val
+
+    # Convert to bitstring
+    return ''.join(str(solution[i]) for i in range(num_vertices))
+```
+
+## Performance Comparison
+
+### RQAOA vs Standard QAOA
+
+RQAOA tends to outperform standard QAOA in several scenarios:
+
+| Aspect | Standard QAOA | RQAOA |
+|--------|---------------|-------|
+| Problem size handling | Degrades with size | Progressive reduction |
+| Circuit depth | Fixed for all iterations | Applied to smaller problems |
+| Information extraction | Final sampling only | Correlations at each level |
+| Structured problems | May miss structure | Exploits correlations |
+
+### When RQAOA Excels
+
+<Example title="Clustered Graph Example">
+Consider a graph with two well-separated clusters connected by few edges:
+
+```
+Cluster A: vertices {0, 1, 2} densely connected
+Cluster B: vertices {3, 4, 5} densely connected
+Inter-cluster: sparse connections
+
+RQAOA behavior:
+1. First iterations: identify strong intra-cluster correlations
+2. Eliminate within clusters (same partition)
+3. Final problem: effectively 2 variables (one per cluster)
+4. Solve remaining trivially
+```
+</Example>
+
+### Benchmarking Framework
+
+```python
+def benchmark_rqaoa(num_vertices: int,
+                    edge_probability: float,
+                    num_instances: int = 10) -> Dict:
+    """
+    Benchmark RQAOA against standard QAOA.
+    """
+    results = {
+        'qaoa_ratios': [],
+        'rqaoa_ratios': [],
+        'optimal_values': []
+    }
+
+    for _ in range(num_instances):
+        # Generate random graph
+        edges = []
+        for i in range(num_vertices):
+            for j in range(i + 1, num_vertices):
+                if np.random.random() < edge_probability:
+                    edges.append((i, j))
+
+        if not edges:
+            continue
+
+        # Find optimal
+        optimal = exact_maxcut(edges, num_vertices)
+        results['optimal_values'].append(optimal)
+
+        # Run standard QAOA
+        qaoa_result = run_standard_qaoa(edges, num_vertices)
+        results['qaoa_ratios'].append(qaoa_result / optimal)
+
+        # Run RQAOA
+        rqaoa = RecursiveQAOA(p=1, cutoff=3)
+        rqaoa_result = rqaoa.solve(edges, num_vertices)
+        results['rqaoa_ratios'].append(
+            rqaoa_result['cut_value'] / optimal
+        )
+
+    return {
+        'qaoa_mean': np.mean(results['qaoa_ratios']),
+        'qaoa_std': np.std(results['qaoa_ratios']),
+        'rqaoa_mean': np.mean(results['rqaoa_ratios']),
+        'rqaoa_std': np.std(results['rqaoa_ratios'])
+    }
+```
+
+## Advanced Topics
+
+### Adaptive RQAOA
+
+The number of variables eliminated per iteration can be adapted:
+
+- **Single elimination**: Most conservative, highest quality correlations
+- **Multiple elimination**: Faster convergence, may lose information
+- **Threshold-based**: Eliminate all pairs above correlation threshold
+
+### Correlation Quality Assessment
+
+Not all correlations are equally reliable:
+
+```python
+def assess_correlation_confidence(counts: Dict[str, int],
+                                   i: int, j: int) -> float:
+    """
+    Estimate confidence in correlation measurement.
+    Uses bootstrap resampling.
+    """
+    total = sum(counts.values())
+    samples = []
+
+    # Expand counts to samples
+    bitstrings = []
+    for bs, count in counts.items():
+        bitstrings.extend([bs] * count)
+
+    # Bootstrap
+    n_bootstrap = 100
+    correlations = []
+
+    for _ in range(n_bootstrap):
+        # Resample with replacement
+        resampled = np.random.choice(bitstrings, size=total, replace=True)
+
+        # Compute correlation
+        zz = 0
+        for bs in resampled:
+            bits = [1 - 2 * int(b) for b in bs[::-1]]
+            zz += bits[i] * bits[j]
+        correlations.append(zz / total)
+
+    # Confidence based on standard error
+    return 1.0 / (1.0 + np.std(correlations))
+```
+
+### Hybrid Strategies
+
+RQAOA can be combined with other techniques:
+
+- **Warm-started RQAOA**: Initialize QAOA with classical solution
+- **Multi-depth RQAOA**: Use different depths at different recursion levels
+- **Classical preprocessing**: Use graph reduction heuristics first
+
+<Tip>
+For very large problems, consider using RQAOA with higher cutoff values and more powerful exact solvers (like ILP) for the final subproblem.
+</Tip>
+
+## Summary
+
+Recursive QAOA extends standard QAOA by:
+
+1. **Correlation extraction**: Mining structural information from quantum states
+2. **Iterative reduction**: Progressively simplifying the optimization problem
+3. **Exact termination**: Solving small residual problems optimally
+4. **Backtracking**: Reconstructing full solutions from partial ones
+
+Key advantages include improved scaling, exploitation of problem structure, and often better approximation ratios on structured instances.
+
+## Next Steps
+
+In the next lesson, we'll explore **Quantum Annealing**, an alternative paradigm for optimization that uses adiabatic evolution rather than variational circuits.

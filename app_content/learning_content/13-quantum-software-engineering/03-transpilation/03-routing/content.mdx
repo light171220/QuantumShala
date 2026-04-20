@@ -1,0 +1,443 @@
+---
+title: "Routing: SWAP Insertion and Routing Algorithms"
+description: "Learn algorithms for inserting SWAP gates to enable two-qubit operations on non-adjacent qubits."
+duration: 60
+difficulty: "advanced"
+---
+
+## 1. The Routing Problem
+
+After initial qubit mapping, some two-qubit gates may act on non-adjacent physical qubits. Routing inserts SWAP gates to move qubit states until the required interaction is possible.
+
+```python
+from dataclasses import dataclass
+from typing import List, Dict, Set, Tuple, Optional
+from collections import deque
+import heapq
+
+@dataclass
+class Gate:
+    name: str
+    qubits: Tuple[int, ...]
+    params: Tuple[float, ...] = ()
+
+class Router:
+    """Base class for routing algorithms."""
+
+    def __init__(self, topology_edges: Set[Tuple[int, int]]):
+        self.edges = topology_edges
+        self._build_adjacency()
+
+    def _build_adjacency(self):
+        self.neighbors = {}
+        for q1, q2 in self.edges:
+            self.neighbors.setdefault(q1, []).append(q2)
+            self.neighbors.setdefault(q2, []).append(q1)
+
+    def are_adjacent(self, q1: int, q2: int) -> bool:
+        return (q1, q2) in self.edges or (q2, q1) in self.edges
+
+    def shortest_path(self, start: int, end: int) -> List[int]:
+        if start == end:
+            return [start]
+        visited = {start}
+        queue = deque([(start, [start])])
+        while queue:
+            node, path = queue.popleft()
+            for neighbor in self.neighbors.get(node, []):
+                if neighbor == end:
+                    return path + [end]
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, path + [neighbor]))
+        return []
+```
+
+## 2. Basic SWAP Insertion
+
+The simplest approach: for each non-adjacent gate, find shortest path and insert SWAPs.
+
+```python
+class BasicRouter(Router):
+    """Insert SWAPs along shortest path for each gate."""
+
+    def route(
+        self,
+        gates: List[Gate],
+        initial_mapping: Dict[int, int]
+    ) -> Tuple[List[Gate], Dict[int, int]]:
+        """
+        Route circuit by inserting SWAPs.
+
+        Args:
+            gates: Original circuit gates (logical qubits)
+            initial_mapping: logical -> physical mapping
+        Returns:
+            (routed_gates, final_mapping)
+        """
+        result = []
+        mapping = dict(initial_mapping)
+        reverse = {v: k for k, v in mapping.items()}
+
+        for gate in gates:
+            if len(gate.qubits) == 1:
+                # Single-qubit: just map
+                physical = mapping[gate.qubits[0]]
+                result.append(Gate(gate.name, (physical,), gate.params))
+
+            elif len(gate.qubits) == 2:
+                lq1, lq2 = gate.qubits
+                pq1, pq2 = mapping[lq1], mapping[lq2]
+
+                if self.are_adjacent(pq1, pq2):
+                    # Already adjacent
+                    result.append(Gate(gate.name, (pq1, pq2), gate.params))
+                else:
+                    # Need routing
+                    swaps, mapping, reverse = self._route_pair(
+                        pq1, pq2, mapping, reverse
+                    )
+                    result.extend(swaps)
+                    # Now apply gate
+                    pq1_new = mapping[lq1]
+                    pq2_new = mapping[lq2]
+                    result.append(Gate(gate.name, (pq1_new, pq2_new), gate.params))
+
+        return result, mapping
+
+    def _route_pair(
+        self,
+        pq1: int,
+        pq2: int,
+        mapping: Dict[int, int],
+        reverse: Dict[int, int]
+    ) -> Tuple[List[Gate], Dict[int, int], Dict[int, int]]:
+        """Route pq1 towards pq2 using shortest path."""
+        path = self.shortest_path(pq1, pq2)
+        swaps = []
+
+        # Move pq1 along path (stop one before pq2)
+        current = pq1
+        for next_pos in path[1:-1]:
+            swaps.append(Gate('SWAP', (current, next_pos)))
+            # Update mappings
+            self._apply_swap(current, next_pos, mapping, reverse)
+            current = next_pos
+
+        return swaps, mapping, reverse
+
+    def _apply_swap(
+        self,
+        pq1: int,
+        pq2: int,
+        mapping: Dict[int, int],
+        reverse: Dict[int, int]
+    ):
+        """Update mappings after SWAP."""
+        lq1 = reverse.get(pq1)
+        lq2 = reverse.get(pq2)
+
+        if lq1 is not None:
+            mapping[lq1] = pq2
+        if lq2 is not None:
+            mapping[lq2] = pq1
+
+        reverse[pq1], reverse[pq2] = lq2, lq1
+```
+
+## 3. SABRE-Style Routing
+
+SABRE (SWAP-based Bidirectional Routing) uses look-ahead to make better SWAP choices.
+
+```python
+class SABRERouter(Router):
+    """SABRE-style routing with look-ahead heuristic."""
+
+    def __init__(
+        self,
+        topology_edges: Set[Tuple[int, int]],
+        look_ahead_depth: int = 20,
+        decay: float = 0.5
+    ):
+        super().__init__(topology_edges)
+        self.look_ahead = look_ahead_depth
+        self.decay = decay
+        self._compute_distances()
+
+    def _compute_distances(self):
+        """Precompute all-pairs shortest distances."""
+        qubits = set()
+        for q1, q2 in self.edges:
+            qubits.add(q1)
+            qubits.add(q2)
+
+        self.distances = {}
+        for q in qubits:
+            self.distances[q] = self._bfs_distances(q)
+
+    def _bfs_distances(self, start: int) -> Dict[int, int]:
+        distances = {start: 0}
+        queue = deque([start])
+        while queue:
+            node = queue.popleft()
+            for neighbor in self.neighbors.get(node, []):
+                if neighbor not in distances:
+                    distances[neighbor] = distances[node] + 1
+                    queue.append(neighbor)
+        return distances
+
+    def route(
+        self,
+        gates: List[Gate],
+        initial_mapping: Dict[int, int]
+    ) -> Tuple[List[Gate], Dict[int, int]]:
+        """Route using SABRE heuristic."""
+        result = []
+        mapping = dict(initial_mapping)
+        reverse = {v: k for k, v in mapping.items()}
+
+        # Create front layer (gates with no dependencies)
+        front = []
+        remaining = list(gates)
+        executed = set()
+
+        while remaining or front:
+            # Update front layer
+            front = self._get_front_layer(remaining, executed)
+
+            # Execute all executable gates
+            newly_executed = []
+            for gate in front:
+                if len(gate.qubits) == 1:
+                    physical = mapping[gate.qubits[0]]
+                    result.append(Gate(gate.name, (physical,), gate.params))
+                    newly_executed.append(gate)
+                elif len(gate.qubits) == 2:
+                    lq1, lq2 = gate.qubits
+                    pq1, pq2 = mapping[lq1], mapping[lq2]
+                    if self.are_adjacent(pq1, pq2):
+                        result.append(Gate(gate.name, (pq1, pq2), gate.params))
+                        newly_executed.append(gate)
+
+            for gate in newly_executed:
+                remaining.remove(gate)
+                executed.add(id(gate))
+                if gate in front:
+                    front.remove(gate)
+
+            if not remaining:
+                break
+
+            # If no progress, insert best SWAP
+            if not newly_executed and front:
+                best_swap = self._find_best_swap(front, remaining, mapping)
+                if best_swap:
+                    result.append(Gate('SWAP', best_swap))
+                    self._apply_swap(best_swap[0], best_swap[1], mapping, reverse)
+
+        return result, mapping
+
+    def _get_front_layer(
+        self,
+        remaining: List[Gate],
+        executed: Set[int]
+    ) -> List[Gate]:
+        """Get gates that can be executed (dependencies satisfied)."""
+        # Simplified: assume no dependencies, return all two-qubit gates
+        return [g for g in remaining if len(g.qubits) >= 1][:10]
+
+    def _find_best_swap(
+        self,
+        front: List[Gate],
+        remaining: List[Gate],
+        mapping: Dict[int, int]
+    ) -> Optional[Tuple[int, int]]:
+        """Find SWAP that most reduces total distance."""
+        reverse = {v: k for k, v in mapping.items()}
+
+        best_swap = None
+        best_score = float('inf')
+
+        # Consider all possible SWAPs
+        for pq1, pq2 in self.edges:
+            # Compute score change for this SWAP
+            score = self._compute_swap_score(
+                pq1, pq2, front, remaining, mapping, reverse
+            )
+            if score < best_score:
+                best_score = score
+                best_swap = (pq1, pq2)
+
+        return best_swap
+
+    def _compute_swap_score(
+        self,
+        pq1: int,
+        pq2: int,
+        front: List[Gate],
+        remaining: List[Gate],
+        mapping: Dict[int, int],
+        reverse: Dict[int, int]
+    ) -> float:
+        """Score a potential SWAP (lower is better)."""
+        # Simulate SWAP
+        temp_mapping = dict(mapping)
+        lq1 = reverse.get(pq1)
+        lq2 = reverse.get(pq2)
+        if lq1 is not None:
+            temp_mapping[lq1] = pq2
+        if lq2 is not None:
+            temp_mapping[lq2] = pq1
+
+        # Compute distance sum for front + look-ahead
+        score = 0
+        weight = 1.0
+        look_ahead_gates = remaining[:self.look_ahead]
+
+        for gate in look_ahead_gates:
+            if len(gate.qubits) == 2:
+                lqa, lqb = gate.qubits
+                pqa = temp_mapping.get(lqa, mapping.get(lqa))
+                pqb = temp_mapping.get(lqb, mapping.get(lqb))
+                if pqa is not None and pqb is not None:
+                    dist = self.distances.get(pqa, {}).get(pqb, 10)
+                    score += weight * dist
+            weight *= self.decay
+
+        return score
+
+    def _apply_swap(
+        self,
+        pq1: int,
+        pq2: int,
+        mapping: Dict[int, int],
+        reverse: Dict[int, int]
+    ):
+        lq1 = reverse.get(pq1)
+        lq2 = reverse.get(pq2)
+        if lq1 is not None:
+            mapping[lq1] = pq2
+        if lq2 is not None:
+            mapping[lq2] = pq1
+        reverse[pq1], reverse[pq2] = lq2, lq1
+```
+
+## 4. Bridge Gate Optimization
+
+For some topologies, use bridge gates instead of SWAPs.
+
+```python
+class BridgeRouter(Router):
+    """Use bridge gates when available."""
+
+    def route_with_bridges(
+        self,
+        gates: List[Gate],
+        mapping: Dict[int, int]
+    ) -> List[Gate]:
+        """Route using bridge CNOT when possible."""
+        result = []
+        reverse = {v: k for k, v in mapping.items()}
+
+        for gate in gates:
+            if gate.name not in ('CX', 'CNOT') or len(gate.qubits) != 2:
+                # Non-CNOT: use standard routing
+                result.append(self._map_gate(gate, mapping))
+                continue
+
+            lq1, lq2 = gate.qubits
+            pq1, pq2 = mapping[lq1], mapping[lq2]
+
+            if self.are_adjacent(pq1, pq2):
+                result.append(Gate(gate.name, (pq1, pq2), gate.params))
+            else:
+                # Check for bridge path
+                bridge = self._find_bridge(pq1, pq2)
+                if bridge:
+                    # CNOT via bridge: 4 CNOTs instead of 7 (SWAP + CNOT + SWAP)
+                    result.extend(self._bridge_cnot(pq1, bridge, pq2))
+                else:
+                    # Fall back to SWAP routing
+                    result.extend(self._swap_route(pq1, pq2, mapping, reverse))
+                    result.append(Gate(gate.name, (mapping[lq1], mapping[lq2])))
+
+        return result
+
+    def _find_bridge(self, pq1: int, pq2: int) -> Optional[int]:
+        """Find a qubit connected to both pq1 and pq2."""
+        neighbors1 = set(self.neighbors.get(pq1, []))
+        neighbors2 = set(self.neighbors.get(pq2, []))
+        common = neighbors1 & neighbors2
+        return next(iter(common), None)
+
+    def _bridge_cnot(
+        self,
+        ctrl: int,
+        bridge: int,
+        target: int
+    ) -> List[Gate]:
+        """Implement CNOT via bridge qubit."""
+        return [
+            Gate('CX', (ctrl, bridge)),
+            Gate('CX', (bridge, target)),
+            Gate('CX', (ctrl, bridge)),
+            Gate('CX', (bridge, target)),
+        ]
+```
+
+## 5. Complete Routing Pipeline
+
+```python
+class RoutingPipeline:
+    """Complete routing with strategy selection."""
+
+    def __init__(self, topology_edges: Set[Tuple[int, int]]):
+        self.edges = topology_edges
+        self.basic = BasicRouter(topology_edges)
+        self.sabre = SABRERouter(topology_edges)
+        self.bridge = BridgeRouter(topology_edges)
+
+    def route(
+        self,
+        gates: List[Gate],
+        mapping: Dict[int, int],
+        strategy: str = 'sabre'
+    ) -> Tuple[List[Gate], Dict[int, int], Dict]:
+        """Route circuit with specified strategy."""
+        if strategy == 'basic':
+            routed, final_map = self.basic.route(gates, mapping)
+        elif strategy == 'sabre':
+            routed, final_map = self.sabre.route(gates, mapping)
+        else:
+            raise ValueError(f"Unknown strategy: {strategy}")
+
+        stats = self._compute_stats(gates, routed)
+        return routed, final_map, stats
+
+    def _compute_stats(
+        self,
+        original: List[Gate],
+        routed: List[Gate]
+    ) -> Dict:
+        swap_count = sum(1 for g in routed if g.name == 'SWAP')
+        return {
+            'original_gates': len(original),
+            'routed_gates': len(routed),
+            'swaps_inserted': swap_count,
+            'overhead': len(routed) - len(original)
+        }
+```
+
+## Summary
+
+Routing algorithms trade off between:
+
+1. **Simplicity** (basic shortest-path) vs **quality** (SABRE look-ahead)
+2. **SWAP count** vs **circuit depth**
+3. **Compilation time** vs **optimization quality**
+
+Key techniques:
+- Shortest-path SWAP insertion for basic routing
+- Look-ahead heuristics to anticipate future needs
+- Bridge gates to reduce overhead for specific patterns
+- Bidirectional routing for further optimization

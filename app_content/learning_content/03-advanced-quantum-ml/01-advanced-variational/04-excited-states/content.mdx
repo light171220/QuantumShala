@@ -1,0 +1,495 @@
+---
+title: "Excited States VQE: Beyond Ground State Calculations"
+description: "Master techniques for computing excited electronic states using variational quantum algorithms, including VQD, SSVQE, and multistate approaches."
+duration: 75
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the importance of excited states in quantum chemistry
+- Implement Variational Quantum Deflation (VQD) for sequential excited states
+- Apply Subspace-Search VQE (SSVQE) for simultaneous state optimization
+- Use overlap penalty methods to enforce orthogonality
+- Calculate excited state properties and transition amplitudes
+- Handle symmetry constraints in excited state calculations
+
+## 1. Why Excited States Matter
+
+While ground state calculations are fundamental, many chemical and physical phenomena depend on excited states:
+
+- **Photochemistry**: Light absorption and emission
+- **Spectroscopy**: UV-Vis, fluorescence, phosphorescence
+- **Photosynthesis**: Energy transfer mechanisms
+- **Solar cells**: Charge separation dynamics
+- **Catalysis**: Reaction pathways through excited states
+
+<Definition term="Excited State">
+An excited state is any eigenstate of the Hamiltonian with energy higher than the ground state. Excited states are labeled by their energy ordering: E₀ < E₁ < E₂ < ... where E₀ is the ground state energy.
+</Definition>
+
+### The Challenge
+
+Standard VQE minimizes energy, naturally finding the ground state. Finding excited states requires additional constraints to avoid collapsing to lower-energy solutions.
+
+<Formula>
+$$\min_\theta \langle\psi(\theta)|H|\psi(\theta)\rangle \quad \text{s.t.} \quad \langle\psi(\theta)|\psi_k\rangle = 0 \quad \forall k < n$$
+</Formula>
+
+## 2. Variational Quantum Deflation (VQD)
+
+VQD finds excited states sequentially by adding penalty terms that enforce orthogonality to previously computed states.
+
+<Definition term="Variational Quantum Deflation">
+VQD is an algorithm that computes excited states one-by-one by adding overlap penalties to the cost function. After finding the k-th state, a penalty proportional to the overlap with this state is added before optimizing for state k+1.
+</Definition>
+
+### VQD Cost Function
+
+For the (n+1)-th excited state:
+
+<Formula>
+$$\mathcal{L}_n(\theta) = \langle\psi(\theta)|H|\psi(\theta)\rangle + \sum_{k=0}^{n-1} \beta_k |\langle\psi(\theta)|\psi_k\rangle|^2$$
+</Formula>
+
+where $\beta_k$ are large positive penalties.
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+
+class VQD:
+    """Variational Quantum Deflation for excited states."""
+
+    def __init__(self, hamiltonian, ansatz_builder, beta=5.0):
+        """
+        Args:
+            hamiltonian: System Hamiltonian matrix
+            ansatz_builder: Function(params) -> unitary matrix
+            beta: Overlap penalty coefficient
+        """
+        self.H = hamiltonian
+        self.build_ansatz = ansatz_builder
+        self.beta = beta
+        self.dim = hamiltonian.shape[0]
+
+        # Reference state
+        self.psi0 = np.zeros(self.dim, dtype=complex)
+        self.psi0[0] = 1
+
+        # Store computed states
+        self.computed_states = []
+        self.computed_energies = []
+
+    def overlap_penalty(self, state):
+        """Compute total overlap penalty with previous states."""
+        penalty = 0.0
+        for prev_state in self.computed_states:
+            overlap = np.abs(np.vdot(prev_state, state))**2
+            penalty += self.beta * overlap
+        return penalty
+
+    def cost_function(self, params):
+        """Cost function with overlap penalties."""
+        # Build current state
+        U = self.build_ansatz(params)
+        psi = U @ self.psi0
+
+        # Energy expectation
+        energy = np.real(psi.conj() @ self.H @ psi)
+
+        # Add overlap penalties
+        penalty = self.overlap_penalty(psi)
+
+        return energy + penalty
+
+    def find_next_state(self, n_params, n_restarts=5):
+        """Find the next excited state."""
+        best_energy = float('inf')
+        best_params = None
+        best_state = None
+
+        for _ in range(n_restarts):
+            # Random initialization
+            init_params = np.random.randn(n_params) * 0.1
+
+            # Optimize
+            result = minimize(
+                self.cost_function,
+                init_params,
+                method='BFGS'
+            )
+
+            # Build final state
+            U = self.build_ansatz(result.x)
+            state = U @ self.psi0
+
+            # True energy (without penalty)
+            energy = np.real(state.conj() @ self.H @ state)
+
+            if energy < best_energy:
+                best_energy = energy
+                best_params = result.x
+                best_state = state
+
+        # Store this state
+        self.computed_states.append(best_state)
+        self.computed_energies.append(best_energy)
+
+        return best_energy, best_state
+
+    def run(self, n_states, n_params):
+        """Compute ground state and n_states-1 excited states."""
+        for k in range(n_states):
+            energy, state = self.find_next_state(n_params)
+            print(f"State {k}: E = {energy:.6f}")
+
+        return self.computed_energies, self.computed_states
+```
+
+<Tip>
+Choose β large enough to prevent overlap but not so large that optimization becomes unstable. A good rule of thumb: β ≈ 2-5 times the expected energy gap.
+</Tip>
+
+## 3. Subspace-Search VQE (SSVQE)
+
+SSVQE finds multiple states simultaneously by optimizing a weighted sum of energies.
+
+<Definition term="Subspace-Search VQE">
+SSVQE is a variational algorithm that finds multiple eigenstates simultaneously by optimizing weighted energy sums over a set of orthogonal trial states, generated from a single parameterized circuit applied to different reference states.
+</Definition>
+
+### SSVQE Approach
+
+1. Start with k orthonormal reference states
+2. Apply same unitary U(θ) to all references
+3. Minimize weighted energy sum
+
+<Formula>
+$$\mathcal{L}(\theta) = \sum_{i=0}^{k-1} w_i \langle\phi_i|U^\dagger(\theta) H U(\theta)|\phi_i\rangle$$
+</Formula>
+
+```python
+import numpy as np
+
+class SSVQE:
+    """Subspace-Search VQE for multiple states."""
+
+    def __init__(self, hamiltonian, n_states, weights=None):
+        self.H = hamiltonian
+        self.n_states = n_states
+        self.dim = hamiltonian.shape[0]
+
+        # Weights (default: descending to favor ground state)
+        if weights is None:
+            self.weights = np.array([2**(n_states-1-i)
+                                     for i in range(n_states)])
+            self.weights = self.weights / self.weights.sum()
+        else:
+            self.weights = np.array(weights)
+
+        # Reference states (computational basis)
+        self.references = []
+        for i in range(n_states):
+            ref = np.zeros(self.dim, dtype=complex)
+            ref[i] = 1.0
+            self.references.append(ref)
+
+    def cost_function(self, params, ansatz_builder):
+        """Weighted energy sum."""
+        U = ansatz_builder(params)
+
+        total = 0.0
+        for i, (ref, w) in enumerate(zip(self.references, self.weights)):
+            psi = U @ ref
+            E = np.real(psi.conj() @ self.H @ psi)
+            total += w * E
+
+        return total
+
+    def get_states_and_energies(self, params, ansatz_builder):
+        """Extract individual states and energies."""
+        U = ansatz_builder(params)
+
+        states = []
+        energies = []
+
+        for ref in self.references:
+            psi = U @ ref
+            E = np.real(psi.conj() @ self.H @ psi)
+            states.append(psi)
+            energies.append(E)
+
+        return energies, states
+```
+
+### Comparison: VQD vs SSVQE
+
+| Aspect | VQD | SSVQE |
+|--------|-----|-------|
+| Optimization | Sequential | Simultaneous |
+| Error accumulation | Can compound | Independent |
+| Measurements | Per state | Shared |
+| Parallelization | Limited | High |
+
+## 4. Overlap Computation on Quantum Hardware
+
+Computing overlaps is essential for VQD. Several methods exist:
+
+### Swap Test
+
+<Formula>
+$$|\langle\psi|\phi\rangle|^2 = 1 - 2P_1$$
+</Formula>
+
+where $P_1$ is the probability of measuring the ancilla in state |1⟩.
+
+```python
+def swap_test_circuit_overlap(state1, state2):
+    """
+    Compute |⟨ψ|φ⟩|² using swap test.
+
+    In simulation, we can compute directly.
+    On hardware, would need ancilla-controlled swaps.
+    """
+    overlap = np.abs(np.vdot(state1, state2))**2
+    return overlap
+
+def compute_overlap_matrix(states):
+    """Compute full overlap matrix for a set of states."""
+    n = len(states)
+    S = np.zeros((n, n), dtype=complex)
+
+    for i in range(n):
+        for j in range(n):
+            S[i, j] = np.vdot(states[i], states[j])
+
+    return S
+```
+
+### Hadamard Test for Phase
+
+<Formula>
+$$\text{Re}(\langle\psi|\phi\rangle) = P_0 - P_1$$
+</Formula>
+
+<Warning>
+Overlap measurements add significant overhead to VQD. Each penalty term requires additional circuit evaluations. Consider SSVQE when targeting many excited states.
+</Warning>
+
+## 5. Folded Spectrum Method
+
+An alternative approach uses a folded Hamiltonian to target specific energy regions.
+
+<Definition term="Folded Spectrum">
+The folded spectrum method minimizes (H - σI)² instead of H, targeting the eigenstate closest to energy σ regardless of whether it's ground or excited.
+</Definition>
+
+<Formula>
+$$\min_\theta \langle\psi(\theta)|(H - \sigma I)^2|\psi(\theta)\rangle$$
+</Formula>
+
+```python
+import numpy as np
+
+def folded_spectrum_vqe(hamiltonian, target_energy, ansatz_builder,
+                        n_params, n_restarts=3):
+    """
+    Find state closest to target energy using folded spectrum.
+
+    Args:
+        hamiltonian: System Hamiltonian
+        target_energy: Energy to target (σ)
+        ansatz_builder: Function to build ansatz unitary
+        n_params: Number of variational parameters
+    """
+    from scipy.optimize import minimize
+
+    dim = hamiltonian.shape[0]
+    I = np.eye(dim)
+
+    # Folded Hamiltonian: (H - σI)²
+    H_folded = (hamiltonian - target_energy * I) @ \
+               (hamiltonian - target_energy * I)
+
+    psi0 = np.zeros(dim, dtype=complex)
+    psi0[0] = 1
+
+    def cost(params):
+        U = ansatz_builder(params)
+        psi = U @ psi0
+        return np.real(psi.conj() @ H_folded @ psi)
+
+    best_result = None
+    best_cost = float('inf')
+
+    for _ in range(n_restarts):
+        init = np.random.randn(n_params) * 0.1
+        result = minimize(cost, init, method='BFGS')
+
+        if result.fun < best_cost:
+            best_cost = result.fun
+            best_result = result
+
+    # Get actual energy
+    U = ansatz_builder(best_result.x)
+    psi = U @ psi0
+    actual_energy = np.real(psi.conj() @ hamiltonian @ psi)
+
+    return actual_energy, psi
+```
+
+<Tip>
+Folded spectrum is useful when you have an approximate energy from classical calculations and want to refine a specific excited state without computing all lower states.
+</Tip>
+
+## 6. Transition Properties
+
+Excited states enable calculation of transition properties like oscillator strengths.
+
+<Definition term="Transition Dipole Moment">
+The transition dipole moment μ_0n between ground state |0⟩ and excited state |n⟩ determines the probability of optical transition: μ_0n = ⟨0|μ̂|n⟩.
+</Definition>
+
+```python
+import numpy as np
+
+def compute_transition_dipole(ground_state, excited_state, dipole_operator):
+    """
+    Compute transition dipole moment.
+
+    Args:
+        ground_state: Ground state vector
+        excited_state: Excited state vector
+        dipole_operator: Dipole moment operator matrix
+
+    Returns:
+        Complex transition dipole moment
+    """
+    return np.vdot(ground_state, dipole_operator @ excited_state)
+
+def oscillator_strength(ground_state, excited_state, dipole_operator,
+                       excitation_energy):
+    """
+    Compute oscillator strength for a transition.
+
+    f = (2/3) * ΔE * |μ|²
+
+    Args:
+        excitation_energy: E_n - E_0 in Hartree
+    """
+    mu = compute_transition_dipole(ground_state, excited_state,
+                                   dipole_operator)
+    f = (2/3) * excitation_energy * np.abs(mu)**2
+    return f
+
+# Example usage
+def example_spectroscopy():
+    """Example: compute absorption spectrum."""
+    # Simplified 4-level system
+    H = np.diag([0, 1.5, 2.8, 4.0])  # Energies in eV
+
+    # Dipole operator (example)
+    mu = np.array([[0, 0.5, 0.1, 0],
+                   [0.5, 0, 0.3, 0.2],
+                   [0.1, 0.3, 0, 0.4],
+                   [0, 0.2, 0.4, 0]])
+
+    # States are eigenvectors (already diagonal)
+    states = [np.eye(4)[:, i] for i in range(4)]
+
+    print("Transition analysis:")
+    print("-" * 40)
+
+    ground = states[0]
+    for n in range(1, 4):
+        excited = states[n]
+        dE = H[n, n] - H[0, 0]
+        f = oscillator_strength(ground, excited, mu, dE)
+        print(f"0 → {n}: ΔE = {dE:.2f} eV, f = {f:.4f}")
+
+example_spectroscopy()
+```
+
+## 7. Symmetry-Adapted Excited States
+
+Using molecular symmetry can simplify excited state calculations.
+
+<Definition term="Symmetry-Adapted States">
+States that transform according to specific irreducible representations of the molecular point group. Different symmetry sectors are orthogonal, simplifying state targeting.
+</Definition>
+
+```python
+import numpy as np
+
+def project_to_symmetry(state, symmetry_projector):
+    """
+    Project state onto a symmetry subspace.
+
+    Args:
+        state: Input state vector
+        symmetry_projector: Projector onto desired symmetry
+
+    Returns:
+        Normalized projected state
+    """
+    projected = symmetry_projector @ state
+    norm = np.linalg.norm(projected)
+
+    if norm > 1e-10:
+        return projected / norm
+    else:
+        return None  # State has no component in this symmetry
+
+def symmetry_constrained_vqe(hamiltonian, projector, ansatz_builder,
+                             n_params):
+    """
+    VQE with symmetry constraint.
+
+    Projects state at each optimization step.
+    """
+    from scipy.optimize import minimize
+
+    dim = hamiltonian.shape[0]
+    psi0 = np.zeros(dim, dtype=complex)
+    psi0[0] = 1
+
+    def cost(params):
+        U = ansatz_builder(params)
+        psi = U @ psi0
+
+        # Project to symmetry sector
+        psi_sym = project_to_symmetry(psi, projector)
+        if psi_sym is None:
+            return 1e10  # Large penalty
+
+        E = np.real(psi_sym.conj() @ hamiltonian @ psi_sym)
+        return E
+
+    init = np.random.randn(n_params) * 0.1
+    result = minimize(cost, init, method='BFGS')
+
+    return result.fun, result.x
+```
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Excited states** are crucial for spectroscopy, photochemistry, and reaction dynamics
+2. **VQD** finds excited states sequentially using overlap penalties
+3. **SSVQE** finds multiple states simultaneously with weighted optimization
+4. **Overlap computation** enables orthogonality enforcement but adds measurement overhead
+5. **Folded spectrum** targets specific energy regions directly
+6. **Transition properties** like oscillator strengths require both ground and excited states
+7. **Symmetry constraints** can simplify targeting specific excited states
+
+These techniques enable quantum computers to address important chemical problems beyond ground state energy calculations.
+
+## Further Reading
+
+- Next lesson: Symmetry-Preserving Ansatze
+- Related: Multi-Reference VQE
+- Application: Photochemistry and Spectroscopy Simulation

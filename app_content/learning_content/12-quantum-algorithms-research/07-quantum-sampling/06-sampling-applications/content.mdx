@@ -1,0 +1,793 @@
+---
+title: "Quantum Sampling Applications in Finance, Physics, and ML"
+description: "Explore real-world applications of quantum sampling algorithms in finance (option pricing, risk analysis), physics (quantum simulation, partition functions), and machine learning (Boltzmann machines, generative models)."
+duration: 45
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Apply quantum Monte Carlo to financial derivative pricing
+- Use quantum sampling for physics simulations and partition function estimation
+- Implement quantum-enhanced machine learning sampling techniques
+- Analyze the practical requirements and limitations for real-world applications
+- Compare quantum and classical approaches for specific use cases
+
+## 1. Quantum Finance: Option Pricing
+
+One of the most promising near-term applications of quantum sampling is in finance, particularly for pricing complex derivatives.
+
+<Definition term="Option Pricing">
+The problem of determining the fair value of a financial derivative contract. Classical Monte Carlo is the standard approach for path-dependent options, where quantum methods can provide quadratic speedup.
+</Definition>
+
+### European Option Pricing
+
+A European call option pays $\max(S_T - K, 0)$ at maturity $T$:
+
+<Formula>
+$$V = e^{-rT} \mathbb{E}[\max(S_T - K, 0)]$$
+</Formula>
+
+```python
+import numpy as np
+from typing import Dict, Callable
+from scipy.stats import norm
+
+class QuantumOptionPricer:
+    """
+    Quantum-enhanced option pricing using amplitude estimation principles.
+    """
+
+    def __init__(self, num_price_qubits: int = 8):
+        """
+        Initialize option pricer.
+
+        Args:
+            num_price_qubits: Qubits for price discretization
+        """
+        self.n_price = num_price_qubits
+        self.N = 2 ** num_price_qubits
+
+    def black_scholes_price(
+        self,
+        S0: float,
+        K: float,
+        r: float,
+        sigma: float,
+        T: float,
+        option_type: str = "call"
+    ) -> float:
+        """
+        Exact Black-Scholes price for comparison.
+        """
+        d1 = (np.log(S0/K) + (r + sigma**2/2)*T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+
+        if option_type == "call":
+            return S0 * norm.cdf(d1) - K * np.exp(-r*T) * norm.cdf(d2)
+        else:
+            return K * np.exp(-r*T) * norm.cdf(-d2) - S0 * norm.cdf(-d1)
+
+    def discretize_lognormal(
+        self,
+        S0: float,
+        r: float,
+        sigma: float,
+        T: float,
+        num_stds: float = 4.0
+    ) -> tuple:
+        """
+        Discretize log-normal distribution for S_T.
+
+        Returns:
+            (price_grid, probabilities)
+        """
+        # Under risk-neutral measure: ln(S_T) ~ N(ln(S0) + (r - sigma^2/2)*T, sigma^2*T)
+        mu = np.log(S0) + (r - sigma**2/2) * T
+        std = sigma * np.sqrt(T)
+
+        # Grid in log-space
+        log_min = mu - num_stds * std
+        log_max = mu + num_stds * std
+        log_grid = np.linspace(log_min, log_max, self.N)
+        price_grid = np.exp(log_grid)
+
+        # Probabilities from normal PDF
+        dx = log_grid[1] - log_grid[0]
+        probs = norm.pdf(log_grid, mu, std) * dx
+        probs = probs / probs.sum()  # Normalize
+
+        return price_grid, probs
+
+    def quantum_price_option(
+        self,
+        S0: float,
+        K: float,
+        r: float,
+        sigma: float,
+        T: float,
+        option_type: str = "call",
+        precision_qubits: int = 6
+    ) -> Dict:
+        """
+        Price option using quantum Monte Carlo approach.
+
+        Args:
+            S0: Initial stock price
+            K: Strike price
+            r: Risk-free rate
+            sigma: Volatility
+            T: Time to maturity
+            option_type: "call" or "put"
+            precision_qubits: Qubits for amplitude estimation
+
+        Returns:
+            Pricing results
+        """
+        # Discretize price distribution
+        prices, probs = self.discretize_lognormal(S0, r, sigma, T)
+
+        # Payoff function
+        if option_type == "call":
+            payoffs = np.maximum(prices - K, 0)
+        else:
+            payoffs = np.maximum(K - prices, 0)
+
+        # Normalize payoffs to [0, 1] for amplitude encoding
+        payoff_max = payoffs.max()
+        if payoff_max > 0:
+            payoffs_normalized = payoffs / payoff_max
+        else:
+            payoffs_normalized = payoffs
+
+        # Expected payoff (true value)
+        expected_payoff = np.sum(probs * payoffs)
+        expected_normalized = np.sum(probs * payoffs_normalized)
+
+        # Simulate quantum amplitude estimation
+        M_pe = 2 ** precision_qubits
+        theta = np.arcsin(np.sqrt(expected_normalized))
+
+        # Add estimation noise (simplified)
+        noise = np.random.uniform(-0.5/M_pe, 0.5/M_pe)
+        theta_est = theta + noise
+        theta_est = np.clip(theta_est, 0, np.pi/2)
+
+        est_normalized = np.sin(theta_est) ** 2
+        est_payoff = est_normalized * payoff_max
+
+        # Discount to present value
+        price_estimate = np.exp(-r * T) * est_payoff
+        price_exact = np.exp(-r * T) * expected_payoff
+
+        # Black-Scholes for comparison
+        bs_price = self.black_scholes_price(S0, K, r, sigma, T, option_type)
+
+        return {
+            'quantum_price': price_estimate,
+            'discretized_exact': price_exact,
+            'black_scholes': bs_price,
+            'error_vs_bs': abs(price_estimate - bs_price),
+            'precision_qubits': precision_qubits,
+            'num_price_points': self.N
+        }
+
+
+# Example: Price a European call option
+pricer = QuantumOptionPricer(num_price_qubits=10)
+
+result = pricer.quantum_price_option(
+    S0=100,      # Current price
+    K=105,       # Strike
+    r=0.05,      # 5% risk-free rate
+    sigma=0.2,   # 20% volatility
+    T=1.0,       # 1 year
+    precision_qubits=8
+)
+
+print("Quantum Option Pricing (European Call):")
+print(f"  Initial price: $100, Strike: $105")
+print(f"  Quantum estimate: ${result['quantum_price']:.4f}")
+print(f"  Black-Scholes: ${result['black_scholes']:.4f}")
+print(f"  Error: ${result['error_vs_bs']:.4f}")
+```
+
+### Risk Metrics: Value at Risk (VaR)
+
+```python
+class QuantumRiskAnalysis:
+    """
+    Quantum-enhanced risk analysis for portfolios.
+    """
+
+    def __init__(self, num_qubits: int = 8):
+        self.n = num_qubits
+        self.N = 2 ** num_qubits
+
+    def estimate_var(
+        self,
+        loss_distribution: np.ndarray,
+        probabilities: np.ndarray,
+        confidence_level: float = 0.95
+    ) -> Dict:
+        """
+        Estimate Value at Risk using quantum counting principles.
+
+        VaR_alpha = inf{l : P(Loss > l) <= 1 - alpha}
+
+        Args:
+            loss_distribution: Possible loss values
+            probabilities: Probability of each loss
+            confidence_level: Confidence level (e.g., 0.95)
+
+        Returns:
+            VaR estimate and diagnostics
+        """
+        # Sort by loss
+        sorted_idx = np.argsort(loss_distribution)
+        sorted_losses = loss_distribution[sorted_idx]
+        sorted_probs = probabilities[sorted_idx]
+
+        # Cumulative probability
+        cumulative = np.cumsum(sorted_probs)
+
+        # VaR is the loss level where cumulative prob reaches confidence
+        var_idx = np.searchsorted(cumulative, confidence_level)
+        var_exact = sorted_losses[min(var_idx, len(sorted_losses)-1)]
+
+        # CVaR (Expected Shortfall): expected loss given loss > VaR
+        tail_mask = sorted_losses >= var_exact
+        tail_probs = sorted_probs[tail_mask]
+        tail_losses = sorted_losses[tail_mask]
+
+        if tail_probs.sum() > 0:
+            cvar_exact = np.sum(tail_probs * tail_losses) / tail_probs.sum()
+        else:
+            cvar_exact = var_exact
+
+        return {
+            'var': var_exact,
+            'cvar': cvar_exact,
+            'confidence_level': confidence_level,
+            'tail_probability': 1 - confidence_level
+        }
+
+
+# Example: Portfolio risk analysis
+risk_analyzer = QuantumRiskAnalysis()
+
+# Simulate portfolio loss distribution
+np.random.seed(42)
+losses = np.linspace(-50, 200, 256)  # Possible losses
+# Mixture of normal and tail distribution
+probs = 0.8 * norm.pdf(losses, 20, 30) + 0.2 * norm.pdf(losses, 80, 50)
+probs = probs / probs.sum()
+
+result = risk_analyzer.estimate_var(losses, probs, confidence_level=0.95)
+print(f"\nQuantum Risk Analysis:")
+print(f"  95% VaR: ${result['var']:.2f}")
+print(f"  95% CVaR: ${result['cvar']:.2f}")
+```
+
+## 2. Physics Applications
+
+### Partition Function Estimation
+
+Computing partition functions is fundamental in statistical physics:
+
+<Formula>
+$$Z = \sum_{\sigma} e^{-\beta E(\sigma)} = \text{Tr}(e^{-\beta H})$$
+</Formula>
+
+```python
+class QuantumPartitionFunction:
+    """
+    Quantum estimation of partition functions.
+    """
+
+    def __init__(self, hamiltonian: np.ndarray):
+        self.H = hamiltonian
+        self.dim = hamiltonian.shape[0]
+        self.eigenvalues, _ = np.linalg.eigh(hamiltonian)
+
+    def exact_partition_function(self, beta: float) -> float:
+        """Compute exact Z(beta)."""
+        return np.sum(np.exp(-beta * self.eigenvalues))
+
+    def estimate_free_energy_difference(
+        self,
+        beta1: float,
+        beta2: float,
+        num_intermediate: int = 10
+    ) -> Dict:
+        """
+        Estimate free energy difference using thermodynamic integration.
+
+        Delta F = F(beta2) - F(beta1) = integral from beta1 to beta2 of <H>_beta d(beta)
+
+        Args:
+            beta1, beta2: Initial and final inverse temperatures
+            num_intermediate: Number of integration points
+
+        Returns:
+            Free energy difference estimate
+        """
+        betas = np.linspace(beta1, beta2, num_intermediate)
+        energies = []
+
+        for beta in betas:
+            Z = self.exact_partition_function(beta)
+            E = np.sum(self.eigenvalues * np.exp(-beta * self.eigenvalues)) / Z
+            energies.append(E)
+
+        # Trapezoidal integration
+        energies = np.array(energies)
+        delta_beta = betas[1] - betas[0]
+        delta_F = np.trapz(energies, betas)
+
+        # Exact values for comparison
+        F1 = -np.log(self.exact_partition_function(beta1)) / beta1 if beta1 > 0 else self.eigenvalues[0]
+        F2 = -np.log(self.exact_partition_function(beta2)) / beta2 if beta2 > 0 else self.eigenvalues[0]
+        exact_delta_F = F2 - F1
+
+        return {
+            'delta_F_estimate': delta_F,
+            'delta_F_exact': exact_delta_F,
+            'error': abs(delta_F - exact_delta_F),
+            'beta_range': (beta1, beta2),
+            'intermediate_energies': energies
+        }
+
+    def estimate_ground_state_energy(
+        self,
+        max_beta: float = 10,
+        num_betas: int = 20
+    ) -> Dict:
+        """
+        Estimate ground state energy from low-temperature limit.
+
+        E_0 = lim_{beta -> inf} <H>_beta
+
+        Args:
+            max_beta: Maximum inverse temperature
+            num_betas: Number of temperature points
+
+        Returns:
+            Ground state energy estimate
+        """
+        betas = np.linspace(0.1, max_beta, num_betas)
+        energies = []
+
+        for beta in betas:
+            Z = self.exact_partition_function(beta)
+            E = np.sum(self.eigenvalues * np.exp(-beta * self.eigenvalues)) / Z
+            energies.append(E)
+
+        # Extrapolate to beta -> infinity
+        # Fit exponential decay to ground state
+        from scipy.optimize import curve_fit
+
+        def decay_model(beta, E0, gap, c):
+            return E0 + c * np.exp(-gap * beta)
+
+        try:
+            popt, _ = curve_fit(decay_model, betas, energies, p0=[energies[-1], 1, 1])
+            E0_estimate = popt[0]
+        except:
+            E0_estimate = energies[-1]
+
+        return {
+            'E0_estimate': E0_estimate,
+            'E0_exact': self.eigenvalues[0],
+            'error': abs(E0_estimate - self.eigenvalues[0]),
+            'betas': betas,
+            'energies': energies
+        }
+
+
+# Example: Ising model partition function
+X = np.array([[0, 1], [1, 0]])
+Z = np.array([[1, 0], [0, -1]])
+
+H_ising = -np.kron(Z, Z) - 0.5 * (np.kron(X, np.eye(2)) + np.kron(np.eye(2), X))
+
+pf_estimator = QuantumPartitionFunction(H_ising)
+
+# Ground state estimation
+result = pf_estimator.estimate_ground_state_energy()
+print(f"\nQuantum Physics: Ground State Estimation")
+print(f"  Estimated E0: {result['E0_estimate']:.6f}")
+print(f"  Exact E0: {result['E0_exact']:.6f}")
+print(f"  Error: {result['error']:.6f}")
+
+# Free energy difference
+fe_result = pf_estimator.estimate_free_energy_difference(0.5, 2.0)
+print(f"\nFree Energy Difference (beta: 0.5 -> 2.0):")
+print(f"  Estimated: {fe_result['delta_F_estimate']:.6f}")
+print(f"  Exact: {fe_result['delta_F_exact']:.6f}")
+```
+
+### Quantum Simulation Sampling
+
+```python
+def simulate_quantum_dynamics(
+    hamiltonian: np.ndarray,
+    initial_state: np.ndarray,
+    times: np.ndarray,
+    observable: np.ndarray
+) -> Dict:
+    """
+    Simulate quantum dynamics and sample observables.
+
+    Args:
+        hamiltonian: System Hamiltonian
+        initial_state: Initial quantum state
+        times: Time points for evolution
+        observable: Observable to measure
+
+    Returns:
+        Simulation results
+    """
+    from scipy.linalg import expm
+
+    expectation_values = []
+
+    for t in times:
+        # Time evolution: |psi(t)> = exp(-i*H*t) |psi(0)>
+        U = expm(-1j * hamiltonian * t)
+        psi_t = U @ initial_state
+
+        # Expectation value
+        exp_val = np.real(psi_t.conj() @ observable @ psi_t)
+        expectation_values.append(exp_val)
+
+    return {
+        'times': times,
+        'expectation_values': expectation_values,
+        'initial_expectation': expectation_values[0],
+        'final_expectation': expectation_values[-1]
+    }
+
+
+# Example: Rabi oscillations
+H_rabi = np.array([[0, 1], [1, 0]])  # Sigma_x
+initial = np.array([1, 0])  # |0> state
+observable = np.array([[1, 0], [0, -1]])  # Sigma_z
+
+times = np.linspace(0, 4*np.pi, 100)
+result = simulate_quantum_dynamics(H_rabi, initial, times, observable)
+
+print(f"\nQuantum Dynamics Simulation (Rabi oscillations):")
+print(f"  Initial <Z>: {result['initial_expectation']:.4f}")
+print(f"  Oscillation period: {2*np.pi:.4f}")
+```
+
+## 3. Machine Learning Applications
+
+### Quantum Boltzmann Machine Sampling
+
+```python
+class QuantumBoltzmannMachine:
+    """
+    Simplified quantum Boltzmann machine for demonstration.
+    """
+
+    def __init__(self, num_visible: int, num_hidden: int):
+        """
+        Initialize QBM.
+
+        Args:
+            num_visible: Number of visible units
+            num_hidden: Number of hidden units
+        """
+        self.n_v = num_visible
+        self.n_h = num_hidden
+        self.n_total = num_visible + num_hidden
+
+        # Initialize random weights
+        self.W = np.random.randn(num_visible, num_hidden) * 0.1
+        self.b_v = np.zeros(num_visible)
+        self.b_h = np.zeros(num_hidden)
+
+    def energy(self, v: np.ndarray, h: np.ndarray) -> float:
+        """
+        Compute energy of configuration.
+
+        E(v, h) = -v^T W h - b_v^T v - b_h^T h
+        """
+        return -v @ self.W @ h - self.b_v @ v - self.b_h @ h
+
+    def sample_gibbs(
+        self,
+        num_samples: int,
+        beta: float = 1.0,
+        burn_in: int = 1000
+    ) -> Dict:
+        """
+        Sample from the Boltzmann distribution using Gibbs sampling.
+
+        Args:
+            num_samples: Number of samples to generate
+            beta: Inverse temperature
+            burn_in: Burn-in steps
+
+        Returns:
+            Samples and statistics
+        """
+        # Initialize randomly
+        v = np.random.randint(0, 2, self.n_v).astype(float)
+        h = np.random.randint(0, 2, self.n_h).astype(float)
+
+        v_samples = []
+        h_samples = []
+
+        total_steps = burn_in + num_samples
+
+        for step in range(total_steps):
+            # Sample hidden given visible
+            for j in range(self.n_h):
+                activation = self.b_h[j] + v @ self.W[:, j]
+                prob = 1 / (1 + np.exp(-beta * activation))
+                h[j] = 1 if np.random.random() < prob else 0
+
+            # Sample visible given hidden
+            for i in range(self.n_v):
+                activation = self.b_v[i] + self.W[i, :] @ h
+                prob = 1 / (1 + np.exp(-beta * activation))
+                v[i] = 1 if np.random.random() < prob else 0
+
+            if step >= burn_in:
+                v_samples.append(v.copy())
+                h_samples.append(h.copy())
+
+        return {
+            'visible_samples': np.array(v_samples),
+            'hidden_samples': np.array(h_samples),
+            'mean_visible': np.mean(v_samples, axis=0),
+            'mean_hidden': np.mean(h_samples, axis=0)
+        }
+
+    def compute_data_likelihood(
+        self,
+        data: np.ndarray,
+        beta: float = 1.0
+    ) -> float:
+        """
+        Estimate log-likelihood of data (approximate).
+
+        Args:
+            data: Array of visible configurations
+            beta: Inverse temperature
+
+        Returns:
+            Average log-likelihood
+        """
+        log_likelihoods = []
+
+        for v in data:
+            # Sum over hidden configurations
+            log_Z_v = 0
+            for h_config in range(2 ** self.n_h):
+                h = np.array([(h_config >> j) & 1 for j in range(self.n_h)], dtype=float)
+                E = self.energy(v, h)
+                log_Z_v += np.exp(-beta * E)
+
+            log_likelihoods.append(np.log(log_Z_v + 1e-10))
+
+        return np.mean(log_likelihoods)
+
+
+# Example: Train a small QBM
+qbm = QuantumBoltzmannMachine(num_visible=4, num_hidden=2)
+
+# Generate some training data (simple pattern)
+training_data = np.array([
+    [1, 1, 0, 0],
+    [0, 0, 1, 1],
+    [1, 1, 0, 0],
+    [0, 0, 1, 1]
+])
+
+# Sample from the model
+samples = qbm.sample_gibbs(num_samples=1000, beta=1.0)
+
+print(f"\nQuantum Boltzmann Machine:")
+print(f"  Visible units: {qbm.n_v}, Hidden units: {qbm.n_h}")
+print(f"  Mean visible activation: {samples['mean_visible']}")
+print(f"  Data likelihood: {qbm.compute_data_likelihood(training_data):.4f}")
+```
+
+### Quantum-Enhanced Generative Models
+
+```python
+class QuantumGenerativeModel:
+    """
+    Simplified quantum generative model using Born rule sampling.
+    """
+
+    def __init__(self, num_qubits: int):
+        self.n = num_qubits
+        self.dim = 2 ** num_qubits
+
+    def parameterized_state(self, params: np.ndarray) -> np.ndarray:
+        """
+        Create parameterized quantum state for generation.
+
+        Uses simple rotation ansatz.
+        """
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1  # Start with |0...0>
+
+        # Apply parameterized rotations
+        for i, theta in enumerate(params[:self.n]):
+            # Simplified single-qubit rotation effect
+            idx = i % self.n
+            state = self._apply_ry(state, idx, theta)
+
+        # Normalize
+        state = state / np.linalg.norm(state)
+
+        return state
+
+    def _apply_ry(self, state: np.ndarray, qubit: int, theta: float) -> np.ndarray:
+        """Apply Ry rotation to a specific qubit."""
+        new_state = state.copy()
+
+        for i in range(self.dim):
+            # Check if qubit is 0 or 1
+            bit = (i >> qubit) & 1
+            partner = i ^ (1 << qubit)
+
+            if bit == 0 and i < partner:
+                # Apply Ry rotation between |...0...> and |...1...>
+                c, s = np.cos(theta/2), np.sin(theta/2)
+                new_state[i] = c * state[i] - s * state[partner]
+                new_state[partner] = s * state[i] + c * state[partner]
+
+        return new_state
+
+    def sample(
+        self,
+        params: np.ndarray,
+        num_samples: int
+    ) -> Dict:
+        """
+        Generate samples from the quantum distribution.
+
+        Args:
+            params: Circuit parameters
+            num_samples: Number of samples
+
+        Returns:
+            Samples and statistics
+        """
+        state = self.parameterized_state(params)
+        probs = np.abs(state) ** 2
+
+        # Sample from Born rule distribution
+        samples = np.random.choice(self.dim, size=num_samples, p=probs)
+
+        # Convert to binary strings
+        binary_samples = [format(s, f'0{self.n}b') for s in samples]
+
+        # Compute empirical distribution
+        unique, counts = np.unique(samples, return_counts=True)
+        empirical_probs = dict(zip(unique, counts / num_samples))
+
+        return {
+            'samples': samples,
+            'binary_samples': binary_samples,
+            'empirical_distribution': empirical_probs,
+            'true_distribution': probs,
+            'entropy': -np.sum(probs * np.log(probs + 1e-10))
+        }
+
+
+# Example
+qgm = QuantumGenerativeModel(num_qubits=3)
+params = np.array([0.5, 1.0, 1.5])
+
+samples = qgm.sample(params, num_samples=1000)
+print(f"\nQuantum Generative Model:")
+print(f"  Qubits: {qgm.n}")
+print(f"  Distribution entropy: {samples['entropy']:.4f}")
+print(f"  Top 3 samples: {list(samples['empirical_distribution'].items())[:3]}")
+```
+
+## 4. Practical Considerations
+
+### Resource Requirements
+
+<Warning>
+Practical quantum advantage requires:
+1. Sufficient qubits for problem encoding
+2. Low error rates for deep circuits
+3. Fast classical preprocessing
+4. Efficient quantum-classical interface
+</Warning>
+
+```python
+def estimate_quantum_resources(
+    application: str,
+    problem_size: int,
+    target_precision: float
+) -> Dict:
+    """
+    Estimate quantum resources needed for application.
+
+    Args:
+        application: "finance", "physics", or "ml"
+        problem_size: Problem dimension
+        target_precision: Target error
+
+    Returns:
+        Resource estimates
+    """
+    import math
+
+    resources = {
+        'application': application,
+        'problem_size': problem_size,
+        'target_precision': target_precision
+    }
+
+    if application == "finance":
+        # Option pricing
+        # Need log(1/eps) qubits for price discretization
+        # Plus log(1/eps) qubits for amplitude estimation
+        price_qubits = math.ceil(math.log2(1/target_precision))
+        ae_qubits = math.ceil(math.log2(np.pi/target_precision))
+        total_qubits = price_qubits + ae_qubits + 1  # +1 for ancilla
+
+        # Circuit depth ~ 2^{ae_qubits}
+        circuit_depth = 2 ** ae_qubits
+
+        resources['qubits'] = total_qubits
+        resources['circuit_depth'] = circuit_depth
+        resources['t_gates_estimate'] = circuit_depth * total_qubits
+
+    elif application == "physics":
+        # Partition function / thermal sampling
+        system_qubits = math.ceil(math.log2(problem_size))
+        ae_qubits = math.ceil(math.log2(np.pi/target_precision))
+
+        resources['qubits'] = system_qubits + ae_qubits
+        resources['circuit_depth'] = 2 ** ae_qubits * problem_size
+        resources['t_gates_estimate'] = resources['circuit_depth'] * resources['qubits']
+
+    elif application == "ml":
+        # Boltzmann sampling
+        resources['qubits'] = problem_size
+        resources['circuit_depth'] = problem_size ** 2  # Rough estimate
+        resources['t_gates_estimate'] = resources['circuit_depth'] * resources['qubits']
+
+    return resources
+
+
+# Example estimates
+for app in ["finance", "physics", "ml"]:
+    res = estimate_quantum_resources(app, problem_size=100, target_precision=0.01)
+    print(f"\n{app.upper()} Application (size=100, precision=0.01):")
+    print(f"  Qubits needed: {res['qubits']}")
+    print(f"  Circuit depth: {res['circuit_depth']}")
+```
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Finance**: Quantum Monte Carlo for option pricing with quadratic speedup
+2. **Risk Analysis**: VaR and CVaR estimation using quantum counting
+3. **Physics**: Partition function and ground state energy estimation
+4. **Machine Learning**: Quantum Boltzmann machines and generative models
+5. **Practical Considerations**: Resource requirements and current limitations
+
+## Further Reading
+
+- Research papers on quantum finance algorithms
+- Quantum simulation review articles
+- Quantum machine learning surveys
+- Industry reports on quantum computing applications

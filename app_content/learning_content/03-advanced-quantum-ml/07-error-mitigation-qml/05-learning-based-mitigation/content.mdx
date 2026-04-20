@@ -1,0 +1,559 @@
+---
+title: "Learning-Based Error Mitigation"
+description: "Use machine learning techniques to learn noise patterns and mitigate errors without explicit noise models"
+---
+
+# Learning-Based Error Mitigation
+
+Learning-based error mitigation uses machine learning to automatically discover and correct noise patterns without requiring explicit noise models.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Train neural networks for error mitigation
+- Implement Clifford data regression
+- Learn noise models from calibration data
+- Apply transfer learning for mitigation
+- Design training strategies for mitigators
+- Combine learning with physics-based methods
+
+## 1. Clifford Data Regression
+
+Use Clifford circuits with known outcomes to train a mitigator.
+
+<Definition term="Clifford Data Regression (CDR)">
+CDR uses Clifford circuits (efficiently simulatable) to learn the relationship between noisy and ideal expectation values, then applies this learned correction to non-Clifford circuits.
+</Definition>
+
+```python
+import numpy as np
+
+class CliffordDataRegression:
+    """
+    Clifford Data Regression for error mitigation.
+    """
+
+    def __init__(self):
+        self.coefficients = None
+
+    def generate_clifford_data(self, n_circuits, noise_prob, observable):
+        """
+        Generate training data from Clifford circuits.
+
+        Returns:
+            noisy_values: Noisy expectation values
+            ideal_values: Classically computed ideal values
+        """
+        noisy_values = []
+        ideal_values = []
+
+        for _ in range(n_circuits):
+            # Random Clifford circuit (simplified: random Paulis and H)
+            circuit, ideal_exp = self._random_clifford_circuit(observable)
+
+            # Simulate noisy execution
+            noisy_exp = self._run_noisy(circuit, observable, noise_prob)
+
+            noisy_values.append(noisy_exp)
+            ideal_values.append(ideal_exp)
+
+        return np.array(noisy_values), np.array(ideal_values)
+
+    def _random_clifford_circuit(self, observable):
+        """Generate random Clifford circuit and compute ideal expectation."""
+        # Simplified: sequence of H, S, CZ gates
+        n_gates = np.random.randint(2, 6)
+
+        # For Clifford circuits, ideal expectation is ±1 or 0
+        # Simplified simulation
+        ideal_exp = np.random.choice([-1, 0, 1])
+
+        return n_gates, ideal_exp
+
+    def _run_noisy(self, circuit_depth, observable, noise_prob):
+        """Simulate noisy circuit execution."""
+        # Simplified: noisy expectation decays with depth
+        ideal = np.random.uniform(-1, 1)
+        decay = np.exp(-noise_prob * circuit_depth)
+        return ideal * decay + np.random.randn() * 0.1
+
+    def fit(self, noisy_values, ideal_values, degree=2):
+        """
+        Fit polynomial regression model.
+
+        E_ideal = a₀ + a₁E_noisy + a₂E_noisy² + ...
+        """
+        # Build design matrix
+        X = np.column_stack([noisy_values**i for i in range(degree + 1)])
+
+        # Least squares fit
+        self.coefficients = np.linalg.lstsq(X, ideal_values, rcond=None)[0]
+
+        return self
+
+    def predict(self, noisy_value):
+        """Predict ideal value from noisy measurement."""
+        if self.coefficients is None:
+            raise ValueError("Must fit first")
+
+        prediction = sum(c * noisy_value**i
+                        for i, c in enumerate(self.coefficients))
+        return np.clip(prediction, -1, 1)
+
+# Demonstrate CDR
+print("Clifford Data Regression:")
+print("=" * 50)
+
+np.random.seed(42)
+cdr = CliffordDataRegression()
+
+# Generate training data
+noisy_train, ideal_train = cdr.generate_clifford_data(100, noise_prob=0.05,
+                                                       observable='Z')
+
+# Fit model
+cdr.fit(noisy_train, ideal_train, degree=2)
+
+print(f"Fitted coefficients: {cdr.coefficients}")
+
+# Test prediction
+test_noisy = 0.7
+test_predicted = cdr.predict(test_noisy)
+print(f"\nNoisy value: {test_noisy:.4f}")
+print(f"CDR predicted: {test_predicted:.4f}")
+```
+
+## 2. Neural Network Mitigator
+
+Train a neural network to map noisy to ideal expectation values.
+
+```python
+class NeuralMitigator:
+    """
+    Neural network-based error mitigator.
+    """
+
+    def __init__(self, hidden_sizes=[32, 16]):
+        self.hidden_sizes = hidden_sizes
+        self.weights = []
+        self.biases = []
+
+    def _relu(self, x):
+        return np.maximum(0, x)
+
+    def _relu_grad(self, x):
+        return (x > 0).astype(float)
+
+    def initialize(self, input_size, output_size):
+        """Initialize network weights."""
+        sizes = [input_size] + self.hidden_sizes + [output_size]
+
+        self.weights = []
+        self.biases = []
+
+        for i in range(len(sizes) - 1):
+            # Xavier initialization
+            scale = np.sqrt(2.0 / sizes[i])
+            self.weights.append(np.random.randn(sizes[i], sizes[i+1]) * scale)
+            self.biases.append(np.zeros(sizes[i+1]))
+
+    def forward(self, x):
+        """Forward pass through network."""
+        self.activations = [x]
+
+        for i, (W, b) in enumerate(zip(self.weights, self.biases)):
+            z = self.activations[-1] @ W + b
+
+            if i < len(self.weights) - 1:
+                a = self._relu(z)
+            else:
+                a = np.tanh(z)  # Output in [-1, 1]
+
+            self.activations.append(a)
+
+        return self.activations[-1]
+
+    def train(self, X, y, epochs=1000, lr=0.01):
+        """Train network using gradient descent."""
+        n_samples = len(X)
+
+        if len(self.weights) == 0:
+            self.initialize(X.shape[1] if X.ndim > 1 else 1, 1)
+
+        X = X.reshape(-1, 1) if X.ndim == 1 else X
+        y = y.reshape(-1, 1) if y.ndim == 1 else y
+
+        losses = []
+
+        for epoch in range(epochs):
+            # Forward pass
+            pred = self.forward(X)
+            loss = np.mean((pred - y) ** 2)
+            losses.append(loss)
+
+            # Backward pass (simplified for single layer)
+            grad_output = 2 * (pred - y) / n_samples
+
+            for i in range(len(self.weights) - 1, -1, -1):
+                if i == len(self.weights) - 1:
+                    # tanh gradient
+                    grad = grad_output * (1 - pred**2)
+                else:
+                    grad = grad_output * self._relu_grad(self.activations[i+1])
+
+                grad_w = self.activations[i].T @ grad
+                grad_b = np.sum(grad, axis=0)
+
+                grad_output = grad @ self.weights[i].T
+
+                # Update
+                self.weights[i] -= lr * grad_w
+                self.biases[i] -= lr * grad_b
+
+        return losses
+
+    def predict(self, x):
+        """Predict mitigated value."""
+        x = np.array([[x]]) if np.isscalar(x) else x.reshape(-1, 1)
+        return self.forward(x).flatten()
+
+# Train neural mitigator
+print("\nNeural Network Mitigator:")
+print("=" * 50)
+
+# Generate synthetic training data
+np.random.seed(42)
+n_samples = 200
+
+# True relationship: ideal = noisy / (1 - 0.3*abs(noisy))
+noisy_data = np.random.uniform(-0.9, 0.9, n_samples)
+ideal_data = noisy_data / (1 - 0.3*np.abs(noisy_data))
+ideal_data = np.clip(ideal_data, -1, 1)
+
+# Add noise
+ideal_data += np.random.randn(n_samples) * 0.05
+
+# Train
+mitigator = NeuralMitigator(hidden_sizes=[16, 8])
+mitigator.initialize(1, 1)
+losses = mitigator.train(noisy_data, ideal_data, epochs=500, lr=0.1)
+
+print(f"Final training loss: {losses[-1]:.6f}")
+
+# Test
+test_noisy = np.array([0.3, 0.5, 0.7])
+predictions = mitigator.predict(test_noisy)
+
+print(f"\nTest predictions:")
+for n, p in zip(test_noisy, predictions):
+    print(f"  Noisy {n:.2f} → Mitigated {p:.4f}")
+```
+
+<Tip>
+Training data should cover the range of expected noisy values. Use data augmentation and regularization to prevent overfitting.
+</Tip>
+
+## 3. Learning Noise Models
+
+Learn the noise model directly from calibration data.
+
+```python
+class LearnedNoiseModel:
+    """
+    Learn noise model parameters from data.
+    """
+
+    def __init__(self):
+        self.parameters = {}
+
+    def fit_depolarizing(self, prepared_states, measured_probs):
+        """
+        Estimate depolarizing probability from data.
+
+        Args:
+            prepared_states: List of ideal density matrices
+            measured_probs: List of measured probability distributions
+        """
+        fidelities = []
+
+        for rho_ideal, probs_measured in zip(prepared_states, measured_probs):
+            # Compute fidelity between ideal and measured
+            # Simplified: use overlap with expected distribution
+            rho_measured = self._probs_to_density(probs_measured)
+            fid = np.real(np.trace(rho_ideal @ rho_measured))
+            fidelities.append(fid)
+
+        avg_fidelity = np.mean(fidelities)
+
+        # For depolarizing: F = (1-p) + p/d
+        # Solve for p: p = (1-F) * d / (d-1)
+        d = len(measured_probs[0])
+        p_estimate = (1 - avg_fidelity) * d / (d - 1)
+
+        self.parameters['depolarizing_prob'] = np.clip(p_estimate, 0, 1)
+
+        return self.parameters
+
+    def _probs_to_density(self, probs):
+        """Convert probability distribution to density matrix."""
+        dim = len(probs)
+        rho = np.diag(probs.astype(complex))
+        return rho
+
+    def predict_correction(self, noisy_exp):
+        """Predict corrected expectation value."""
+        if 'depolarizing_prob' not in self.parameters:
+            return noisy_exp
+
+        p = self.parameters['depolarizing_prob']
+        # Inverse of depolarizing: E_ideal = E_noisy / (1-p)
+        # (simplified, ignoring finite-size effects)
+        return noisy_exp / max(1 - p, 0.1)
+
+# Demonstrate learned noise model
+print("\nLearned Noise Model:")
+print("=" * 50)
+
+# Simulate calibration data
+true_p = 0.08
+
+prepared = [np.array([[1, 0], [0, 0]], dtype=complex),  # |0⟩
+            np.array([[0, 0], [0, 1]], dtype=complex)]  # |1⟩
+
+measured = []
+for rho in prepared:
+    # Apply depolarizing
+    noisy = (1 - true_p) * rho + true_p * np.eye(2) / 2
+    probs = np.array([noisy[0, 0].real, noisy[1, 1].real])
+    measured.append(probs)
+
+# Fit model
+model = LearnedNoiseModel()
+params = model.fit_depolarizing(prepared, measured)
+
+print(f"True depolarizing probability: {true_p:.4f}")
+print(f"Estimated probability: {params['depolarizing_prob']:.4f}")
+
+# Test correction
+noisy_exp = 0.8
+corrected = model.predict_correction(noisy_exp)
+print(f"\nNoisy expectation: {noisy_exp:.4f}")
+print(f"Corrected: {corrected:.4f}")
+```
+
+## 4. Transfer Learning for Mitigation
+
+Transfer learned mitigators to new circuits.
+
+```python
+class TransferMitigator:
+    """
+    Transfer learning for error mitigation.
+
+    Pre-train on one set of circuits, fine-tune on target.
+    """
+
+    def __init__(self, base_mitigator):
+        self.base = base_mitigator
+        self.fine_tuned = False
+
+    def pretrain(self, source_data, source_labels, epochs=500):
+        """Pre-train on source domain (e.g., Clifford circuits)."""
+        self.base.initialize(1, 1)
+        self.base.train(source_data, source_labels, epochs=epochs)
+        return self
+
+    def fine_tune(self, target_data, target_labels, epochs=100, lr=0.01):
+        """Fine-tune on target domain with few samples."""
+        # Reduce learning rate for fine-tuning
+        self.base.train(target_data, target_labels, epochs=epochs, lr=lr)
+        self.fine_tuned = True
+        return self
+
+    def predict(self, noisy_value):
+        """Predict mitigated value."""
+        return self.base.predict(noisy_value)
+
+# Demonstrate transfer learning
+print("\nTransfer Learning Mitigation:")
+print("=" * 50)
+
+np.random.seed(42)
+
+# Source domain: many Clifford circuits
+source_noisy = np.random.uniform(-0.8, 0.8, 200)
+source_ideal = source_noisy * 1.15 + np.random.randn(200) * 0.05
+
+# Target domain: few non-Clifford circuits
+target_noisy = np.random.uniform(-0.6, 0.6, 20)
+target_ideal = target_noisy * 1.20 + np.random.randn(20) * 0.05
+
+# Train with transfer learning
+base = NeuralMitigator(hidden_sizes=[16])
+transfer = TransferMitigator(base)
+
+# Pre-train on source
+transfer.pretrain(source_noisy, source_ideal, epochs=300)
+pretrain_pred = transfer.predict(np.array([0.5]))[0]
+
+# Fine-tune on target
+transfer.fine_tune(target_noisy, target_ideal, epochs=100, lr=0.05)
+finetune_pred = transfer.predict(np.array([0.5]))[0]
+
+# True target correction
+true_corrected = 0.5 * 1.20
+
+print(f"Test input: 0.5")
+print(f"Pre-trained prediction: {pretrain_pred:.4f}")
+print(f"Fine-tuned prediction: {finetune_pred:.4f}")
+print(f"True corrected: {true_corrected:.4f}")
+```
+
+<Warning>
+Transfer learning works best when source and target domains share similar noise characteristics. Large domain shifts require more fine-tuning data.
+</Warning>
+
+## 5. Hybrid Physics-ML Methods
+
+Combine physics-based constraints with learned corrections.
+
+```python
+class HybridMitigator:
+    """
+    Combine physics-based and learning-based mitigation.
+    """
+
+    def __init__(self):
+        self.physics_model = None
+        self.residual_model = None
+
+    def set_physics_model(self, model_type='zne', **params):
+        """Set physics-based correction."""
+        if model_type == 'zne':
+            self.physics_model = lambda x, factors: self._zne_correction(x, factors)
+        elif model_type == 'linear':
+            slope = params.get('slope', 1.1)
+            self.physics_model = lambda x, _: x * slope
+
+    def _zne_correction(self, measurements, noise_factors):
+        """Simple ZNE extrapolation."""
+        coeffs = np.polyfit(noise_factors, measurements, 1)
+        return coeffs[1]  # y-intercept
+
+    def train_residual(self, noisy_data, ideal_data, physics_predictions):
+        """Train model to predict residual: ideal - physics_prediction."""
+        residuals = ideal_data - physics_predictions
+
+        self.residual_model = NeuralMitigator(hidden_sizes=[8])
+        self.residual_model.initialize(1, 1)
+        self.residual_model.train(noisy_data, residuals, epochs=300)
+
+    def predict(self, noisy_value, physics_prediction):
+        """Combine physics and learned corrections."""
+        if self.residual_model is None:
+            return physics_prediction
+
+        residual = self.residual_model.predict(np.array([noisy_value]))[0]
+        return physics_prediction + residual
+
+# Demonstrate hybrid approach
+print("\nHybrid Physics-ML Mitigation:")
+print("=" * 50)
+
+np.random.seed(42)
+
+# Training data
+n_samples = 100
+noisy_data = np.random.uniform(-0.8, 0.8, n_samples)
+ideal_data = noisy_data * 1.15 + 0.02 * noisy_data**2  # Non-linear correction
+ideal_data += np.random.randn(n_samples) * 0.03
+
+# Physics model (linear approximation)
+physics_pred = noisy_data * 1.10  # Slightly off
+
+# Train hybrid
+hybrid = HybridMitigator()
+hybrid.set_physics_model('linear', slope=1.10)
+hybrid.train_residual(noisy_data, ideal_data, physics_pred)
+
+# Test
+test_noisy = 0.6
+physics_only = 0.6 * 1.10
+hybrid_pred = hybrid.predict(test_noisy, physics_only)
+true_ideal = 0.6 * 1.15 + 0.02 * 0.6**2
+
+print(f"Noisy value: {test_noisy:.4f}")
+print(f"Physics-only: {physics_only:.4f}")
+print(f"Hybrid prediction: {hybrid_pred:.4f}")
+print(f"True ideal: {true_ideal:.4f}")
+```
+
+## 6. Training Strategies
+
+Best practices for training mitigation models.
+
+```python
+def cross_validation_mitigator(data_noisy, data_ideal, k_folds=5):
+    """
+    Cross-validate mitigator to assess generalization.
+    """
+    n = len(data_noisy)
+    fold_size = n // k_folds
+
+    val_errors = []
+
+    for fold in range(k_folds):
+        # Split data
+        val_start = fold * fold_size
+        val_end = val_start + fold_size
+
+        val_noisy = data_noisy[val_start:val_end]
+        val_ideal = data_ideal[val_start:val_end]
+
+        train_noisy = np.concatenate([data_noisy[:val_start],
+                                      data_noisy[val_end:]])
+        train_ideal = np.concatenate([data_ideal[:val_start],
+                                      data_ideal[val_end:]])
+
+        # Train
+        mitigator = NeuralMitigator(hidden_sizes=[16])
+        mitigator.initialize(1, 1)
+        mitigator.train(train_noisy, train_ideal, epochs=200)
+
+        # Validate
+        predictions = mitigator.predict(val_noisy)
+        error = np.mean((predictions - val_ideal)**2)
+        val_errors.append(error)
+
+    return np.mean(val_errors), np.std(val_errors)
+
+# Demonstrate cross-validation
+print("\nCross-Validation for Mitigation:")
+print("=" * 50)
+
+np.random.seed(42)
+data_noisy = np.random.uniform(-0.8, 0.8, 100)
+data_ideal = data_noisy * 1.12 + np.random.randn(100) * 0.05
+
+mean_error, std_error = cross_validation_mitigator(data_noisy, data_ideal)
+
+print(f"Cross-validation MSE: {mean_error:.6f} ± {std_error:.6f}")
+```
+
+## Summary
+
+In this lesson, you learned:
+
+- **Clifford Data Regression**: Train on simulatable circuits
+- **Neural mitigators**: Learn complex noise corrections
+- **Noise model learning**: Estimate parameters from data
+- **Transfer learning**: Adapt to new circuits with few samples
+- **Hybrid methods**: Combine physics and ML
+- **Training strategies**: Cross-validation and best practices
+
+Learning-based methods complement physics-based approaches by handling unknown or complex noise.
+
+## Next Steps
+
+In the final lesson, we'll explore error-aware training strategies that make VQC optimization robust to noise.

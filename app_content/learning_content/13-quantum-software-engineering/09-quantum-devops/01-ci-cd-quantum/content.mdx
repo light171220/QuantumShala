@@ -1,0 +1,996 @@
+---
+title: "CI/CD for Quantum Applications: Automating Quantum Software Delivery"
+description: "Master continuous integration and continuous deployment pipelines tailored for quantum computing applications. Learn to automate testing, validation, and deployment of quantum circuits and hybrid quantum-classical systems."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Design CI/CD pipelines specifically for quantum software projects
+- Implement automated testing strategies for quantum circuits including simulation and hardware validation
+- Configure multi-stage pipelines that handle both classical and quantum components
+- Set up automated circuit optimization and transpilation in deployment workflows
+- Manage quantum hardware credentials and backend selection in CI/CD systems
+- Implement rollback strategies and canary deployments for quantum services
+
+## 1. Introduction to Quantum CI/CD
+
+Continuous Integration and Continuous Deployment (CI/CD) for quantum applications presents unique challenges that extend beyond traditional software pipelines. Quantum software must be validated across multiple layers: classical preprocessing, quantum circuit correctness, simulator behavior, and real hardware execution.
+
+<Definition term="Quantum CI/CD">
+A specialized software delivery practice that automates the building, testing, and deployment of quantum applications across classical simulators and quantum hardware backends, ensuring circuit correctness, optimization, and reproducibility throughout the development lifecycle.
+</Definition>
+
+### Why Quantum CI/CD Matters
+
+<Formula>
+$$\text{Pipeline Reliability} = \frac{\text{Successful Deployments}}{\text{Total Attempts}} \times \prod_{i=1}^{n} P(\text{Stage}_i \text{ passes})$$
+</Formula>
+
+Traditional CI/CD must be extended to handle:
+
+| Challenge | Classical CI/CD | Quantum CI/CD |
+|-----------|-----------------|---------------|
+| Testing | Deterministic unit tests | Probabilistic outcome validation |
+| Hardware | Consistent compute resources | Variable qubit quality and availability |
+| Validation | Binary pass/fail | Statistical confidence intervals |
+| Optimization | Code optimization | Circuit transpilation and depth reduction |
+| Credentials | API keys | Quantum hardware access tokens |
+
+<Tip>
+Start with simulator-based CI pipelines and gradually introduce hardware testing stages as your confidence grows. Hardware jobs are expensive and have queue times.
+</Tip>
+
+## 2. Pipeline Architecture for Quantum Projects
+
+A robust quantum CI/CD pipeline consists of multiple stages, each addressing specific validation requirements.
+
+### Multi-Stage Pipeline Design
+
+```yaml
+# .github/workflows/quantum-ci.yml
+name: Quantum Application CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly hardware validation
+    - cron: '0 0 * * 0'
+
+env:
+  PYTHON_VERSION: '3.11'
+  QISKIT_VERSION: '1.0'
+
+jobs:
+  # Stage 1: Static Analysis and Classical Tests
+  classical-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install ruff mypy pytest pytest-cov
+
+      - name: Lint with Ruff
+        run: ruff check src/ tests/
+
+      - name: Type checking
+        run: mypy src/ --ignore-missing-imports
+
+      - name: Classical unit tests
+        run: pytest tests/classical/ -v --cov=src --cov-report=xml
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: coverage.xml
+
+  # Stage 2: Circuit Validation (Statevector)
+  circuit-validation:
+    needs: classical-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install quantum dependencies
+        run: pip install qiskit qiskit-aer numpy scipy
+
+      - name: Validate circuit construction
+        run: pytest tests/circuits/ -v -m "not hardware"
+
+      - name: Run statevector simulations
+        run: python scripts/validate_statevectors.py
+
+      - name: Check circuit depths
+        run: python scripts/check_circuit_metrics.py --max-depth 100
+
+  # Stage 3: Noise Model Simulation
+  noise-simulation:
+    needs: circuit-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install qiskit qiskit-aer qiskit-ibm-runtime
+
+      - name: Run noise model tests
+        run: pytest tests/noise/ -v --tb=short
+
+      - name: Statistical validation
+        run: |
+          python scripts/noise_validation.py \
+            --shots 10000 \
+            --confidence 0.95 \
+            --threshold 0.1
+
+  # Stage 4: Hardware Integration (Scheduled/Manual)
+  hardware-validation:
+    needs: noise-simulation
+    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[hw-test]')
+    runs-on: ubuntu-latest
+    environment: quantum-hardware
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install qiskit qiskit-ibm-runtime
+
+      - name: Run hardware tests
+        env:
+          IBM_QUANTUM_TOKEN: ${{ secrets.IBM_QUANTUM_TOKEN }}
+        run: |
+          python scripts/hardware_validation.py \
+            --backend ibm_brisbane \
+            --max-circuits 5 \
+            --shots 4000
+
+      - name: Archive hardware results
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardware-results
+          path: results/hardware/
+
+  # Stage 5: Deployment
+  deploy:
+    needs: [noise-simulation]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build package
+        run: python -m build
+
+      - name: Deploy to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: twine upload dist/*
+```
+
+<Warning>
+Never store quantum hardware tokens in your repository. Always use encrypted secrets and environment protection rules.
+</Warning>
+
+## 3. Automated Testing Strategies
+
+Quantum applications require layered testing approaches that validate correctness at multiple abstraction levels.
+
+### Test Hierarchy for Quantum Code
+
+<Formula>
+$$\text{Test Coverage} = \alpha \cdot C_{unit} + \beta \cdot C_{circuit} + \gamma \cdot C_{noise} + \delta \cdot C_{hardware}$$
+</Formula>
+
+Where weights $\alpha > \beta > \gamma > \delta$ reflect test frequency and cost.
+
+```python
+# tests/conftest.py
+import pytest
+from qiskit import QuantumCircuit
+from qiskit_aer import AerSimulator
+from qiskit_aer.noise import NoiseModel, depolarizing_error
+
+@pytest.fixture
+def statevector_simulator():
+    """Ideal simulator for exact validation."""
+    return AerSimulator(method='statevector')
+
+@pytest.fixture
+def shot_simulator():
+    """Shot-based simulator for statistical tests."""
+    return AerSimulator(method='automatic', shots=8192)
+
+@pytest.fixture
+def noisy_simulator():
+    """Simulator with realistic noise model."""
+    noise_model = NoiseModel()
+
+    # Single-qubit gate error
+    error_1q = depolarizing_error(0.001, 1)
+    noise_model.add_all_qubit_quantum_error(error_1q, ['rx', 'ry', 'rz', 'x', 'y', 'z', 'h'])
+
+    # Two-qubit gate error
+    error_2q = depolarizing_error(0.01, 2)
+    noise_model.add_all_qubit_quantum_error(error_2q, ['cx', 'cz'])
+
+    return AerSimulator(noise_model=noise_model)
+
+@pytest.fixture
+def sample_circuit():
+    """Bell state preparation circuit."""
+    qc = QuantumCircuit(2, 2)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.measure([0, 1], [0, 1])
+    return qc
+
+
+# tests/circuits/test_bell_state.py
+import numpy as np
+from qiskit.quantum_info import Statevector
+from scipy import stats
+
+class TestBellStateCircuit:
+    """Test suite for Bell state preparation."""
+
+    def test_statevector_exact(self, sample_circuit, statevector_simulator):
+        """Verify exact statevector matches expected Bell state."""
+        # Remove measurements for statevector
+        qc = sample_circuit.remove_final_measurements(inplace=False)
+
+        sv = Statevector.from_instruction(qc)
+        expected = np.array([1, 0, 0, 1]) / np.sqrt(2)
+
+        assert np.allclose(np.abs(sv.data), np.abs(expected), atol=1e-10)
+
+    def test_measurement_distribution(self, sample_circuit, shot_simulator):
+        """Verify measurement outcomes follow expected distribution."""
+        job = shot_simulator.run(sample_circuit, shots=10000)
+        counts = job.result().get_counts()
+
+        # Bell state should give 50% |00> and 50% |11>
+        total = sum(counts.values())
+        p_00 = counts.get('00', 0) / total
+        p_11 = counts.get('11', 0) / total
+
+        # Chi-squared test for uniform distribution over {00, 11}
+        observed = [counts.get('00', 0), counts.get('11', 0)]
+        expected = [total / 2, total / 2]
+
+        chi2, p_value = stats.chisquare(observed, expected)
+
+        assert p_value > 0.01, f"Distribution test failed: chi2={chi2}, p={p_value}"
+        assert counts.get('01', 0) + counts.get('10', 0) < total * 0.01
+
+    def test_noise_resilience(self, sample_circuit, noisy_simulator):
+        """Verify circuit performs acceptably under noise."""
+        job = noisy_simulator.run(sample_circuit, shots=10000)
+        counts = job.result().get_counts()
+
+        total = sum(counts.values())
+        fidelity_estimate = (counts.get('00', 0) + counts.get('11', 0)) / total
+
+        # Accept if fidelity > 90% under noise
+        assert fidelity_estimate > 0.90, f"Noisy fidelity too low: {fidelity_estimate}"
+
+    @pytest.mark.hardware
+    def test_hardware_execution(self, sample_circuit):
+        """Integration test on real hardware (run sparingly)."""
+        from qiskit_ibm_runtime import QiskitRuntimeService, Sampler
+
+        service = QiskitRuntimeService()
+        backend = service.least_busy(operational=True, simulator=False)
+
+        sampler = Sampler(backend)
+        job = sampler.run([sample_circuit], shots=4000)
+        result = job.result()
+
+        counts = result[0].data.meas.get_counts()
+        total = sum(counts.values())
+        fidelity = (counts.get('00', 0) + counts.get('11', 0)) / total
+
+        # Hardware threshold is lower
+        assert fidelity > 0.80, f"Hardware fidelity: {fidelity}"
+```
+
+<Example>
+**Statistical Validation Framework**
+
+For probabilistic quantum outputs, we need statistical tests rather than exact comparisons:
+
+```python
+# scripts/validate_statevectors.py
+import json
+import sys
+from pathlib import Path
+from typing import Dict, List, Tuple
+import numpy as np
+from scipy import stats
+from qiskit import QuantumCircuit
+from qiskit.quantum_info import Statevector, state_fidelity
+
+class StatevectorValidator:
+    """Validates quantum circuits against expected statevectors."""
+
+    def __init__(self, tolerance: float = 1e-6):
+        self.tolerance = tolerance
+        self.results: List[Dict] = []
+
+    def validate_circuit(
+        self,
+        circuit: QuantumCircuit,
+        expected_sv: np.ndarray,
+        name: str
+    ) -> Tuple[bool, float]:
+        """Validate circuit produces expected statevector."""
+        # Get actual statevector
+        actual_sv = Statevector.from_instruction(circuit)
+        expected = Statevector(expected_sv)
+
+        # Calculate fidelity
+        fidelity = state_fidelity(actual_sv, expected)
+        passed = fidelity > (1 - self.tolerance)
+
+        self.results.append({
+            'name': name,
+            'fidelity': fidelity,
+            'passed': passed,
+            'circuit_depth': circuit.depth(),
+            'gate_count': circuit.size()
+        })
+
+        return passed, fidelity
+
+    def validate_measurement_distribution(
+        self,
+        counts: Dict[str, int],
+        expected_probs: Dict[str, float],
+        confidence: float = 0.99
+    ) -> Tuple[bool, float]:
+        """Chi-squared test for measurement distribution."""
+        total_shots = sum(counts.values())
+
+        # Prepare observed and expected frequencies
+        all_outcomes = set(counts.keys()) | set(expected_probs.keys())
+        observed = []
+        expected = []
+
+        for outcome in sorted(all_outcomes):
+            observed.append(counts.get(outcome, 0))
+            expected.append(expected_probs.get(outcome, 0) * total_shots)
+
+        # Filter out zero expected values
+        mask = [e > 0 for e in expected]
+        observed = [o for o, m in zip(observed, mask) if m]
+        expected = [e for e, m in zip(expected, mask) if m]
+
+        if len(observed) < 2:
+            return True, 1.0
+
+        chi2, p_value = stats.chisquare(observed, expected)
+        passed = p_value > (1 - confidence)
+
+        return passed, p_value
+
+    def generate_report(self) -> Dict:
+        """Generate validation report."""
+        total = len(self.results)
+        passed = sum(1 for r in self.results if r['passed'])
+
+        return {
+            'total_tests': total,
+            'passed': passed,
+            'failed': total - passed,
+            'pass_rate': passed / total if total > 0 else 0,
+            'details': self.results
+        }
+
+
+if __name__ == '__main__':
+    validator = StatevectorValidator()
+
+    # Example: Validate Hadamard
+    qc_h = QuantumCircuit(1)
+    qc_h.h(0)
+    expected_h = np.array([1, 1]) / np.sqrt(2)
+    validator.validate_circuit(qc_h, expected_h, "Hadamard")
+
+    # Example: Validate Bell state
+    qc_bell = QuantumCircuit(2)
+    qc_bell.h(0)
+    qc_bell.cx(0, 1)
+    expected_bell = np.array([1, 0, 0, 1]) / np.sqrt(2)
+    validator.validate_circuit(qc_bell, expected_bell, "Bell State")
+
+    report = validator.generate_report()
+    print(json.dumps(report, indent=2))
+
+    sys.exit(0 if report['failed'] == 0 else 1)
+```
+</Example>
+
+## 4. Circuit Optimization in CI/CD
+
+Automated transpilation and optimization should be part of your deployment pipeline.
+
+### Optimization Pipeline Stage
+
+```python
+# scripts/optimize_circuits.py
+"""Circuit optimization stage for CI/CD pipeline."""
+from dataclasses import dataclass
+from typing import List, Optional, Dict, Any
+import json
+from pathlib import Path
+
+from qiskit import QuantumCircuit, transpile
+from qiskit.transpiler import PassManager
+from qiskit.transpiler.passes import (
+    Optimize1qGates,
+    CXCancellation,
+    CommutativeCancellation,
+    RemoveBarriers,
+    Depth,
+    Size
+)
+from qiskit_ibm_runtime import QiskitRuntimeService
+
+@dataclass
+class OptimizationResult:
+    """Results from circuit optimization."""
+    original_depth: int
+    optimized_depth: int
+    original_gates: int
+    optimized_gates: int
+    original_cx_count: int
+    optimized_cx_count: int
+    reduction_percent: float
+
+class CircuitOptimizer:
+    """Optimize circuits for deployment."""
+
+    def __init__(
+        self,
+        backend_name: Optional[str] = None,
+        optimization_level: int = 3
+    ):
+        self.optimization_level = optimization_level
+        self.backend = None
+
+        if backend_name:
+            service = QiskitRuntimeService()
+            self.backend = service.backend(backend_name)
+
+    def _count_cx(self, circuit: QuantumCircuit) -> int:
+        """Count CX gates in circuit."""
+        return circuit.count_ops().get('cx', 0)
+
+    def optimize(self, circuit: QuantumCircuit) -> tuple[QuantumCircuit, OptimizationResult]:
+        """Optimize a circuit and return metrics."""
+        original_depth = circuit.depth()
+        original_gates = circuit.size()
+        original_cx = self._count_cx(circuit)
+
+        # Transpile with optimization
+        if self.backend:
+            optimized = transpile(
+                circuit,
+                backend=self.backend,
+                optimization_level=self.optimization_level
+            )
+        else:
+            # Generic optimization without backend constraints
+            pm = PassManager([
+                RemoveBarriers(),
+                Optimize1qGates(),
+                CXCancellation(),
+                CommutativeCancellation(),
+                Optimize1qGates(),
+            ])
+            optimized = pm.run(circuit)
+
+        optimized_depth = optimized.depth()
+        optimized_gates = optimized.size()
+        optimized_cx = self._count_cx(optimized)
+
+        reduction = (1 - optimized_depth / original_depth) * 100 if original_depth > 0 else 0
+
+        result = OptimizationResult(
+            original_depth=original_depth,
+            optimized_depth=optimized_depth,
+            original_gates=original_gates,
+            optimized_gates=optimized_gates,
+            original_cx_count=original_cx,
+            optimized_cx_count=optimized_cx,
+            reduction_percent=reduction
+        )
+
+        return optimized, result
+
+    def batch_optimize(
+        self,
+        circuits: List[QuantumCircuit],
+        names: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Optimize multiple circuits and generate report."""
+        if names is None:
+            names = [f"circuit_{i}" for i in range(len(circuits))]
+
+        results = {}
+        total_reduction = 0
+
+        for name, circuit in zip(names, circuits):
+            optimized, metrics = self.optimize(circuit)
+            results[name] = {
+                'metrics': metrics.__dict__,
+                'optimized_qasm': optimized.qasm() if optimized.num_qubits <= 10 else None
+            }
+            total_reduction += metrics.reduction_percent
+
+        return {
+            'circuits': results,
+            'average_reduction': total_reduction / len(circuits) if circuits else 0,
+            'optimization_level': self.optimization_level,
+            'backend': self.backend.name if self.backend else 'generic'
+        }
+
+
+def main():
+    """Main optimization pipeline entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Optimize quantum circuits')
+    parser.add_argument('--input', type=str, required=True, help='Input QASM file or directory')
+    parser.add_argument('--output', type=str, required=True, help='Output directory')
+    parser.add_argument('--backend', type=str, help='Target backend for optimization')
+    parser.add_argument('--level', type=int, default=3, help='Optimization level (0-3)')
+    parser.add_argument('--max-depth', type=int, default=100, help='Maximum allowed depth')
+
+    args = parser.parse_args()
+
+    optimizer = CircuitOptimizer(
+        backend_name=args.backend,
+        optimization_level=args.level
+    )
+
+    input_path = Path(args.input)
+    output_path = Path(args.output)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # Load circuits
+    circuits = []
+    names = []
+
+    if input_path.is_file():
+        qc = QuantumCircuit.from_qasm_file(str(input_path))
+        circuits.append(qc)
+        names.append(input_path.stem)
+    else:
+        for qasm_file in input_path.glob('*.qasm'):
+            qc = QuantumCircuit.from_qasm_file(str(qasm_file))
+            circuits.append(qc)
+            names.append(qasm_file.stem)
+
+    # Optimize
+    report = optimizer.batch_optimize(circuits, names)
+
+    # Check constraints
+    failures = []
+    for name, data in report['circuits'].items():
+        if data['metrics']['optimized_depth'] > args.max_depth:
+            failures.append(f"{name}: depth {data['metrics']['optimized_depth']} > {args.max_depth}")
+
+    # Write report
+    report_path = output_path / 'optimization_report.json'
+    with open(report_path, 'w') as f:
+        json.dump(report, f, indent=2)
+
+    print(f"Optimization complete. Average depth reduction: {report['average_reduction']:.1f}%")
+
+    if failures:
+        print("FAILURES:")
+        for f in failures:
+            print(f"  - {f}")
+        return 1
+
+    return 0
+
+
+if __name__ == '__main__':
+    exit(main())
+```
+
+## 5. Managing Quantum Credentials
+
+Secure handling of quantum hardware access is critical for CI/CD pipelines.
+
+<Warning>
+Quantum hardware access tokens often have usage quotas. Protect them carefully and implement rate limiting in your pipelines.
+</Warning>
+
+### Secrets Management Best Practices
+
+```yaml
+# .github/workflows/quantum-secrets.yml
+name: Quantum CI with Secure Credentials
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  hardware-tests:
+    runs-on: ubuntu-latest
+    environment: quantum-hardware  # Requires approval for production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure quantum credentials
+        run: |
+          # Create credentials directory
+          mkdir -p ~/.qiskit
+
+          # Write credentials file (never echo secrets!)
+          python << 'EOF'
+          import os
+          import json
+
+          config = {
+              "default_provider": "ibm_quantum",
+              "ibm_quantum": {
+                  "token": os.environ["IBM_QUANTUM_TOKEN"],
+                  "channel": "ibm_quantum"
+              }
+          }
+
+          with open(os.path.expanduser("~/.qiskit/qiskit-ibm.json"), "w") as f:
+              json.dump(config, f)
+          EOF
+        env:
+          IBM_QUANTUM_TOKEN: ${{ secrets.IBM_QUANTUM_TOKEN }}
+
+      - name: Run hardware tests
+        run: pytest tests/hardware/ -v --tb=short
+        env:
+          # Limit API calls
+          QUANTUM_MAX_JOBS: "5"
+          QUANTUM_JOB_TIMEOUT: "3600"
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -rf ~/.qiskit/
+```
+
+```python
+# src/quantum_app/config.py
+"""Secure configuration management for quantum applications."""
+import os
+from dataclasses import dataclass
+from typing import Optional
+from functools import lru_cache
+
+@dataclass
+class QuantumConfig:
+    """Configuration for quantum backend access."""
+    token: str
+    channel: str = "ibm_quantum"
+    instance: str = "ibm-q/open/main"
+    max_jobs: int = 10
+    timeout: int = 3600
+
+    @classmethod
+    def from_environment(cls) -> "QuantumConfig":
+        """Load configuration from environment variables."""
+        token = os.environ.get("IBM_QUANTUM_TOKEN")
+        if not token:
+            raise ValueError("IBM_QUANTUM_TOKEN environment variable not set")
+
+        return cls(
+            token=token,
+            channel=os.environ.get("IBM_QUANTUM_CHANNEL", "ibm_quantum"),
+            instance=os.environ.get("IBM_QUANTUM_INSTANCE", "ibm-q/open/main"),
+            max_jobs=int(os.environ.get("QUANTUM_MAX_JOBS", "10")),
+            timeout=int(os.environ.get("QUANTUM_JOB_TIMEOUT", "3600"))
+        )
+
+@lru_cache()
+def get_runtime_service():
+    """Get cached runtime service instance."""
+    from qiskit_ibm_runtime import QiskitRuntimeService
+
+    config = QuantumConfig.from_environment()
+
+    return QiskitRuntimeService(
+        channel=config.channel,
+        token=config.token,
+        instance=config.instance
+    )
+
+class RateLimitedBackend:
+    """Wrapper that enforces rate limits on backend usage."""
+
+    def __init__(self, backend, max_jobs_per_hour: int = 10):
+        self.backend = backend
+        self.max_jobs = max_jobs_per_hour
+        self.job_times = []
+
+    def run(self, *args, **kwargs):
+        """Run with rate limiting."""
+        import time
+
+        current_time = time.time()
+        hour_ago = current_time - 3600
+
+        # Clean old entries
+        self.job_times = [t for t in self.job_times if t > hour_ago]
+
+        if len(self.job_times) >= self.max_jobs:
+            wait_time = self.job_times[0] - hour_ago
+            raise RuntimeError(
+                f"Rate limit exceeded. Wait {wait_time:.0f}s or increase limit."
+            )
+
+        self.job_times.append(current_time)
+        return self.backend.run(*args, **kwargs)
+```
+
+## 6. Rollback and Canary Deployments
+
+For production quantum services, implement careful deployment strategies.
+
+<Example>
+**Canary Deployment for Quantum APIs**
+
+```python
+# src/deployment/canary.py
+"""Canary deployment manager for quantum services."""
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+import random
+from enum import Enum
+
+class DeploymentStatus(Enum):
+    CANARY = "canary"
+    FULL = "full"
+    ROLLING_BACK = "rolling_back"
+    ROLLED_BACK = "rolled_back"
+
+@dataclass
+class CircuitVersion:
+    """Versioned quantum circuit configuration."""
+    version: str
+    circuit_hash: str
+    optimization_level: int
+    target_backend: str
+    fidelity_threshold: float
+
+@dataclass
+class CanaryMetrics:
+    """Metrics collected during canary deployment."""
+    requests: int = 0
+    successes: int = 0
+    failures: int = 0
+    avg_fidelity: float = 0.0
+
+    @property
+    def success_rate(self) -> float:
+        return self.successes / self.requests if self.requests > 0 else 0.0
+
+class QuantumCanaryDeployer:
+    """Manages canary deployments for quantum circuits."""
+
+    def __init__(
+        self,
+        canary_percentage: float = 0.1,
+        min_canary_requests: int = 100,
+        success_threshold: float = 0.95,
+        fidelity_threshold: float = 0.85
+    ):
+        self.canary_percentage = canary_percentage
+        self.min_canary_requests = min_canary_requests
+        self.success_threshold = success_threshold
+        self.fidelity_threshold = fidelity_threshold
+
+        self.current_version: Optional[CircuitVersion] = None
+        self.canary_version: Optional[CircuitVersion] = None
+        self.status = DeploymentStatus.FULL
+
+        self.current_metrics = CanaryMetrics()
+        self.canary_metrics = CanaryMetrics()
+
+    def start_canary(self, new_version: CircuitVersion):
+        """Begin canary deployment of new circuit version."""
+        self.canary_version = new_version
+        self.canary_metrics = CanaryMetrics()
+        self.status = DeploymentStatus.CANARY
+
+        print(f"Started canary deployment: {new_version.version}")
+
+    def route_request(self) -> CircuitVersion:
+        """Route request to appropriate version."""
+        if self.status != DeploymentStatus.CANARY:
+            return self.current_version
+
+        if random.random() < self.canary_percentage:
+            return self.canary_version
+        return self.current_version
+
+    def record_result(
+        self,
+        version: CircuitVersion,
+        success: bool,
+        fidelity: float
+    ):
+        """Record execution result for metrics."""
+        if version == self.canary_version:
+            metrics = self.canary_metrics
+        else:
+            metrics = self.current_metrics
+
+        metrics.requests += 1
+        if success:
+            metrics.successes += 1
+        else:
+            metrics.failures += 1
+
+        # Update running average
+        n = metrics.requests
+        metrics.avg_fidelity = (
+            (metrics.avg_fidelity * (n - 1) + fidelity) / n
+        )
+
+    def evaluate_canary(self) -> Dict:
+        """Evaluate canary deployment status."""
+        if self.canary_metrics.requests < self.min_canary_requests:
+            return {
+                'decision': 'wait',
+                'reason': f'Need {self.min_canary_requests - self.canary_metrics.requests} more requests',
+                'metrics': self.canary_metrics.__dict__
+            }
+
+        # Check success rate
+        if self.canary_metrics.success_rate < self.success_threshold:
+            return {
+                'decision': 'rollback',
+                'reason': f'Success rate {self.canary_metrics.success_rate:.2%} < {self.success_threshold:.2%}',
+                'metrics': self.canary_metrics.__dict__
+            }
+
+        # Check fidelity
+        if self.canary_metrics.avg_fidelity < self.fidelity_threshold:
+            return {
+                'decision': 'rollback',
+                'reason': f'Avg fidelity {self.canary_metrics.avg_fidelity:.3f} < {self.fidelity_threshold}',
+                'metrics': self.canary_metrics.__dict__
+            }
+
+        return {
+            'decision': 'promote',
+            'reason': 'All thresholds met',
+            'metrics': self.canary_metrics.__dict__
+        }
+
+    def promote_canary(self):
+        """Promote canary to full deployment."""
+        self.current_version = self.canary_version
+        self.current_metrics = self.canary_metrics
+        self.canary_version = None
+        self.canary_metrics = CanaryMetrics()
+        self.status = DeploymentStatus.FULL
+
+        print(f"Promoted {self.current_version.version} to production")
+
+    def rollback(self):
+        """Rollback canary deployment."""
+        self.status = DeploymentStatus.ROLLING_BACK
+        version = self.canary_version.version
+        self.canary_version = None
+        self.canary_metrics = CanaryMetrics()
+        self.status = DeploymentStatus.ROLLED_BACK
+
+        print(f"Rolled back canary deployment: {version}")
+
+
+# CI/CD integration
+def deployment_pipeline():
+    """Example deployment pipeline with canary."""
+    deployer = QuantumCanaryDeployer(
+        canary_percentage=0.05,  # 5% of traffic
+        min_canary_requests=500,
+        success_threshold=0.98,
+        fidelity_threshold=0.90
+    )
+
+    # Current production version
+    deployer.current_version = CircuitVersion(
+        version="v1.2.3",
+        circuit_hash="abc123",
+        optimization_level=3,
+        target_backend="ibm_brisbane",
+        fidelity_threshold=0.85
+    )
+
+    # New version to deploy
+    new_version = CircuitVersion(
+        version="v1.3.0",
+        circuit_hash="def456",
+        optimization_level=3,
+        target_backend="ibm_brisbane",
+        fidelity_threshold=0.85
+    )
+
+    deployer.start_canary(new_version)
+
+    # In production, this would run continuously
+    # Here we simulate
+    for _ in range(600):
+        version = deployer.route_request()
+        # Simulate execution
+        success = random.random() > 0.02
+        fidelity = random.gauss(0.92, 0.03)
+        deployer.record_result(version, success, fidelity)
+
+    # Evaluate
+    result = deployer.evaluate_canary()
+    print(f"Canary evaluation: {result}")
+
+    if result['decision'] == 'promote':
+        deployer.promote_canary()
+    elif result['decision'] == 'rollback':
+        deployer.rollback()
+```
+</Example>
+
+## Summary
+
+In this lesson, you learned how to build robust CI/CD pipelines for quantum applications:
+
+1. **Pipeline Architecture**: Multi-stage pipelines that progress from classical tests through simulator validation to hardware execution
+2. **Automated Testing**: Layered testing strategies using statistical validation for probabilistic quantum outputs
+3. **Circuit Optimization**: Automated transpilation and depth checking integrated into deployment workflows
+4. **Credentials Management**: Secure handling of quantum hardware tokens using environment variables and GitHub secrets
+5. **Deployment Strategies**: Canary deployments with quantum-specific metrics like fidelity thresholds
+
+<Tip>
+Start simple with simulator-only CI and gradually add complexity. A working pipeline that runs on every commit is more valuable than a complex one that developers avoid.
+</Tip>
+
+## Further Reading
+
+- Next lesson: Version Control Strategies for Quantum Projects
+- Related: Testing and Debugging Quantum Applications
+- Advanced: Infrastructure as Code for Quantum Systems

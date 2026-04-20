@@ -1,0 +1,577 @@
+---
+title: "API Compatibility"
+description: "Designing APIs and interfaces that support both classical and post-quantum cryptography for seamless migration."
+---
+
+# API Compatibility
+
+Well-designed APIs enable smooth cryptographic migrations. This lesson covers strategies for building crypto-agile interfaces that support both classical and PQC algorithms.
+
+## API Design Principles
+
+### Algorithm Abstraction
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Crypto-Agile API Design                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  PRINCIPLE 1: Abstract Algorithm Selection                      │
+│  ┌────────────────────────────────────────────────────────────┐│
+│  │  // BAD: Algorithm hardcoded                               ││
+│  │  signature = ecdsa_sign(key, message)                      ││
+│  │                                                             ││
+│  │  // GOOD: Algorithm parameter                              ││
+│  │  signature = sign(key, message, algorithm="ML-DSA-65")     ││
+│  │                                                             ││
+│  │  // BETTER: Algorithm from key metadata                    ││
+│  │  signature = key.sign(message)  // Algorithm in key       ││
+│  └────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  PRINCIPLE 2: Self-Describing Keys                              │
+│  ┌────────────────────────────────────────────────────────────┐│
+│  │  key = {                                                   ││
+│  │    "algorithm": "ML-DSA-65",                              ││
+│  │    "key_bytes": "...",                                    ││
+│  │    "metadata": {...}                                      ││
+│  │  }                                                         ││
+│  └────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  PRINCIPLE 3: Graceful Degradation                              │
+│  ┌────────────────────────────────────────────────────────────┐│
+│  │  if supports("ML-DSA-65"):                                ││
+│  │      use_pqc()                                            ││
+│  │  else:                                                     ││
+│  │      warn_and_use_classical()                             ││
+│  └────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Interface Design
+
+```python
+"""
+Algorithm-agnostic cryptographic API design
+"""
+
+from abc import ABC, abstractmethod
+from typing import Tuple, Optional, Dict, Any
+from enum import Enum
+
+class Algorithm(Enum):
+    """Supported algorithms."""
+    # Signatures
+    ECDSA_P256 = "ecdsa_p256"
+    ML_DSA_44 = "ml_dsa_44"
+    ML_DSA_65 = "ml_dsa_65"
+    ML_DSA_87 = "ml_dsa_87"
+    HYBRID_ECDSA_ML_DSA_65 = "hybrid_ecdsa_ml_dsa_65"
+
+    # Key Exchange
+    X25519 = "x25519"
+    ML_KEM_768 = "ml_kem_768"
+    HYBRID_X25519_ML_KEM_768 = "hybrid_x25519_ml_kem_768"
+
+class SigningKey(ABC):
+    """Abstract signing key interface."""
+
+    @property
+    @abstractmethod
+    def algorithm(self) -> Algorithm:
+        """Return the algorithm for this key."""
+        pass
+
+    @property
+    @abstractmethod
+    def public_key(self) -> 'VerifyingKey':
+        """Return corresponding public key."""
+        pass
+
+    @abstractmethod
+    def sign(self, message: bytes) -> bytes:
+        """Sign a message."""
+        pass
+
+    @abstractmethod
+    def export(self, format: str = "pem") -> bytes:
+        """Export key in specified format."""
+        pass
+
+    @classmethod
+    @abstractmethod
+    def generate(cls, algorithm: Algorithm) -> 'SigningKey':
+        """Generate new key pair."""
+        pass
+
+    @classmethod
+    @abstractmethod
+    def import_key(cls, data: bytes, format: str = "pem") -> 'SigningKey':
+        """Import key from bytes."""
+        pass
+
+class VerifyingKey(ABC):
+    """Abstract verification key interface."""
+
+    @property
+    @abstractmethod
+    def algorithm(self) -> Algorithm:
+        pass
+
+    @abstractmethod
+    def verify(self, message: bytes, signature: bytes) -> bool:
+        """Verify a signature."""
+        pass
+
+    @abstractmethod
+    def export(self, format: str = "pem") -> bytes:
+        pass
+
+class KEMPublicKey(ABC):
+    """Abstract KEM public key."""
+
+    @property
+    @abstractmethod
+    def algorithm(self) -> Algorithm:
+        pass
+
+    @abstractmethod
+    def encapsulate(self) -> Tuple[bytes, bytes]:
+        """Encapsulate to produce (ciphertext, shared_secret)."""
+        pass
+
+class KEMPrivateKey(ABC):
+    """Abstract KEM private key."""
+
+    @property
+    @abstractmethod
+    def algorithm(self) -> Algorithm:
+        pass
+
+    @property
+    @abstractmethod
+    def public_key(self) -> KEMPublicKey:
+        pass
+
+    @abstractmethod
+    def decapsulate(self, ciphertext: bytes) -> bytes:
+        """Decapsulate to recover shared secret."""
+        pass
+
+    @classmethod
+    @abstractmethod
+    def generate(cls, algorithm: Algorithm) -> 'KEMPrivateKey':
+        pass
+
+# Registry for implementations
+class CryptoRegistry:
+    """Registry for algorithm implementations."""
+
+    _signing_impls: Dict[Algorithm, type] = {}
+    _kem_impls: Dict[Algorithm, type] = {}
+
+    @classmethod
+    def register_signing(cls, algorithm: Algorithm, impl: type):
+        cls._signing_impls[algorithm] = impl
+
+    @classmethod
+    def get_signing(cls, algorithm: Algorithm) -> type:
+        if algorithm not in cls._signing_impls:
+            raise ValueError(f"Algorithm {algorithm} not registered")
+        return cls._signing_impls[algorithm]
+
+    @classmethod
+    def supported_signing_algorithms(cls) -> list:
+        return list(cls._signing_impls.keys())
+
+print("Algorithm-Agnostic API Design")
+print("=" * 50)
+print("Key principles:")
+print("  1. Abstract base classes define interface")
+print("  2. Keys carry their algorithm metadata")
+print("  3. Registry allows runtime algorithm selection")
+print("  4. Graceful degradation for unsupported algorithms")
+```
+
+## Key Format Handling
+
+### Multi-Format Support
+
+```python
+"""
+Key format handling for compatibility
+"""
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Union, Optional
+
+class KeyFormat(Enum):
+    """Supported key formats."""
+    RAW = "raw"          # Raw bytes
+    PEM = "pem"          # PEM encoded
+    DER = "der"          # DER encoded
+    JWK = "jwk"          # JSON Web Key
+    PKCS8 = "pkcs8"      # PKCS#8 (private keys)
+    SPKI = "spki"        # SubjectPublicKeyInfo
+
+@dataclass
+class KeyEnvelope:
+    """
+    Universal key container with format conversion.
+    """
+    algorithm: str
+    key_bytes: bytes
+    is_private: bool
+    metadata: dict = None
+
+    def to_format(self, format: KeyFormat) -> Union[bytes, dict]:
+        """Convert key to specified format."""
+        if format == KeyFormat.RAW:
+            return self.key_bytes
+
+        elif format == KeyFormat.PEM:
+            return self._to_pem()
+
+        elif format == KeyFormat.DER:
+            return self._to_der()
+
+        elif format == KeyFormat.JWK:
+            return self._to_jwk()
+
+        else:
+            raise ValueError(f"Unsupported format: {format}")
+
+    def _to_pem(self) -> bytes:
+        """Convert to PEM format."""
+        import base64
+
+        der = self._to_der()
+        b64 = base64.b64encode(der).decode('ascii')
+
+        # Split into 64-char lines
+        lines = [b64[i:i+64] for i in range(0, len(b64), 64)]
+
+        key_type = "PRIVATE KEY" if self.is_private else "PUBLIC KEY"
+        header = f"-----BEGIN {key_type}-----\n"
+        footer = f"\n-----END {key_type}-----\n"
+
+        return (header + '\n'.join(lines) + footer).encode('ascii')
+
+    def _to_der(self) -> bytes:
+        """Convert to DER format."""
+        # Simplified - real implementation would use proper ASN.1
+        # This is a placeholder showing the concept
+        return b'\x30' + bytes([len(self.key_bytes)]) + self.key_bytes
+
+    def _to_jwk(self) -> dict:
+        """Convert to JWK format."""
+        import base64
+
+        # Map algorithm to JWK key type
+        kty_map = {
+            "ML-DSA-65": "OKP",  # Or specific type when standardized
+            "ML-KEM-768": "OKP",
+            "ECDSA-P256": "EC",
+        }
+
+        return {
+            "kty": kty_map.get(self.algorithm, "OKP"),
+            "alg": self.algorithm,
+            "x": base64.urlsafe_b64encode(self.key_bytes).decode('ascii').rstrip('='),
+            # Additional parameters based on algorithm
+        }
+
+    @classmethod
+    def from_format(cls, data: Union[bytes, dict], format: KeyFormat,
+                    algorithm: str = None) -> 'KeyEnvelope':
+        """Create key envelope from formatted data."""
+        if format == KeyFormat.RAW:
+            return cls(
+                algorithm=algorithm,
+                key_bytes=data,
+                is_private=False  # Caller must specify
+            )
+
+        elif format == KeyFormat.PEM:
+            return cls._from_pem(data, algorithm)
+
+        elif format == KeyFormat.JWK:
+            return cls._from_jwk(data)
+
+        else:
+            raise ValueError(f"Unsupported format: {format}")
+
+    @classmethod
+    def _from_pem(cls, data: bytes, algorithm: str) -> 'KeyEnvelope':
+        """Parse PEM format."""
+        import base64
+
+        lines = data.decode('ascii').strip().split('\n')
+        is_private = 'PRIVATE' in lines[0]
+
+        # Extract base64 content
+        b64 = ''.join(lines[1:-1])
+        der = base64.b64decode(b64)
+
+        # Parse DER (simplified)
+        key_bytes = der[2:]  # Skip SEQUENCE header
+
+        return cls(
+            algorithm=algorithm,
+            key_bytes=key_bytes,
+            is_private=is_private
+        )
+
+    @classmethod
+    def _from_jwk(cls, data: dict) -> 'KeyEnvelope':
+        """Parse JWK format."""
+        import base64
+
+        algorithm = data.get('alg', 'unknown')
+        x = data.get('x', '')
+
+        # Add padding if needed
+        padding = 4 - len(x) % 4
+        if padding != 4:
+            x += '=' * padding
+
+        key_bytes = base64.urlsafe_b64decode(x)
+
+        return cls(
+            algorithm=algorithm,
+            key_bytes=key_bytes,
+            is_private='d' in data
+        )
+
+# Example usage
+print("Key Format Handling")
+print("=" * 50)
+
+key = KeyEnvelope(
+    algorithm="ML-DSA-65",
+    key_bytes=bytes(100),  # Placeholder
+    is_private=False
+)
+
+for fmt in [KeyFormat.RAW, KeyFormat.PEM, KeyFormat.JWK]:
+    result = key.to_format(fmt)
+    if isinstance(result, bytes):
+        print(f"{fmt.value}: {len(result)} bytes")
+    else:
+        print(f"{fmt.value}: {list(result.keys())}")
+```
+
+## API Versioning
+
+### Version Strategy
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              API Versioning for Crypto Migration                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  VERSION 1.x: Classical Only                                    │
+│  ├─ Algorithms: ECDSA, RSA, X25519, P-256                      │
+│  ├─ Key formats: PEM, DER, JWK                                 │
+│  └─ Stable, widely deployed                                     │
+│                                                                  │
+│  VERSION 2.x: Hybrid Support                                    │
+│  ├─ Adds: ML-KEM, ML-DSA, hybrid modes                         │
+│  ├─ Key formats: Extended for PQC                              │
+│  ├─ Backward compatible with 1.x keys                          │
+│  └─ New functions, old functions deprecated                     │
+│                                                                  │
+│  VERSION 3.x: PQC Primary                                       │
+│  ├─ PQC as default algorithms                                  │
+│  ├─ Classical available for compatibility                       │
+│  ├─ Remove deprecated functions                                 │
+│  └─ Breaking changes documented                                 │
+│                                                                  │
+│  MIGRATION PATH                                                 │
+│  ┌────────────────────────────────────────────────────────────┐│
+│  │  1.x → 2.x: Add new imports, update key generation         ││
+│  │  2.x → 3.x: Change defaults, remove classical-only code    ││
+│  └────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  DEPRECATION POLICY                                             │
+│  1. Mark deprecated in N.0                                      │
+│  2. Warn on use in N.1                                          │
+│  3. Remove in (N+1).0                                          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Version Negotiation
+
+```python
+"""
+API version negotiation
+"""
+
+from dataclasses import dataclass
+from typing import Set, Optional
+
+@dataclass
+class APICapabilities:
+    """API version and capability advertisement."""
+    version: str
+    algorithms: Set[str]
+    key_formats: Set[str]
+    features: Set[str]
+
+    def supports(self, algorithm: str) -> bool:
+        return algorithm in self.algorithms
+
+    def common_algorithms(self, other: 'APICapabilities') -> Set[str]:
+        return self.algorithms & other.algorithms
+
+# Version definitions
+V1_CAPABILITIES = APICapabilities(
+    version="1.0",
+    algorithms={"ecdsa_p256", "rsa_2048", "x25519"},
+    key_formats={"pem", "der", "jwk"},
+    features={"sign", "verify", "key_exchange"}
+)
+
+V2_CAPABILITIES = APICapabilities(
+    version="2.0",
+    algorithms={
+        "ecdsa_p256", "rsa_2048", "x25519",  # Classical
+        "ml_dsa_65", "ml_kem_768",            # PQC
+        "hybrid_ecdsa_ml_dsa", "hybrid_x25519_ml_kem"  # Hybrid
+    },
+    key_formats={"pem", "der", "jwk", "raw"},
+    features={"sign", "verify", "key_exchange", "hybrid"}
+)
+
+def negotiate_capabilities(client: APICapabilities,
+                           server: APICapabilities) -> dict:
+    """Negotiate common capabilities."""
+    common_algos = client.common_algorithms(server)
+
+    # Prefer hybrid, then PQC, then classical
+    priority = ["hybrid_", "ml_", "ecdsa", "rsa", "x25519"]
+
+    selected = None
+    for prefix in priority:
+        for algo in common_algos:
+            if algo.startswith(prefix):
+                selected = algo
+                break
+        if selected:
+            break
+
+    return {
+        "version": min(client.version, server.version),
+        "common_algorithms": common_algos,
+        "selected_algorithm": selected,
+        "common_formats": client.key_formats & server.key_formats
+    }
+
+# Example negotiation
+print("API Capability Negotiation")
+print("=" * 50)
+
+result = negotiate_capabilities(V2_CAPABILITIES, V1_CAPABILITIES)
+print(f"Negotiated version: {result['version']}")
+print(f"Common algorithms: {result['common_algorithms']}")
+print(f"Selected: {result['selected_algorithm']}")
+```
+
+## Backward Compatibility
+
+### Compatibility Layer
+
+```python
+"""
+Backward compatibility layer for crypto API migration
+"""
+
+import warnings
+from typing import Optional
+
+# Old API (v1) - deprecated
+def ecdsa_sign_v1(private_key: bytes, message: bytes) -> bytes:
+    """
+    DEPRECATED: Use sign() with algorithm parameter instead.
+    """
+    warnings.warn(
+        "ecdsa_sign_v1 is deprecated, use sign(key, message, algorithm='ecdsa_p256')",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    # Delegate to new API
+    return sign(private_key, message, algorithm="ecdsa_p256")
+
+# New API (v2)
+def sign(private_key: bytes, message: bytes,
+         algorithm: str = "ml_dsa_65") -> bytes:
+    """
+    Sign a message.
+
+    Args:
+        private_key: Key bytes
+        message: Message to sign
+        algorithm: Algorithm identifier (default: ml_dsa_65)
+
+    Returns:
+        Signature bytes
+    """
+    # Implementation would dispatch to correct algorithm
+    print(f"Signing with {algorithm}")
+    return b"signature"
+
+# Compatibility wrapper
+class CompatibilityWrapper:
+    """
+    Wraps new API to provide old API interface.
+    """
+
+    def __init__(self, new_api, default_algorithm: str = "ecdsa_p256"):
+        self._api = new_api
+        self._default_algorithm = default_algorithm
+        self._warned = set()
+
+    def __getattr__(self, name: str):
+        # Map old method names to new ones
+        method_map = {
+            "ecdsa_sign": ("sign", {"algorithm": "ecdsa_p256"}),
+            "ecdsa_verify": ("verify", {"algorithm": "ecdsa_p256"}),
+            "generate_ecdsa_key": ("generate_key", {"algorithm": "ecdsa_p256"}),
+        }
+
+        if name in method_map:
+            new_name, defaults = method_map[name]
+
+            if name not in self._warned:
+                warnings.warn(
+                    f"{name} is deprecated, use {new_name} instead",
+                    DeprecationWarning,
+                    stacklevel=2
+                )
+                self._warned.add(name)
+
+            def wrapper(*args, **kwargs):
+                merged = {**defaults, **kwargs}
+                return getattr(self._api, new_name)(*args, **merged)
+
+            return wrapper
+
+        return getattr(self._api, name)
+
+print("Backward Compatibility Layer")
+print("=" * 50)
+print("Old API calls automatically converted to new API")
+print("Deprecation warnings guide migration")
+```
+
+## Summary
+
+API compatibility for PQC requires:
+
+1. **Algorithm Abstraction**: Don't hardcode algorithms
+2. **Self-Describing Keys**: Include algorithm in key metadata
+3. **Format Support**: Handle multiple key formats
+4. **Versioning**: Clear version strategy with deprecation path
+5. **Compatibility Layers**: Bridge old and new APIs
+
+Design for change - cryptographic algorithms will continue to evolve.

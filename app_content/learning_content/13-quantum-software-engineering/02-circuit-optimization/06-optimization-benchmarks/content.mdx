@@ -1,0 +1,567 @@
+---
+title: "Optimization Benchmarks: Metrics and Comparisons"
+description: "Learn to evaluate and compare circuit optimization techniques using standard metrics and benchmark circuits."
+duration: 50
+difficulty: "intermediate"
+---
+
+## 1. Circuit Quality Metrics
+
+Evaluating optimization effectiveness requires well-defined metrics that capture different aspects of circuit quality.
+
+### Primary Metrics
+
+```python
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Set
+from collections import defaultdict
+import time
+
+@dataclass
+class Gate:
+    name: str
+    qubits: Tuple[int, ...]
+    params: Tuple[float, ...] = ()
+
+@dataclass
+class CircuitMetrics:
+    """Comprehensive circuit quality metrics."""
+    gate_count: int
+    depth: int
+    two_qubit_count: int
+    cnot_count: int
+    single_qubit_count: int
+    t_count: int  # Important for fault-tolerant circuits
+    t_depth: int
+    width: int  # Number of qubits used
+    critical_path_length: int
+
+
+class MetricsCalculator:
+    """Calculate various circuit quality metrics."""
+
+    def __init__(self):
+        self.two_qubit_gates = {'CX', 'CNOT', 'CZ', 'CY', 'SWAP', 'ISWAP',
+                                'CRX', 'CRY', 'CRZ', 'ECR', 'RZX'}
+        self.t_gates = {'T', 'TDG', 'CCX', 'TOFFOLI'}  # T and T-equivalent
+
+    def calculate(self, gates: List[Gate]) -> CircuitMetrics:
+        """Compute all metrics for a circuit."""
+        if not gates:
+            return CircuitMetrics(0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+        # Basic counts
+        gate_count = len(gates)
+        two_qubit_count = sum(1 for g in gates if g.name.upper() in self.two_qubit_gates)
+        cnot_count = sum(1 for g in gates if g.name.upper() in ('CX', 'CNOT'))
+        single_qubit_count = sum(1 for g in gates if len(g.qubits) == 1)
+        t_count = sum(1 for g in gates if g.name.upper() in self.t_gates)
+
+        # Width: number of qubits used
+        all_qubits = set()
+        for g in gates:
+            all_qubits.update(g.qubits)
+        width = len(all_qubits)
+
+        # Depth calculation
+        depth = self._calculate_depth(gates)
+        t_depth = self._calculate_t_depth(gates)
+        critical_path = self._calculate_critical_path(gates)
+
+        return CircuitMetrics(
+            gate_count=gate_count,
+            depth=depth,
+            two_qubit_count=two_qubit_count,
+            cnot_count=cnot_count,
+            single_qubit_count=single_qubit_count,
+            t_count=t_count,
+            t_depth=t_depth,
+            width=width,
+            critical_path_length=critical_path
+        )
+
+    def _calculate_depth(self, gates: List[Gate]) -> int:
+        """Calculate circuit depth."""
+        qubit_depths = {}
+
+        for gate in gates:
+            # Gate depth is 1 + max depth of involved qubits
+            max_prev = max(
+                (qubit_depths.get(q, 0) for q in gate.qubits),
+                default=0
+            )
+            new_depth = max_prev + 1
+
+            for q in gate.qubits:
+                qubit_depths[q] = new_depth
+
+        return max(qubit_depths.values()) if qubit_depths else 0
+
+    def _calculate_t_depth(self, gates: List[Gate]) -> int:
+        """Calculate depth counting only T gates."""
+        qubit_t_depths = {}
+
+        for gate in gates:
+            max_prev = max(
+                (qubit_t_depths.get(q, 0) for q in gate.qubits),
+                default=0
+            )
+
+            if gate.name.upper() in self.t_gates:
+                new_depth = max_prev + 1
+            else:
+                new_depth = max_prev
+
+            for q in gate.qubits:
+                qubit_t_depths[q] = new_depth
+
+        return max(qubit_t_depths.values()) if qubit_t_depths else 0
+
+    def _calculate_critical_path(self, gates: List[Gate]) -> int:
+        """Calculate critical path (two-qubit gate depth)."""
+        qubit_crit_depths = {}
+
+        for gate in gates:
+            max_prev = max(
+                (qubit_crit_depths.get(q, 0) for q in gate.qubits),
+                default=0
+            )
+
+            if len(gate.qubits) >= 2:
+                new_depth = max_prev + 1
+            else:
+                new_depth = max_prev
+
+            for q in gate.qubits:
+                qubit_crit_depths[q] = new_depth
+
+        return max(qubit_crit_depths.values()) if qubit_crit_depths else 0
+```
+
+## 2. Weighted Cost Models
+
+Different hardware has different gate costs:
+
+```python
+@dataclass
+class GateCosts:
+    """Cost model for different gate types."""
+    single_qubit: float = 1.0
+    two_qubit: float = 10.0  # CNOTs are typically much noisier
+    t_gate: float = 100.0    # T gates are expensive in fault-tolerant
+    measurement: float = 50.0
+
+
+class WeightedCostCalculator:
+    """Calculate weighted circuit cost based on gate types."""
+
+    DEFAULT_COSTS = {
+        # Single qubit gates (low error)
+        'H': 1.0, 'X': 1.0, 'Y': 1.0, 'Z': 1.0,
+        'S': 1.0, 'SDG': 1.0, 'SX': 1.0, 'SXDG': 1.0,
+        'RX': 1.0, 'RY': 1.0, 'RZ': 1.0, 'U3': 1.0,
+
+        # T gates (expensive in fault-tolerant)
+        'T': 15.0, 'TDG': 15.0,
+
+        # Two-qubit gates (high error)
+        'CX': 10.0, 'CNOT': 10.0, 'CZ': 10.0,
+        'SWAP': 30.0,  # Usually 3 CNOTs
+        'ECR': 10.0,
+
+        # Three-qubit gates
+        'CCX': 50.0, 'TOFFOLI': 50.0,
+
+        # Measurement
+        'MEASURE': 5.0,
+    }
+
+    def __init__(self, custom_costs: Dict[str, float] = None):
+        self.costs = {**self.DEFAULT_COSTS}
+        if custom_costs:
+            self.costs.update(custom_costs)
+
+    def total_cost(self, gates: List[Gate]) -> float:
+        """Calculate total weighted cost."""
+        return sum(self.gate_cost(g) for g in gates)
+
+    def gate_cost(self, gate: Gate) -> float:
+        """Get cost for a single gate."""
+        return self.costs.get(gate.name.upper(), 1.0)
+
+    def cost_breakdown(self, gates: List[Gate]) -> Dict[str, float]:
+        """Get cost breakdown by gate type."""
+        breakdown = defaultdict(float)
+        for gate in gates:
+            breakdown[gate.name.upper()] += self.gate_cost(gate)
+        return dict(breakdown)
+```
+
+## 3. Benchmark Circuits
+
+Standard benchmark circuits enable fair comparison:
+
+```python
+class BenchmarkCircuits:
+    """Generate standard benchmark circuits."""
+
+    @staticmethod
+    def ghz_state(n: int) -> List[Gate]:
+        """GHZ state preparation: H on q0, CNOTs to all others."""
+        gates = [Gate('H', (0,))]
+        for i in range(1, n):
+            gates.append(Gate('CX', (0, i)))
+        return gates
+
+    @staticmethod
+    def qft(n: int) -> List[Gate]:
+        """Quantum Fourier Transform."""
+        gates = []
+        for i in range(n):
+            gates.append(Gate('H', (i,)))
+            for j in range(i + 1, n):
+                angle = 3.14159 / (2 ** (j - i))
+                gates.append(Gate('CRZ', (j, i), (angle,)))
+        # Add swaps for bit reversal
+        for i in range(n // 2):
+            gates.append(Gate('SWAP', (i, n - 1 - i)))
+        return gates
+
+    @staticmethod
+    def random_circuit(n: int, depth: int, seed: int = 42) -> List[Gate]:
+        """Generate random circuit for benchmarking."""
+        import random
+        random.seed(seed)
+
+        single_gates = ['H', 'X', 'Y', 'Z', 'S', 'T', 'RZ']
+        gates = []
+
+        for d in range(depth):
+            # Random single-qubit layer
+            for q in range(n):
+                if random.random() < 0.5:
+                    g = random.choice(single_gates)
+                    if g == 'RZ':
+                        gates.append(Gate(g, (q,), (random.uniform(0, 6.28),)))
+                    else:
+                        gates.append(Gate(g, (q,)))
+
+            # Random two-qubit layer
+            available = list(range(n))
+            random.shuffle(available)
+            while len(available) >= 2:
+                q1 = available.pop()
+                q2 = available.pop()
+                gates.append(Gate('CX', (q1, q2)))
+
+        return gates
+
+    @staticmethod
+    def qaoa_layer(n: int, graph_edges: List[Tuple[int, int]],
+                   gamma: float, beta: float) -> List[Gate]:
+        """Single QAOA layer for MaxCut."""
+        gates = []
+
+        # Cost layer
+        for i, j in graph_edges:
+            gates.append(Gate('CX', (i, j)))
+            gates.append(Gate('RZ', (j,), (2 * gamma,)))
+            gates.append(Gate('CX', (i, j)))
+
+        # Mixer layer
+        for q in range(n):
+            gates.append(Gate('RX', (q,), (2 * beta,)))
+
+        return gates
+
+    @staticmethod
+    def grover_iteration(n: int) -> List[Gate]:
+        """Single Grover iteration (oracle + diffusion)."""
+        gates = []
+
+        # Placeholder oracle (would be problem-specific)
+        gates.append(Gate('Z', (n - 1,)))  # Simple Z on last qubit
+
+        # Diffusion operator
+        for q in range(n):
+            gates.append(Gate('H', (q,)))
+            gates.append(Gate('X', (q,)))
+
+        # Multi-controlled Z
+        gates.append(Gate('H', (n - 1,)))
+        for q in range(n - 1):
+            gates.append(Gate('CX', (q, n - 1)))
+        gates.append(Gate('H', (n - 1,)))
+
+        for q in range(n):
+            gates.append(Gate('X', (q,)))
+            gates.append(Gate('H', (q,)))
+
+        return gates
+```
+
+## 4. Comparison Framework
+
+Systematically compare optimization techniques:
+
+```python
+@dataclass
+class OptimizationResult:
+    """Result of a single optimization run."""
+    optimizer_name: str
+    original_metrics: CircuitMetrics
+    optimized_metrics: CircuitMetrics
+    optimization_time_ms: float
+    gates_reduced: int
+    depth_reduced: int
+    cnot_reduced: int
+
+    @property
+    def gate_reduction_pct(self) -> float:
+        if self.original_metrics.gate_count == 0:
+            return 0.0
+        return (self.gates_reduced / self.original_metrics.gate_count) * 100
+
+    @property
+    def depth_reduction_pct(self) -> float:
+        if self.original_metrics.depth == 0:
+            return 0.0
+        return (self.depth_reduced / self.original_metrics.depth) * 100
+
+
+class OptimizerComparison:
+    """Framework for comparing multiple optimizers."""
+
+    def __init__(self):
+        self.metrics_calc = MetricsCalculator()
+        self.results: List[OptimizationResult] = []
+
+    def benchmark_optimizer(
+        self,
+        optimizer_name: str,
+        optimizer_fn,
+        circuits: List[Tuple[str, List[Gate]]]
+    ) -> List[OptimizationResult]:
+        """Run optimizer on benchmark circuits."""
+        results = []
+
+        for circuit_name, gates in circuits:
+            original_metrics = self.metrics_calc.calculate(gates)
+
+            start_time = time.time()
+            optimized = optimizer_fn(gates)
+            elapsed_ms = (time.time() - start_time) * 1000
+
+            optimized_metrics = self.metrics_calc.calculate(optimized)
+
+            result = OptimizationResult(
+                optimizer_name=optimizer_name,
+                original_metrics=original_metrics,
+                optimized_metrics=optimized_metrics,
+                optimization_time_ms=elapsed_ms,
+                gates_reduced=original_metrics.gate_count - optimized_metrics.gate_count,
+                depth_reduced=original_metrics.depth - optimized_metrics.depth,
+                cnot_reduced=original_metrics.cnot_count - optimized_metrics.cnot_count
+            )
+
+            results.append(result)
+            self.results.append(result)
+
+        return results
+
+    def compare_optimizers(
+        self,
+        optimizers: Dict[str, callable],
+        circuits: List[Tuple[str, List[Gate]]]
+    ) -> Dict[str, Dict]:
+        """Compare multiple optimizers on same circuits."""
+        comparison = {}
+
+        for name, opt_fn in optimizers.items():
+            results = self.benchmark_optimizer(name, opt_fn, circuits)
+
+            comparison[name] = {
+                'avg_gate_reduction': sum(r.gate_reduction_pct for r in results) / len(results),
+                'avg_depth_reduction': sum(r.depth_reduction_pct for r in results) / len(results),
+                'avg_time_ms': sum(r.optimization_time_ms for r in results) / len(results),
+                'total_gates_reduced': sum(r.gates_reduced for r in results),
+                'total_cnots_reduced': sum(r.cnot_reduced for r in results),
+            }
+
+        return comparison
+
+    def generate_report(self) -> str:
+        """Generate comparison report."""
+        if not self.results:
+            return "No results to report."
+
+        lines = ["=" * 60, "Optimization Benchmark Report", "=" * 60, ""]
+
+        # Group by optimizer
+        by_optimizer = defaultdict(list)
+        for r in self.results:
+            by_optimizer[r.optimizer_name].append(r)
+
+        for name, results in by_optimizer.items():
+            lines.append(f"Optimizer: {name}")
+            lines.append("-" * 40)
+
+            avg_gate_red = sum(r.gate_reduction_pct for r in results) / len(results)
+            avg_depth_red = sum(r.depth_reduction_pct for r in results) / len(results)
+            avg_time = sum(r.optimization_time_ms for r in results) / len(results)
+
+            lines.append(f"  Circuits tested: {len(results)}")
+            lines.append(f"  Avg gate reduction: {avg_gate_red:.1f}%")
+            lines.append(f"  Avg depth reduction: {avg_depth_red:.1f}%")
+            lines.append(f"  Avg optimization time: {avg_time:.2f} ms")
+            lines.append("")
+
+        return "\n".join(lines)
+```
+
+## 5. Visualization and Reporting
+
+```python
+def format_metrics_table(
+    metrics_list: List[Tuple[str, CircuitMetrics]]
+) -> str:
+    """Format metrics as ASCII table."""
+    headers = ["Circuit", "Gates", "Depth", "CNOTs", "T-count", "Width"]
+    rows = []
+
+    for name, m in metrics_list:
+        rows.append([
+            name,
+            str(m.gate_count),
+            str(m.depth),
+            str(m.cnot_count),
+            str(m.t_count),
+            str(m.width)
+        ])
+
+    # Calculate column widths
+    widths = [max(len(h), max(len(r[i]) for r in rows))
+              for i, h in enumerate(headers)]
+
+    # Format header
+    header_line = " | ".join(h.ljust(w) for h, w in zip(headers, widths))
+    separator = "-+-".join("-" * w for w in widths)
+
+    # Format rows
+    row_lines = [" | ".join(cell.ljust(w) for cell, w in zip(row, widths))
+                 for row in rows]
+
+    return "\n".join([header_line, separator] + row_lines)
+
+
+def create_comparison_chart(results: Dict[str, Dict]) -> str:
+    """Create ASCII bar chart for comparison."""
+    lines = ["\nGate Reduction Comparison:", ""]
+
+    max_reduction = max(r['avg_gate_reduction'] for r in results.values())
+    bar_width = 40
+
+    for name, data in sorted(results.items(),
+                             key=lambda x: -x[1]['avg_gate_reduction']):
+        pct = data['avg_gate_reduction']
+        bar_len = int((pct / max_reduction) * bar_width) if max_reduction > 0 else 0
+        bar = "#" * bar_len
+        lines.append(f"{name:15} |{bar.ljust(bar_width)}| {pct:.1f}%")
+
+    return "\n".join(lines)
+```
+
+## 6. Complete Benchmarking Pipeline
+
+```python
+class BenchmarkSuite:
+    """Complete benchmarking pipeline."""
+
+    def __init__(self):
+        self.benchmarks = BenchmarkCircuits()
+        self.comparison = OptimizerComparison()
+        self.cost_calc = WeightedCostCalculator()
+
+    def create_benchmark_set(self, sizes: List[int] = None) -> List[Tuple[str, List[Gate]]]:
+        """Create standard benchmark circuit set."""
+        if sizes is None:
+            sizes = [4, 6, 8]
+
+        circuits = []
+
+        for n in sizes:
+            circuits.append((f"GHZ-{n}", self.benchmarks.ghz_state(n)))
+            circuits.append((f"QFT-{n}", self.benchmarks.qft(n)))
+            circuits.append((f"Random-{n}", self.benchmarks.random_circuit(n, 10)))
+            circuits.append((f"Grover-{n}", self.benchmarks.grover_iteration(n)))
+
+        return circuits
+
+    def run_full_benchmark(
+        self,
+        optimizers: Dict[str, callable],
+        sizes: List[int] = None
+    ) -> str:
+        """Run complete benchmark suite."""
+        circuits = self.create_benchmark_set(sizes)
+
+        # Run comparison
+        results = self.comparison.compare_optimizers(optimizers, circuits)
+
+        # Generate reports
+        report_parts = [
+            self.comparison.generate_report(),
+            create_comparison_chart(results),
+            "\nDetailed Results:",
+            "-" * 40
+        ]
+
+        return "\n".join(report_parts)
+
+
+# Example usage
+def example_optimizer(gates: List[Gate]) -> List[Gate]:
+    """Simple cancellation optimizer for demonstration."""
+    result = []
+    self_inverse = {'H', 'X', 'Y', 'Z', 'CX', 'SWAP'}
+
+    for gate in gates:
+        if (result and
+            gate.name.upper() in self_inverse and
+            result[-1].name == gate.name and
+            result[-1].qubits == gate.qubits):
+            result.pop()
+        else:
+            result.append(gate)
+    return result
+
+
+# Run benchmark
+suite = BenchmarkSuite()
+optimizers = {
+    'Baseline (none)': lambda g: g,
+    'Cancellation': example_optimizer,
+}
+
+print(suite.run_full_benchmark(optimizers, sizes=[4, 6]))
+```
+
+## Summary
+
+Effective optimization benchmarking requires:
+
+1. **Comprehensive metrics**: Gate count, depth, CNOT count, T-count, weighted cost
+2. **Standard benchmarks**: GHZ, QFT, random circuits, algorithm-specific circuits
+3. **Fair comparison**: Same circuits, controlled environment, multiple runs
+4. **Clear reporting**: Tables, charts, statistical summaries
+
+Key metrics by use case:
+- **NISQ**: CNOT count, depth (for decoherence)
+- **Fault-tolerant**: T-count, T-depth (T gates are expensive)
+- **General**: Total gate count, weighted cost
+
+Best practices:
+- Test on diverse circuit types and sizes
+- Report both absolute and percentage improvements
+- Include optimization time in comparisons
+- Use weighted costs for realistic hardware comparison

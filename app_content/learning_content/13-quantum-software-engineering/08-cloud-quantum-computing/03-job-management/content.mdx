@@ -1,0 +1,615 @@
+---
+title: "Quantum Job Management and Scheduling"
+description: "Master quantum job submission, monitoring, and batch processing."
+duration: 55
+difficulty: "intermediate"
+---
+
+## 1. Job Lifecycle
+
+Understanding the quantum job lifecycle is essential for effective cloud computing.
+
+```
+Quantum Job Lifecycle
+═════════════════════
+
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│   CREATED    │───>│   QUEUED     │───>│   RUNNING    │
+│              │    │              │    │              │
+│ Circuit +    │    │ Waiting for  │    │ Executing on │
+│ Parameters   │    │ QPU access   │    │ quantum HW   │
+└──────────────┘    └──────────────┘    └──────┬───────┘
+                                               │
+       ┌───────────────────────────────────────┘
+       │
+       ▼
+┌──────────────┐    ┌──────────────┐
+│  COMPLETED   │    │   FAILED     │
+│              │    │              │
+│ Results      │    │ Error info   │
+│ available    │    │ Retry logic  │
+└──────────────┘    └──────────────┘
+
+States by Provider:
+───────────────────
+IBM Quantum:  INITIALIZING → QUEUED → VALIDATING → RUNNING → COMPLETED/FAILED/CANCELLED
+Amazon Braket: CREATED → QUEUED → RUNNING → COMPLETED/FAILED/CANCELLING/CANCELLED
+Google:        READY → RUNNING → SUCCESS/FAILURE/CANCELLED
+Azure:         Waiting → Executing → Succeeded/Failed/Cancelled
+```
+
+## 2. Job Submission
+
+```python
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Any
+from enum import Enum
+from datetime import datetime
+import uuid
+import json
+
+class JobStatus(Enum):
+    CREATED = "created"
+    QUEUED = "queued"
+    VALIDATING = "validating"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+@dataclass
+class QuantumCircuit:
+    """Representation of a quantum circuit for submission."""
+    qasm: str
+    num_qubits: int
+    depth: int
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class JobConfig:
+    """Configuration for a quantum job."""
+    shots: int = 1024
+    memory: bool = False  # Return individual shot results
+    optimization_level: int = 1
+    resilience_level: int = 0  # Error mitigation level
+    max_execution_time: Optional[int] = None  # seconds
+    tags: List[str] = field(default_factory=list)
+
+@dataclass
+class QuantumJob:
+    """Represents a submitted quantum job."""
+    job_id: str
+    backend: str
+    circuit: QuantumCircuit
+    config: JobConfig
+    status: JobStatus
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    queue_position: Optional[int] = None
+    error_message: Optional[str] = None
+    results: Optional[Dict] = None
+
+class JobSubmitter:
+    """Handle quantum job submission."""
+
+    def __init__(self, provider: str):
+        self.provider = provider
+        self._jobs: Dict[str, QuantumJob] = {}
+
+    def create_job(self, circuit: QuantumCircuit,
+                   backend: str,
+                   config: Optional[JobConfig] = None) -> QuantumJob:
+        """Create a new quantum job."""
+        job_id = f"{self.provider}_{uuid.uuid4().hex[:12]}"
+        config = config or JobConfig()
+
+        job = QuantumJob(
+            job_id=job_id,
+            backend=backend,
+            circuit=circuit,
+            config=config,
+            status=JobStatus.CREATED,
+            created_at=datetime.now()
+        )
+
+        self._jobs[job_id] = job
+        return job
+
+    def submit(self, job: QuantumJob) -> str:
+        """Submit job to quantum backend."""
+        # Validate circuit
+        self._validate_circuit(job.circuit, job.backend)
+
+        # Submit to provider (simulated)
+        job.status = JobStatus.QUEUED
+        job.queue_position = self._get_queue_position(job.backend)
+
+        print(f"Job {job.job_id} submitted to {job.backend}")
+        print(f"Queue position: {job.queue_position}")
+
+        return job.job_id
+
+    def _validate_circuit(self, circuit: QuantumCircuit, backend: str) -> None:
+        """Validate circuit against backend constraints."""
+        # Check qubit count
+        backend_qubits = self._get_backend_qubits(backend)
+        if circuit.num_qubits > backend_qubits:
+            raise ValueError(
+                f"Circuit requires {circuit.num_qubits} qubits, "
+                f"backend {backend} has {backend_qubits}"
+            )
+
+    def _get_backend_qubits(self, backend: str) -> int:
+        """Get qubit count for backend."""
+        backend_qubits = {
+            "ibm_brisbane": 127,
+            "ibm_osaka": 127,
+            "ionq_aria": 25,
+            "rigetti_aspen": 80
+        }
+        return backend_qubits.get(backend, 100)
+
+    def _get_queue_position(self, backend: str) -> int:
+        """Get current queue position (simulated)."""
+        import random
+        return random.randint(1, 50)
+
+# Example usage
+submitter = JobSubmitter("ibm")
+
+circuit = QuantumCircuit(
+    qasm='OPENQASM 2.0; qreg q[2]; h q[0]; cx q[0],q[1]; measure q;',
+    num_qubits=2,
+    depth=3
+)
+
+config = JobConfig(shots=4096, optimization_level=2)
+job = submitter.create_job(circuit, "ibm_brisbane", config)
+job_id = submitter.submit(job)
+```
+
+## 3. Job Monitoring
+
+```python
+import asyncio
+from typing import Callable, Awaitable
+import time
+
+class JobMonitor:
+    """Monitor quantum job status and progress."""
+
+    def __init__(self, poll_interval: float = 5.0):
+        self.poll_interval = poll_interval
+        self._callbacks: Dict[str, List[Callable]] = {}
+
+    def get_status(self, job_id: str) -> Dict:
+        """Get current job status."""
+        # Simulated status response
+        return {
+            "job_id": job_id,
+            "status": "QUEUED",
+            "queue_position": 12,
+            "estimated_start_time": "2025-01-15T10:30:00Z",
+            "backend": "ibm_brisbane"
+        }
+
+    def wait_for_completion(self, job_id: str,
+                            timeout: Optional[float] = None,
+                            callback: Optional[Callable] = None) -> Dict:
+        """Block until job completes or timeout."""
+        start_time = time.time()
+
+        while True:
+            status = self.get_status(job_id)
+
+            if callback:
+                callback(status)
+
+            if status["status"] in ["COMPLETED", "FAILED", "CANCELLED"]:
+                return status
+
+            if timeout and (time.time() - start_time) > timeout:
+                raise TimeoutError(f"Job {job_id} did not complete within {timeout}s")
+
+            time.sleep(self.poll_interval)
+
+    async def wait_for_completion_async(self, job_id: str,
+                                        timeout: Optional[float] = None) -> Dict:
+        """Async version of wait_for_completion."""
+        start_time = time.time()
+
+        while True:
+            status = self.get_status(job_id)
+
+            if status["status"] in ["COMPLETED", "FAILED", "CANCELLED"]:
+                return status
+
+            if timeout and (time.time() - start_time) > timeout:
+                raise TimeoutError(f"Job {job_id} timed out")
+
+            await asyncio.sleep(self.poll_interval)
+
+    def register_callback(self, job_id: str,
+                          event: str,
+                          callback: Callable) -> None:
+        """Register callback for job events."""
+        key = f"{job_id}:{event}"
+        if key not in self._callbacks:
+            self._callbacks[key] = []
+        self._callbacks[key].append(callback)
+
+    def estimate_completion_time(self, job_id: str) -> Dict:
+        """Estimate when job will complete."""
+        status = self.get_status(job_id)
+
+        # Estimation based on queue position and historical data
+        avg_execution_time = 30  # seconds
+        avg_queue_time_per_position = 120  # seconds
+
+        queue_wait = status.get("queue_position", 0) * avg_queue_time_per_position
+        total_estimate = queue_wait + avg_execution_time
+
+        return {
+            "job_id": job_id,
+            "queue_wait_seconds": queue_wait,
+            "execution_seconds": avg_execution_time,
+            "total_estimate_seconds": total_estimate,
+            "confidence": "medium"
+        }
+
+# Example
+monitor = JobMonitor(poll_interval=10.0)
+
+def status_callback(status):
+    print(f"Job status: {status['status']}, Queue: {status.get('queue_position', 'N/A')}")
+
+# Simulate monitoring
+print(monitor.estimate_completion_time("ibm_job_abc123"))
+```
+
+## 4. Batch Job Processing
+
+```python
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Iterator
+import threading
+
+@dataclass
+class BatchConfig:
+    """Configuration for batch job processing."""
+    max_concurrent: int = 5
+    retry_failed: bool = True
+    max_retries: int = 3
+    fail_fast: bool = False  # Stop on first failure
+
+class BatchJobManager:
+    """Manage batch quantum job submissions."""
+
+    def __init__(self, submitter: JobSubmitter,
+                 monitor: JobMonitor,
+                 config: Optional[BatchConfig] = None):
+        self.submitter = submitter
+        self.monitor = monitor
+        self.config = config or BatchConfig()
+        self._results: Dict[str, Any] = {}
+        self._lock = threading.Lock()
+
+    def submit_batch(self, circuits: List[QuantumCircuit],
+                     backend: str,
+                     job_config: Optional[JobConfig] = None) -> List[str]:
+        """Submit multiple circuits as a batch."""
+        job_ids = []
+
+        for i, circuit in enumerate(circuits):
+            job = self.submitter.create_job(circuit, backend, job_config)
+            job_id = self.submitter.submit(job)
+            job_ids.append(job_id)
+
+            # Rate limit submissions
+            if (i + 1) % 10 == 0:
+                time.sleep(1)  # Avoid rate limits
+
+        print(f"Submitted batch of {len(job_ids)} jobs")
+        return job_ids
+
+    def wait_for_batch(self, job_ids: List[str],
+                       timeout: Optional[float] = None) -> Dict[str, Dict]:
+        """Wait for all jobs in batch to complete."""
+        results = {}
+        start_time = time.time()
+
+        with ThreadPoolExecutor(max_workers=self.config.max_concurrent) as executor:
+            future_to_job = {
+                executor.submit(self._wait_single, job_id, timeout): job_id
+                for job_id in job_ids
+            }
+
+            for future in as_completed(future_to_job):
+                job_id = future_to_job[future]
+                try:
+                    result = future.result()
+                    results[job_id] = result
+
+                    if self.config.fail_fast and result.get("status") == "FAILED":
+                        print(f"Fail-fast triggered by job {job_id}")
+                        executor.shutdown(wait=False)
+                        break
+
+                except Exception as e:
+                    results[job_id] = {"status": "ERROR", "error": str(e)}
+
+        return results
+
+    def _wait_single(self, job_id: str,
+                     timeout: Optional[float]) -> Dict:
+        """Wait for single job with retry logic."""
+        retries = 0
+
+        while retries <= self.config.max_retries:
+            try:
+                result = self.monitor.wait_for_completion(job_id, timeout)
+
+                if result["status"] == "COMPLETED":
+                    return result
+
+                if result["status"] == "FAILED" and self.config.retry_failed:
+                    retries += 1
+                    print(f"Retrying job {job_id} (attempt {retries})")
+                    # Resubmit logic would go here
+                    continue
+
+                return result
+
+            except TimeoutError:
+                return {"status": "TIMEOUT", "job_id": job_id}
+
+        return {"status": "MAX_RETRIES_EXCEEDED", "job_id": job_id}
+
+    def get_batch_progress(self, job_ids: List[str]) -> Dict:
+        """Get progress summary for batch."""
+        statuses = {}
+        for job_id in job_ids:
+            status = self.monitor.get_status(job_id)
+            statuses[job_id] = status["status"]
+
+        summary = {
+            "total": len(job_ids),
+            "completed": sum(1 for s in statuses.values() if s == "COMPLETED"),
+            "running": sum(1 for s in statuses.values() if s == "RUNNING"),
+            "queued": sum(1 for s in statuses.values() if s == "QUEUED"),
+            "failed": sum(1 for s in statuses.values() if s == "FAILED"),
+            "jobs": statuses
+        }
+
+        summary["progress_pct"] = (summary["completed"] / summary["total"]) * 100
+        return summary
+
+# Example batch processing
+batch_mgr = BatchJobManager(submitter, monitor)
+
+circuits = [
+    QuantumCircuit(qasm=f"circuit_{i}", num_qubits=2, depth=3)
+    for i in range(5)
+]
+
+print("\nBatch job example:")
+# job_ids = batch_mgr.submit_batch(circuits, "ibm_brisbane")
+# results = batch_mgr.wait_for_batch(job_ids, timeout=3600)
+```
+
+## 5. Job Prioritization and Scheduling
+
+```python
+from heapq import heappush, heappop
+from dataclasses import field
+
+@dataclass(order=True)
+class PrioritizedJob:
+    """Job with priority for scheduling."""
+    priority: int
+    created_at: float = field(compare=False)
+    job: QuantumJob = field(compare=False)
+
+class JobScheduler:
+    """Intelligent job scheduling across backends."""
+
+    def __init__(self):
+        self._queue: List[PrioritizedJob] = []
+        self._backend_loads: Dict[str, int] = {}
+        self._backend_capacities: Dict[str, int] = {
+            "ibm_brisbane": 100,
+            "ibm_osaka": 100,
+            "ionq_aria": 50,
+            "rigetti_aspen": 75
+        }
+
+    def add_job(self, job: QuantumJob, priority: int = 5) -> None:
+        """Add job to scheduling queue."""
+        # Priority: 1 = highest, 10 = lowest
+        pjob = PrioritizedJob(
+            priority=priority,
+            created_at=time.time(),
+            job=job
+        )
+        heappush(self._queue, pjob)
+
+    def get_next_job(self) -> Optional[QuantumJob]:
+        """Get highest priority job ready for execution."""
+        if not self._queue:
+            return None
+
+        pjob = heappop(self._queue)
+        return pjob.job
+
+    def select_optimal_backend(self, job: QuantumJob,
+                               available_backends: List[str]) -> str:
+        """Select best backend based on load and job requirements."""
+        scored_backends = []
+
+        for backend in available_backends:
+            if not self._meets_requirements(job, backend):
+                continue
+
+            score = self._calculate_backend_score(job, backend)
+            scored_backends.append((score, backend))
+
+        if not scored_backends:
+            raise ValueError("No suitable backend found")
+
+        # Return highest scored backend
+        scored_backends.sort(reverse=True)
+        return scored_backends[0][1]
+
+    def _meets_requirements(self, job: QuantumJob, backend: str) -> bool:
+        """Check if backend meets job requirements."""
+        backend_qubits = {
+            "ibm_brisbane": 127,
+            "ibm_osaka": 127,
+            "ionq_aria": 25,
+            "rigetti_aspen": 80
+        }
+        return job.circuit.num_qubits <= backend_qubits.get(backend, 0)
+
+    def _calculate_backend_score(self, job: QuantumJob, backend: str) -> float:
+        """Calculate suitability score for backend."""
+        score = 100.0
+
+        # Penalize for queue length
+        load = self._backend_loads.get(backend, 0)
+        capacity = self._backend_capacities.get(backend, 100)
+        utilization = load / capacity
+        score -= utilization * 30
+
+        # Bonus for matching hardware type
+        if job.circuit.metadata.get("preferred_hardware") == backend:
+            score += 20
+
+        # Consider fidelity requirements
+        if job.circuit.metadata.get("high_fidelity"):
+            if "ionq" in backend:  # Trapped ions have higher fidelity
+                score += 15
+
+        return score
+
+    def rebalance_queue(self) -> None:
+        """Rebalance jobs across backends based on current loads."""
+        # Get all pending jobs
+        jobs = []
+        while self._queue:
+            jobs.append(heappop(self._queue))
+
+        # Reassign backends if needed
+        for pjob in jobs:
+            if pjob.job.status == JobStatus.QUEUED:
+                # Check if current backend is overloaded
+                current_load = self._backend_loads.get(pjob.job.backend, 0)
+                current_capacity = self._backend_capacities.get(pjob.job.backend, 100)
+
+                if current_load / current_capacity > 0.8:
+                    # Try to find better backend
+                    backends = list(self._backend_capacities.keys())
+                    try:
+                        new_backend = self.select_optimal_backend(pjob.job, backends)
+                        if new_backend != pjob.job.backend:
+                            print(f"Rebalancing job to {new_backend}")
+                            pjob.job.backend = new_backend
+                    except ValueError:
+                        pass
+
+            heappush(self._queue, pjob)
+
+scheduler = JobScheduler()
+print("\nJob scheduler initialized")
+```
+
+## 6. Session Management
+
+IBM Quantum Runtime sessions optimize iterative algorithms.
+
+```python
+class QuantumSession:
+    """Manage quantum computing sessions for iterative workloads."""
+
+    def __init__(self, backend: str, max_time: int = 3600):
+        self.session_id: Optional[str] = None
+        self.backend = backend
+        self.max_time = max_time
+        self.jobs_executed = 0
+        self.started_at: Optional[datetime] = None
+        self._active = False
+
+    def __enter__(self):
+        """Start session."""
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Close session."""
+        self.close()
+        return False
+
+    def start(self) -> str:
+        """Initialize a new session."""
+        self.session_id = f"session_{uuid.uuid4().hex[:8]}"
+        self.started_at = datetime.now()
+        self._active = True
+        print(f"Session {self.session_id} started on {self.backend}")
+        return self.session_id
+
+    def close(self) -> None:
+        """Close the session."""
+        if self._active:
+            elapsed = (datetime.now() - self.started_at).total_seconds()
+            print(f"Session {self.session_id} closed")
+            print(f"  Jobs executed: {self.jobs_executed}")
+            print(f"  Duration: {elapsed:.1f}s")
+            self._active = False
+
+    def run(self, circuit: QuantumCircuit, shots: int = 1024) -> Dict:
+        """Run circuit within session (reduced queue time)."""
+        if not self._active:
+            raise RuntimeError("Session not active")
+
+        # Check time limit
+        elapsed = (datetime.now() - self.started_at).total_seconds()
+        if elapsed > self.max_time:
+            raise TimeoutError("Session time limit exceeded")
+
+        # Execute with session priority (simulated)
+        self.jobs_executed += 1
+
+        return {
+            "session_id": self.session_id,
+            "job_number": self.jobs_executed,
+            "status": "COMPLETED",
+            "results": {"00": 512, "11": 512}  # Example Bell state results
+        }
+
+    def get_remaining_time(self) -> float:
+        """Get remaining session time in seconds."""
+        if not self.started_at:
+            return self.max_time
+        elapsed = (datetime.now() - self.started_at).total_seconds()
+        return max(0, self.max_time - elapsed)
+
+# Example session usage
+print("\nSession example:")
+with QuantumSession("ibm_brisbane", max_time=1800) as session:
+    # VQE optimization loop would run multiple circuits
+    for i in range(3):
+        result = session.run(circuit, shots=1024)
+        print(f"  Iteration {i+1}: {result['status']}")
+```
+
+## Summary
+
+Effective job management requires:
+
+1. **Submission**: Proper circuit validation and configuration
+2. **Monitoring**: Real-time status tracking with callbacks
+3. **Batch Processing**: Parallel submission with concurrency control
+4. **Scheduling**: Priority-based queuing with backend optimization
+5. **Sessions**: Reduced latency for iterative algorithms
+
+These techniques ensure efficient use of quantum resources and reliable execution of quantum workloads.

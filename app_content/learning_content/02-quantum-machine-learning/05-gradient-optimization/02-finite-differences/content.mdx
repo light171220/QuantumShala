@@ -1,0 +1,491 @@
+---
+title: "Finite Difference Methods"
+description: "Explore numerical differentiation techniques for quantum circuits when parameter-shift is unavailable."
+---
+
+# Finite Difference Methods
+
+When the parameter-shift rule doesn't apply, finite difference methods provide a universal approach to gradient estimation.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Implement forward and central differences
+- Understand truncation vs numerical error
+- Choose appropriate step sizes
+- Apply SPSA for efficient estimation
+- Compare finite difference variants
+
+## 1. Forward and Central Differences
+
+The basic finite difference formulas for gradient approximation.
+
+```python
+import numpy as np
+
+def finite_difference_basics():
+    """
+    Introduction to finite difference methods.
+    """
+    print("Finite Difference Methods:")
+    print("=" * 50)
+
+    print("\n1. Forward Difference:")
+    print("-" * 40)
+    print("  f'(x) ≈ [f(x + ε) - f(x)] / ε")
+    print("  Error: O(ε)")
+    print("  Evaluations: n + 1")
+
+    print("\n\n2. Central Difference:")
+    print("-" * 40)
+    print("  f'(x) ≈ [f(x + ε) - f(x - ε)] / 2ε")
+    print("  Error: O(ε²)")
+    print("  Evaluations: 2n")
+
+    print("\n\n3. Backward Difference:")
+    print("-" * 40)
+    print("  f'(x) ≈ [f(x) - f(x - ε)] / ε")
+    print("  Error: O(ε)")
+    print("  Evaluations: n + 1")
+
+    # Demonstration
+    def test_function(x):
+        return np.sin(x)
+
+    def true_derivative(x):
+        return np.cos(x)
+
+    x = 1.0
+    true_grad = true_derivative(x)
+
+    print("\n\n4. Example: f(x) = sin(x) at x = 1")
+    print("-" * 40)
+    print(f"  True derivative: {true_grad:.6f}")
+
+    for epsilon in [0.1, 0.01, 0.001, 0.0001]:
+        forward = (test_function(x + epsilon) - test_function(x)) / epsilon
+        central = (test_function(x + epsilon) - test_function(x - epsilon)) / (2 * epsilon)
+
+        print(f"\n  ε = {epsilon}:")
+        print(f"    Forward:  {forward:.6f}, error = {abs(forward - true_grad):.2e}")
+        print(f"    Central:  {central:.6f}, error = {abs(central - true_grad):.2e}")
+
+finite_difference_basics()
+```
+
+<Formula>
+Central Difference (most accurate):
+$$\frac{\partial f}{\partial \theta_i} \approx \frac{f(\theta + \epsilon e_i) - f(\theta - \epsilon e_i)}{2\epsilon}$$
+where $e_i$ is the unit vector in direction $i$.
+</Formula>
+
+## 2. Step Size Selection
+
+Choosing the optimal step size balances truncation and numerical errors.
+
+```python
+import numpy as np
+
+def step_size_analysis():
+    """
+    Analyze the effect of step size on accuracy.
+    """
+    print("Step Size Analysis:")
+    print("=" * 50)
+
+    print("\n1. Two Sources of Error:")
+    print("-" * 40)
+    print("  Truncation error: O(ε²) for central difference")
+    print("  Numerical error: O(σ/ε) from measurement noise")
+    print("  Total error: O(ε²) + O(σ/ε)")
+
+    print("\n\n2. Optimal Step Size:")
+    print("-" * 40)
+    print("  Minimize total error:")
+    print("  d/dε [ε² + σ/ε] = 0")
+    print("  2ε - σ/ε² = 0")
+    print("  ε_opt = (σ/2)^(1/3)")
+
+    # Simulation with noise
+    def noisy_circuit(params, noise_std=0.01):
+        """Simulate noisy quantum circuit."""
+        clean_value = np.sum(np.sin(params)**2)
+        return clean_value + np.random.normal(0, noise_std)
+
+    print("\n\n3. Error vs Step Size (with noise σ=0.01):")
+    print("-" * 40)
+
+    params = np.array([0.5, 0.8])
+    true_grad = 2 * np.sin(params) * np.cos(params)
+    noise_std = 0.01
+
+    epsilons = [0.5, 0.1, 0.05, 0.01, 0.005, 0.001]
+
+    print(f"\n  {'ε':<10} {'Mean Error':<15} {'Std Dev':<15}")
+    print("  " + "-" * 40)
+
+    for eps in epsilons:
+        errors = []
+        for _ in range(100):
+            grad = np.zeros(2)
+            for i in range(2):
+                p_plus = params.copy()
+                p_plus[i] += eps
+                p_minus = params.copy()
+                p_minus[i] -= eps
+                grad[i] = (noisy_circuit(p_plus, noise_std) -
+                          noisy_circuit(p_minus, noise_std)) / (2 * eps)
+            errors.append(np.linalg.norm(grad - true_grad))
+
+        print(f"  {eps:<10} {np.mean(errors):<15.4f} {np.std(errors):<15.4f}")
+
+    # Optimal epsilon
+    eps_opt = (noise_std / 2) ** (1/3)
+    print(f"\n  Theoretical optimal ε ≈ {eps_opt:.4f}")
+
+step_size_analysis()
+```
+
+<Tip>
+For quantum circuits with shot noise, use larger step sizes than you would for exact classical simulations. The rule of thumb is ε ~ σ^(1/3) where σ is the noise standard deviation.
+</Tip>
+
+## 3. SPSA: Simultaneous Perturbation
+
+SPSA reduces the number of circuit evaluations from 2n to 2.
+
+```python
+import numpy as np
+
+def spsa_method():
+    """
+    Simultaneous Perturbation Stochastic Approximation.
+    """
+    print("SPSA (Simultaneous Perturbation):")
+    print("=" * 50)
+
+    print("\n1. Key Idea:")
+    print("-" * 40)
+    print("  Instead of perturbing each parameter separately,")
+    print("  perturb ALL parameters simultaneously with random")
+    print("  ±1 values. Only 2 evaluations regardless of n!")
+
+    print("\n\n2. Algorithm:")
+    print("-" * 40)
+    print("  1. Sample Δ from {-1, +1}^n (Bernoulli)")
+    print("  2. Compute f(θ + cΔ) and f(θ - cΔ)")
+    print("  3. Gradient estimate: g = [f⁺ - f⁻] / (2c) × Δ")
+
+    def spsa_gradient(circuit_fn, params, c=0.1):
+        """
+        Estimate gradient using SPSA.
+
+        Args:
+            circuit_fn: Cost function
+            params: Current parameters
+            c: Perturbation size
+
+        Returns:
+            Gradient estimate
+        """
+        n = len(params)
+        # Random perturbation direction
+        delta = np.random.choice([-1, 1], size=n)
+
+        # Two function evaluations
+        f_plus = circuit_fn(params + c * delta)
+        f_minus = circuit_fn(params - c * delta)
+
+        # Gradient estimate
+        gradient = (f_plus - f_minus) / (2 * c) * delta
+        return gradient
+
+    # Comparison
+    print("\n\n3. Comparison: Central Diff vs SPSA")
+    print("-" * 40)
+
+    def test_circuit(params):
+        return np.sum(np.sin(params)**2)
+
+    params = np.array([0.5, 0.8, 1.2, 0.3])
+    true_grad = 2 * np.sin(params) * np.cos(params)
+
+    # Central difference (8 evaluations)
+    def central_diff_gradient(fn, p, eps=0.01):
+        grad = np.zeros(len(p))
+        for i in range(len(p)):
+            p_plus = p.copy(); p_plus[i] += eps
+            p_minus = p.copy(); p_minus[i] -= eps
+            grad[i] = (fn(p_plus) - fn(p_minus)) / (2 * eps)
+        return grad
+
+    cd_grad = central_diff_gradient(test_circuit, params)
+
+    # SPSA (2 evaluations, averaged over trials)
+    np.random.seed(42)
+    spsa_grads = [spsa_gradient(test_circuit, params) for _ in range(50)]
+    spsa_mean = np.mean(spsa_grads, axis=0)
+    spsa_std = np.std(spsa_grads, axis=0)
+
+    print(f"\n  True gradient: {true_grad.round(4)}")
+    print(f"  Central diff:  {cd_grad.round(4)}")
+    print(f"  SPSA (mean):   {spsa_mean.round(4)}")
+    print(f"  SPSA (std):    {spsa_std.round(4)}")
+
+    print(f"\n  Evaluations: Central diff = 8, SPSA = 2")
+    print(f"  Trade-off: SPSA has higher variance but lower cost")
+
+spsa_method()
+```
+
+<Warning>
+SPSA gradients are unbiased but have high variance. Multiple samples or averaging over iterations helps reduce this variance.
+</Warning>
+
+## 4. Higher-Order Methods
+
+More accurate finite difference formulas.
+
+```python
+import numpy as np
+
+def higher_order_differences():
+    """
+    Higher-order finite difference formulas.
+    """
+    print("Higher-Order Finite Differences:")
+    print("=" * 50)
+
+    print("\n1. Five-Point Stencil (O(ε⁴)):")
+    print("-" * 40)
+    print("  f'(x) ≈ [-f(x+2ε) + 8f(x+ε) - 8f(x-ε) + f(x-2ε)] / 12ε")
+
+    print("\n\n2. Comparison of Methods:")
+    print("-" * 40)
+
+    def test_fn(x):
+        return np.sin(x)
+
+    def true_deriv(x):
+        return np.cos(x)
+
+    x = 1.0
+
+    def forward_diff(f, x, eps):
+        return (f(x + eps) - f(x)) / eps
+
+    def central_diff(f, x, eps):
+        return (f(x + eps) - f(x - eps)) / (2 * eps)
+
+    def five_point(f, x, eps):
+        return (-f(x + 2*eps) + 8*f(x + eps) - 8*f(x - eps) + f(x - 2*eps)) / (12 * eps)
+
+    true = true_deriv(x)
+
+    print(f"\n  True derivative at x=1: {true:.8f}")
+    print(f"\n  {'ε':<10} {'Forward':<12} {'Central':<12} {'Five-point':<12}")
+    print("  " + "-" * 46)
+
+    for eps in [0.1, 0.01, 0.001]:
+        fwd_err = abs(forward_diff(test_fn, x, eps) - true)
+        cen_err = abs(central_diff(test_fn, x, eps) - true)
+        fiv_err = abs(five_point(test_fn, x, eps) - true)
+
+        print(f"  {eps:<10} {fwd_err:<12.2e} {cen_err:<12.2e} {fiv_err:<12.2e}")
+
+    print("\n\n3. Cost-Accuracy Trade-off:")
+    print("-" * 40)
+
+    methods = [
+        ("Forward", 1, "n+1", "O(ε)"),
+        ("Central", 2, "2n", "O(ε²)"),
+        ("Five-point", 4, "4n", "O(ε⁴)"),
+    ]
+
+    print(f"  {'Method':<12} {'Points':<8} {'Evals':<8} {'Error':<10}")
+    print("  " + "-" * 38)
+    for name, points, evals, error in methods:
+        print(f"  {name:<12} {points:<8} {evals:<8} {error:<10}")
+
+higher_order_differences()
+```
+
+## 5. Practical Implementation
+
+Complete gradient computation with error handling.
+
+```python
+import numpy as np
+
+class FiniteDifferenceGradient:
+    """
+    Finite difference gradient computation with multiple methods.
+    """
+
+    def __init__(self, circuit_fn, method='central', epsilon=0.01):
+        """
+        Args:
+            circuit_fn: Function to differentiate
+            method: 'forward', 'central', 'five_point', or 'spsa'
+            epsilon: Step size
+        """
+        self.circuit = circuit_fn
+        self.method = method
+        self.epsilon = epsilon
+        self.eval_count = 0
+
+    def reset_counter(self):
+        self.eval_count = 0
+
+    def _eval(self, params):
+        self.eval_count += 1
+        return self.circuit(params)
+
+    def gradient(self, params):
+        """Compute gradient using specified method."""
+        params = np.array(params, dtype=float)
+
+        if self.method == 'forward':
+            return self._forward_diff(params)
+        elif self.method == 'central':
+            return self._central_diff(params)
+        elif self.method == 'five_point':
+            return self._five_point(params)
+        elif self.method == 'spsa':
+            return self._spsa(params)
+        else:
+            raise ValueError(f"Unknown method: {self.method}")
+
+    def _forward_diff(self, params):
+        f0 = self._eval(params)
+        grad = np.zeros(len(params))
+        for i in range(len(params)):
+            p_plus = params.copy()
+            p_plus[i] += self.epsilon
+            grad[i] = (self._eval(p_plus) - f0) / self.epsilon
+        return grad
+
+    def _central_diff(self, params):
+        grad = np.zeros(len(params))
+        for i in range(len(params)):
+            p_plus = params.copy()
+            p_plus[i] += self.epsilon
+            p_minus = params.copy()
+            p_minus[i] -= self.epsilon
+            grad[i] = (self._eval(p_plus) - self._eval(p_minus)) / (2 * self.epsilon)
+        return grad
+
+    def _five_point(self, params):
+        grad = np.zeros(len(params))
+        eps = self.epsilon
+        for i in range(len(params)):
+            p = [params.copy() for _ in range(4)]
+            p[0][i] += 2 * eps
+            p[1][i] += eps
+            p[2][i] -= eps
+            p[3][i] -= 2 * eps
+            f = [self._eval(pp) for pp in p]
+            grad[i] = (-f[0] + 8*f[1] - 8*f[2] + f[3]) / (12 * eps)
+        return grad
+
+    def _spsa(self, params):
+        delta = np.random.choice([-1, 1], size=len(params))
+        f_plus = self._eval(params + self.epsilon * delta)
+        f_minus = self._eval(params - self.epsilon * delta)
+        return (f_plus - f_minus) / (2 * self.epsilon) * delta
+
+# Demonstration
+print("Finite Difference Implementation:")
+print("=" * 50)
+
+def quantum_circuit(params):
+    """Simulated quantum cost function."""
+    return np.sum(np.sin(params)**2) + 0.5 * np.prod(np.cos(params))
+
+params = np.array([0.5, 0.8, 1.2])
+
+print("\nGradient computation comparison:")
+print("-" * 40)
+
+for method in ['forward', 'central', 'five_point', 'spsa']:
+    grad_calc = FiniteDifferenceGradient(quantum_circuit, method=method)
+    grad_calc.reset_counter()
+    grad = grad_calc.gradient(params)
+    print(f"\n  {method.capitalize()}:")
+    print(f"    Gradient: {grad.round(4)}")
+    print(f"    Evaluations: {grad_calc.eval_count}")
+```
+
+## 6. When to Use Each Method
+
+Guidelines for choosing gradient methods.
+
+```python
+def method_selection_guide():
+    """
+    Guide for selecting gradient computation method.
+    """
+    print("Method Selection Guide:")
+    print("=" * 50)
+
+    print("\n1. Decision Tree:")
+    print("-" * 40)
+    print("""
+    Is gate Pauli-based?
+    ├─ Yes → Use Parameter-Shift (exact)
+    └─ No → Is gradient precision critical?
+            ├─ Yes → Use Central Difference
+            │       └─ Need more accuracy? → Five-Point
+            └─ No → Is n_params large?
+                    ├─ Yes → Use SPSA (2 evals)
+                    └─ No → Use Central Difference
+    """)
+
+    print("\n2. Method Summary:")
+    print("-" * 40)
+
+    methods = [
+        ("Parameter-Shift", "Exact", "2n", "Pauli gates only"),
+        ("Central Diff", "O(ε²)", "2n", "General, accurate"),
+        ("Five-Point", "O(ε⁴)", "4n", "High precision needed"),
+        ("SPSA", "Unbiased", "2", "Many parameters"),
+        ("Forward Diff", "O(ε)", "n+1", "Memory limited"),
+    ]
+
+    print(f"  {'Method':<18} {'Error':<10} {'Evals':<8} {'Best for':<20}")
+    print("  " + "-" * 56)
+    for m in methods:
+        print(f"  {m[0]:<18} {m[1]:<10} {m[2]:<8} {m[3]:<20}")
+
+    print("\n\n3. Practical Tips:")
+    print("-" * 40)
+    tips = [
+        "Start with parameter-shift if gates support it",
+        "Use ε ~ 0.01-0.1 for noisy circuits",
+        "Average multiple SPSA samples for stability",
+        "Monitor gradient variance during training",
+        "Reduce ε if optimization oscillates"
+    ]
+    for tip in tips:
+        print(f"  • {tip}")
+
+method_selection_guide()
+```
+
+## Summary
+
+Finite difference methods provide flexible gradient estimation:
+
+1. **Forward/Backward**: Simple but O(ε) error
+2. **Central Difference**: Standard choice with O(ε²) error
+3. **Five-Point**: Higher accuracy with O(ε⁴) error
+4. **SPSA**: Only 2 evaluations for any n
+5. **Step Size**: Balance truncation and noise errors
+6. **Selection**: Based on gate type, precision needs, and cost
+
+Use parameter-shift when available; fall back to finite differences otherwise.
+
+## Next Steps
+
+In the next lesson, we'll explore natural gradients for more efficient optimization in curved parameter spaces.

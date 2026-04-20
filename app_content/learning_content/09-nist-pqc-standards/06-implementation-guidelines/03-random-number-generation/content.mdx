@@ -1,0 +1,558 @@
+---
+title: "Secure Random Number Generation"
+description: "Master cryptographic random number generation for PQC implementations, including entropy sources, DRBGs, and testing methodologies."
+---
+
+# Secure Random Number Generation
+
+Cryptographic security fundamentally depends on unpredictable random numbers. For PQC algorithms, random number generation is especially critical because key generation and signing rely heavily on high-quality randomness.
+
+## Why Randomness Matters
+
+### The Role of Randomness in PQC
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│           Random Number Usage in PQC Algorithms                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ML-KEM (Key Encapsulation)                                     │
+│  ├─ Key generation: Random seed for secret/public key          │
+│  ├─ Encapsulation: Random value for shared secret derivation   │
+│  └─ Each operation needs ~32 bytes high-quality randomness     │
+│                                                                  │
+│  ML-DSA (Signatures)                                            │
+│  ├─ Key generation: Random seed for key pair                   │
+│  ├─ Signing: Random masking vectors (y)                        │
+│  ├─ Deterministic mode: Uses hash of (key || message)          │
+│  └─ Randomized mode: Each signature needs fresh randomness     │
+│                                                                  │
+│  SLH-DSA (Hash-Based Signatures)                                │
+│  ├─ Key generation: Random seeds for all trees                 │
+│  ├─ Signing: Random index selection                            │
+│  └─ Stateless design requires quality randomness               │
+│                                                                  │
+│  FN-DSA (FALCON Signatures)                                     │
+│  ├─ Key generation: Random (f, g) polynomials                  │
+│  ├─ Signing: Random salt for hash-to-point                     │
+│  ├─ Gaussian sampling: Random bits for sampler                 │
+│  └─ High entropy requirements for proper distribution          │
+│                                                                  │
+├─────────────────────────────────────────────────────────────────┤
+│  Critical: Weak randomness = Complete system compromise         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Failures from Bad Randomness
+
+```python
+"""
+Historical randomness failures in cryptography
+"""
+
+failures = [
+    {
+        "name": "Sony PlayStation 3 ECDSA",
+        "year": 2010,
+        "flaw": "Reused random nonce k in ECDSA signatures",
+        "impact": "Private key recovered from two signatures",
+        "lesson": "Each signature MUST have unique randomness"
+    },
+    {
+        "name": "Debian OpenSSL",
+        "year": 2008,
+        "flaw": "Removed entropy sources, only PID as randomness",
+        "impact": "Only 32,768 possible keys; all compromised",
+        "lesson": "Never reduce entropy sources without analysis"
+    },
+    {
+        "name": "Android SecureRandom",
+        "year": 2013,
+        "flaw": "PRNG not properly seeded on some devices",
+        "impact": "Bitcoin wallets compromised, funds stolen",
+        "lesson": "Verify RNG initialization on all platforms"
+    },
+    {
+        "name": "Taiwan Citizen Digital Certificate",
+        "year": 2017,
+        "flaw": "Weak prime generation in RSA",
+        "impact": "760,000 certificates vulnerable",
+        "lesson": "Prime generation needs proper randomness"
+    }
+]
+
+print("Historical Randomness Failures")
+print("=" * 60)
+
+for f in failures:
+    print(f"\n{f['name']} ({f['year']})")
+    print(f"  Flaw: {f['flaw']}")
+    print(f"  Impact: {f['impact']}")
+    print(f"  Lesson: {f['lesson']}")
+```
+
+## Entropy Sources
+
+### Operating System Entropy
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Operating System Entropy Sources                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Linux:                                                          │
+│  ├─ /dev/urandom - Non-blocking, cryptographic quality         │
+│  ├─ /dev/random - Blocking (legacy, usually unnecessary)       │
+│  ├─ getrandom() - System call, can block until seeded          │
+│  └─ Sources: CPU noise, device timing, interrupts              │
+│                                                                  │
+│  Windows:                                                        │
+│  ├─ BCryptGenRandom - Primary API                               │
+│  ├─ RtlGenRandom - Legacy (avoid in new code)                  │
+│  └─ Sources: TPM, CPU RDRAND, system state                     │
+│                                                                  │
+│  macOS/iOS:                                                      │
+│  ├─ SecRandomCopyBytes - Recommended API                        │
+│  ├─ /dev/random - Also suitable                                │
+│  └─ Sources: Secure Enclave, CPU, system events                │
+│                                                                  │
+│  Best Practice:                                                  │
+│  1. Use OS-provided CSPRNG (never roll your own)               │
+│  2. Use library wrappers that handle platform differences       │
+│  3. Check for initialization errors                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Hardware Entropy
+
+```python
+"""
+Hardware entropy sources for cryptographic applications
+"""
+
+hardware_sources = {
+    "CPU RDRAND/RDSEED": {
+        "description": "Intel/AMD CPU random number instructions",
+        "quality": "High (hardware true random)",
+        "availability": "Modern x86 CPUs (2012+)",
+        "usage": "Automatic on modern OS",
+        "concerns": "Trust in CPU vendor implementation"
+    },
+    "TPM (Trusted Platform Module)": {
+        "description": "Dedicated security chip",
+        "quality": "Very high (certified hardware)",
+        "availability": "Most enterprise systems, some consumer",
+        "usage": "Via OS APIs or direct TPM commands",
+        "concerns": "Requires TPM present and enabled"
+    },
+    "HSM (Hardware Security Module)": {
+        "description": "Dedicated cryptographic processor",
+        "quality": "Highest (FIPS certified)",
+        "availability": "Servers, specialized systems",
+        "usage": "Vendor-specific APIs",
+        "concerns": "Cost, complexity"
+    },
+    "USB Hardware RNG": {
+        "description": "External random number generator",
+        "quality": "Varies by device",
+        "availability": "Add-on purchase",
+        "usage": "Device driver, /dev/hwrng",
+        "concerns": "Physical security, supply chain"
+    }
+}
+
+print("Hardware Entropy Sources")
+print("=" * 60)
+
+for source, info in hardware_sources.items():
+    print(f"\n{source}")
+    for key, value in info.items():
+        print(f"  {key}: {value}")
+```
+
+## Deterministic Random Bit Generators (DRBGs)
+
+### NIST Approved DRBGs
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              NIST SP 800-90A DRBGs                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Hash_DRBG                                                      │
+│  ├─ Based on hash functions (SHA-256, SHA-512)                 │
+│  ├─ Simple construction                                         │
+│  ├─ Good for software implementations                          │
+│  └─ Recommended for PQC key generation                         │
+│                                                                  │
+│  HMAC_DRBG                                                      │
+│  ├─ Based on HMAC (SHA-256, SHA-512)                           │
+│  ├─ Slightly more complex than Hash_DRBG                       │
+│  ├─ Strong security proofs                                     │
+│  └─ Widely implemented                                          │
+│                                                                  │
+│  CTR_DRBG                                                       │
+│  ├─ Based on AES in counter mode                               │
+│  ├─ Very fast with AES-NI hardware                             │
+│  ├─ Common in hardware implementations                         │
+│  └─ Requires good AES implementation                           │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  All DRBGs need:                                          │  │
+│  │  • High-quality entropy input (seed)                      │  │
+│  │  • Regular reseeding (after N bytes or time interval)     │  │
+│  │  • Prediction resistance option for critical uses         │  │
+│  └──────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### DRBG Implementation Example
+
+```python
+"""
+Simplified HMAC_DRBG implementation for educational purposes.
+In production, use your cryptographic library's DRBG.
+"""
+
+import hmac
+import hashlib
+from typing import Optional
+
+class HMAC_DRBG:
+    """
+    HMAC-DRBG as specified in NIST SP 800-90A.
+    Simplified for educational purposes.
+    """
+
+    def __init__(self, entropy: bytes, nonce: bytes = b"",
+                 personalization: bytes = b""):
+        """
+        Initialize DRBG with entropy input.
+
+        Args:
+            entropy: High-quality random bytes (min 32 bytes)
+            nonce: Additional uniqueness (e.g., counter)
+            personalization: Application-specific string
+        """
+        self.hash_func = hashlib.sha256
+        self.outlen = 32  # SHA-256 output length
+
+        # Initial state
+        self.K = b'\x00' * self.outlen
+        self.V = b'\x01' * self.outlen
+
+        # Seed with provided entropy
+        seed_material = entropy + nonce + personalization
+        self._update(seed_material)
+
+        self.reseed_counter = 1
+
+    def _hmac(self, key: bytes, data: bytes) -> bytes:
+        """Compute HMAC-SHA256."""
+        return hmac.new(key, data, self.hash_func).digest()
+
+    def _update(self, provided_data: Optional[bytes] = None):
+        """Update internal state."""
+        if provided_data is None:
+            provided_data = b""
+
+        # K = HMAC(K, V || 0x00 || provided_data)
+        self.K = self._hmac(self.K, self.V + b'\x00' + provided_data)
+        # V = HMAC(K, V)
+        self.V = self._hmac(self.K, self.V)
+
+        if provided_data:
+            # K = HMAC(K, V || 0x01 || provided_data)
+            self.K = self._hmac(self.K, self.V + b'\x01' + provided_data)
+            # V = HMAC(K, V)
+            self.V = self._hmac(self.K, self.V)
+
+    def generate(self, num_bytes: int) -> bytes:
+        """
+        Generate random bytes.
+
+        Args:
+            num_bytes: Number of bytes to generate
+
+        Returns:
+            Random bytes
+        """
+        if self.reseed_counter > 2**48:
+            raise Exception("Reseed required")
+
+        output = b""
+        while len(output) < num_bytes:
+            self.V = self._hmac(self.K, self.V)
+            output += self.V
+
+        self._update()
+        self.reseed_counter += 1
+
+        return output[:num_bytes]
+
+    def reseed(self, entropy: bytes, additional: bytes = b""):
+        """Reseed the DRBG with fresh entropy."""
+        self._update(entropy + additional)
+        self.reseed_counter = 1
+
+# Example usage
+import os
+
+# Get entropy from OS
+entropy = os.urandom(48)  # More than minimum for security margin
+
+# Create DRBG
+drbg = HMAC_DRBG(
+    entropy=entropy,
+    nonce=os.urandom(16),
+    personalization=b"PQC-KeyGen"
+)
+
+# Generate random bytes
+random_bytes = drbg.generate(32)
+print(f"Generated: {random_bytes.hex()}")
+```
+
+## PQC-Specific Considerations
+
+### Deterministic vs Randomized Signing
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│          Deterministic vs Randomized Signing                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  DETERMINISTIC (Hash-based nonce)                               │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  nonce = Hash(secret_key || message)                      │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│  ✓ Same message always produces same signature                 │
+│  ✓ No RNG required at signing time                             │
+│  ✓ Protects against RNG failures                               │
+│  ✗ Fault attacks may extract key via differential analysis    │
+│  ✗ Side-channel on same message can leak information          │
+│                                                                  │
+│  RANDOMIZED (Fresh randomness)                                  │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  nonce = RNG()                                            │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│  ✓ Each signature is independent                               │
+│  ✓ Fault attacks harder (different values each time)          │
+│  ✗ Requires quality RNG at signing time                        │
+│  ✗ RNG failure = potential key compromise                     │
+│                                                                  │
+│  HEDGED (Best of both)                                          │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  nonce = Hash(secret_key || message || RNG())             │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│  ✓ Secure even if RNG fails                                    │
+│  ✓ Different nonce each time (if RNG works)                   │
+│  ✓ Recommended for most applications                          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Generation Requirements
+
+```python
+"""
+RNG requirements for PQC key generation
+"""
+
+key_gen_requirements = {
+    "ML-KEM-512": {
+        "seed_bytes": 32,
+        "entropy_source": "OS CSPRNG",
+        "notes": "Single 32-byte seed expands to full keypair"
+    },
+    "ML-KEM-768": {
+        "seed_bytes": 32,
+        "entropy_source": "OS CSPRNG",
+        "notes": "Same seed structure as ML-KEM-512"
+    },
+    "ML-KEM-1024": {
+        "seed_bytes": 32,
+        "entropy_source": "OS CSPRNG",
+        "notes": "Same seed structure, larger expansion"
+    },
+    "ML-DSA-44": {
+        "seed_bytes": 32,
+        "entropy_source": "OS CSPRNG",
+        "notes": "ExpandA and ExpandS from seed"
+    },
+    "ML-DSA-65": {
+        "seed_bytes": 32,
+        "entropy_source": "OS CSPRNG",
+        "notes": "Same as ML-DSA-44"
+    },
+    "ML-DSA-87": {
+        "seed_bytes": 32,
+        "entropy_source": "OS CSPRNG",
+        "notes": "Same as ML-DSA-44"
+    },
+    "SLH-DSA": {
+        "seed_bytes": "48-72 bytes (variant dependent)",
+        "entropy_source": "OS CSPRNG",
+        "notes": "SK.seed, SK.prf, PK.seed all random"
+    },
+    "FN-DSA-512": {
+        "seed_bytes": 32,
+        "entropy_source": "OS CSPRNG",
+        "notes": "Seeds NTRU key generation, requires many samples"
+    },
+    "FN-DSA-1024": {
+        "seed_bytes": 32,
+        "entropy_source": "OS CSPRNG",
+        "notes": "Same as FN-DSA-512, larger polynomials"
+    }
+}
+
+print("PQC Key Generation RNG Requirements")
+print("=" * 60)
+
+for alg, req in key_gen_requirements.items():
+    print(f"\n{alg}")
+    for key, value in req.items():
+        print(f"  {key}: {value}")
+```
+
+## Testing Randomness
+
+### Statistical Tests
+
+```python
+"""
+Basic randomness testing for cryptographic RNGs
+"""
+
+import os
+import math
+from collections import Counter
+
+def frequency_test(data: bytes) -> dict:
+    """
+    Monobit frequency test from NIST SP 800-22.
+    Tests if 0s and 1s are approximately balanced.
+    """
+    # Convert to bits
+    bits = ''.join(format(byte, '08b') for byte in data)
+    n = len(bits)
+
+    # Count 1s and 0s
+    ones = bits.count('1')
+    zeros = n - ones
+
+    # Calculate statistic
+    s = abs(ones - zeros) / math.sqrt(n)
+    p_value = math.erfc(s / math.sqrt(2))
+
+    return {
+        "test": "Frequency (Monobit)",
+        "ones": ones,
+        "zeros": zeros,
+        "statistic": s,
+        "p_value": p_value,
+        "pass": p_value >= 0.01
+    }
+
+def runs_test(data: bytes) -> dict:
+    """
+    Runs test from NIST SP 800-22.
+    Tests if runs of consecutive 0s or 1s are as expected.
+    """
+    bits = ''.join(format(byte, '08b') for byte in data)
+    n = len(bits)
+
+    # Proportion of 1s
+    ones = bits.count('1')
+    pi = ones / n
+
+    # Check pre-condition
+    if abs(pi - 0.5) >= 2 / math.sqrt(n):
+        return {"test": "Runs", "pass": False, "reason": "Failed pre-condition"}
+
+    # Count runs
+    runs = 1
+    for i in range(1, n):
+        if bits[i] != bits[i-1]:
+            runs += 1
+
+    # Calculate statistic
+    expected = 2 * n * pi * (1 - pi) + 1
+    variance = 2 * math.sqrt(2 * n) * pi * (1 - pi)
+
+    if variance == 0:
+        return {"test": "Runs", "pass": False, "reason": "Zero variance"}
+
+    z = (runs - expected) / variance
+    p_value = math.erfc(abs(z) / math.sqrt(2))
+
+    return {
+        "test": "Runs",
+        "runs": runs,
+        "expected": expected,
+        "statistic": z,
+        "p_value": p_value,
+        "pass": p_value >= 0.01
+    }
+
+def byte_distribution_test(data: bytes) -> dict:
+    """
+    Chi-squared test for uniform byte distribution.
+    """
+    n = len(data)
+    counts = Counter(data)
+
+    # Expected count for each byte value
+    expected = n / 256
+
+    # Chi-squared statistic
+    chi_sq = sum((counts.get(i, 0) - expected)**2 / expected
+                 for i in range(256))
+
+    # Degrees of freedom = 255
+    # For large samples, chi-squared ~ normal with mean=df, var=2*df
+    df = 255
+    z = (chi_sq - df) / math.sqrt(2 * df)
+    p_value = 1 - 0.5 * (1 + math.erf(z / math.sqrt(2)))
+
+    return {
+        "test": "Byte Distribution",
+        "chi_squared": chi_sq,
+        "degrees_of_freedom": df,
+        "p_value": p_value,
+        "pass": 0.01 <= p_value <= 0.99
+    }
+
+# Test the OS random number generator
+print("Testing os.urandom()")
+print("=" * 50)
+
+test_data = os.urandom(100000)
+
+tests = [
+    frequency_test(test_data),
+    runs_test(test_data),
+    byte_distribution_test(test_data)
+]
+
+for result in tests:
+    print(f"\n{result['test']}:")
+    for key, value in result.items():
+        if key != 'test':
+            if isinstance(value, float):
+                print(f"  {key}: {value:.6f}")
+            else:
+                print(f"  {key}: {value}")
+```
+
+## Summary
+
+Secure random number generation is foundational for PQC:
+
+1. **Use OS-provided CSPRNGs**: Never implement your own
+2. **Seed DRBGs properly**: At least 256 bits of entropy
+3. **Consider hedged signing**: Combine RNG with deterministic elements
+4. **Test your RNG**: Use NIST statistical tests
+5. **Monitor for failures**: Check return codes, reseed regularly
+
+A single RNG failure can compromise an entire cryptographic system.

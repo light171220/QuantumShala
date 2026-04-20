@@ -1,0 +1,788 @@
+---
+title: "Side-Channel Attacks on PQC"
+description: "Understanding and defending against side-channel attacks targeting post-quantum cryptographic implementations"
+---
+
+# Side-Channel Attacks on Post-Quantum Cryptography
+
+Side-channel attacks exploit physical characteristics of cryptographic implementations rather than mathematical weaknesses. PQC algorithms introduce new side-channel vulnerabilities.
+
+## Side-Channel Attack Categories
+
+```
+Side-Channel Attack Taxonomy:
+═══════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    Side-Channel Attacks                         │
+├─────────────────────┬─────────────────────┬─────────────────────┤
+│    Timing-Based     │    Power-Based      │     EM-Based        │
+├─────────────────────┼─────────────────────┼─────────────────────┤
+│ • Cache timing      │ • Simple PA (SPA)   │ • Near-field EM     │
+│ • Branch timing     │ • Differential PA   │ • Far-field EM      │
+│ • Memory access     │ • Correlation PA    │ • EM templates      │
+│ • Instruction timing│ • Template attacks  │                     │
+└─────────────────────┴─────────────────────┴─────────────────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              │      Additional Channels      │
+              ├───────────────────────────────┤
+              │ • Acoustic                    │
+              │ • Thermal                     │
+              │ • Fault-induced               │
+              │ • Microarchitectural          │
+              └───────────────────────────────┘
+```
+
+## Timing Attacks on Lattice Operations
+
+```python
+import time
+from typing import List, Tuple
+import random
+
+# =============================================================================
+# VULNERABLE IMPLEMENTATION - DO NOT USE
+# =============================================================================
+
+def vulnerable_polynomial_comparison(a: List[int], b: List[int]) -> bool:
+    """
+    VULNERABLE: Early-exit comparison leaks coefficient positions.
+
+    An attacker can measure timing differences to learn where
+    polynomials differ, potentially revealing secret information.
+    """
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            return False  # Early exit - timing leak!
+    return True
+
+def vulnerable_rejection_sampling(sample: int, bound: int) -> bool:
+    """
+    VULNERABLE: Rejection timing reveals sample magnitude.
+
+    In ML-DSA signing, rejection sampling timing can leak
+    information about the secret key.
+    """
+    # Time varies based on sample value
+    if abs(sample) > bound:
+        return True   # Reject
+    return False      # Accept - timing differs!
+
+# =============================================================================
+# SECURE CONSTANT-TIME IMPLEMENTATION
+# =============================================================================
+
+def constant_time_compare(a: List[int], b: List[int]) -> bool:
+    """
+    Constant-time comparison for polynomials.
+
+    Always processes all coefficients regardless of match.
+    """
+    if len(a) != len(b):
+        # Length mismatch can't be hidden, but shouldn't
+        # depend on secret data
+        return False
+
+    result = 0
+    for i in range(len(a)):
+        # XOR accumulates differences without branching
+        result |= a[i] ^ b[i]
+
+    # Convert to boolean in constant time
+    # If result is 0, all coefficients matched
+    result = (result | (-result)) >> 31
+    return result == 0
+
+def ct_select(condition: int, a: int, b: int) -> int:
+    """
+    Constant-time selection: returns a if condition else b.
+
+    condition must be 0 or 1.
+    """
+    # Create mask: all 1s if condition, all 0s otherwise
+    mask = -condition  # 0 -> 0x0, 1 -> 0xFFFFFFFF
+    return (a & mask) | (b & ~mask)
+
+def ct_abs(x: int) -> int:
+    """Constant-time absolute value."""
+    mask = x >> 31  # Arithmetic shift: all 1s if negative
+    return (x ^ mask) - mask
+
+def ct_lt(a: int, b: int) -> int:
+    """
+    Constant-time less-than comparison.
+
+    Returns 1 if a < b, else 0.
+    """
+    # Careful with overflow - use larger type in practice
+    diff = a - b
+    return (diff >> 31) & 1
+
+class ConstantTimeRejection:
+    """
+    Constant-time rejection sampling for ML-DSA.
+
+    The key insight is to perform all computations but only
+    use the result conditionally.
+    """
+
+    def __init__(self, bound: int):
+        self.bound = bound
+        self.gamma1 = bound  # Simplified
+
+    def check_norm(self, coefficients: List[int]) -> Tuple[bool, int]:
+        """
+        Check infinity norm in constant time.
+
+        Returns (accept, max_coeff) where timing doesn't depend
+        on coefficient values.
+        """
+        reject = 0
+        max_val = 0
+
+        for coeff in coefficients:
+            abs_coeff = ct_abs(coeff)
+
+            # Update max in constant time
+            is_larger = ct_lt(max_val, abs_coeff)
+            max_val = ct_select(is_larger, abs_coeff, max_val)
+
+            # Check bound in constant time
+            exceeds = ct_lt(self.bound, abs_coeff)
+            reject |= exceeds
+
+        # reject is 1 if any coefficient exceeded bound
+        accept = reject ^ 1
+        return bool(accept), max_val
+
+# Timing attack demonstration
+def demonstrate_timing_leak():
+    """Show timing difference in vulnerable implementation."""
+    n = 256
+
+    # Create test polynomials
+    base = [random.randint(0, 100) for _ in range(n)]
+
+    # Differ at position 0 (fast reject)
+    early_diff = base.copy()
+    early_diff[0] = base[0] + 1
+
+    # Differ at position n-1 (slow reject)
+    late_diff = base.copy()
+    late_diff[n-1] = base[n-1] + 1
+
+    # Measure vulnerable implementation
+    iterations = 10000
+
+    start = time.perf_counter()
+    for _ in range(iterations):
+        vulnerable_polynomial_comparison(base, early_diff)
+    early_time = time.perf_counter() - start
+
+    start = time.perf_counter()
+    for _ in range(iterations):
+        vulnerable_polynomial_comparison(base, late_diff)
+    late_time = time.perf_counter() - start
+
+    print("Vulnerable Implementation Timing:")
+    print(f"  Early difference: {early_time*1e6/iterations:.3f} µs")
+    print(f"  Late difference:  {late_time*1e6/iterations:.3f} µs")
+    print(f"  Timing leak:      {(late_time-early_time)*1e6/iterations:.3f} µs")
+
+    # Measure constant-time implementation
+    start = time.perf_counter()
+    for _ in range(iterations):
+        constant_time_compare(base, early_diff)
+    early_time = time.perf_counter() - start
+
+    start = time.perf_counter()
+    for _ in range(iterations):
+        constant_time_compare(base, late_diff)
+    late_time = time.perf_counter() - start
+
+    print("\nConstant-Time Implementation:")
+    print(f"  Early difference: {early_time*1e6/iterations:.3f} µs")
+    print(f"  Late difference:  {late_time*1e6/iterations:.3f} µs")
+    print(f"  Timing leak:      {(late_time-early_time)*1e6/iterations:.3f} µs")
+
+demonstrate_timing_leak()
+```
+
+## Cache Timing Attacks
+
+```
+Cache Timing Attack on NTT:
+═══════════════════════════════════════════════════════════════════
+
+NTT uses precomputed twiddle factors stored in a table:
+    twiddles[i] = ω^(bit_reverse(i)) mod q
+
+Vulnerable access pattern:
+┌─────────────────────────────────────────────────────────────────┐
+│  for i in range(n):                                             │
+│      j = index_from_secret(i)  ← Secret-dependent index         │
+│      twiddle = table[j]        ← Cache hit/miss reveals j       │
+│      result[i] = poly[i] * twiddle                              │
+└─────────────────────────────────────────────────────────────────┘
+
+Cache Side Channel:
+┌─────────┐     ┌─────────┐     ┌─────────┐
+│ L1 Cache│     │ L2 Cache│     │  Memory │
+│  (fast) │     │ (slower)│     │ (slowest)│
+└────┬────┘     └────┬────┘     └────┬────┘
+     │               │               │
+     └───────────────┴───────────────┘
+                     │
+              Hit = Fast access
+              Miss = Slow access
+
+     Attacker measures access time to infer secret index
+```
+
+```python
+from typing import List, Optional
+import os
+
+class CacheResistantTable:
+    """
+    Cache-timing-resistant table lookup.
+
+    Uses full table scan to prevent cache-timing leakage.
+    """
+
+    def __init__(self, values: List[int]):
+        self.values = values
+        self.size = len(values)
+
+    def lookup_vulnerable(self, index: int) -> int:
+        """
+        VULNERABLE: Direct index access leaks index via cache.
+        """
+        return self.values[index]
+
+    def lookup_constant_time(self, index: int) -> int:
+        """
+        Constant-time lookup: accesses ALL table entries.
+
+        This prevents cache-timing attacks by ensuring the
+        cache access pattern is independent of the index.
+        """
+        result = 0
+        for i in range(self.size):
+            # Create mask: all 1s if i == index, else all 0s
+            mask = -int(i == index)
+            result |= self.values[i] & mask
+        return result
+
+    def lookup_with_scrambling(self, index: int, key: bytes) -> int:
+        """
+        Alternative: Scramble table with per-use random permutation.
+
+        This approach randomizes access pattern rather than
+        hiding it through full scan.
+        """
+        # In practice, use proper PRF for scrambling
+        scramble = int.from_bytes(
+            os.urandom(4), 'little'
+        ) % self.size
+
+        # Access at scrambled positions
+        result = 0
+        for i in range(self.size):
+            actual_index = (i + scramble) % self.size
+            # Still need constant-time selection
+            mask = -int(actual_index == index)
+            result |= self.values[actual_index] & mask
+        return result
+
+class NTTConstantTime:
+    """
+    Cache-resistant NTT implementation.
+
+    For production, use optimized assembly with:
+    - Register-only computation
+    - Bitsliced implementation
+    - Hardware AES for table generation
+    """
+
+    def __init__(self, n: int, q: int, root: int):
+        self.n = n
+        self.q = q
+        # Precompute all twiddle factors
+        self.twiddles = self._compute_twiddles(root)
+
+    def _compute_twiddles(self, root: int) -> List[int]:
+        """Compute NTT twiddle factors."""
+        twiddles = [1]
+        current = root
+        for _ in range(1, self.n):
+            twiddles.append(current)
+            current = (current * root) % self.q
+        return twiddles
+
+    def _ct_twiddle_lookup(self, index: int) -> int:
+        """Constant-time twiddle factor lookup."""
+        result = 0
+        for i, tw in enumerate(self.twiddles):
+            mask = -int(i == index)
+            result |= tw & mask
+        return result
+
+    def ntt_layer(self, poly: List[int], layer: int) -> List[int]:
+        """
+        Single NTT butterfly layer with constant-time access.
+
+        Note: For performance, production implementations use
+        register-based computation or bitslicing.
+        """
+        m = 1 << layer
+        result = poly.copy()
+
+        for i in range(0, self.n, 2 * m):
+            for j in range(m):
+                # Constant-time twiddle lookup
+                tw_idx = (self.n // (2 * m)) * j
+                twiddle = self._ct_twiddle_lookup(tw_idx)
+
+                u = result[i + j]
+                v = (result[i + j + m] * twiddle) % self.q
+
+                result[i + j] = (u + v) % self.q
+                result[i + j + m] = (u - v) % self.q
+
+        return result
+```
+
+## Power Analysis Attacks
+
+```
+Simple Power Analysis (SPA) on ML-DSA Signing:
+═══════════════════════════════════════════════════════════════════
+
+Power trace during signing:
+              ┌─────────────────────────────────────────────┐
+              │         ML-DSA Sign Operation               │
+              └─────────────────────────────────────────────┘
+Power
+   │    ┌──┐      ┌──┐   ┌──────┐  ┌─────┐
+   │    │  │      │  │   │      │  │     │
+   │ ┌──┘  └──────┘  └───┘      └──┘     └──────
+   │ │
+   └─┴────────────────────────────────────────────▶ Time
+     │      │        │         │       │
+     │      │        │         │       │
+   Hash   Matrix   Sample    NTT    Encode
+   μ       A·s      y
+
+SPA Attack Points:
+├─ Rejection sampling iterations visible
+├─ Matrix multiplication patterns reveal structure
+├─ NTT butterfly operations show data flow
+└─ Conditional branches create distinct patterns
+```
+
+```python
+from dataclasses import dataclass
+from typing import List, Callable
+import random
+
+@dataclass
+class PowerTrace:
+    """Simulated power trace for analysis."""
+    samples: List[float]
+    sample_rate: int
+    operation: str
+
+class PowerAnalysisSimulator:
+    """
+    Simulate power consumption for side-channel analysis.
+
+    In real attacks, traces come from oscilloscope measurements.
+    This simulator demonstrates the concepts.
+    """
+
+    def __init__(self):
+        self.base_power = 100.0  # mW
+        self.noise_level = 5.0   # mW
+
+    def simulate_hamming_weight(self, value: int, bits: int = 32) -> float:
+        """
+        Power consumption correlates with Hamming weight.
+
+        Each '1' bit draws more current than '0' bit.
+        """
+        hw = bin(value & ((1 << bits) - 1)).count('1')
+        # Simplified model: power ∝ Hamming weight
+        power = self.base_power + (hw * 2.0)
+        noise = random.gauss(0, self.noise_level)
+        return power + noise
+
+    def simulate_operation_sequence(
+        self,
+        values: List[int],
+        operation: str
+    ) -> PowerTrace:
+        """Simulate power trace for sequence of operations."""
+        samples = []
+        for val in values:
+            samples.append(self.simulate_hamming_weight(val))
+        return PowerTrace(samples, 1000000, operation)
+
+class DifferentialPowerAnalysis:
+    """
+    Differential Power Analysis (DPA) attack simulation.
+
+    DPA uses statistical correlation between hypothetical
+    intermediate values and measured power consumption.
+    """
+
+    def __init__(self, traces: List[PowerTrace], plaintexts: List[int]):
+        self.traces = traces
+        self.plaintexts = plaintexts
+
+    def compute_correlation(
+        self,
+        key_hypothesis: int,
+        intermediate_fn: Callable[[int, int], int]
+    ) -> float:
+        """
+        Compute correlation for key hypothesis.
+
+        High correlation suggests correct key byte.
+        """
+        n = len(self.traces)
+        if n == 0:
+            return 0.0
+
+        # Compute hypothetical intermediate values
+        hypothetical = [
+            bin(intermediate_fn(pt, key_hypothesis)).count('1')
+            for pt in self.plaintexts
+        ]
+
+        # Extract power at attack point
+        power_values = [t.samples[0] for t in self.traces]
+
+        # Compute Pearson correlation
+        mean_h = sum(hypothetical) / n
+        mean_p = sum(power_values) / n
+
+        numerator = sum(
+            (h - mean_h) * (p - mean_p)
+            for h, p in zip(hypothetical, power_values)
+        )
+
+        denom_h = sum((h - mean_h) ** 2 for h in hypothetical) ** 0.5
+        denom_p = sum((p - mean_p) ** 2 for p in power_values) ** 0.5
+
+        if denom_h == 0 or denom_p == 0:
+            return 0.0
+
+        return numerator / (denom_h * denom_p)
+
+    def attack_key_byte(
+        self,
+        intermediate_fn: Callable[[int, int], int]
+    ) -> int:
+        """
+        Recover key byte using DPA.
+
+        Tests all 256 possible key byte values.
+        """
+        best_key = 0
+        best_correlation = 0.0
+
+        for key_guess in range(256):
+            corr = abs(self.compute_correlation(key_guess, intermediate_fn))
+            if corr > best_correlation:
+                best_correlation = corr
+                best_key = key_guess
+
+        return best_key
+```
+
+## Countermeasures
+
+```
+Defense Layers Against Side-Channel Attacks:
+═══════════════════════════════════════════════════════════════════
+
+Layer 1: Algorithmic Countermeasures
+├─ Constant-time implementation
+├─ Regular execution patterns
+└─ Branch-free code
+
+Layer 2: Masking and Blinding
+├─ Boolean masking (XOR with random mask)
+├─ Arithmetic masking (add random mask)
+└─ Polynomial masking (for lattice operations)
+
+Layer 3: Randomization
+├─ Execution order shuffling
+├─ Random delays
+└─ Operation redundancy
+
+Layer 4: Hardware Countermeasures
+├─ Dual-rail logic
+├─ Random clock jitter
+└─ Power filtering
+```
+
+```python
+from typing import List, Tuple
+import os
+
+class MaskedPolynomial:
+    """
+    Boolean-masked polynomial for side-channel resistance.
+
+    The polynomial p is split into shares: p = p0 ⊕ p1
+    Operations are performed on shares without ever
+    reconstructing the original polynomial.
+    """
+
+    def __init__(self, n: int, q: int):
+        self.n = n
+        self.q = q
+        self.share0: List[int] = [0] * n
+        self.share1: List[int] = [0] * n
+
+    def encode(self, polynomial: List[int]):
+        """
+        Split polynomial into two random shares.
+
+        p[i] = share0[i] ⊕ share1[i] for all i
+        """
+        for i in range(self.n):
+            # Random share
+            self.share0[i] = int.from_bytes(os.urandom(2), 'little') % self.q
+            # Compute second share to XOR to original
+            self.share1[i] = polynomial[i] ^ self.share0[i]
+
+    def decode(self) -> List[int]:
+        """Reconstruct polynomial from shares (only when needed)."""
+        return [(self.share0[i] ^ self.share1[i]) % self.q
+                for i in range(self.n)]
+
+    def masked_add(self, other: 'MaskedPolynomial') -> 'MaskedPolynomial':
+        """
+        Add two masked polynomials.
+
+        For XOR masking: (a0⊕a1) + (b0⊕b1)
+        This requires conversion to arithmetic masking.
+        """
+        # Simplified - real implementation needs careful conversion
+        result = MaskedPolynomial(self.n, self.q)
+        for i in range(self.n):
+            # This is a simplified version
+            a = self.share0[i] ^ self.share1[i]
+            b = other.share0[i] ^ other.share1[i]
+            result.encode([(a + b) % self.q])
+        return result
+
+class ArithmeticMasking:
+    """
+    Arithmetic masking for modular operations.
+
+    Secret x is stored as (x - r) mod q and r separately.
+    """
+
+    def __init__(self, q: int):
+        self.q = q
+
+    def encode(self, value: int) -> Tuple[int, int]:
+        """Split value into arithmetically masked shares."""
+        mask = int.from_bytes(os.urandom(4), 'little') % self.q
+        masked_value = (value - mask) % self.q
+        return masked_value, mask
+
+    def decode(self, masked: int, mask: int) -> int:
+        """Recover original value."""
+        return (masked + mask) % self.q
+
+    def masked_multiply(
+        self,
+        a_masked: int, a_mask: int,
+        b_masked: int, b_mask: int
+    ) -> Tuple[int, int]:
+        """
+        Multiply two masked values.
+
+        (a - ra)(b - rb) = ab - a*rb - b*ra + ra*rb
+
+        We need: result_masked = ab - result_mask
+        """
+        # Generate fresh output mask
+        result_mask = int.from_bytes(os.urandom(4), 'little') % self.q
+
+        # Compute product terms
+        # a = a_masked + a_mask, b = b_masked + b_mask
+        term1 = (a_masked * b_masked) % self.q
+        term2 = (a_masked * b_mask) % self.q
+        term3 = (a_mask * b_masked) % self.q
+        term4 = (a_mask * b_mask) % self.q
+
+        # ab = term1 + term2 + term3 + term4
+        ab = (term1 + term2 + term3 + term4) % self.q
+
+        # Apply new mask
+        result_masked = (ab - result_mask) % self.q
+
+        return result_masked, result_mask
+
+class ShuffledExecution:
+    """
+    Randomize execution order to defeat SPA.
+
+    By processing operations in random order, power traces
+    from different executions cannot be aligned.
+    """
+
+    def __init__(self):
+        pass
+
+    def shuffle_indices(self, n: int) -> List[int]:
+        """Generate random permutation of indices."""
+        indices = list(range(n))
+        # Fisher-Yates shuffle
+        for i in range(n - 1, 0, -1):
+            j = int.from_bytes(os.urandom(4), 'little') % (i + 1)
+            indices[i], indices[j] = indices[j], indices[i]
+        return indices
+
+    def execute_shuffled(
+        self,
+        operations: List[Tuple[int, callable]],
+        values: List[int]
+    ) -> List[int]:
+        """
+        Execute operations in shuffled order.
+
+        Each operation is (index, function) pair.
+        """
+        n = len(operations)
+        results = [0] * n
+        order = self.shuffle_indices(n)
+
+        for i in order:
+            idx, op = operations[i]
+            results[idx] = op(values[idx])
+
+        return results
+```
+
+## PQC-Specific Vulnerabilities
+
+```python
+class LatticeSigningSideChannels:
+    """
+    Side-channel vulnerabilities specific to lattice signing.
+
+    ML-DSA and FN-DSA have unique attack surfaces from:
+    - Rejection sampling loops
+    - Gaussian/uniform sampling
+    - Polynomial arithmetic
+    """
+
+    def analyze_rejection_sampling(self):
+        """
+        ML-DSA rejection sampling side channel.
+
+        The number of iterations reveals information about
+        the secret key through the distribution of z = y + c*s.
+        """
+        analysis = """
+        Rejection Sampling Attack (ML-DSA):
+        ════════════════════════════════════
+
+        Algorithm:
+        1. Generate random y
+        2. Compute z = y + c*s₁  (s₁ is secret)
+        3. If ||z||∞ ≥ γ₁ - β: REJECT and retry
+
+        Attack vector:
+        - Iteration count correlates with s₁ coefficients
+        - More rejections when s₁ has large coefficients
+        - Timing reveals information about secret key norm
+
+        Countermeasures:
+        - Add dummy iterations for constant timing
+        - Use constant-time norm checking
+        - Employ masking on intermediate values
+        """
+        print(analysis)
+
+    def analyze_gaussian_sampling(self):
+        """
+        FN-DSA Gaussian sampling side channel.
+
+        Discrete Gaussian sampling is challenging to implement
+        in constant time due to its inherent variability.
+        """
+        analysis = """
+        Gaussian Sampling Attack (FN-DSA):
+        ════════════════════════════════════
+
+        CDT (Cumulative Distribution Table) sampling:
+        - Table lookup index depends on random bits
+        - Number of table accesses varies with output
+        - Each sample's timing reveals partial information
+
+        Inversion sampling:
+        - Rejection rate depends on target distribution
+        - Secret-dependent intermediate values
+
+        Countermeasures:
+        - Constant-time CDT with full table scan
+        - Fixed-iteration sampling
+        - Uniform sampling conversion techniques
+        """
+        print(analysis)
+
+    def analyze_ntt_leakage(self):
+        """
+        NTT operation side channels.
+
+        The Number Theoretic Transform is a core operation
+        with multiple potential leakage points.
+        """
+        analysis = """
+        NTT Side-Channel Vulnerabilities:
+        ════════════════════════════════════
+
+        Twiddle factor access:
+        - Table index may depend on secret data
+        - Cache timing reveals access pattern
+
+        Butterfly operations:
+        - Power consumption correlates with operand values
+        - Different reduction paths for different inputs
+
+        Countermeasures:
+        - On-the-fly twiddle computation
+        - Constant-time modular reduction
+        - Operand masking throughout NTT
+        - Use Montgomery representation
+        """
+        print(analysis)
+
+# Display analyses
+analyzer = LatticeSigningSideChannels()
+analyzer.analyze_rejection_sampling()
+analyzer.analyze_gaussian_sampling()
+analyzer.analyze_ntt_leakage()
+```
+
+## Summary
+
+Side-channel attacks on PQC require careful attention:
+
+1. **Timing attacks**: Lattice operations, rejection sampling, and table lookups must be constant-time
+2. **Power/EM attacks**: Require masking, shuffling, and hardware countermeasures
+3. **Cache attacks**: Table lookups need full-scan or scrambling approaches
+4. **PQC-specific**: Rejection sampling and Gaussian sampling introduce unique vulnerabilities
+
+Secure implementation requires defense in depth with multiple countermeasure layers.

@@ -1,0 +1,388 @@
+---
+title: "FN-DSA Signing and Verification"
+description: "Detailed walkthrough of FN-DSA key generation, signing, and verification algorithms with implementation insights."
+keywords: ["fn-dsa", "signing", "verification", "falcon", "compression"]
+---
+
+# FN-DSA Signing and Verification
+
+This lesson provides a detailed walkthrough of FN-DSA operations including key generation, signing, and verification algorithms.
+
+## Key Generation
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              FN-DSA KEY GENERATION                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Goal: Generate NTRU trapdoor (f, g, F, G) with good basis    │
+│                                                                 │
+│   Algorithm NTRUGen():                                          │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   1. Sample f, g ← D_σ (Gaussian polynomials)          │  │
+│   │      - Each coefficient from discrete Gaussian          │  │
+│   │      - σ chosen for security                           │  │
+│   │                                                         │  │
+│   │   2. Check f is invertible mod q                       │  │
+│   │      - If not, resample and try again                  │  │
+│   │                                                         │  │
+│   │   3. Compute F, G using NTRU solving:                  │  │
+│   │      - Find (F, G) such that fG - gF = q              │  │
+│   │      - Uses extended GCD in polynomial ring            │  │
+│   │                                                         │  │
+│   │   4. Reduce (F, G) using LLL or similar:              │  │
+│   │      - Make Gram-Schmidt norms as small as possible   │  │
+│   │      - This step is critical for security             │  │
+│   │                                                         │  │
+│   │   5. Verify Gram-Schmidt bound:                        │  │
+│   │      - max ||b̃_i|| ≤ 1.17√(q/2n)                     │  │
+│   │      - If bound exceeded, restart from step 1         │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Output:                                                       │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   Public Key:                                          │  │
+│   │   h = g · f⁻¹ mod q                                   │  │
+│   │                                                         │  │
+│   │   Secret Key:                                          │  │
+│   │   (f, g, F, G) + precomputed FALCON tree              │  │
+│   │   (Tree enables fast FFT sampling)                     │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Complexity:                                                   │
+│   - Expected ~100 iterations to find good (f, g)              │
+│   - NTRU solving is O(n² log n)                               │
+│   - Tree construction is O(n log n)                           │
+│   - Total: ~10ms for n=512, ~25ms for n=1024                 │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Signing Algorithm
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              FN-DSA SIGNING ALGORITHM                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Input: Message M, Secret Key SK = (f, g, F, G, Tree)         │
+│                                                                 │
+│   Algorithm Sign(M, SK):                                        │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   1. Generate nonce (randomized or deterministic):     │  │
+│   │      r ← SHAKE256(SK.seed || M)[0:320]                 │  │
+│   │      (320 bits = 40 bytes of randomness)               │  │
+│   │                                                         │  │
+│   │   2. Hash message to polynomial:                        │  │
+│   │      c = HashToPoint(r || M, q, n)                     │  │
+│   │      (c is a polynomial in R_q)                        │  │
+│   │                                                         │  │
+│   │   3. Compute target:                                   │  │
+│   │      t = (c, 0) in FFT domain                         │  │
+│   │      (We want s₁ + h·s₂ ≡ c, starting with target c) │  │
+│   │                                                         │  │
+│   │   4. Sample signature using FALCON tree:               │  │
+│   │      (z₁, z₂) = ffSampling(t, Tree)                   │  │
+│   │      (Gaussian sample close to target)                 │  │
+│   │                                                         │  │
+│   │   5. Compute signature polynomials:                    │  │
+│   │      s₂ = z₂                                          │  │
+│   │      s₁ = c - h·s₂ (recovered during verification)    │  │
+│   │                                                         │  │
+│   │   6. Check signature norm (rejection sampling):        │  │
+│   │      if ||(s₁, s₂)|| > bound: goto step 1            │  │
+│   │      (Ensures signatures have bounded norm)            │  │
+│   │                                                         │  │
+│   │   7. Compress s₂:                                      │  │
+│   │      sig = Compress(s₂)                               │  │
+│   │      (Golomb-Rice encoding)                            │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Output: Signature σ = (r, sig)                               │
+│                                                                 │
+│   Signing Time: ~400μs (FN-DSA-512), ~900μs (FN-DSA-1024)     │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Verification Algorithm
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              FN-DSA VERIFICATION ALGORITHM                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Input: Message M, Signature σ = (r, sig), Public Key h       │
+│                                                                 │
+│   Algorithm Verify(M, σ, h):                                   │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   1. Decompress signature:                             │  │
+│   │      s₂ = Decompress(sig)                              │  │
+│   │                                                         │  │
+│   │   2. Recompute message hash:                           │  │
+│   │      c = HashToPoint(r || M, q, n)                     │  │
+│   │                                                         │  │
+│   │   3. Recover s₁:                                       │  │
+│   │      s₁ = c - h·s₂ mod q                              │  │
+│   │      (Uses public key and hash)                        │  │
+│   │                                                         │  │
+│   │   4. Reduce coefficients to centered representation:  │  │
+│   │      s₁[i] ∈ [-(q-1)/2, (q-1)/2]                      │  │
+│   │      s₂[i] ∈ [-(q-1)/2, (q-1)/2]                      │  │
+│   │                                                         │  │
+│   │   5. Check norm bound:                                 │  │
+│   │      if ||(s₁, s₂)||² > bound²: return REJECT        │  │
+│   │      (Signature must be "short")                       │  │
+│   │                                                         │  │
+│   │   6. Return ACCEPT                                     │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Verification Time: ~50μs (FN-DSA-512), ~100μs (FN-DSA-1024) │
+│                                                                 │
+│   Norm Bounds:                                                  │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   FN-DSA-512:  ||(s₁, s₂)||² ≤ 34034726               │  │
+│   │   FN-DSA-1024: ||(s₁, s₂)||² ≤ 70265242               │  │
+│   │                                                         │  │
+│   │   These bounds ensure:                                 │  │
+│   │   • Signatures were properly Gaussian sampled         │  │
+│   │   • No large coefficients (attack indicator)          │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Signature Compression
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SIGNATURE COMPRESSION                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Why Compress?                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   • s₂ has n coefficients in range ~[-σ√n, σ√n]       │  │
+│   │   • Naive encoding: n × log₂(2σ√n) bits              │  │
+│   │   • But most coefficients are small (Gaussian)        │  │
+│   │   • Compression exploits this distribution            │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Golomb-Rice Encoding:                                        │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   For each coefficient c:                              │  │
+│   │   1. Map to non-negative: v = 2|c| - (c < 0 ? 1 : 0)  │  │
+│   │   2. Quotient q = v >> k (high bits)                  │  │
+│   │   3. Remainder r = v & ((1 << k) - 1) (low bits)      │  │
+│   │   4. Encode: q ones, one zero, then r in k bits       │  │
+│   │                                                         │  │
+│   │   Example (k=3):                                       │  │
+│   │   v = 13 = 1·8 + 5                                    │  │
+│   │   Encoded: 10 101 = "10101" (5 bits)                  │  │
+│   │                                                         │  │
+│   │   Small values → fewer bits                           │  │
+│   │   Large values → more bits (rare for Gaussian)        │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Compression Results:                                          │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   FN-DSA-512:                                          │  │
+│   │   • Uncompressed: 512 × 12 bits = 768 bytes           │  │
+│   │   • Compressed average: ~625 bytes                     │  │
+│   │   • Plus header (r, metadata): ~666 bytes total       │  │
+│   │                                                         │  │
+│   │   FN-DSA-1024:                                         │  │
+│   │   • Uncompressed: 1024 × 12 bits = 1,536 bytes        │  │
+│   │   • Compressed average: ~1,200 bytes                   │  │
+│   │   • Plus header: ~1,280 bytes total                   │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Implementation Example
+
+```python
+import hashlib
+import numpy as np
+from numpy.fft import fft, ifft
+
+class FNDSASimplified:
+    """
+    Simplified FN-DSA for educational purposes.
+    NOT CRYPTOGRAPHICALLY SECURE - for demonstration only.
+    """
+
+    def __init__(self, n: int = 512, q: int = 12289):
+        self.n = n
+        self.q = q
+        self.sigma = 165.7  # Gaussian parameter
+
+    def _hash_to_point(self, data: bytes) -> np.ndarray:
+        """Hash data to polynomial in R_q."""
+        h = hashlib.shake_256(data)
+        coeffs = []
+        for i in range(self.n):
+            byte_pair = h.digest(self.n * 2)[i*2:(i+1)*2]
+            coeffs.append(int.from_bytes(byte_pair, 'big') % self.q)
+        return np.array(coeffs)
+
+    def _poly_mul(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Multiply polynomials in R_q using FFT."""
+        n = len(a)
+        # Zero-pad for convolution
+        a_padded = np.zeros(2 * n)
+        b_padded = np.zeros(2 * n)
+        a_padded[:n] = a
+        b_padded[:n] = b
+
+        # FFT-based multiplication
+        product = np.real(ifft(fft(a_padded) * fft(b_padded)))
+        product = np.round(product).astype(int)
+
+        # Reduce mod X^n + 1
+        result = product[:n] - product[n:]
+        return result % self.q
+
+    def _center_coeffs(self, poly: np.ndarray) -> np.ndarray:
+        """Center coefficients to range [-(q-1)/2, (q-1)/2]."""
+        result = poly.copy()
+        half_q = (self.q - 1) // 2
+        result[result > half_q] -= self.q
+        return result
+
+    def _poly_norm_sq(self, poly: np.ndarray) -> int:
+        """Compute squared L2 norm of polynomial."""
+        centered = self._center_coeffs(poly)
+        return int(np.sum(centered ** 2))
+
+    def keygen(self):
+        """
+        Generate key pair (simplified - not secure).
+        Real implementation needs proper NTRU trapdoor generation.
+        """
+        # Simplified: sample small polynomials
+        f = np.random.randint(-2, 3, self.n)
+        g = np.random.randint(-2, 3, self.n)
+
+        # Ensure f is invertible (simplified check)
+        f[0] = max(f[0], 1)
+
+        # In real implementation: compute F, G and FALCON tree
+        # Here we just store f, g for demonstration
+
+        # Compute h = g/f mod q (simplified)
+        # Real implementation uses proper polynomial inversion
+        h = self._hash_to_point(f.tobytes() + g.tobytes())
+
+        sk = {'f': f, 'g': g, 'h': h}
+        pk = h
+
+        return pk, sk
+
+    def sign(self, message: bytes, sk: dict) -> dict:
+        """
+        Sign message (simplified).
+        Real implementation uses FFT tree sampling.
+        """
+        # Generate nonce
+        seed = sk['f'].tobytes() + message
+        r = hashlib.shake_256(seed).digest(40)
+
+        # Hash to polynomial
+        c = self._hash_to_point(r + message)
+
+        # Simplified signing (not real Gaussian sampling)
+        # Real FALCON uses FFT tree sampling
+        s2 = np.random.randint(-3, 4, self.n)
+        s1 = (c - self._poly_mul(sk['h'], s2)) % self.q
+
+        # Check norm bound (simplified)
+        norm_sq = self._poly_norm_sq(s1) + self._poly_norm_sq(s2)
+        max_norm_sq = 34034726 if self.n == 512 else 70265242
+
+        signature = {
+            'r': r,
+            's2': s2,
+            'norm_sq': norm_sq,
+        }
+
+        return signature
+
+    def verify(self, message: bytes, sig: dict, pk: np.ndarray) -> bool:
+        """Verify signature."""
+        # Recompute hash
+        c = self._hash_to_point(sig['r'] + message)
+
+        # Recover s1
+        s1 = (c - self._poly_mul(pk, sig['s2'])) % self.q
+
+        # Check norm bound
+        norm_sq = self._poly_norm_sq(s1) + self._poly_norm_sq(sig['s2'])
+        max_norm_sq = 34034726 if self.n == 512 else 70265242
+
+        return norm_sq <= max_norm_sq
+
+
+# Demonstration
+print("FN-DSA Simplified Demo")
+print("=" * 50)
+print("WARNING: This is educational only, not secure!")
+print()
+
+fndsa = FNDSASimplified(n=64, q=12289)  # Small n for demo
+
+pk, sk = fndsa.keygen()
+print(f"Key generated (n={fndsa.n})")
+print(f"Public key size: {len(pk) * 2} bytes (simplified)")
+
+message = b"Hello, FN-DSA!"
+sig = fndsa.sign(message, sk)
+print(f"\nSigned message: {message.decode()}")
+print(f"Nonce: {sig['r'][:8].hex()}...")
+print(f"Signature norm²: {sig['norm_sq']}")
+
+valid = fndsa.verify(message, sig, pk)
+print(f"\nVerification: {'PASS' if valid else 'FAIL'}")
+
+# Test with wrong message
+valid_wrong = fndsa.verify(b"Wrong message", sig, pk)
+print(f"Wrong message verification: {'PASS' if valid_wrong else 'FAIL'}")
+```
+
+## Summary
+
+FN-DSA operations overview:
+
+**Key Generation:**
+- Sample Gaussian polynomials f, g
+- Solve NTRU equation for F, G
+- Reduce to get good Gram-Schmidt basis
+- Build FALCON tree for fast sampling
+- Output h = g/f as public key
+
+**Signing:**
+- Generate nonce r (random or deterministic)
+- Hash message to polynomial c
+- FFT sample (s₁, s₂) with s₁ + h·s₂ = c
+- Check norm bound, retry if exceeded
+- Compress s₂ for compact signature
+
+**Verification:**
+- Decompress s₂
+- Recompute c from message
+- Recover s₁ = c - h·s₂
+- Check ||(s₁, s₂)|| ≤ bound
+- Accept if norm check passes
+
+**Compression:**
+- Golomb-Rice encoding exploits Gaussian distribution
+- Small coefficients → fewer bits
+- Achieves ~666 bytes (512) or ~1,280 bytes (1024)

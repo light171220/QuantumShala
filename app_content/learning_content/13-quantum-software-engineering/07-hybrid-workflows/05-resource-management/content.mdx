@@ -1,0 +1,1650 @@
+---
+title: "Resource Management for Quantum Computing"
+description: "Learn essential resource management strategies for quantum computing applications."
+duration: 55
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+- Implement efficient QPU allocation strategies for varying workloads
+- Design queue management systems for quantum job scheduling
+- Apply cost optimization techniques for cloud quantum resources
+- Build multi-backend strategies for load balancing and redundancy
+- Create resource pooling patterns for shared quantum access
+
+## 1. Understanding Quantum Resource Constraints
+
+Quantum computing resources are fundamentally different from classical resources, requiring specialized management approaches.
+
+```
+QUANTUM RESOURCE CONSTRAINTS
+============================
+
+Physical Constraints                 Operational Constraints
+--------------------                 -----------------------
+┌─────────────────────┐              ┌─────────────────────┐
+│  Limited Qubits     │              │  Queue Wait Times   │
+│  - 100-1000 qubits  │              │  - Minutes to hours │
+│  - Connectivity     │              │  - Priority levels  │
+│    limitations      │              │  - Fair share       │
+└─────────────────────┘              └─────────────────────┘
+         │                                    │
+         ▼                                    ▼
+┌─────────────────────┐              ┌─────────────────────┐
+│  Coherence Time     │              │  Execution Windows  │
+│  - T1: 100-500 μs   │              │  - Maintenance      │
+│  - T2: 50-200 μs    │              │  - Calibration      │
+│  - Circuit depth    │              │  - Availability     │
+│    limits           │              │    schedules        │
+└─────────────────────┘              └─────────────────────┘
+         │                                    │
+         ▼                                    ▼
+┌─────────────────────┐              ┌─────────────────────┐
+│  Gate Fidelities    │              │  Cost Per Shot      │
+│  - 1-qubit: 99.9%   │              │  - $0.01-$1/shot    │
+│  - 2-qubit: 99-99.5%│              │  - Pricing tiers    │
+│  - Measurement: 99% │              │  - Reserved vs      │
+│                     │              │    on-demand        │
+└─────────────────────┘              └─────────────────────┘
+
+Resource Hierarchy:
+┌──────────────────────────────────────────────────────┐
+│                    Cloud Provider                     │
+│  ┌────────────────────────────────────────────────┐  │
+│  │              Quantum Region/Zone                │  │
+│  │  ┌──────────────────────────────────────────┐  │  │
+│  │  │           Backend/QPU                     │  │  │
+│  │  │  ┌────────────────────────────────────┐  │  │  │
+│  │  │  │      Physical Qubits               │  │  │  │
+│  │  │  │  ┌──────────────────────────────┐  │  │  │  │
+│  │  │  │  │    Execution Sessions        │  │  │  │  │
+│  │  │  │  └──────────────────────────────┘  │  │  │  │
+│  │  │  └────────────────────────────────────┘  │  │  │
+│  │  └──────────────────────────────────────────┘  │  │
+│  └────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────┘
+```
+
+## 2. QPU Allocation Strategies
+
+Implement intelligent allocation of quantum processing units based on workload requirements.
+
+```python
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional, Callable
+from enum import Enum
+import time
+import heapq
+import threading
+from collections import defaultdict
+import random
+
+class QPUStatus(Enum):
+    """Status of a quantum processing unit."""
+    AVAILABLE = "available"
+    BUSY = "busy"
+    CALIBRATING = "calibrating"
+    MAINTENANCE = "maintenance"
+    OFFLINE = "offline"
+
+class AllocationStrategy(Enum):
+    """QPU allocation strategies."""
+    ROUND_ROBIN = "round_robin"
+    LEAST_LOADED = "least_loaded"
+    BEST_FIT = "best_fit"
+    PRIORITY_BASED = "priority_based"
+    COST_OPTIMIZED = "cost_optimized"
+
+@dataclass
+class QPUProperties:
+    """Properties of a quantum processing unit."""
+    qpu_id: str
+    provider: str
+    num_qubits: int
+    connectivity: str  # 'linear', 'grid', 'all-to-all'
+    t1_time: float  # microseconds
+    t2_time: float  # microseconds
+    single_qubit_fidelity: float
+    two_qubit_fidelity: float
+    readout_fidelity: float
+    cost_per_shot: float
+    max_shots: int
+    max_circuits_per_job: int
+
+@dataclass
+class QPUState:
+    """Current state of a QPU."""
+    qpu_id: str
+    status: QPUStatus
+    current_load: int  # Number of pending jobs
+    queue_time_estimate: float  # seconds
+    last_calibration: float  # timestamp
+    properties: QPUProperties
+    utilization_history: List[float] = field(default_factory=list)
+
+@dataclass
+class JobRequirements:
+    """Requirements for a quantum job."""
+    job_id: str
+    min_qubits: int
+    circuit_depth: int
+    shots: int
+    priority: int = 1  # 1 (highest) to 5 (lowest)
+    max_cost: float = float('inf')
+    required_fidelity: float = 0.95
+    deadline: Optional[float] = None  # timestamp
+
+
+class QPUAllocator:
+    """
+    Manages QPU allocation across multiple backends.
+
+    Implements multiple allocation strategies:
+    - Round Robin: Fair distribution
+    - Least Loaded: Minimize queue time
+    - Best Fit: Match requirements to capabilities
+    - Priority Based: High priority jobs get best QPUs
+    - Cost Optimized: Minimize execution cost
+    """
+
+    def __init__(self, strategy: AllocationStrategy = AllocationStrategy.BEST_FIT):
+        self.strategy = strategy
+        self.qpus: Dict[str, QPUState] = {}
+        self.allocation_history: List[Dict] = []
+        self._round_robin_index = 0
+        self._lock = threading.Lock()
+
+    def register_qpu(self, state: QPUState):
+        """Register a QPU with the allocator."""
+        self.qpus[state.qpu_id] = state
+
+    def unregister_qpu(self, qpu_id: str):
+        """Remove a QPU from the allocator."""
+        if qpu_id in self.qpus:
+            del self.qpus[qpu_id]
+
+    def update_qpu_state(self, qpu_id: str, **updates):
+        """Update QPU state."""
+        if qpu_id in self.qpus:
+            for key, value in updates.items():
+                if hasattr(self.qpus[qpu_id], key):
+                    setattr(self.qpus[qpu_id], key, value)
+
+    def allocate(self, requirements: JobRequirements) -> Optional[str]:
+        """
+        Allocate a QPU for the given job requirements.
+
+        Returns QPU ID or None if no suitable QPU is available.
+        """
+        with self._lock:
+            available_qpus = self._get_available_qpus(requirements)
+
+            if not available_qpus:
+                return None
+
+            if self.strategy == AllocationStrategy.ROUND_ROBIN:
+                selected = self._round_robin_allocate(available_qpus)
+            elif self.strategy == AllocationStrategy.LEAST_LOADED:
+                selected = self._least_loaded_allocate(available_qpus)
+            elif self.strategy == AllocationStrategy.BEST_FIT:
+                selected = self._best_fit_allocate(available_qpus, requirements)
+            elif self.strategy == AllocationStrategy.PRIORITY_BASED:
+                selected = self._priority_based_allocate(available_qpus, requirements)
+            elif self.strategy == AllocationStrategy.COST_OPTIMIZED:
+                selected = self._cost_optimized_allocate(available_qpus, requirements)
+            else:
+                selected = available_qpus[0].qpu_id
+
+            # Record allocation
+            self._record_allocation(selected, requirements)
+
+            return selected
+
+    def _get_available_qpus(self, requirements: JobRequirements) -> List[QPUState]:
+        """Get QPUs that meet the job requirements."""
+        available = []
+
+        for qpu in self.qpus.values():
+            # Check availability
+            if qpu.status not in [QPUStatus.AVAILABLE, QPUStatus.BUSY]:
+                continue
+
+            props = qpu.properties
+
+            # Check qubit count
+            if props.num_qubits < requirements.min_qubits:
+                continue
+
+            # Check fidelity requirements
+            estimated_fidelity = self._estimate_circuit_fidelity(
+                props, requirements.circuit_depth
+            )
+            if estimated_fidelity < requirements.required_fidelity:
+                continue
+
+            # Check cost constraints
+            estimated_cost = props.cost_per_shot * requirements.shots
+            if estimated_cost > requirements.max_cost:
+                continue
+
+            # Check deadline feasibility
+            if requirements.deadline:
+                estimated_completion = time.time() + qpu.queue_time_estimate
+                if estimated_completion > requirements.deadline:
+                    continue
+
+            available.append(qpu)
+
+        return available
+
+    def _estimate_circuit_fidelity(
+        self,
+        props: QPUProperties,
+        circuit_depth: int
+    ) -> float:
+        """Estimate circuit fidelity based on QPU properties."""
+        # Simplified fidelity model
+        single_q_ops = circuit_depth * 2
+        two_q_ops = circuit_depth // 2
+
+        fidelity = (
+            (props.single_qubit_fidelity ** single_q_ops) *
+            (props.two_qubit_fidelity ** two_q_ops) *
+            props.readout_fidelity
+        )
+
+        return fidelity
+
+    def _round_robin_allocate(self, available: List[QPUState]) -> str:
+        """Round-robin allocation."""
+        selected = available[self._round_robin_index % len(available)]
+        self._round_robin_index += 1
+        return selected.qpu_id
+
+    def _least_loaded_allocate(self, available: List[QPUState]) -> str:
+        """Allocate to least loaded QPU."""
+        return min(available, key=lambda q: q.queue_time_estimate).qpu_id
+
+    def _best_fit_allocate(
+        self,
+        available: List[QPUState],
+        requirements: JobRequirements
+    ) -> str:
+        """Allocate based on best fit to requirements."""
+        def score_qpu(qpu: QPUState) -> float:
+            props = qpu.properties
+            score = 0.0
+
+            # Qubit efficiency (prefer closest match)
+            qubit_ratio = requirements.min_qubits / props.num_qubits
+            score += qubit_ratio * 30
+
+            # Fidelity score
+            fidelity = self._estimate_circuit_fidelity(props, requirements.circuit_depth)
+            score += fidelity * 40
+
+            # Queue time penalty
+            score -= min(qpu.queue_time_estimate / 3600, 10) * 2
+
+            # Cost efficiency
+            cost = props.cost_per_shot * requirements.shots
+            score -= min(cost / 100, 10)
+
+            return score
+
+        return max(available, key=score_qpu).qpu_id
+
+    def _priority_based_allocate(
+        self,
+        available: List[QPUState],
+        requirements: JobRequirements
+    ) -> str:
+        """Allocate based on job priority."""
+        if requirements.priority <= 2:
+            # High priority: best fidelity
+            return max(
+                available,
+                key=lambda q: self._estimate_circuit_fidelity(
+                    q.properties, requirements.circuit_depth
+                )
+            ).qpu_id
+        else:
+            # Lower priority: fastest queue
+            return min(available, key=lambda q: q.queue_time_estimate).qpu_id
+
+    def _cost_optimized_allocate(
+        self,
+        available: List[QPUState],
+        requirements: JobRequirements
+    ) -> str:
+        """Allocate to minimize cost while meeting requirements."""
+        def cost_score(qpu: QPUState) -> float:
+            base_cost = qpu.properties.cost_per_shot * requirements.shots
+
+            # Add penalty for wait time (opportunity cost)
+            wait_cost = qpu.queue_time_estimate * 0.01
+
+            return base_cost + wait_cost
+
+        return min(available, key=cost_score).qpu_id
+
+    def _record_allocation(self, qpu_id: str, requirements: JobRequirements):
+        """Record allocation for analysis."""
+        self.allocation_history.append({
+            "timestamp": time.time(),
+            "qpu_id": qpu_id,
+            "job_id": requirements.job_id,
+            "strategy": self.strategy.value,
+            "requirements": {
+                "min_qubits": requirements.min_qubits,
+                "shots": requirements.shots,
+                "priority": requirements.priority
+            }
+        })
+
+        # Update QPU load
+        if qpu_id in self.qpus:
+            self.qpus[qpu_id].current_load += 1
+
+    def get_allocation_statistics(self) -> Dict[str, Any]:
+        """Get allocation statistics."""
+        if not self.allocation_history:
+            return {"total_allocations": 0}
+
+        qpu_usage = defaultdict(int)
+        for record in self.allocation_history:
+            qpu_usage[record["qpu_id"]] += 1
+
+        return {
+            "total_allocations": len(self.allocation_history),
+            "qpu_usage": dict(qpu_usage),
+            "strategy": self.strategy.value,
+            "active_qpus": len([q for q in self.qpus.values()
+                              if q.status == QPUStatus.AVAILABLE])
+        }
+
+
+# Demonstration
+print("QPU Allocation Strategies:")
+print("=" * 50)
+
+allocator = QPUAllocator(AllocationStrategy.BEST_FIT)
+
+# Register sample QPUs
+qpu1 = QPUState(
+    qpu_id="ibm_sherbrooke",
+    status=QPUStatus.AVAILABLE,
+    current_load=5,
+    queue_time_estimate=300,
+    last_calibration=time.time() - 3600,
+    properties=QPUProperties(
+        qpu_id="ibm_sherbrooke",
+        provider="IBM",
+        num_qubits=127,
+        connectivity="heavy-hex",
+        t1_time=300,
+        t2_time=150,
+        single_qubit_fidelity=0.9995,
+        two_qubit_fidelity=0.995,
+        readout_fidelity=0.98,
+        cost_per_shot=0.01,
+        max_shots=100000,
+        max_circuits_per_job=300
+    )
+)
+
+qpu2 = QPUState(
+    qpu_id="ionq_forte",
+    status=QPUStatus.AVAILABLE,
+    current_load=2,
+    queue_time_estimate=120,
+    last_calibration=time.time() - 1800,
+    properties=QPUProperties(
+        qpu_id="ionq_forte",
+        provider="IonQ",
+        num_qubits=32,
+        connectivity="all-to-all",
+        t1_time=10000,
+        t2_time=1000,
+        single_qubit_fidelity=0.9999,
+        two_qubit_fidelity=0.995,
+        readout_fidelity=0.995,
+        cost_per_shot=0.03,
+        max_shots=10000,
+        max_circuits_per_job=100
+    )
+)
+
+allocator.register_qpu(qpu1)
+allocator.register_qpu(qpu2)
+
+# Test allocation
+job = JobRequirements(
+    job_id="test_job_1",
+    min_qubits=20,
+    circuit_depth=50,
+    shots=1000,
+    priority=2
+)
+
+selected = allocator.allocate(job)
+print(f"Selected QPU: {selected}")
+print(f"Allocation Statistics: {allocator.get_allocation_statistics()}")
+```
+
+## 3. Queue Management Systems
+
+Design efficient queue management for quantum job scheduling.
+
+```python
+import heapq
+from datetime import datetime, timedelta
+
+class PriorityLevel(Enum):
+    """Job priority levels."""
+    CRITICAL = 1
+    HIGH = 2
+    NORMAL = 3
+    LOW = 4
+    BATCH = 5
+
+@dataclass
+class QueuedJob:
+    """A job in the quantum queue."""
+    job_id: str
+    priority: PriorityLevel
+    submit_time: float
+    estimated_duration: float
+    requirements: JobRequirements
+    retry_count: int = 0
+    max_retries: int = 3
+
+    def __lt__(self, other):
+        """Enable priority queue comparison."""
+        if self.priority.value != other.priority.value:
+            return self.priority.value < other.priority.value
+        return self.submit_time < other.submit_time
+
+
+class QuantumJobQueue:
+    """
+    Priority queue for quantum jobs with fair scheduling.
+
+    Features:
+    - Multiple priority levels
+    - Fair share scheduling
+    - Deadline-aware ordering
+    - Starvation prevention
+    """
+
+    def __init__(self, fairness_window: float = 3600):
+        self.queues: Dict[PriorityLevel, List[QueuedJob]] = {
+            level: [] for level in PriorityLevel
+        }
+        self.fairness_window = fairness_window
+        self.job_index: Dict[str, QueuedJob] = {}
+        self.completed_jobs: List[Dict] = []
+        self.stats = {
+            "total_submitted": 0,
+            "total_completed": 0,
+            "total_cancelled": 0,
+            "total_wait_time": 0.0
+        }
+
+    def submit(self, job: QueuedJob) -> bool:
+        """Submit a job to the queue."""
+        if job.job_id in self.job_index:
+            return False
+
+        heapq.heappush(self.queues[job.priority], job)
+        self.job_index[job.job_id] = job
+        self.stats["total_submitted"] += 1
+
+        return True
+
+    def get_next(self) -> Optional[QueuedJob]:
+        """
+        Get the next job to execute.
+
+        Uses weighted fair queuing to prevent starvation.
+        """
+        # Check for starvation - promote old low-priority jobs
+        self._check_starvation()
+
+        # Get next job based on priority
+        for priority in PriorityLevel:
+            if self.queues[priority]:
+                job = heapq.heappop(self.queues[priority])
+                del self.job_index[job.job_id]
+
+                wait_time = time.time() - job.submit_time
+                self.stats["total_wait_time"] += wait_time
+
+                return job
+
+        return None
+
+    def _check_starvation(self):
+        """Promote jobs that have been waiting too long."""
+        current_time = time.time()
+
+        for priority in [PriorityLevel.LOW, PriorityLevel.BATCH]:
+            promoted = []
+            remaining = []
+
+            for job in self.queues[priority]:
+                wait_time = current_time - job.submit_time
+
+                # Promote if waiting longer than fairness window
+                if wait_time > self.fairness_window:
+                    # Move to higher priority
+                    new_priority = PriorityLevel(max(1, priority.value - 1))
+                    promoted.append((job, new_priority))
+                else:
+                    remaining.append(job)
+
+            # Rebuild queue without promoted jobs
+            self.queues[priority] = remaining
+            heapq.heapify(self.queues[priority])
+
+            # Add promoted jobs to new queues
+            for job, new_priority in promoted:
+                heapq.heappush(self.queues[new_priority], job)
+
+    def cancel(self, job_id: str) -> bool:
+        """Cancel a queued job."""
+        if job_id not in self.job_index:
+            return False
+
+        job = self.job_index[job_id]
+
+        # Remove from queue
+        self.queues[job.priority] = [
+            j for j in self.queues[job.priority] if j.job_id != job_id
+        ]
+        heapq.heapify(self.queues[job.priority])
+
+        del self.job_index[job_id]
+        self.stats["total_cancelled"] += 1
+
+        return True
+
+    def requeue(self, job: QueuedJob, delay: float = 0) -> bool:
+        """Requeue a failed job with optional delay."""
+        if job.retry_count >= job.max_retries:
+            return False
+
+        job.retry_count += 1
+        job.submit_time = time.time() + delay
+
+        return self.submit(job)
+
+    def complete(self, job_id: str, result: Any = None):
+        """Mark a job as completed."""
+        self.completed_jobs.append({
+            "job_id": job_id,
+            "completed_at": time.time(),
+            "result": result
+        })
+        self.stats["total_completed"] += 1
+
+    def get_position(self, job_id: str) -> Optional[int]:
+        """Get queue position for a job."""
+        if job_id not in self.job_index:
+            return None
+
+        job = self.job_index[job_id]
+        position = 0
+
+        # Count jobs ahead in higher priority queues
+        for priority in PriorityLevel:
+            if priority.value < job.priority.value:
+                position += len(self.queues[priority])
+            elif priority == job.priority:
+                for queued_job in self.queues[priority]:
+                    if queued_job.job_id == job_id:
+                        break
+                    position += 1
+                break
+
+        return position
+
+    def get_estimated_wait(self, job_id: str) -> Optional[float]:
+        """Estimate wait time for a job."""
+        position = self.get_position(job_id)
+        if position is None:
+            return None
+
+        job = self.job_index[job_id]
+
+        # Sum estimated durations of jobs ahead
+        wait_time = 0.0
+
+        for priority in PriorityLevel:
+            if priority.value <= job.priority.value:
+                for queued_job in self.queues[priority]:
+                    if queued_job.job_id == job_id:
+                        return wait_time
+                    wait_time += queued_job.estimated_duration
+
+        return wait_time
+
+    def get_queue_stats(self) -> Dict[str, Any]:
+        """Get queue statistics."""
+        queue_lengths = {
+            priority.name: len(jobs)
+            for priority, jobs in self.queues.items()
+        }
+
+        avg_wait = (
+            self.stats["total_wait_time"] / self.stats["total_completed"]
+            if self.stats["total_completed"] > 0 else 0
+        )
+
+        return {
+            **self.stats,
+            "queue_lengths": queue_lengths,
+            "total_queued": sum(queue_lengths.values()),
+            "average_wait_time": avg_wait
+        }
+
+    def visualize_queue(self) -> str:
+        """Generate ASCII visualization of queue state."""
+        output = "\nQuantum Job Queue Status\n"
+        output += "=" * 50 + "\n\n"
+
+        for priority in PriorityLevel:
+            jobs = self.queues[priority]
+            count = len(jobs)
+            bar = "█" * min(count, 20) + ("+" if count > 20 else "")
+            output += f"{priority.name:10s} [{bar:21s}] {count:3d} jobs\n"
+
+        stats = self.get_queue_stats()
+        output += f"\nTotal Queued: {stats['total_queued']}\n"
+        output += f"Avg Wait Time: {stats['average_wait_time']:.1f}s\n"
+
+        return output
+
+
+# Demonstration
+print("\nQueue Management System:")
+print("=" * 50)
+
+queue = QuantumJobQueue(fairness_window=1800)
+
+# Submit sample jobs
+for i in range(5):
+    job = QueuedJob(
+        job_id=f"job_{i}",
+        priority=PriorityLevel(random.randint(1, 5)),
+        submit_time=time.time(),
+        estimated_duration=random.uniform(10, 60),
+        requirements=JobRequirements(
+            job_id=f"job_{i}",
+            min_qubits=10,
+            circuit_depth=20,
+            shots=1000
+        )
+    )
+    queue.submit(job)
+
+print(queue.visualize_queue())
+```
+
+## 4. Cost Optimization Techniques
+
+Implement strategies to minimize quantum computing costs.
+
+```python
+@dataclass
+class CostModel:
+    """Cost model for quantum execution."""
+    base_cost_per_shot: float
+    volume_discount_threshold: int
+    volume_discount_rate: float
+    priority_multiplier: Dict[PriorityLevel, float]
+    reserved_capacity_discount: float
+
+@dataclass
+class ExecutionPlan:
+    """Optimized execution plan."""
+    job_id: str
+    backend: str
+    shots_allocation: Dict[str, int]
+    estimated_cost: float
+    estimated_time: float
+    optimizations_applied: List[str]
+
+
+class CostOptimizer:
+    """
+    Optimizes quantum execution costs.
+
+    Strategies:
+    - Shot batching for volume discounts
+    - Backend selection based on cost/quality
+    - Time-shifting to cheaper windows
+    - Result caching and reuse
+    """
+
+    def __init__(self):
+        self.cost_models: Dict[str, CostModel] = {}
+        self.result_cache: Dict[str, Any] = {}
+        self.optimization_history: List[Dict] = []
+
+    def register_cost_model(self, backend: str, model: CostModel):
+        """Register cost model for a backend."""
+        self.cost_models[backend] = model
+
+    def optimize_execution(
+        self,
+        jobs: List[JobRequirements],
+        available_backends: List[str],
+        deadline: Optional[float] = None
+    ) -> List[ExecutionPlan]:
+        """
+        Create optimized execution plans for multiple jobs.
+        """
+        plans = []
+
+        # Sort jobs by priority
+        sorted_jobs = sorted(jobs, key=lambda j: j.priority)
+
+        # Try to batch jobs for volume discounts
+        batches = self._create_batches(sorted_jobs)
+
+        for batch in batches:
+            # Find optimal backend for batch
+            backend, cost = self._find_optimal_backend(
+                batch, available_backends, deadline
+            )
+
+            # Create execution plan
+            plan = ExecutionPlan(
+                job_id=batch[0].job_id if len(batch) == 1 else f"batch_{len(plans)}",
+                backend=backend,
+                shots_allocation={j.job_id: j.shots for j in batch},
+                estimated_cost=cost,
+                estimated_time=sum(j.shots * 0.001 for j in batch),
+                optimizations_applied=[]
+            )
+
+            # Record optimizations
+            if len(batch) > 1:
+                plan.optimizations_applied.append("shot_batching")
+
+            plans.append(plan)
+
+        return plans
+
+    def _create_batches(
+        self,
+        jobs: List[JobRequirements]
+    ) -> List[List[JobRequirements]]:
+        """Group jobs into batches for volume discounts."""
+        batches = []
+        current_batch = []
+        current_shots = 0
+
+        for job in jobs:
+            # Check if adding job would benefit from batching
+            if current_shots + job.shots <= 100000:  # Batch threshold
+                current_batch.append(job)
+                current_shots += job.shots
+            else:
+                if current_batch:
+                    batches.append(current_batch)
+                current_batch = [job]
+                current_shots = job.shots
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
+
+    def _find_optimal_backend(
+        self,
+        batch: List[JobRequirements],
+        backends: List[str],
+        deadline: Optional[float]
+    ) -> tuple:
+        """Find optimal backend for a job batch."""
+        total_shots = sum(j.shots for j in batch)
+        min_qubits = max(j.min_qubits for j in batch)
+        max_priority = min(j.priority for j in batch)
+
+        best_backend = None
+        best_cost = float('inf')
+
+        for backend in backends:
+            if backend not in self.cost_models:
+                continue
+
+            model = self.cost_models[backend]
+
+            # Calculate base cost
+            cost = model.base_cost_per_shot * total_shots
+
+            # Apply volume discount
+            if total_shots >= model.volume_discount_threshold:
+                cost *= (1 - model.volume_discount_rate)
+
+            # Apply priority multiplier
+            priority_level = PriorityLevel(max_priority)
+            cost *= model.priority_multiplier.get(priority_level, 1.0)
+
+            if cost < best_cost:
+                best_cost = cost
+                best_backend = backend
+
+        return best_backend, best_cost
+
+    def estimate_cost(
+        self,
+        requirements: JobRequirements,
+        backend: str
+    ) -> Dict[str, Any]:
+        """Estimate execution cost with breakdown."""
+        if backend not in self.cost_models:
+            return {"error": "Unknown backend"}
+
+        model = self.cost_models[backend]
+
+        base_cost = model.base_cost_per_shot * requirements.shots
+
+        # Volume discount
+        volume_discount = 0.0
+        if requirements.shots >= model.volume_discount_threshold:
+            volume_discount = base_cost * model.volume_discount_rate
+
+        # Priority adjustment
+        priority_level = PriorityLevel(requirements.priority)
+        priority_multiplier = model.priority_multiplier.get(priority_level, 1.0)
+
+        final_cost = (base_cost - volume_discount) * priority_multiplier
+
+        return {
+            "base_cost": base_cost,
+            "volume_discount": volume_discount,
+            "priority_multiplier": priority_multiplier,
+            "final_cost": final_cost,
+            "cost_per_shot": final_cost / requirements.shots,
+            "potential_savings": base_cost - final_cost
+        }
+
+    def suggest_optimizations(
+        self,
+        requirements: JobRequirements
+    ) -> List[Dict[str, Any]]:
+        """Suggest cost optimizations for a job."""
+        suggestions = []
+
+        # Check volume discount opportunity
+        for backend, model in self.cost_models.items():
+            if requirements.shots < model.volume_discount_threshold:
+                additional_shots = model.volume_discount_threshold - requirements.shots
+                potential_savings = (
+                    requirements.shots * model.base_cost_per_shot *
+                    model.volume_discount_rate
+                )
+
+                suggestions.append({
+                    "type": "volume_discount",
+                    "backend": backend,
+                    "description": f"Add {additional_shots} shots to reach volume discount",
+                    "potential_savings": potential_savings
+                })
+
+        # Check priority downgrade
+        if requirements.priority < 4:
+            for backend, model in self.cost_models.items():
+                current_mult = model.priority_multiplier.get(
+                    PriorityLevel(requirements.priority), 1.0
+                )
+                lower_mult = model.priority_multiplier.get(
+                    PriorityLevel(requirements.priority + 1), 1.0
+                )
+
+                if lower_mult < current_mult:
+                    savings = requirements.shots * model.base_cost_per_shot * (
+                        current_mult - lower_mult
+                    )
+                    suggestions.append({
+                        "type": "priority_downgrade",
+                        "backend": backend,
+                        "description": "Lower priority for reduced cost",
+                        "potential_savings": savings
+                    })
+
+        return suggestions
+
+
+# Demonstration
+print("\nCost Optimization:")
+print("=" * 50)
+
+optimizer = CostOptimizer()
+
+# Register cost models
+optimizer.register_cost_model("ibm_quantum", CostModel(
+    base_cost_per_shot=0.01,
+    volume_discount_threshold=10000,
+    volume_discount_rate=0.2,
+    priority_multiplier={
+        PriorityLevel.CRITICAL: 2.0,
+        PriorityLevel.HIGH: 1.5,
+        PriorityLevel.NORMAL: 1.0,
+        PriorityLevel.LOW: 0.8,
+        PriorityLevel.BATCH: 0.5
+    },
+    reserved_capacity_discount=0.3
+))
+
+# Estimate cost
+job = JobRequirements(
+    job_id="cost_test",
+    min_qubits=10,
+    circuit_depth=50,
+    shots=15000,
+    priority=2
+)
+
+estimate = optimizer.estimate_cost(job, "ibm_quantum")
+print(f"\nCost Estimate for {job.shots} shots:")
+print(f"  Base Cost: ${estimate['base_cost']:.2f}")
+print(f"  Volume Discount: ${estimate['volume_discount']:.2f}")
+print(f"  Final Cost: ${estimate['final_cost']:.2f}")
+
+suggestions = optimizer.suggest_optimizations(job)
+print(f"\nOptimization Suggestions: {len(suggestions)}")
+for s in suggestions:
+    print(f"  - {s['description']}: save ${s['potential_savings']:.2f}")
+```
+
+## 5. Multi-Backend Strategies
+
+Implement strategies for distributing workloads across multiple quantum backends.
+
+```python
+class LoadBalancingStrategy(Enum):
+    """Load balancing strategies for multi-backend execution."""
+    ROUND_ROBIN = "round_robin"
+    WEIGHTED_ROUND_ROBIN = "weighted_round_robin"
+    LEAST_CONNECTIONS = "least_connections"
+    ADAPTIVE = "adaptive"
+    GEOGRAPHIC = "geographic"
+
+
+class MultiBackendManager:
+    """
+    Manages multiple quantum backends for redundancy and load balancing.
+
+    Features:
+    - Automatic failover
+    - Load balancing
+    - Health monitoring
+    - Result aggregation
+    """
+
+    def __init__(self, strategy: LoadBalancingStrategy = LoadBalancingStrategy.ADAPTIVE):
+        self.strategy = strategy
+        self.backends: Dict[str, Dict[str, Any]] = {}
+        self.health_scores: Dict[str, float] = {}
+        self.connection_counts: Dict[str, int] = {}
+        self.weights: Dict[str, float] = {}
+        self._round_robin_index = 0
+
+    def register_backend(
+        self,
+        backend_id: str,
+        properties: Dict[str, Any],
+        weight: float = 1.0
+    ):
+        """Register a quantum backend."""
+        self.backends[backend_id] = properties
+        self.health_scores[backend_id] = 1.0
+        self.connection_counts[backend_id] = 0
+        self.weights[backend_id] = weight
+
+    def update_health(self, backend_id: str, score: float):
+        """Update backend health score."""
+        if backend_id in self.health_scores:
+            # Exponential moving average
+            alpha = 0.3
+            self.health_scores[backend_id] = (
+                alpha * score + (1 - alpha) * self.health_scores[backend_id]
+            )
+
+    def select_backend(
+        self,
+        requirements: JobRequirements = None
+    ) -> Optional[str]:
+        """Select a backend based on the load balancing strategy."""
+        healthy_backends = [
+            bid for bid, score in self.health_scores.items()
+            if score >= 0.5
+        ]
+
+        if not healthy_backends:
+            return None
+
+        if self.strategy == LoadBalancingStrategy.ROUND_ROBIN:
+            return self._round_robin_select(healthy_backends)
+        elif self.strategy == LoadBalancingStrategy.WEIGHTED_ROUND_ROBIN:
+            return self._weighted_round_robin_select(healthy_backends)
+        elif self.strategy == LoadBalancingStrategy.LEAST_CONNECTIONS:
+            return self._least_connections_select(healthy_backends)
+        elif self.strategy == LoadBalancingStrategy.ADAPTIVE:
+            return self._adaptive_select(healthy_backends, requirements)
+        else:
+            return healthy_backends[0]
+
+    def _round_robin_select(self, backends: List[str]) -> str:
+        """Simple round-robin selection."""
+        selected = backends[self._round_robin_index % len(backends)]
+        self._round_robin_index += 1
+        return selected
+
+    def _weighted_round_robin_select(self, backends: List[str]) -> str:
+        """Weighted round-robin based on configured weights."""
+        total_weight = sum(self.weights[b] for b in backends)
+        r = random.uniform(0, total_weight)
+
+        cumulative = 0
+        for backend in backends:
+            cumulative += self.weights[backend]
+            if r <= cumulative:
+                return backend
+
+        return backends[-1]
+
+    def _least_connections_select(self, backends: List[str]) -> str:
+        """Select backend with fewest active connections."""
+        return min(backends, key=lambda b: self.connection_counts[b])
+
+    def _adaptive_select(
+        self,
+        backends: List[str],
+        requirements: JobRequirements = None
+    ) -> str:
+        """Adaptive selection based on health, load, and requirements."""
+        def score_backend(backend_id: str) -> float:
+            health = self.health_scores[backend_id]
+            load = self.connection_counts[backend_id]
+            weight = self.weights[backend_id]
+
+            # Base score from health and weight
+            score = health * weight
+
+            # Penalize high load
+            score -= min(load / 10, 0.5)
+
+            # Consider requirements if provided
+            if requirements:
+                props = self.backends[backend_id]
+                if props.get("num_qubits", 0) >= requirements.min_qubits:
+                    score += 0.2
+
+            return score
+
+        return max(backends, key=score_backend)
+
+    def execute_with_failover(
+        self,
+        execute_fn: Callable,
+        requirements: JobRequirements,
+        max_attempts: int = 3
+    ) -> Dict[str, Any]:
+        """Execute with automatic failover to backup backends."""
+        attempted = set()
+        last_error = None
+
+        for attempt in range(max_attempts):
+            # Select backend excluding previously failed ones
+            available = [
+                b for b in self.backends
+                if b not in attempted and self.health_scores[b] >= 0.5
+            ]
+
+            if not available:
+                break
+
+            backend = self.select_backend(requirements)
+            if backend in attempted:
+                continue
+
+            attempted.add(backend)
+            self.connection_counts[backend] += 1
+
+            try:
+                result = execute_fn(backend, requirements)
+                self.connection_counts[backend] -= 1
+                self.update_health(backend, 1.0)
+
+                return {
+                    "success": True,
+                    "backend": backend,
+                    "result": result,
+                    "attempts": attempt + 1
+                }
+
+            except Exception as e:
+                self.connection_counts[backend] -= 1
+                self.update_health(backend, 0.3)
+                last_error = e
+
+        return {
+            "success": False,
+            "error": str(last_error),
+            "attempted_backends": list(attempted),
+            "attempts": len(attempted)
+        }
+
+    def execute_parallel(
+        self,
+        execute_fn: Callable,
+        requirements: JobRequirements,
+        num_backends: int = 2
+    ) -> Dict[str, Any]:
+        """Execute on multiple backends in parallel for redundancy."""
+        import concurrent.futures
+
+        backends = []
+        for _ in range(num_backends):
+            backend = self.select_backend(requirements)
+            if backend and backend not in backends:
+                backends.append(backend)
+
+        results = {}
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = {
+                executor.submit(execute_fn, b, requirements): b
+                for b in backends
+            }
+
+            for future in concurrent.futures.as_completed(futures):
+                backend = futures[future]
+                try:
+                    results[backend] = {
+                        "success": True,
+                        "result": future.result()
+                    }
+                    self.update_health(backend, 1.0)
+                except Exception as e:
+                    results[backend] = {
+                        "success": False,
+                        "error": str(e)
+                    }
+                    self.update_health(backend, 0.5)
+
+        return {
+            "backends_used": backends,
+            "results": results,
+            "successful": sum(1 for r in results.values() if r["success"])
+        }
+
+    def get_backend_status(self) -> Dict[str, Any]:
+        """Get status of all backends."""
+        return {
+            backend_id: {
+                "health": self.health_scores[backend_id],
+                "connections": self.connection_counts[backend_id],
+                "weight": self.weights[backend_id],
+                "properties": self.backends[backend_id]
+            }
+            for backend_id in self.backends
+        }
+
+
+# Demonstration
+print("\nMulti-Backend Manager:")
+print("=" * 50)
+
+manager = MultiBackendManager(LoadBalancingStrategy.ADAPTIVE)
+
+# Register backends
+manager.register_backend("ibm_sherbrooke", {"num_qubits": 127, "region": "us-east"}, 1.0)
+manager.register_backend("ionq_forte", {"num_qubits": 32, "region": "us-west"}, 0.8)
+manager.register_backend("rigetti_aspen", {"num_qubits": 80, "region": "us-west"}, 0.9)
+
+# Simulate health updates
+manager.update_health("ibm_sherbrooke", 0.95)
+manager.update_health("ionq_forte", 0.88)
+manager.update_health("rigetti_aspen", 0.75)
+
+print("\nBackend Status:")
+for backend_id, status in manager.get_backend_status().items():
+    print(f"  {backend_id}: health={status['health']:.2f}, "
+          f"connections={status['connections']}")
+```
+
+## 6. Resource Pooling Patterns
+
+Implement resource pooling for efficient shared quantum access.
+
+```python
+from contextlib import contextmanager
+
+@dataclass
+class PooledResource:
+    """A pooled quantum resource."""
+    resource_id: str
+    backend_id: str
+    allocated: bool = False
+    allocated_to: Optional[str] = None
+    allocated_at: Optional[float] = None
+    last_used: Optional[float] = None
+
+
+class QuantumResourcePool:
+    """
+    Resource pool for managing shared quantum access.
+
+    Features:
+    - Connection pooling
+    - Resource reservation
+    - Automatic cleanup
+    - Fair allocation
+    """
+
+    def __init__(
+        self,
+        max_resources_per_backend: int = 5,
+        resource_timeout: float = 3600
+    ):
+        self.max_per_backend = max_resources_per_backend
+        self.resource_timeout = resource_timeout
+        self.pools: Dict[str, List[PooledResource]] = {}
+        self.waiters: Dict[str, List[str]] = {}  # backend -> [user_ids]
+        self._lock = threading.Lock()
+
+    def initialize_pool(self, backend_id: str):
+        """Initialize a pool for a backend."""
+        if backend_id not in self.pools:
+            self.pools[backend_id] = []
+            self.waiters[backend_id] = []
+
+            for i in range(self.max_per_backend):
+                resource = PooledResource(
+                    resource_id=f"{backend_id}_resource_{i}",
+                    backend_id=backend_id
+                )
+                self.pools[backend_id].append(resource)
+
+    def acquire(
+        self,
+        backend_id: str,
+        user_id: str,
+        timeout: float = 60
+    ) -> Optional[PooledResource]:
+        """Acquire a resource from the pool."""
+        if backend_id not in self.pools:
+            self.initialize_pool(backend_id)
+
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            with self._lock:
+                # Clean up expired allocations
+                self._cleanup_expired(backend_id)
+
+                # Find available resource
+                for resource in self.pools[backend_id]:
+                    if not resource.allocated:
+                        resource.allocated = True
+                        resource.allocated_to = user_id
+                        resource.allocated_at = time.time()
+                        return resource
+
+            # Wait and retry
+            time.sleep(0.1)
+
+        return None
+
+    def release(self, resource: PooledResource):
+        """Release a resource back to the pool."""
+        with self._lock:
+            resource.allocated = False
+            resource.allocated_to = None
+            resource.last_used = time.time()
+
+    def _cleanup_expired(self, backend_id: str):
+        """Clean up resources that have exceeded timeout."""
+        current_time = time.time()
+
+        for resource in self.pools[backend_id]:
+            if resource.allocated and resource.allocated_at:
+                if current_time - resource.allocated_at > self.resource_timeout:
+                    resource.allocated = False
+                    resource.allocated_to = None
+
+    @contextmanager
+    def resource_context(self, backend_id: str, user_id: str):
+        """Context manager for automatic resource acquisition and release."""
+        resource = self.acquire(backend_id, user_id)
+        if resource is None:
+            raise ResourceError(f"Could not acquire resource for {backend_id}")
+
+        try:
+            yield resource
+        finally:
+            self.release(resource)
+
+    def get_pool_status(self, backend_id: str) -> Dict[str, Any]:
+        """Get status of a resource pool."""
+        if backend_id not in self.pools:
+            return {"error": "Pool not initialized"}
+
+        pool = self.pools[backend_id]
+        allocated = sum(1 for r in pool if r.allocated)
+
+        return {
+            "backend": backend_id,
+            "total_resources": len(pool),
+            "allocated": allocated,
+            "available": len(pool) - allocated,
+            "utilization": allocated / len(pool) if pool else 0
+        }
+
+    def reserve_capacity(
+        self,
+        backend_id: str,
+        user_id: str,
+        num_resources: int,
+        duration: float
+    ) -> Dict[str, Any]:
+        """Reserve dedicated capacity for a user."""
+        if backend_id not in self.pools:
+            self.initialize_pool(backend_id)
+
+        reserved = []
+
+        with self._lock:
+            available = [r for r in self.pools[backend_id] if not r.allocated]
+
+            if len(available) < num_resources:
+                return {
+                    "success": False,
+                    "error": f"Only {len(available)} resources available"
+                }
+
+            for resource in available[:num_resources]:
+                resource.allocated = True
+                resource.allocated_to = user_id
+                resource.allocated_at = time.time()
+                reserved.append(resource.resource_id)
+
+        return {
+            "success": True,
+            "reserved_resources": reserved,
+            "duration": duration,
+            "expires_at": time.time() + duration
+        }
+
+
+class ResourceError(Exception):
+    """Error related to resource management."""
+    pass
+
+
+# Demonstration
+print("\nResource Pool Management:")
+print("=" * 50)
+
+pool = QuantumResourcePool(max_resources_per_backend=3)
+pool.initialize_pool("ibm_quantum")
+
+# Demonstrate resource acquisition
+resource = pool.acquire("ibm_quantum", "user_1")
+print(f"\nAcquired resource: {resource.resource_id}")
+print(f"Pool status: {pool.get_pool_status('ibm_quantum')}")
+
+# Release resource
+pool.release(resource)
+print(f"After release: {pool.get_pool_status('ibm_quantum')}")
+
+# Reserve capacity
+reservation = pool.reserve_capacity("ibm_quantum", "premium_user", 2, 3600)
+print(f"\nReservation: {reservation}")
+print(f"Pool status: {pool.get_pool_status('ibm_quantum')}")
+```
+
+## 7. Integrated Resource Management System
+
+Combine all resource management components into a unified system.
+
+```python
+class QuantumResourceManager:
+    """
+    Integrated quantum resource management system.
+
+    Combines:
+    - QPU allocation
+    - Queue management
+    - Cost optimization
+    - Multi-backend coordination
+    - Resource pooling
+    """
+
+    def __init__(self):
+        self.allocator = QPUAllocator(AllocationStrategy.BEST_FIT)
+        self.queue = QuantumJobQueue()
+        self.cost_optimizer = CostOptimizer()
+        self.multi_backend = MultiBackendManager(LoadBalancingStrategy.ADAPTIVE)
+        self.resource_pool = QuantumResourcePool()
+
+        self.execution_log: List[Dict] = []
+
+    def submit_job(
+        self,
+        requirements: JobRequirements,
+        optimize_cost: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Submit a job through the full resource management pipeline.
+        """
+        submission_time = time.time()
+
+        # Cost optimization
+        cost_estimate = None
+        if optimize_cost:
+            suggestions = self.cost_optimizer.suggest_optimizations(requirements)
+            # Apply automatic optimizations if beneficial
+            for suggestion in suggestions:
+                if suggestion.get("auto_apply", False):
+                    # Apply optimization
+                    pass
+
+        # Create queued job
+        queued_job = QueuedJob(
+            job_id=requirements.job_id,
+            priority=PriorityLevel(requirements.priority),
+            submit_time=submission_time,
+            estimated_duration=requirements.shots * 0.001,
+            requirements=requirements
+        )
+
+        # Submit to queue
+        self.queue.submit(queued_job)
+
+        # Get position and estimate
+        position = self.queue.get_position(requirements.job_id)
+        estimated_wait = self.queue.get_estimated_wait(requirements.job_id)
+
+        return {
+            "job_id": requirements.job_id,
+            "status": "queued",
+            "queue_position": position,
+            "estimated_wait": estimated_wait,
+            "submitted_at": submission_time,
+            "cost_suggestions": suggestions if optimize_cost else []
+        }
+
+    def execute_next(self) -> Optional[Dict[str, Any]]:
+        """Execute the next job in queue."""
+        job = self.queue.get_next()
+        if job is None:
+            return None
+
+        # Allocate QPU
+        qpu_id = self.allocator.allocate(job.requirements)
+        if qpu_id is None:
+            # No suitable QPU, use multi-backend with failover
+            result = self.multi_backend.execute_with_failover(
+                self._execute_on_backend,
+                job.requirements
+            )
+        else:
+            # Execute on allocated QPU
+            result = self._execute_on_backend(qpu_id, job.requirements)
+
+        # Record execution
+        self.execution_log.append({
+            "job_id": job.job_id,
+            "executed_at": time.time(),
+            "qpu_id": qpu_id,
+            "result": result
+        })
+
+        self.queue.complete(job.job_id, result)
+
+        return {
+            "job_id": job.job_id,
+            "status": "completed" if result.get("success", False) else "failed",
+            "result": result
+        }
+
+    def _execute_on_backend(
+        self,
+        backend_id: str,
+        requirements: JobRequirements
+    ) -> Dict[str, Any]:
+        """Execute job on a specific backend."""
+        # Acquire pooled resource
+        resource = self.resource_pool.acquire(backend_id, requirements.job_id)
+        if resource is None:
+            raise ResourceError(f"No resources available on {backend_id}")
+
+        try:
+            # Simulate execution
+            time.sleep(0.01)  # Simulated execution time
+
+            return {
+                "success": True,
+                "backend": backend_id,
+                "resource": resource.resource_id,
+                "counts": {"00": 500, "11": 500}
+            }
+        finally:
+            self.resource_pool.release(resource)
+
+    def get_system_status(self) -> Dict[str, Any]:
+        """Get comprehensive system status."""
+        return {
+            "queue_stats": self.queue.get_queue_stats(),
+            "allocation_stats": self.allocator.get_allocation_statistics(),
+            "backend_status": self.multi_backend.get_backend_status(),
+            "recent_executions": len(self.execution_log),
+            "timestamp": time.time()
+        }
+
+    def generate_report(self) -> str:
+        """Generate system status report."""
+        status = self.get_system_status()
+
+        report = "\n" + "=" * 60 + "\n"
+        report += "QUANTUM RESOURCE MANAGEMENT SYSTEM REPORT\n"
+        report += "=" * 60 + "\n\n"
+
+        # Queue status
+        queue_stats = status["queue_stats"]
+        report += "QUEUE STATUS:\n"
+        report += f"  Total Queued: {queue_stats['total_queued']}\n"
+        report += f"  Total Completed: {queue_stats['total_completed']}\n"
+        report += f"  Average Wait: {queue_stats['average_wait_time']:.1f}s\n\n"
+
+        # Allocation status
+        alloc_stats = status["allocation_stats"]
+        report += "ALLOCATION STATUS:\n"
+        report += f"  Total Allocations: {alloc_stats['total_allocations']}\n"
+        report += f"  Active QPUs: {alloc_stats['active_qpus']}\n\n"
+
+        # Backend status
+        report += "BACKEND STATUS:\n"
+        for backend, info in status["backend_status"].items():
+            report += f"  {backend}:\n"
+            report += f"    Health: {info['health']:.2f}\n"
+            report += f"    Connections: {info['connections']}\n"
+
+        report += "\n" + "=" * 60 + "\n"
+
+        return report
+
+
+# Demonstration
+print("\nIntegrated Resource Management System:")
+print("=" * 60)
+
+manager = QuantumResourceManager()
+
+# Setup backends
+manager.allocator.register_qpu(qpu1)
+manager.allocator.register_qpu(qpu2)
+manager.multi_backend.register_backend("ibm_sherbrooke", {"num_qubits": 127}, 1.0)
+manager.multi_backend.register_backend("ionq_forte", {"num_qubits": 32}, 0.8)
+manager.resource_pool.initialize_pool("ibm_sherbrooke")
+manager.resource_pool.initialize_pool("ionq_forte")
+manager.cost_optimizer.register_cost_model("ibm_sherbrooke", CostModel(
+    base_cost_per_shot=0.01,
+    volume_discount_threshold=10000,
+    volume_discount_rate=0.2,
+    priority_multiplier={level: 1.0 for level in PriorityLevel},
+    reserved_capacity_discount=0.3
+))
+
+# Submit jobs
+for i in range(3):
+    job = JobRequirements(
+        job_id=f"integrated_job_{i}",
+        min_qubits=10,
+        circuit_depth=30,
+        shots=5000,
+        priority=random.randint(1, 4)
+    )
+    result = manager.submit_job(job)
+    print(f"Submitted {job.job_id}: position={result['queue_position']}")
+
+# Execute jobs
+print("\nExecuting jobs...")
+while True:
+    result = manager.execute_next()
+    if result is None:
+        break
+    print(f"Executed {result['job_id']}: {result['status']}")
+
+# Generate report
+print(manager.generate_report())
+```
+
+## Summary
+
+Effective resource management for quantum computing requires a comprehensive approach:
+
+1. **QPU Allocation**: Implement strategies like best-fit, least-loaded, and cost-optimized allocation to efficiently assign jobs to quantum processors
+2. **Queue Management**: Design priority queues with fair scheduling and starvation prevention
+3. **Cost Optimization**: Apply batching, volume discounts, and strategic backend selection to minimize costs
+4. **Multi-Backend Coordination**: Use load balancing, failover, and parallel execution for reliability
+5. **Resource Pooling**: Implement connection pooling and reservation systems for shared access
+6. **Integration**: Combine all components into a unified resource management system
+
+## Further Reading
+
+- IBM Qiskit Runtime Session Management
+- Amazon Braket Hybrid Jobs Documentation
+- Google Cloud Quantum Computing Resource Guide
+- Kubernetes Resource Management Concepts
+- AWS Well-Architected Framework - Cost Optimization

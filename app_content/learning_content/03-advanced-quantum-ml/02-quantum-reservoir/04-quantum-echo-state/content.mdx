@@ -1,0 +1,785 @@
+---
+title: "Quantum Echo State Networks"
+description: "Explore quantum echo state networks (QESN), combining echo state network principles with quantum dynamics for enhanced recurrent neural computation."
+duration: 70
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the quantum echo state property
+- Design QESN architectures with appropriate dynamics
+- Implement quantum leaky integrator dynamics
+- Analyze stability conditions for quantum ESN
+- Compare QESN performance with classical ESN
+- Apply QESN to practical temporal tasks
+
+## 1. Echo State Networks: Quantum Extension
+
+Quantum Echo State Networks (QESN) extend the classical ESN framework by replacing the recurrent neural network with a quantum system while preserving the essential echo state property.
+
+<Definition term="Quantum Echo State Network">
+A quantum echo state network is a recurrent quantum computing architecture where a quantum system serves as the reservoir. The system must exhibit the quantum echo state property: the influence of initial conditions must fade over time, ensuring that the current state depends primarily on recent inputs.
+</Definition>
+
+### Classical to Quantum Mapping
+
+<Formula>
+$$\text{Classical: } \mathbf{h}(t) = (1-\alpha)\mathbf{h}(t-1) + \alpha \tanh(W_{in}u(t) + W_{res}\mathbf{h}(t-1))$$
+</Formula>
+
+<Formula>
+$$\text{Quantum: } \rho(t) = (1-\alpha)\rho(t-1) + \alpha \mathcal{E}[\rho(t-1), u(t)]$$
+</Formula>
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+class QuantumEchoStateNetwork:
+    """
+    Quantum Echo State Network implementation.
+
+    Combines quantum dynamics with echo state network principles.
+    """
+
+    def __init__(self, n_qubits, leaking_rate=0.3, spectral_radius=0.9):
+        """
+        Initialize QESN.
+
+        Args:
+            n_qubits: Number of qubits in reservoir
+            leaking_rate: Leaky integration parameter (0 < α ≤ 1)
+            spectral_radius: Controls Hamiltonian strength
+        """
+        self.n_qubits = n_qubits
+        self.dim = 2**n_qubits
+        self.alpha = leaking_rate
+        self.spectral_radius = spectral_radius
+
+        # Build scaled Hamiltonian
+        self.H = self._build_hamiltonian()
+        self._scale_hamiltonian()
+
+        # Evolution operator
+        self.U = expm(-1j * self.H)
+
+        # Observable operators
+        self.observables = self._generate_observables()
+
+        # State initialization
+        self.reset()
+
+    def _build_hamiltonian(self):
+        """Build reservoir Hamiltonian."""
+        H = np.zeros((self.dim, self.dim), dtype=complex)
+
+        I = np.eye(2, dtype=complex)
+        X = np.array([[0, 1], [1, 0]], dtype=complex)
+        Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+        Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        def kron_chain(ops):
+            result = ops[0]
+            for op in ops[1:]:
+                result = np.kron(result, op)
+            return result
+
+        np.random.seed(42)
+
+        # Transverse field
+        for i in range(self.n_qubits):
+            ops = [I] * self.n_qubits
+            ops[i] = X
+            H += np.random.uniform(-1, 1) * kron_chain(ops)
+
+        # Longitudinal field
+        for i in range(self.n_qubits):
+            ops = [I] * self.n_qubits
+            ops[i] = Z
+            H += np.random.uniform(-1, 1) * kron_chain(ops)
+
+        # Nearest-neighbor couplings
+        for i in range(self.n_qubits - 1):
+            for P1, P2 in [(X, X), (Y, Y), (Z, Z)]:
+                ops = [I] * self.n_qubits
+                ops[i] = P1
+                ops[i + 1] = P2
+                H += np.random.uniform(-1, 1) * kron_chain(ops)
+
+        return H
+
+    def _scale_hamiltonian(self):
+        """Scale Hamiltonian to control dynamics."""
+        eigenvalues = np.linalg.eigvalsh(self.H)
+        current_spectral = max(abs(eigenvalues))
+        if current_spectral > 0:
+            self.H *= self.spectral_radius / current_spectral
+
+    def _generate_observables(self):
+        """Generate measurement observables."""
+        I = np.eye(2, dtype=complex)
+        paulis = [
+            np.array([[1, 0], [0, -1]], dtype=complex),  # Z
+            np.array([[0, 1], [1, 0]], dtype=complex),   # X
+            np.array([[0, -1j], [1j, 0]], dtype=complex) # Y
+        ]
+
+        observables = []
+        for i in range(self.n_qubits):
+            for P in paulis:
+                ops = [I] * self.n_qubits
+                ops[i] = P
+                O = ops[0]
+                for op in ops[1:]:
+                    O = np.kron(O, op)
+                observables.append(O)
+
+        return observables
+
+    def reset(self):
+        """Reset to ground state."""
+        self.rho = np.zeros((self.dim, self.dim), dtype=complex)
+        self.rho[0, 0] = 1.0
+
+    def _encode_input(self, u):
+        """Create input encoding unitary."""
+        theta = u * np.pi
+        Ry = np.array([
+            [np.cos(theta/2), -np.sin(theta/2)],
+            [np.sin(theta/2), np.cos(theta/2)]
+        ], dtype=complex)
+
+        I_rest = np.eye(2**(self.n_qubits - 1), dtype=complex)
+        return np.kron(Ry, I_rest)
+
+    def step(self, u):
+        """
+        Process single input with leaky integration.
+
+        Args:
+            u: Input value
+
+        Returns:
+            Feature vector from observables
+        """
+        # Store previous state
+        rho_prev = self.rho.copy()
+
+        # Encode and evolve
+        U_in = self._encode_input(u)
+        rho_new = U_in @ self.rho @ U_in.conj().T
+        rho_new = self.U @ rho_new @ self.U.conj().T
+
+        # Leaky integration (convex combination)
+        self.rho = (1 - self.alpha) * rho_prev + self.alpha * rho_new
+
+        # Ensure valid density matrix
+        self.rho = (self.rho + self.rho.conj().T) / 2
+        self.rho /= np.trace(self.rho)
+
+        # Measure observables
+        features = []
+        for O in self.observables:
+            exp_val = np.real(np.trace(O @ self.rho))
+            features.append(exp_val)
+
+        return np.array(features)
+
+    def process_sequence(self, inputs):
+        """Process input sequence."""
+        self.reset()
+        features = []
+        for u in inputs:
+            feat = self.step(u)
+            features.append(feat)
+        return np.array(features)
+```
+
+## 2. The Quantum Echo State Property
+
+The echo state property ensures that the reservoir's response depends on input history, not on initial conditions.
+
+<Definition term="Quantum Echo State Property">
+A quantum reservoir satisfies the echo state property if, for any two initial states ρ₀ and σ₀, driven by the same input sequence, the trace distance D(ρₜ, σₜ) → 0 as t → ∞. This ensures that information about initial conditions fades while input information is retained.
+</Definition>
+
+<Warning>
+Unlike classical ESN where the echo state property is guaranteed by spectral radius < 1, quantum systems have more complex conditions due to unitary dynamics. The leaky integrator formulation helps ensure the quantum echo state property.
+</Warning>
+
+### Verifying the Echo State Property
+
+```python
+def verify_echo_state_property(qesn, n_steps=100, n_trials=5):
+    """
+    Verify that QESN satisfies echo state property.
+
+    Args:
+        qesn: QuantumEchoStateNetwork instance
+        n_steps: Number of evolution steps
+        n_trials: Number of random initial states to test
+
+    Returns:
+        Dictionary with convergence analysis
+    """
+    # Generate common input sequence
+    np.random.seed(123)
+    inputs = np.random.uniform(-1, 1, n_steps)
+
+    # Reference trajectory from ground state
+    qesn.reset()
+    ref_states = []
+    for u in inputs:
+        qesn.step(u)
+        ref_states.append(qesn.rho.copy())
+
+    # Test convergence from random initial states
+    convergence_curves = []
+
+    for trial in range(n_trials):
+        # Random initial pure state
+        random_vec = np.random.randn(qesn.dim) + 1j * np.random.randn(qesn.dim)
+        random_vec /= np.linalg.norm(random_vec)
+        qesn.rho = np.outer(random_vec, random_vec.conj())
+
+        distances = []
+        for t, u in enumerate(inputs):
+            qesn.step(u)
+
+            # Trace distance to reference
+            diff = qesn.rho - ref_states[t]
+            eigenvalues = np.linalg.eigvalsh(diff @ diff.conj().T)
+            trace_dist = 0.5 * np.sum(np.sqrt(np.maximum(eigenvalues, 0)))
+            distances.append(trace_dist)
+
+        convergence_curves.append(distances)
+
+    # Analyze convergence
+    avg_curve = np.mean(convergence_curves, axis=0)
+    final_distances = [curve[-1] for curve in convergence_curves]
+
+    # Estimate convergence rate
+    if len(avg_curve) > 10:
+        log_curve = np.log(avg_curve[:50] + 1e-10)
+        rate = -np.polyfit(range(50), log_curve, 1)[0]
+    else:
+        rate = 0
+
+    return {
+        'satisfies_esp': np.mean(final_distances) < 0.1,
+        'final_distance_mean': np.mean(final_distances),
+        'final_distance_std': np.std(final_distances),
+        'convergence_rate': rate,
+        'convergence_curves': convergence_curves
+    }
+
+
+def analyze_leaking_rate_effect(n_qubits, leaking_rates=[0.1, 0.3, 0.5, 0.7, 0.9]):
+    """
+    Analyze how leaking rate affects echo state property.
+
+    Returns comparison of convergence for different α values.
+    """
+    results = {}
+
+    for alpha in leaking_rates:
+        qesn = QuantumEchoStateNetwork(n_qubits, leaking_rate=alpha)
+        esp_result = verify_echo_state_property(qesn)
+
+        results[alpha] = {
+            'satisfies_esp': esp_result['satisfies_esp'],
+            'convergence_rate': esp_result['convergence_rate'],
+            'final_distance': esp_result['final_distance_mean']
+        }
+
+        print(f"α = {alpha}:")
+        print(f"  ESP satisfied: {esp_result['satisfies_esp']}")
+        print(f"  Convergence rate: {esp_result['convergence_rate']:.4f}")
+        print()
+
+    return results
+```
+
+## 3. Quantum Leaky Integrator Dynamics
+
+The leaky integrator mechanism is crucial for controlling the quantum reservoir's temporal dynamics.
+
+<Definition term="Quantum Leaky Integrator">
+The quantum leaky integrator combines the previous state with the new evolved state: ρ(t) = (1-α)ρ(t-1) + α·E[ρ(t-1), u(t)], where α is the leaking rate. This creates a controllable memory timescale while ensuring the echo state property.
+</Definition>
+
+<Formula>
+$$\rho(t) = (1-\alpha)\rho(t-1) + \alpha \cdot U_{in}(u(t)) \cdot U_{evol} \cdot \rho(t-1) \cdot U_{evol}^\dagger \cdot U_{in}^\dagger(u(t))$$
+</Formula>
+
+```python
+class AdaptiveLeakyQESN(QuantumEchoStateNetwork):
+    """QESN with adaptive leaking rate based on input dynamics."""
+
+    def __init__(self, n_qubits, base_leaking_rate=0.3,
+                 min_alpha=0.1, max_alpha=0.9, adaptation_rate=0.1):
+        """
+        Initialize adaptive QESN.
+
+        Args:
+            n_qubits: Number of qubits
+            base_leaking_rate: Starting leaking rate
+            min_alpha, max_alpha: Bounds on adaptation
+            adaptation_rate: How quickly α adapts
+        """
+        super().__init__(n_qubits, leaking_rate=base_leaking_rate)
+        self.base_alpha = base_leaking_rate
+        self.min_alpha = min_alpha
+        self.max_alpha = max_alpha
+        self.adaptation_rate = adaptation_rate
+
+        self.prev_input = 0.0
+        self.input_variance_estimate = 0.1
+
+    def step(self, u):
+        """Step with adaptive leaking rate."""
+        # Estimate input dynamics
+        input_change = abs(u - self.prev_input)
+        self.input_variance_estimate = (
+            (1 - self.adaptation_rate) * self.input_variance_estimate +
+            self.adaptation_rate * input_change
+        )
+
+        # Adapt leaking rate: faster changes → higher α
+        # Slow changes → lower α (more memory)
+        adapted_alpha = self.base_alpha + 0.5 * self.input_variance_estimate
+        self.alpha = np.clip(adapted_alpha, self.min_alpha, self.max_alpha)
+
+        self.prev_input = u
+
+        # Standard step with adapted α
+        return super().step(u)
+
+
+class MultiScaleQESN:
+    """
+    Multi-scale QESN with multiple reservoirs at different timescales.
+    """
+
+    def __init__(self, n_qubits, n_scales=3, alpha_range=(0.1, 0.9)):
+        """
+        Initialize multi-scale QESN.
+
+        Args:
+            n_qubits: Qubits per reservoir
+            n_scales: Number of timescales
+            alpha_range: Range of leaking rates
+        """
+        self.n_scales = n_scales
+        self.reservoirs = []
+
+        alphas = np.linspace(alpha_range[0], alpha_range[1], n_scales)
+
+        for alpha in alphas:
+            reservoir = QuantumEchoStateNetwork(
+                n_qubits, leaking_rate=alpha
+            )
+            self.reservoirs.append(reservoir)
+
+    def reset(self):
+        """Reset all reservoirs."""
+        for res in self.reservoirs:
+            res.reset()
+
+    def step(self, u):
+        """Process input through all scales."""
+        all_features = []
+        for res in self.reservoirs:
+            features = res.step(u)
+            all_features.extend(features)
+        return np.array(all_features)
+
+    def process_sequence(self, inputs):
+        """Process sequence through all scales."""
+        self.reset()
+        features = []
+        for u in inputs:
+            feat = self.step(u)
+            features.append(feat)
+        return np.array(features)
+```
+
+<Tip>
+The leaking rate α controls the memory-reactivity trade-off: small α means longer memory but slower response to new inputs; large α means quick response but shorter memory. Multi-scale architectures can capture patterns at multiple temporal scales simultaneously.
+</Tip>
+
+## 4. Stability Analysis
+
+Understanding stability conditions is essential for designing effective quantum echo state networks.
+
+### Stability Conditions
+
+```python
+def analyze_qesn_stability(qesn, n_perturbations=20):
+    """
+    Analyze stability of QESN dynamics.
+
+    Tests whether small perturbations decay over time.
+    """
+    # Generate input sequence
+    inputs = np.random.uniform(-1, 1, 100)
+
+    # Get reference trajectory
+    qesn.reset()
+    for u in inputs:
+        qesn.step(u)
+    ref_rho = qesn.rho.copy()
+
+    # Test perturbation decay
+    perturbation_results = []
+
+    for _ in range(n_perturbations):
+        # Apply small perturbation
+        epsilon = 0.01
+        pert = np.random.randn(qesn.dim, qesn.dim)
+        pert = (pert + pert.T) / 2  # Hermitian
+        pert = epsilon * pert / np.linalg.norm(pert)
+
+        qesn.rho = ref_rho + pert
+        # Ensure valid density matrix
+        qesn.rho = (qesn.rho + qesn.rho.conj().T) / 2
+        eigenvalues = np.linalg.eigvalsh(qesn.rho)
+        if np.min(eigenvalues) < 0:
+            qesn.rho -= np.min(eigenvalues) * np.eye(qesn.dim)
+        qesn.rho /= np.trace(qesn.rho)
+
+        # Evolve and measure perturbation decay
+        more_inputs = np.random.uniform(-1, 1, 50)
+        perturbation_norms = []
+
+        qesn2 = QuantumEchoStateNetwork(
+            qesn.n_qubits,
+            qesn.alpha,
+            qesn.spectral_radius
+        )
+        qesn2.rho = ref_rho.copy()
+
+        for u in more_inputs:
+            qesn.step(u)
+            qesn2.step(u)
+
+            diff = qesn.rho - qesn2.rho
+            perturbation_norms.append(np.linalg.norm(diff))
+
+        perturbation_results.append(perturbation_norms)
+
+    avg_decay = np.mean(perturbation_results, axis=0)
+
+    # Check if perturbations decay
+    is_stable = avg_decay[-1] < avg_decay[0] * 0.5
+
+    return {
+        'is_stable': is_stable,
+        'initial_perturbation': avg_decay[0],
+        'final_perturbation': avg_decay[-1],
+        'decay_ratio': avg_decay[-1] / (avg_decay[0] + 1e-10),
+        'perturbation_evolution': avg_decay
+    }
+
+
+def compute_effective_spectral_radius(qesn, n_samples=1000):
+    """
+    Estimate the effective spectral radius of the quantum dynamics.
+
+    This indicates how quickly information propagates/decays.
+    """
+    # Jacobian estimation via finite differences
+    epsilon = 1e-6
+
+    qesn.reset()
+    # Reach a typical state
+    for _ in range(50):
+        qesn.step(np.random.uniform(-1, 1))
+
+    base_rho = qesn.rho.copy()
+    base_features = qesn.step(0.0)
+
+    jacobian_estimates = []
+
+    for i in range(min(qesn.dim**2, 100)):
+        # Perturb density matrix element
+        row, col = i // qesn.dim, i % qesn.dim
+
+        qesn.rho = base_rho.copy()
+        qesn.rho[row, col] += epsilon
+        qesn.rho[col, row] += epsilon  # Keep Hermitian
+        qesn.rho /= np.trace(qesn.rho)
+
+        perturbed_features = qesn.step(0.0)
+
+        derivative = (perturbed_features - base_features) / epsilon
+        jacobian_estimates.append(np.linalg.norm(derivative))
+
+    # Effective spectral radius approximation
+    eff_sr = np.mean(jacobian_estimates) * (1 - qesn.alpha)
+
+    return eff_sr
+```
+
+## 5. QESN Training and Readout
+
+Training a QESN follows the standard reservoir computing paradigm with quantum-specific considerations.
+
+```python
+class TrainableQESN:
+    """QESN with training infrastructure."""
+
+    def __init__(self, n_qubits, leaking_rate=0.3, spectral_radius=0.9,
+                 regularization=1e-4):
+        """Initialize trainable QESN."""
+        self.reservoir = QuantumEchoStateNetwork(
+            n_qubits, leaking_rate, spectral_radius
+        )
+        self.reg = regularization
+        self.W_out = None
+
+        # Normalization parameters
+        self.input_mean = 0.0
+        self.input_std = 1.0
+        self.output_mean = 0.0
+        self.output_std = 1.0
+
+    def fit(self, inputs, targets, washout=50):
+        """
+        Train the output layer.
+
+        Args:
+            inputs: Input sequence
+            targets: Target outputs
+            washout: Initial steps to discard
+
+        Returns:
+            Training metrics
+        """
+        # Normalize inputs
+        self.input_mean = np.mean(inputs)
+        self.input_std = np.std(inputs) + 1e-8
+        normalized_inputs = (inputs - self.input_mean) / self.input_std
+
+        # Collect features
+        features = self.reservoir.process_sequence(normalized_inputs)
+
+        # Prepare training data
+        X = features[washout:]
+
+        # Normalize targets
+        self.output_mean = np.mean(targets)
+        self.output_std = np.std(targets) + 1e-8
+        normalized_targets = (targets - self.output_mean) / self.output_std
+        y = normalized_targets[washout:]
+
+        # Ensure matching lengths
+        min_len = min(len(X), len(y))
+        X, y = X[:min_len], y[:min_len]
+
+        # Ridge regression
+        XTX = X.T @ X + self.reg * np.eye(X.shape[1])
+        self.W_out = np.linalg.solve(XTX, X.T @ y)
+
+        # Training metrics
+        y_pred = X @ self.W_out
+        train_mse = np.mean((y_pred - y)**2)
+        train_corr = np.corrcoef(y_pred, y)[0, 1]
+
+        return {
+            'train_mse': train_mse,
+            'train_correlation': train_corr,
+            'n_samples': len(y)
+        }
+
+    def predict(self, inputs):
+        """Make predictions on new inputs."""
+        if self.W_out is None:
+            raise ValueError("Model not trained")
+
+        normalized_inputs = (inputs - self.input_mean) / self.input_std
+        features = self.reservoir.process_sequence(normalized_inputs)
+
+        normalized_pred = features @ self.W_out
+        predictions = normalized_pred * self.output_std + self.output_mean
+
+        return predictions
+
+    def evaluate(self, inputs, targets, washout=50):
+        """Evaluate on test data."""
+        predictions = self.predict(inputs)
+
+        # Skip washout
+        pred = predictions[washout:]
+        true = targets[washout:]
+
+        min_len = min(len(pred), len(true))
+        pred, true = pred[:min_len], true[:min_len]
+
+        mse = np.mean((pred - true)**2)
+        nmse = mse / np.var(true)
+        corr = np.corrcoef(pred, true)[0, 1]
+
+        return {
+            'mse': mse,
+            'nmse': nmse,
+            'correlation': corr
+        }
+```
+
+## 6. Comparison: QESN vs Classical ESN
+
+Understanding when quantum ESN provides advantages over classical ESN.
+
+```python
+class ClassicalESN:
+    """Classical Echo State Network for comparison."""
+
+    def __init__(self, n_neurons, leaking_rate=0.3, spectral_radius=0.9):
+        """Initialize classical ESN."""
+        self.n_neurons = n_neurons
+        self.alpha = leaking_rate
+
+        # Random reservoir weights
+        np.random.seed(42)
+        W = np.random.randn(n_neurons, n_neurons)
+        # Scale to desired spectral radius
+        eigenvalues = np.linalg.eigvals(W)
+        W *= spectral_radius / np.max(np.abs(eigenvalues))
+        self.W_res = W
+
+        # Input weights
+        self.W_in = np.random.uniform(-1, 1, n_neurons)
+
+        self.reset()
+
+    def reset(self):
+        """Reset state."""
+        self.h = np.zeros(self.n_neurons)
+
+    def step(self, u):
+        """Process single input."""
+        pre_activation = self.W_in * u + self.W_res @ self.h
+        h_new = np.tanh(pre_activation)
+        self.h = (1 - self.alpha) * self.h + self.alpha * h_new
+        return self.h.copy()
+
+    def process_sequence(self, inputs):
+        """Process input sequence."""
+        self.reset()
+        features = []
+        for u in inputs:
+            feat = self.step(u)
+            features.append(feat)
+        return np.array(features)
+
+
+def compare_esn_qesn(task='memory', n_qubits=4, n_neurons=12):
+    """
+    Compare classical ESN with QESN on benchmark tasks.
+
+    Args:
+        task: 'memory', 'narma10', or 'lorenz'
+        n_qubits: Qubits for QESN
+        n_neurons: Neurons for classical ESN (roughly 3*n_qubits)
+    """
+    n_samples = 1000
+    washout = 100
+
+    if task == 'memory':
+        # Memory capacity task
+        inputs = np.random.uniform(-1, 1, n_samples)
+
+        results = {'qesn': {}, 'classical': {}}
+
+        for name, model in [
+            ('qesn', QuantumEchoStateNetwork(n_qubits)),
+            ('classical', ClassicalESN(n_neurons))
+        ]:
+            features = model.process_sequence(inputs)
+
+            # Measure memory for different delays
+            mc_total = 0
+            for delay in range(1, 21):
+                X = features[washout + delay:]
+                y = inputs[washout:-delay]
+                min_len = min(len(X), len(y))
+
+                reg = 1e-6
+                XTX = X[:min_len].T @ X[:min_len] + reg * np.eye(X.shape[1])
+                W = np.linalg.solve(XTX, X[:min_len].T @ y[:min_len])
+
+                y_pred = X[:min_len] @ W
+                corr = np.corrcoef(y_pred, y[:min_len])[0, 1]
+                mc_total += corr**2 if not np.isnan(corr) else 0
+
+            results[name]['memory_capacity'] = mc_total
+
+    elif task == 'narma10':
+        # NARMA-10 nonlinear task
+        inputs = np.random.uniform(0, 0.5, n_samples)
+        targets = np.zeros(n_samples)
+
+        for t in range(10, n_samples):
+            targets[t] = (
+                0.3 * targets[t-1] +
+                0.05 * targets[t-1] * np.sum(targets[t-10:t]) +
+                1.5 * inputs[t-1] * inputs[t-10] +
+                0.1
+            )
+
+        results = {'qesn': {}, 'classical': {}}
+
+        for name, model in [
+            ('qesn', QuantumEchoStateNetwork(n_qubits)),
+            ('classical', ClassicalESN(n_neurons))
+        ]:
+            features = model.process_sequence(inputs)
+
+            X = features[washout:]
+            y = targets[washout:]
+
+            # Train/test split
+            split = int(0.8 * len(X))
+            X_train, X_test = X[:split], X[split:]
+            y_train, y_test = y[:split], y[split:]
+
+            # Train
+            reg = 1e-4
+            XTX = X_train.T @ X_train + reg * np.eye(X_train.shape[1])
+            W = np.linalg.solve(XTX, X_train.T @ y_train)
+
+            # Test
+            y_pred = X_test @ W
+            nmse = np.mean((y_pred - y_test)**2) / np.var(y_test)
+
+            results[name]['nmse'] = nmse
+
+    return results
+```
+
+<Tip>
+QESN typically shows advantages for tasks requiring high-dimensional feature spaces or quantum correlations. For simple tasks, classical ESN may be more practical due to lower computational overhead in simulation.
+</Tip>
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Quantum Echo State Networks** extend classical ESN with quantum dynamics
+2. **Echo state property** ensures dependence on inputs rather than initial conditions
+3. **Leaky integration** provides controllable memory timescales
+4. **Stability analysis** ensures well-behaved dynamics
+5. **Multi-scale architectures** capture patterns at multiple timescales
+6. **Comparison with classical ESN** reveals task-dependent advantages
+
+QESN provides a principled framework for temporal quantum machine learning with guaranteed stability properties.
+
+## Further Reading
+
+- Next lesson: Hardware Implementations
+- Related: Quantum Reservoir Stability Theory
+- Application: Speech Recognition with QESN

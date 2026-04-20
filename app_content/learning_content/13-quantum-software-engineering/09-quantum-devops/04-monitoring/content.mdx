@@ -1,0 +1,959 @@
+---
+title: "Monitoring Quantum Applications"
+description: "Learn to implement comprehensive monitoring for quantum applications, including quantum-specific metrics like fidelity, circuit depth, and hardware utilization. Set up dashboards, alerts, and observability infrastructure for production quantum services."
+duration: 50
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Define and collect quantum-specific metrics beyond traditional application monitoring
+- Implement Prometheus metrics exporters for quantum applications
+- Create Grafana dashboards that visualize quantum execution quality
+- Set up alerting rules for quantum service degradation
+- Monitor quantum hardware availability and queue status
+- Implement custom metrics for variational algorithm convergence
+
+## 1. The Need for Quantum-Specific Monitoring
+
+Traditional application monitoring focuses on latency, throughput, and error rates. Quantum applications require additional metrics that capture the probabilistic nature of quantum computation and hardware-specific characteristics.
+
+<Definition term="Quantum Observability">
+The practice of understanding the internal state and behavior of quantum applications through external outputs, encompassing quantum-specific metrics like fidelity estimates, circuit depth, hardware error rates, and optimization convergence in addition to traditional software metrics.
+</Definition>
+
+### Quantum Metrics Categories
+
+| Category | Metrics | Why It Matters |
+|----------|---------|----------------|
+| Execution Quality | Fidelity, success rate | Ensures results are trustworthy |
+| Circuit Complexity | Depth, gate count, CX count | Affects error accumulation |
+| Hardware Status | Queue time, calibration age | Impacts scheduling decisions |
+| Optimization | Convergence rate, cost function | Tracks algorithm progress |
+| Resources | Shots used, backend time | Controls costs |
+
+<Formula>
+$$\text{Effective Fidelity} \approx \prod_{i=1}^{d} (1 - \epsilon_i) \approx e^{-\sum_i \epsilon_i}$$
+</Formula>
+
+Where $d$ is circuit depth and $\epsilon_i$ is the error rate at layer $i$.
+
+## 2. Implementing Prometheus Metrics
+
+Prometheus is the de facto standard for cloud-native metrics. Let's implement quantum-specific metrics.
+
+```python
+# src/quantum_app/metrics/prometheus_metrics.py
+"""Prometheus metrics for quantum applications."""
+from prometheus_client import Counter, Gauge, Histogram, Summary, Info
+from prometheus_client import start_http_server, REGISTRY
+from functools import wraps
+import time
+from typing import Optional, Dict, Any
+
+# ============================================
+# Quantum Execution Metrics
+# ============================================
+
+# Circuit execution counter
+CIRCUIT_EXECUTIONS = Counter(
+    'quantum_circuit_executions_total',
+    'Total number of circuit executions',
+    ['backend', 'circuit_name', 'status']
+)
+
+# Fidelity estimate gauge (current value)
+FIDELITY_ESTIMATE = Gauge(
+    'quantum_fidelity_estimate',
+    'Estimated fidelity of last execution',
+    ['backend', 'circuit_name']
+)
+
+# Circuit depth histogram
+CIRCUIT_DEPTH = Histogram(
+    'quantum_circuit_depth',
+    'Distribution of circuit depths',
+    ['backend'],
+    buckets=[5, 10, 20, 50, 100, 200, 500, 1000]
+)
+
+# Two-qubit gate count histogram
+CX_COUNT = Histogram(
+    'quantum_cx_gate_count',
+    'Distribution of CX gate counts',
+    ['backend'],
+    buckets=[1, 5, 10, 25, 50, 100, 250, 500]
+)
+
+# Execution duration
+EXECUTION_DURATION = Histogram(
+    'quantum_execution_duration_seconds',
+    'Time spent executing quantum circuits',
+    ['backend', 'execution_type'],
+    buckets=[0.1, 0.5, 1, 5, 10, 30, 60, 120, 300, 600]
+)
+
+# ============================================
+# Hardware Metrics
+# ============================================
+
+# Backend queue status
+BACKEND_QUEUE_LENGTH = Gauge(
+    'quantum_backend_queue_length',
+    'Number of jobs in backend queue',
+    ['backend']
+)
+
+# Backend availability
+BACKEND_AVAILABLE = Gauge(
+    'quantum_backend_available',
+    'Whether backend is operational (1=yes, 0=no)',
+    ['backend']
+)
+
+# Calibration age in hours
+CALIBRATION_AGE_HOURS = Gauge(
+    'quantum_calibration_age_hours',
+    'Hours since last calibration',
+    ['backend']
+)
+
+# Error rates from calibration
+GATE_ERROR_RATE = Gauge(
+    'quantum_gate_error_rate',
+    'Gate error rate from calibration',
+    ['backend', 'gate_type']
+)
+
+READOUT_ERROR_RATE = Gauge(
+    'quantum_readout_error_rate',
+    'Readout error rate from calibration',
+    ['backend', 'qubit']
+)
+
+# ============================================
+# Optimization Metrics
+# ============================================
+
+# VQE/QAOA iteration counter
+OPTIMIZATION_ITERATIONS = Counter(
+    'quantum_optimization_iterations_total',
+    'Total optimization iterations',
+    ['algorithm', 'optimizer']
+)
+
+# Current cost function value
+COST_FUNCTION_VALUE = Gauge(
+    'quantum_cost_function_value',
+    'Current value of cost function',
+    ['algorithm', 'experiment_id']
+)
+
+# Gradient norm for convergence monitoring
+GRADIENT_NORM = Gauge(
+    'quantum_gradient_norm',
+    'Norm of parameter gradient',
+    ['algorithm', 'experiment_id']
+)
+
+# Best cost found so far
+BEST_COST_VALUE = Gauge(
+    'quantum_best_cost_value',
+    'Best cost function value found',
+    ['algorithm', 'experiment_id']
+)
+
+# ============================================
+# Resource Usage Metrics
+# ============================================
+
+# Shots used
+SHOTS_USED = Counter(
+    'quantum_shots_used_total',
+    'Total measurement shots used',
+    ['backend']
+)
+
+# Estimated cost
+ESTIMATED_COST_USD = Counter(
+    'quantum_estimated_cost_usd_total',
+    'Estimated cost in USD',
+    ['backend']
+)
+
+# ============================================
+# Application Info
+# ============================================
+
+APP_INFO = Info(
+    'quantum_application',
+    'Information about the quantum application'
+)
+
+
+class QuantumMetrics:
+    """Centralized metrics management for quantum applications."""
+
+    def __init__(self, app_name: str, version: str):
+        self.app_name = app_name
+        self.version = version
+        APP_INFO.info({
+            'app_name': app_name,
+            'version': version
+        })
+
+    def record_execution(
+        self,
+        backend: str,
+        circuit_name: str,
+        success: bool,
+        fidelity: Optional[float] = None,
+        depth: Optional[int] = None,
+        cx_count: Optional[int] = None,
+        duration: Optional[float] = None,
+        shots: int = 0
+    ):
+        """Record a circuit execution with all relevant metrics."""
+        status = 'success' if success else 'failure'
+
+        CIRCUIT_EXECUTIONS.labels(
+            backend=backend,
+            circuit_name=circuit_name,
+            status=status
+        ).inc()
+
+        if fidelity is not None:
+            FIDELITY_ESTIMATE.labels(
+                backend=backend,
+                circuit_name=circuit_name
+            ).set(fidelity)
+
+        if depth is not None:
+            CIRCUIT_DEPTH.labels(backend=backend).observe(depth)
+
+        if cx_count is not None:
+            CX_COUNT.labels(backend=backend).observe(cx_count)
+
+        if duration is not None:
+            EXECUTION_DURATION.labels(
+                backend=backend,
+                execution_type='circuit'
+            ).observe(duration)
+
+        if shots > 0:
+            SHOTS_USED.labels(backend=backend).inc(shots)
+
+    def record_optimization_step(
+        self,
+        algorithm: str,
+        experiment_id: str,
+        optimizer: str,
+        cost: float,
+        gradient_norm: Optional[float] = None,
+        is_best: bool = False
+    ):
+        """Record an optimization iteration."""
+        OPTIMIZATION_ITERATIONS.labels(
+            algorithm=algorithm,
+            optimizer=optimizer
+        ).inc()
+
+        COST_FUNCTION_VALUE.labels(
+            algorithm=algorithm,
+            experiment_id=experiment_id
+        ).set(cost)
+
+        if gradient_norm is not None:
+            GRADIENT_NORM.labels(
+                algorithm=algorithm,
+                experiment_id=experiment_id
+            ).set(gradient_norm)
+
+        if is_best:
+            BEST_COST_VALUE.labels(
+                algorithm=algorithm,
+                experiment_id=experiment_id
+            ).set(cost)
+
+    def update_backend_status(
+        self,
+        backend: str,
+        available: bool,
+        queue_length: int,
+        calibration_age_hours: float
+    ):
+        """Update backend status metrics."""
+        BACKEND_AVAILABLE.labels(backend=backend).set(1 if available else 0)
+        BACKEND_QUEUE_LENGTH.labels(backend=backend).set(queue_length)
+        CALIBRATION_AGE_HOURS.labels(backend=backend).set(calibration_age_hours)
+
+    def update_error_rates(
+        self,
+        backend: str,
+        gate_errors: Dict[str, float],
+        readout_errors: Dict[str, float]
+    ):
+        """Update calibration error rates."""
+        for gate, error in gate_errors.items():
+            GATE_ERROR_RATE.labels(
+                backend=backend,
+                gate_type=gate
+            ).set(error)
+
+        for qubit, error in readout_errors.items():
+            READOUT_ERROR_RATE.labels(
+                backend=backend,
+                qubit=qubit
+            ).set(error)
+
+
+def timed_execution(backend: str, execution_type: str = 'circuit'):
+    """Decorator to time quantum executions."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start = time.time()
+            try:
+                result = func(*args, **kwargs)
+                return result
+            finally:
+                duration = time.time() - start
+                EXECUTION_DURATION.labels(
+                    backend=backend,
+                    execution_type=execution_type
+                ).observe(duration)
+        return wrapper
+    return decorator
+
+
+def start_metrics_server(port: int = 8000):
+    """Start the Prometheus metrics HTTP server."""
+    start_http_server(port)
+    print(f"Metrics server started on port {port}")
+```
+
+<Tip>
+Use labels judiciously. High-cardinality labels (like experiment IDs) can cause memory issues in Prometheus. Consider using summaries or removing labels after experiments complete.
+</Tip>
+
+## 3. Backend Monitoring Service
+
+Create a service that periodically collects hardware status metrics.
+
+```python
+# src/quantum_app/metrics/backend_monitor.py
+"""Monitor quantum backend status and calibration."""
+import asyncio
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
+import logging
+
+from qiskit_ibm_runtime import QiskitRuntimeService
+
+from .prometheus_metrics import (
+    BACKEND_AVAILABLE,
+    BACKEND_QUEUE_LENGTH,
+    CALIBRATION_AGE_HOURS,
+    GATE_ERROR_RATE,
+    READOUT_ERROR_RATE
+)
+
+logger = logging.getLogger(__name__)
+
+
+class BackendMonitor:
+    """Monitors quantum backend status and calibration data."""
+
+    def __init__(
+        self,
+        backends: List[str],
+        refresh_interval: int = 300  # 5 minutes
+    ):
+        self.backends = backends
+        self.refresh_interval = refresh_interval
+        self.service: Optional[QiskitRuntimeService] = None
+        self._running = False
+
+    async def start(self):
+        """Start the monitoring loop."""
+        self.service = QiskitRuntimeService()
+        self._running = True
+        logger.info(f"Starting backend monitor for: {self.backends}")
+
+        while self._running:
+            try:
+                await self._collect_metrics()
+            except Exception as e:
+                logger.error(f"Error collecting backend metrics: {e}")
+
+            await asyncio.sleep(self.refresh_interval)
+
+    def stop(self):
+        """Stop the monitoring loop."""
+        self._running = False
+        logger.info("Backend monitor stopped")
+
+    async def _collect_metrics(self):
+        """Collect metrics from all backends."""
+        for backend_name in self.backends:
+            try:
+                await self._collect_backend_metrics(backend_name)
+            except Exception as e:
+                logger.warning(f"Failed to collect metrics for {backend_name}: {e}")
+                BACKEND_AVAILABLE.labels(backend=backend_name).set(0)
+
+    async def _collect_backend_metrics(self, backend_name: str):
+        """Collect metrics for a single backend."""
+        backend = self.service.backend(backend_name)
+
+        # Check availability
+        status = backend.status()
+        is_available = status.operational and status.status_msg == 'active'
+        BACKEND_AVAILABLE.labels(backend=backend_name).set(1 if is_available else 0)
+
+        # Queue length
+        queue_length = status.pending_jobs
+        BACKEND_QUEUE_LENGTH.labels(backend=backend_name).set(queue_length)
+
+        # Calibration data
+        try:
+            properties = backend.properties()
+            if properties and properties.last_update_date:
+                now = datetime.now(timezone.utc)
+                cal_age = (now - properties.last_update_date).total_seconds() / 3600
+                CALIBRATION_AGE_HOURS.labels(backend=backend_name).set(cal_age)
+
+                # Gate error rates (averaged)
+                self._update_gate_errors(backend_name, properties)
+
+                # Readout errors
+                self._update_readout_errors(backend_name, properties)
+
+        except Exception as e:
+            logger.warning(f"Could not get properties for {backend_name}: {e}")
+
+    def _update_gate_errors(self, backend_name: str, properties):
+        """Update gate error metrics from calibration."""
+        # Collect error rates by gate type
+        gate_errors: Dict[str, List[float]] = {}
+
+        for gate in properties.gates:
+            gate_type = gate.gate
+            for param in gate.parameters:
+                if param.name == 'gate_error':
+                    if gate_type not in gate_errors:
+                        gate_errors[gate_type] = []
+                    gate_errors[gate_type].append(param.value)
+
+        # Report average error per gate type
+        for gate_type, errors in gate_errors.items():
+            avg_error = sum(errors) / len(errors) if errors else 0
+            GATE_ERROR_RATE.labels(
+                backend=backend_name,
+                gate_type=gate_type
+            ).set(avg_error)
+
+    def _update_readout_errors(self, backend_name: str, properties):
+        """Update readout error metrics."""
+        for qubit_props in properties.qubits:
+            for prop in qubit_props:
+                if prop.name == 'readout_error':
+                    # Use qubit index from the property
+                    qubit_label = f"q{properties.qubits.index(qubit_props)}"
+                    READOUT_ERROR_RATE.labels(
+                        backend=backend_name,
+                        qubit=qubit_label
+                    ).set(prop.value)
+                    break
+
+
+# Example usage
+async def main():
+    """Run the backend monitor."""
+    monitor = BackendMonitor(
+        backends=['ibm_brisbane', 'ibm_kyoto'],
+        refresh_interval=300
+    )
+
+    try:
+        await monitor.start()
+    except KeyboardInterrupt:
+        monitor.stop()
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
+```
+
+## 4. Grafana Dashboard Configuration
+
+Create comprehensive dashboards for quantum application monitoring.
+
+```json
+{
+  "dashboard": {
+    "title": "Quantum Application Dashboard",
+    "tags": ["quantum", "monitoring"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "Circuit Execution Overview",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(rate(quantum_circuit_executions_total[5m]))",
+            "legendFormat": "Executions/sec"
+          }
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "area"
+        }
+      },
+      {
+        "title": "Execution Success Rate",
+        "type": "gauge",
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(rate(quantum_circuit_executions_total{status='success'}[5m])) / sum(rate(quantum_circuit_executions_total[5m])) * 100",
+            "legendFormat": "Success %"
+          }
+        ],
+        "options": {
+          "thresholds": {
+            "steps": [
+              {"color": "red", "value": 0},
+              {"color": "yellow", "value": 80},
+              {"color": "green", "value": 95}
+            ]
+          }
+        }
+      },
+      {
+        "title": "Fidelity by Backend",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+        "targets": [
+          {
+            "expr": "quantum_fidelity_estimate",
+            "legendFormat": "{{backend}} - {{circuit_name}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "min": 0,
+            "max": 1,
+            "unit": "percentunit"
+          }
+        }
+      },
+      {
+        "title": "Circuit Depth Distribution",
+        "type": "histogram",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+        "targets": [
+          {
+            "expr": "sum(rate(quantum_circuit_depth_bucket[5m])) by (le)",
+            "legendFormat": "{{le}}"
+          }
+        ]
+      },
+      {
+        "title": "Backend Queue Status",
+        "type": "table",
+        "gridPos": {"h": 6, "w": 12, "x": 0, "y": 12},
+        "targets": [
+          {
+            "expr": "quantum_backend_queue_length",
+            "format": "table",
+            "instant": true
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "renameByName": {
+                "backend": "Backend",
+                "Value": "Queue Length"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "title": "Calibration Age (Hours)",
+        "type": "bargauge",
+        "gridPos": {"h": 6, "w": 12, "x": 12, "y": 12},
+        "targets": [
+          {
+            "expr": "quantum_calibration_age_hours",
+            "legendFormat": "{{backend}}"
+          }
+        ],
+        "options": {
+          "orientation": "horizontal",
+          "thresholds": {
+            "steps": [
+              {"color": "green", "value": 0},
+              {"color": "yellow", "value": 12},
+              {"color": "red", "value": 24}
+            ]
+          }
+        }
+      },
+      {
+        "title": "VQE Convergence",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 18},
+        "targets": [
+          {
+            "expr": "quantum_cost_function_value",
+            "legendFormat": "{{algorithm}} - {{experiment_id}}"
+          },
+          {
+            "expr": "quantum_best_cost_value",
+            "legendFormat": "Best: {{algorithm}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "smooth"
+            }
+          }
+        }
+      },
+      {
+        "title": "Gate Error Rates",
+        "type": "timeseries",
+        "gridPos": {"h": 6, "w": 12, "x": 0, "y": 26},
+        "targets": [
+          {
+            "expr": "quantum_gate_error_rate{gate_type=~'cx|ecr'}",
+            "legendFormat": "{{backend}} - {{gate_type}}"
+          }
+        ]
+      },
+      {
+        "title": "Total Shots Used",
+        "type": "stat",
+        "gridPos": {"h": 6, "w": 6, "x": 12, "y": 26},
+        "targets": [
+          {
+            "expr": "sum(quantum_shots_used_total)",
+            "legendFormat": "Total Shots"
+          }
+        ],
+        "options": {
+          "colorMode": "background"
+        }
+      }
+    ]
+  }
+}
+```
+
+## 5. Alerting Rules
+
+Define alerts for quantum-specific conditions.
+
+```yaml
+# prometheus/alerts/quantum_alerts.yml
+groups:
+  - name: quantum_execution_alerts
+    rules:
+      - alert: LowFidelity
+        expr: quantum_fidelity_estimate < 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low fidelity detected on {{ $labels.backend }}"
+          description: "Fidelity for {{ $labels.circuit_name }} on {{ $labels.backend }} is {{ $value | printf \"%.2f\" }}"
+
+      - alert: HighExecutionFailureRate
+        expr: |
+          sum(rate(quantum_circuit_executions_total{status="failure"}[5m])) by (backend)
+          / sum(rate(quantum_circuit_executions_total[5m])) by (backend) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High failure rate on {{ $labels.backend }}"
+          description: "Execution failure rate is {{ $value | printf \"%.1f%%\" }}"
+
+      - alert: CircuitDepthTooHigh
+        expr: histogram_quantile(0.95, sum(rate(quantum_circuit_depth_bucket[5m])) by (le, backend)) > 200
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Deep circuits detected on {{ $labels.backend }}"
+          description: "95th percentile circuit depth is {{ $value }}"
+
+  - name: quantum_backend_alerts
+    rules:
+      - alert: BackendUnavailable
+        expr: quantum_backend_available == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backend {{ $labels.backend }} is unavailable"
+          description: "The quantum backend has been unavailable for more than 5 minutes"
+
+      - alert: LongQueueTime
+        expr: quantum_backend_queue_length > 50
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Long queue on {{ $labels.backend }}"
+          description: "Queue length is {{ $value }} jobs"
+
+      - alert: StaleCalibration
+        expr: quantum_calibration_age_hours > 24
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Stale calibration on {{ $labels.backend }}"
+          description: "Calibration is {{ $value | printf \"%.1f\" }} hours old"
+
+      - alert: HighGateErrorRate
+        expr: quantum_gate_error_rate{gate_type="cx"} > 0.02
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CX error rate on {{ $labels.backend }}"
+          description: "CX gate error rate is {{ $value | printf \"%.4f\" }}"
+
+  - name: quantum_optimization_alerts
+    rules:
+      - alert: OptimizationNotConverging
+        expr: |
+          (quantum_cost_function_value - quantum_best_cost_value)
+          / abs(quantum_best_cost_value) > 0.5
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Optimization may be stuck"
+          description: "Cost function hasn't improved significantly in 30 minutes"
+
+      - alert: ExcessiveIterations
+        expr: increase(quantum_optimization_iterations_total[1h]) > 1000
+        labels:
+          severity: info
+        annotations:
+          summary: "High optimization iteration count"
+          description: "{{ $value }} iterations in the last hour"
+```
+
+<Warning>
+Set alert thresholds based on your specific hardware and application requirements. The values shown here are examples and should be tuned for your environment.
+</Warning>
+
+## 6. Custom Metrics for VQE Monitoring
+
+Implement specialized monitoring for variational algorithms.
+
+<Example>
+**VQE Convergence Monitor**
+
+```python
+# src/quantum_app/metrics/vqe_monitor.py
+"""Specialized monitoring for VQE algorithms."""
+from dataclasses import dataclass, field
+from typing import List, Optional, Callable
+import numpy as np
+from prometheus_client import Gauge, Counter, Histogram
+
+# VQE-specific metrics
+VQE_ENERGY = Gauge(
+    'quantum_vqe_energy',
+    'Current VQE energy estimate',
+    ['molecule', 'ansatz', 'experiment_id']
+)
+
+VQE_CHEMICAL_ACCURACY = Gauge(
+    'quantum_vqe_chemical_accuracy_reached',
+    'Whether chemical accuracy (1.6 mHa) has been reached',
+    ['molecule', 'experiment_id']
+)
+
+VQE_PARAMETER_VARIANCE = Gauge(
+    'quantum_vqe_parameter_variance',
+    'Variance in parameter updates (indicates convergence)',
+    ['experiment_id']
+)
+
+GRADIENT_EVALUATIONS = Counter(
+    'quantum_vqe_gradient_evaluations_total',
+    'Total gradient evaluations',
+    ['experiment_id', 'method']
+)
+
+ENERGY_VARIANCE = Gauge(
+    'quantum_vqe_energy_variance',
+    'Variance in energy measurements',
+    ['experiment_id']
+)
+
+
+@dataclass
+class VQEMonitorConfig:
+    """Configuration for VQE monitoring."""
+    molecule: str
+    ansatz: str
+    experiment_id: str
+    exact_energy: Optional[float] = None  # For accuracy tracking
+    chemical_accuracy: float = 0.0016  # Hartree (1.6 mHa)
+    window_size: int = 10  # For moving averages
+
+
+class VQEMonitor:
+    """Monitor VQE optimization progress."""
+
+    def __init__(self, config: VQEMonitorConfig):
+        self.config = config
+        self.energy_history: List[float] = []
+        self.parameter_history: List[np.ndarray] = []
+        self.gradient_history: List[np.ndarray] = []
+        self._best_energy = float('inf')
+
+    def record_iteration(
+        self,
+        energy: float,
+        parameters: np.ndarray,
+        gradient: Optional[np.ndarray] = None,
+        energy_std: Optional[float] = None
+    ):
+        """Record a VQE iteration."""
+        # Update history
+        self.energy_history.append(energy)
+        self.parameter_history.append(parameters.copy())
+        if gradient is not None:
+            self.gradient_history.append(gradient.copy())
+            GRADIENT_EVALUATIONS.labels(
+                experiment_id=self.config.experiment_id,
+                method='parameter_shift'
+            ).inc()
+
+        # Update best energy
+        if energy < self._best_energy:
+            self._best_energy = energy
+
+        # Record energy
+        VQE_ENERGY.labels(
+            molecule=self.config.molecule,
+            ansatz=self.config.ansatz,
+            experiment_id=self.config.experiment_id
+        ).set(energy)
+
+        # Check chemical accuracy
+        if self.config.exact_energy is not None:
+            error = abs(energy - self.config.exact_energy)
+            reached = 1 if error <= self.config.chemical_accuracy else 0
+            VQE_CHEMICAL_ACCURACY.labels(
+                molecule=self.config.molecule,
+                experiment_id=self.config.experiment_id
+            ).set(reached)
+
+        # Energy variance from measurements
+        if energy_std is not None:
+            ENERGY_VARIANCE.labels(
+                experiment_id=self.config.experiment_id
+            ).set(energy_std ** 2)
+
+        # Parameter variance (convergence indicator)
+        if len(self.parameter_history) >= self.config.window_size:
+            recent = np.array(self.parameter_history[-self.config.window_size:])
+            param_variance = np.mean(np.var(recent, axis=0))
+            VQE_PARAMETER_VARIANCE.labels(
+                experiment_id=self.config.experiment_id
+            ).set(param_variance)
+
+    def get_convergence_report(self) -> dict:
+        """Generate convergence report."""
+        if len(self.energy_history) < 2:
+            return {'status': 'insufficient_data'}
+
+        energies = np.array(self.energy_history)
+        recent = energies[-self.config.window_size:] if len(energies) >= self.config.window_size else energies
+
+        return {
+            'iterations': len(self.energy_history),
+            'best_energy': self._best_energy,
+            'current_energy': energies[-1],
+            'recent_std': float(np.std(recent)),
+            'improvement_rate': float((energies[0] - energies[-1]) / len(energies)),
+            'converged': np.std(recent) < 1e-6,
+            'chemical_accuracy_reached': (
+                abs(self._best_energy - self.config.exact_energy) <= self.config.chemical_accuracy
+                if self.config.exact_energy else None
+            )
+        }
+
+
+# Integration with VQE execution
+def create_vqe_callback(monitor: VQEMonitor) -> Callable:
+    """Create a callback function for VQE optimization."""
+    def callback(eval_count, parameters, energy, std):
+        monitor.record_iteration(
+            energy=energy,
+            parameters=parameters,
+            energy_std=std
+        )
+    return callback
+
+
+# Example usage
+if __name__ == '__main__':
+    config = VQEMonitorConfig(
+        molecule='H2',
+        ansatz='UCCSD',
+        experiment_id='vqe_001',
+        exact_energy=-1.137  # Exact H2 ground state energy
+    )
+
+    monitor = VQEMonitor(config)
+
+    # Simulate optimization
+    for i in range(100):
+        energy = -1.0 - 0.137 * (1 - np.exp(-i/20)) + np.random.normal(0, 0.01)
+        params = np.random.randn(4) * np.exp(-i/50)
+
+        monitor.record_iteration(energy, params)
+
+    print(monitor.get_convergence_report())
+```
+</Example>
+
+## Summary
+
+In this lesson, you learned to implement comprehensive monitoring for quantum applications:
+
+1. **Quantum-Specific Metrics**: Fidelity, circuit depth, gate counts, and optimization progress
+2. **Prometheus Integration**: Custom metrics exporters with proper labeling
+3. **Backend Monitoring**: Hardware status, queue lengths, and calibration tracking
+4. **Grafana Dashboards**: Visualization of quantum execution quality
+5. **Alerting**: Rules for quantum-specific conditions and thresholds
+6. **VQE Monitoring**: Specialized tracking for variational algorithms
+
+<Tip>
+Start with the most critical metrics (fidelity, success rate) and add more as you understand your application's behavior. Over-monitoring creates noise; under-monitoring leaves blind spots.
+</Tip>
+
+## Further Reading
+
+- Next lesson: Logging and Tracing for Quantum Applications
+- Related: CI/CD for Quantum Applications
+- Advanced: Infrastructure as Code for Quantum Systems

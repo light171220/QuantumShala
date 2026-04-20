@@ -1,0 +1,785 @@
+---
+title: "Practical Deployment Considerations"
+description: "Learn practical aspects of deploying quantum machine learning applications on real quantum hardware."
+---
+
+# Practical Deployment Considerations
+
+Deploying quantum machine learning on real hardware requires understanding hardware constraints, optimization strategies, and production workflows.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand hardware selection criteria
+- Implement circuit optimization
+- Apply transpilation strategies
+- Handle job scheduling and queuing
+- Design hybrid workflows
+- Evaluate cost-performance tradeoffs
+
+## 1. Hardware Selection
+
+Choosing the right quantum hardware for your application.
+
+<Definition term="Hardware Backend">
+A specific quantum processor or simulator accessed through a cloud service, characterized by its qubit count, connectivity, gate set, and error rates.
+</Definition>
+
+```python
+import numpy as np
+
+def hardware_comparison():
+    """
+    Compare different quantum hardware options.
+    """
+    print("Quantum Hardware Comparison:")
+    print("=" * 60)
+
+    hardware = [
+        {
+            'provider': 'IBM Quantum',
+            'technology': 'Superconducting',
+            'qubits': '127-1121',
+            'connectivity': 'Heavy-hex',
+            'gate_time': '~50ns (2Q)',
+            'T1': '100-300μs',
+            'error_2q': '0.5-2%'
+        },
+        {
+            'provider': 'Google Quantum AI',
+            'technology': 'Superconducting',
+            'qubits': '53-72',
+            'connectivity': 'Grid',
+            'gate_time': '~25ns (2Q)',
+            'T1': '~15μs',
+            'error_2q': '0.5-1%'
+        },
+        {
+            'provider': 'IonQ',
+            'technology': 'Trapped Ion',
+            'qubits': '11-32',
+            'connectivity': 'All-to-all',
+            'gate_time': '~200μs (2Q)',
+            'T1': '~10s',
+            'error_2q': '0.3-1%'
+        },
+        {
+            'provider': 'Rigetti',
+            'technology': 'Superconducting',
+            'qubits': '40-80',
+            'connectivity': 'Octagonal',
+            'gate_time': '~60ns (2Q)',
+            'T1': '~20μs',
+            'error_2q': '1-3%'
+        },
+        {
+            'provider': 'Quantinuum',
+            'technology': 'Trapped Ion',
+            'qubits': '12-32',
+            'connectivity': 'All-to-all',
+            'gate_time': '~300μs (2Q)',
+            'T1': '>1000s',
+            'error_2q': '0.1-0.5%'
+        }
+    ]
+
+    print(f"\n{'Provider':<18} {'Tech':<15} {'Qubits':<10} {'2Q Error':<10}")
+    print("-" * 60)
+    for h in hardware:
+        print(f"{h['provider']:<18} {h['technology']:<15} {h['qubits']:<10} {h['error_2q']:<10}")
+
+    print("\n\nSelection Criteria:")
+    print("-" * 40)
+
+    criteria = [
+        {
+            'criterion': 'Circuit depth',
+            'superconducting': 'Better (fast gates)',
+            'trapped_ion': 'Limited (slow gates)'
+        },
+        {
+            'criterion': 'Connectivity',
+            'superconducting': 'Limited (adds SWAPs)',
+            'trapped_ion': 'All-to-all (ideal)'
+        },
+        {
+            'criterion': 'Gate fidelity',
+            'superconducting': 'Good (0.5-2%)',
+            'trapped_ion': 'Excellent (0.1-0.5%)'
+        },
+        {
+            'criterion': 'Coherence',
+            'superconducting': 'Moderate (~100μs)',
+            'trapped_ion': 'Very long (~10s)'
+        },
+        {
+            'criterion': 'Throughput',
+            'superconducting': 'High',
+            'trapped_ion': 'Lower'
+        }
+    ]
+
+    print(f"\n{'Criterion':<18} {'Superconducting':<22} {'Trapped Ion':<22}")
+    print("-" * 60)
+    for c in criteria:
+        print(f"{c['criterion']:<18} {c['superconducting']:<22} {c['trapped_ion']:<22}")
+
+hardware_comparison()
+```
+
+<Tip>
+For QML applications with many variational iterations, superconducting systems offer faster throughput. For applications requiring high gate fidelity or complex connectivity, trapped ions may be preferable.
+</Tip>
+
+## 2. Circuit Transpilation
+
+Converting abstract circuits to hardware-executable form.
+
+```python
+import numpy as np
+
+class CircuitTranspiler:
+    """
+    Demonstrate circuit transpilation concepts.
+    """
+
+    def __init__(self, connectivity, native_gates):
+        """
+        Args:
+            connectivity: List of (qubit1, qubit2) pairs that can interact
+            native_gates: Set of native gate names
+        """
+        self.connectivity = set(tuple(sorted(e)) for e in connectivity)
+        self.native_gates = set(native_gates)
+
+    def check_connectivity(self, circuit):
+        """
+        Check if circuit respects hardware connectivity.
+        """
+        violations = []
+        for gate in circuit:
+            if len(gate['qubits']) == 2:
+                edge = tuple(sorted(gate['qubits']))
+                if edge not in self.connectivity:
+                    violations.append(gate)
+        return violations
+
+    def decompose_gate(self, gate_name):
+        """
+        Decompose gate into native gates.
+        """
+        decompositions = {
+            'CNOT': ['RZ', 'SX', 'CZ', 'SX', 'RZ'],
+            'RY': ['RZ', 'SX', 'RZ'],
+            'RX': ['RZ', 'SX', 'RZ'],
+            'SWAP': ['CZ', 'SX', 'CZ', 'SX', 'CZ'],
+            'H': ['RZ', 'SX', 'RZ']
+        }
+        return decompositions.get(gate_name, [gate_name])
+
+    def estimate_swap_overhead(self, qubit1, qubit2, n_qubits):
+        """
+        Estimate SWAPs needed to connect non-adjacent qubits.
+        """
+        # Simplified: assume linear connectivity for estimation
+        distance = abs(qubit1 - qubit2)
+        if distance == 1:
+            return 0
+        return distance - 1  # SWAPs needed
+
+    def analyze_circuit(self, circuit):
+        """
+        Analyze circuit for transpilation impact.
+        """
+        stats = {
+            'original_gates': len(circuit),
+            'native_gates': 0,
+            'non_native_gates': 0,
+            'connectivity_violations': 0,
+            'estimated_swaps': 0
+        }
+
+        for gate in circuit:
+            if gate['name'] in self.native_gates:
+                stats['native_gates'] += 1
+            else:
+                stats['non_native_gates'] += 1
+                stats['native_gates'] += len(self.decompose_gate(gate['name']))
+
+            if len(gate['qubits']) == 2:
+                edge = tuple(sorted(gate['qubits']))
+                if edge not in self.connectivity:
+                    stats['connectivity_violations'] += 1
+                    stats['estimated_swaps'] += self.estimate_swap_overhead(
+                        gate['qubits'][0], gate['qubits'][1], 5
+                    )
+
+        return stats
+
+# Demonstration
+print("Circuit Transpilation Analysis:")
+print("=" * 50)
+
+# Heavy-hex-like connectivity (subset)
+connectivity = [(0, 1), (1, 2), (2, 3), (3, 4), (1, 5), (3, 6)]
+native_gates = {'RZ', 'SX', 'CZ', 'X'}
+
+transpiler = CircuitTranspiler(connectivity, native_gates)
+
+# Sample QML circuit
+circuit = [
+    {'name': 'RY', 'qubits': [0]},
+    {'name': 'RY', 'qubits': [1]},
+    {'name': 'RY', 'qubits': [2]},
+    {'name': 'CNOT', 'qubits': [0, 1]},
+    {'name': 'CNOT', 'qubits': [1, 2]},
+    {'name': 'CNOT', 'qubits': [0, 2]},  # Non-adjacent
+    {'name': 'RY', 'qubits': [0]},
+    {'name': 'RY', 'qubits': [1]},
+    {'name': 'RY', 'qubits': [2]},
+]
+
+print(f"\nConnectivity: {sorted(connectivity)}")
+print(f"Native gates: {sorted(native_gates)}")
+
+stats = transpiler.analyze_circuit(circuit)
+
+print("\n\nCircuit Analysis:")
+print("-" * 40)
+print(f"  Original gates: {stats['original_gates']}")
+print(f"  Native gates needed: {stats['native_gates']}")
+print(f"  Connectivity violations: {stats['connectivity_violations']}")
+print(f"  Estimated SWAPs needed: {stats['estimated_swaps']}")
+
+# Gate count explosion
+print("\n\nGate Count After Transpilation:")
+print("-" * 40)
+
+decomposed_count = 0
+for gate in circuit:
+    decomposed = transpiler.decompose_gate(gate['name'])
+    decomposed_count += len(decomposed)
+    if gate['name'] not in native_gates:
+        print(f"  {gate['name']} → {' + '.join(decomposed)}")
+
+swap_gates = stats['estimated_swaps'] * 3  # Each SWAP = 3 CZ
+total_gates = decomposed_count + swap_gates
+print(f"\n  Decomposed gates: {decomposed_count}")
+print(f"  SWAP overhead: {swap_gates} gates")
+print(f"  Total estimated: {total_gates} gates")
+```
+
+<Warning>
+Transpilation can dramatically increase circuit depth. A 10-gate abstract circuit might become 50+ native gates after decomposition and SWAP insertion. Always check transpiled circuit depth before running.
+</Warning>
+
+## 3. Job Management and Queuing
+
+Handling the realities of cloud quantum access.
+
+```python
+import numpy as np
+import time
+
+class QuantumJobManager:
+    """
+    Manage quantum job submission and monitoring.
+    """
+
+    def __init__(self, max_shots=100000, max_circuits_per_job=300):
+        self.max_shots = max_shots
+        self.max_circuits_per_job = max_circuits_per_job
+        self.jobs = []
+
+    def estimate_queue_time(self, backend_queue, priority='standard'):
+        """
+        Estimate time to execution based on queue.
+        """
+        priority_multipliers = {
+            'premium': 0.1,
+            'standard': 1.0,
+            'fairshare': 2.0
+        }
+
+        base_time = backend_queue * 5  # 5 min per job in queue
+        return base_time * priority_multipliers.get(priority, 1.0)
+
+    def batch_circuits(self, circuits, shots_per_circuit):
+        """
+        Batch circuits into jobs respecting limits.
+        """
+        batches = []
+        current_batch = []
+        current_shots = 0
+
+        for circuit in circuits:
+            if (len(current_batch) >= self.max_circuits_per_job or
+                current_shots + shots_per_circuit > self.max_shots):
+                if current_batch:
+                    batches.append(current_batch)
+                current_batch = []
+                current_shots = 0
+
+            current_batch.append(circuit)
+            current_shots += shots_per_circuit
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
+
+    def optimize_execution(self, n_circuits, shots, backend_info):
+        """
+        Suggest optimal execution strategy.
+        """
+        recommendations = []
+
+        # Shot optimization
+        if shots > 10000:
+            recommendations.append({
+                'type': 'shot_reduction',
+                'suggestion': 'Consider starting with fewer shots',
+                'reason': 'Many VQE iterations benefit from lower shots initially'
+            })
+
+        # Batching
+        n_jobs = np.ceil(n_circuits / self.max_circuits_per_job)
+        if n_jobs > 5:
+            recommendations.append({
+                'type': 'reduce_circuits',
+                'suggestion': f'Consider reducing to {self.max_circuits_per_job * 5} circuits',
+                'reason': f'Currently requires {int(n_jobs)} jobs'
+            })
+
+        # Queue awareness
+        if backend_info.get('queue_length', 0) > 20:
+            recommendations.append({
+                'type': 'backend_selection',
+                'suggestion': 'Consider alternative backend',
+                'reason': f"Queue has {backend_info['queue_length']} jobs"
+            })
+
+        return recommendations
+
+# Demonstration
+print("Quantum Job Management:")
+print("=" * 50)
+
+manager = QuantumJobManager()
+
+# Scenario: QML training loop
+n_iterations = 100
+circuits_per_iteration = 10
+shots = 4096
+
+total_circuits = n_iterations * circuits_per_iteration
+total_shots = total_circuits * shots
+
+print(f"\nQML Training Scenario:")
+print("-" * 40)
+print(f"  Iterations: {n_iterations}")
+print(f"  Circuits per iteration: {circuits_per_iteration}")
+print(f"  Total circuits: {total_circuits}")
+print(f"  Shots per circuit: {shots}")
+print(f"  Total shots: {total_shots:,}")
+
+# Batching analysis
+circuits = list(range(total_circuits))
+batches = manager.batch_circuits(circuits, shots)
+
+print(f"\n\nBatching Analysis:")
+print("-" * 40)
+print(f"  Jobs needed: {len(batches)}")
+print(f"  Circuits per job: {[len(b) for b in batches[:5]]}...")
+
+# Queue estimates
+for queue_length in [5, 20, 50]:
+    wait = manager.estimate_queue_time(queue_length)
+    print(f"\n  Queue length {queue_length}: ~{wait:.0f} min wait")
+
+# Optimization recommendations
+backend_info = {'queue_length': 25, 'error_rate': 0.01}
+recs = manager.optimize_execution(total_circuits, shots, backend_info)
+
+print("\n\nOptimization Recommendations:")
+print("-" * 40)
+for rec in recs:
+    print(f"\n  [{rec['type']}]")
+    print(f"    {rec['suggestion']}")
+    print(f"    Reason: {rec['reason']}")
+```
+
+## 4. Hybrid Workflow Design
+
+Structuring classical-quantum workflows for production.
+
+```python
+import numpy as np
+
+class HybridWorkflow:
+    """
+    Design and manage hybrid classical-quantum workflows.
+    """
+
+    def __init__(self, classical_budget_ratio=0.8):
+        """
+        Args:
+            classical_budget_ratio: Fraction of work to do classically
+        """
+        self.classical_ratio = classical_budget_ratio
+        self.workflow_steps = []
+
+    def add_classical_preprocessing(self, name, compute_cost):
+        self.workflow_steps.append({
+            'type': 'classical',
+            'name': name,
+            'cost': compute_cost,
+            'stage': 'preprocessing'
+        })
+
+    def add_quantum_step(self, name, circuits, shots):
+        self.workflow_steps.append({
+            'type': 'quantum',
+            'name': name,
+            'circuits': circuits,
+            'shots': shots,
+            'stage': 'execution'
+        })
+
+    def add_classical_postprocessing(self, name, compute_cost):
+        self.workflow_steps.append({
+            'type': 'classical',
+            'name': name,
+            'cost': compute_cost,
+            'stage': 'postprocessing'
+        })
+
+    def analyze_workflow(self):
+        """
+        Analyze workflow efficiency.
+        """
+        classical_cost = sum(s['cost'] for s in self.workflow_steps
+                           if s['type'] == 'classical')
+        quantum_circuits = sum(s['circuits'] for s in self.workflow_steps
+                             if s['type'] == 'quantum')
+        quantum_shots = sum(s['circuits'] * s['shots'] for s in self.workflow_steps
+                          if s['type'] == 'quantum')
+
+        return {
+            'classical_compute': classical_cost,
+            'quantum_circuits': quantum_circuits,
+            'quantum_shots': quantum_shots,
+            'n_steps': len(self.workflow_steps)
+        }
+
+# Demonstration
+print("Hybrid Workflow Design:")
+print("=" * 50)
+
+# Example: VQE workflow
+workflow = HybridWorkflow()
+
+# Preprocessing
+workflow.add_classical_preprocessing('molecule_geometry', 10)
+workflow.add_classical_preprocessing('hamiltonian_construction', 50)
+workflow.add_classical_preprocessing('qubit_mapping', 20)
+
+# Quantum execution (multiple iterations)
+for i in range(5):  # Simplified: 5 optimization iterations
+    workflow.add_quantum_step(f'vqe_iteration_{i}', circuits=20, shots=4096)
+    workflow.add_classical_postprocessing(f'gradient_estimation_{i}', 5)
+    workflow.add_classical_postprocessing(f'parameter_update_{i}', 2)
+
+# Final analysis
+workflow.add_classical_postprocessing('result_analysis', 30)
+
+analysis = workflow.analyze_workflow()
+
+print("\nVQE Workflow Analysis:")
+print("-" * 40)
+print(f"  Workflow steps: {analysis['n_steps']}")
+print(f"  Classical compute units: {analysis['classical_compute']}")
+print(f"  Quantum circuits: {analysis['quantum_circuits']}")
+print(f"  Total quantum shots: {analysis['quantum_shots']:,}")
+
+# Best practices
+print("\n\nHybrid Workflow Best Practices:")
+print("-" * 40)
+
+practices = [
+    {
+        'practice': 'Maximize classical preprocessing',
+        'benefit': 'Reduce quantum circuit complexity'
+    },
+    {
+        'practice': 'Batch quantum jobs',
+        'benefit': 'Minimize queue overhead'
+    },
+    {
+        'practice': 'Implement caching',
+        'benefit': 'Avoid redundant quantum calls'
+    },
+    {
+        'practice': 'Use asynchronous execution',
+        'benefit': 'Overlap classical and quantum work'
+    },
+    {
+        'practice': 'Progressive refinement',
+        'benefit': 'Start with low shots, increase as needed'
+    },
+    {
+        'practice': 'Checkpoint regularly',
+        'benefit': 'Recover from failures'
+    }
+]
+
+for p in practices:
+    print(f"\n  {p['practice']}")
+    print(f"    → {p['benefit']}")
+```
+
+<Tip>
+Structure workflows so that quantum device time is minimized. Do as much classical pre-processing and post-processing as possible to reduce the number of quantum circuit executions.
+</Tip>
+
+## 5. Cost Optimization
+
+Managing the economics of quantum computing.
+
+```python
+import numpy as np
+
+def cost_analysis():
+    """
+    Analyze quantum computing costs.
+    """
+    print("Quantum Computing Cost Analysis:")
+    print("=" * 50)
+
+    # Pricing models (illustrative)
+    pricing = {
+        'IBM Quantum': {
+            'model': 'Time-based',
+            'rate': '$1.60/second',
+            'details': 'Billed per quantum runtime second'
+        },
+        'Amazon Braket': {
+            'model': 'Per-shot + per-task',
+            'rate': '$0.00035/shot + $0.30/task',
+            'details': 'Varies by device type'
+        },
+        'Azure Quantum': {
+            'model': 'Credits/subscription',
+            'rate': 'Varies by provider',
+            'details': 'Access to multiple backends'
+        },
+        'Google (research)': {
+            'model': 'Research access',
+            'rate': 'Free for research',
+            'details': 'Limited to collaborations'
+        }
+    }
+
+    print("\nPricing Models:")
+    print("-" * 40)
+    for provider, info in pricing.items():
+        print(f"\n  {provider}:")
+        print(f"    Model: {info['model']}")
+        print(f"    Rate: {info['rate']}")
+
+    # Cost estimation for QML training
+    print("\n\nQML Training Cost Estimation:")
+    print("-" * 40)
+
+    scenarios = [
+        {
+            'name': 'Small VQE',
+            'iterations': 50,
+            'circuits': 10,
+            'shots': 1000,
+            'circuit_time_s': 0.001
+        },
+        {
+            'name': 'Medium VQE',
+            'iterations': 200,
+            'circuits': 50,
+            'shots': 4096,
+            'circuit_time_s': 0.002
+        },
+        {
+            'name': 'Large QML',
+            'iterations': 500,
+            'circuits': 100,
+            'shots': 8192,
+            'circuit_time_s': 0.005
+        }
+    ]
+
+    for s in scenarios:
+        total_circuits = s['iterations'] * s['circuits']
+        total_shots = total_circuits * s['shots']
+        total_time = total_circuits * s['circuit_time_s'] * s['shots'] / 1000
+
+        # IBM-style (time-based)
+        ibm_cost = total_time * 1.60
+
+        # Braket-style (per-shot)
+        braket_cost = total_shots * 0.00035 + total_circuits * 0.0001
+
+        print(f"\n  {s['name']}:")
+        print(f"    Circuits: {total_circuits:,}, Shots: {total_shots:,}")
+        print(f"    Est. runtime: {total_time:.1f} seconds")
+        print(f"    Time-based: ${ibm_cost:.2f}")
+        print(f"    Per-shot: ${braket_cost:.2f}")
+
+    # Cost reduction strategies
+    print("\n\nCost Reduction Strategies:")
+    print("-" * 40)
+
+    strategies = [
+        {
+            'strategy': 'Reduce shot count initially',
+            'savings': '2-4x',
+            'tradeoff': 'Lower precision in early iterations'
+        },
+        {
+            'strategy': 'Use simulators for debugging',
+            'savings': '10-100x',
+            'tradeoff': 'No noise effects'
+        },
+        {
+            'strategy': 'Batch circuits efficiently',
+            'savings': '1.5-2x',
+            'tradeoff': 'More complex job management'
+        },
+        {
+            'strategy': 'Parameter-shift gradient batching',
+            'savings': '2x',
+            'tradeoff': 'Requires circuit restructuring'
+        },
+        {
+            'strategy': 'SPSA instead of parameter-shift',
+            'savings': '5-10x',
+            'tradeoff': 'Noisier gradients'
+        }
+    ]
+
+    for s in strategies:
+        print(f"\n  {s['strategy']}")
+        print(f"    Potential savings: {s['savings']}")
+        print(f"    Tradeoff: {s['tradeoff']}")
+
+cost_analysis()
+```
+
+## 6. Production Checklist
+
+Comprehensive checklist for deploying QML applications.
+
+```python
+def production_checklist():
+    """
+    Production deployment checklist for QML.
+    """
+    print("QML Production Deployment Checklist:")
+    print("=" * 50)
+
+    checklist = {
+        'Pre-Deployment': [
+            ('Validate on simulator', 'Test all circuits on noise-free simulator'),
+            ('Noise simulation', 'Test with realistic noise models'),
+            ('Transpile circuits', 'Check gate count and depth after transpilation'),
+            ('Verify connectivity', 'Ensure circuit respects hardware topology'),
+            ('Benchmark baseline', 'Establish classical performance baseline')
+        ],
+        'Hardware Selection': [
+            ('Choose backend', 'Select based on circuit requirements'),
+            ('Check calibration', 'Review recent calibration data'),
+            ('Verify availability', 'Check maintenance windows'),
+            ('Test connectivity', 'Confirm API access and credentials')
+        ],
+        'Execution': [
+            ('Implement retries', 'Handle transient failures'),
+            ('Add timeouts', 'Prevent hanging on stale jobs'),
+            ('Enable logging', 'Track all job submissions'),
+            ('Checkpoint results', 'Save intermediate results'),
+            ('Monitor queue', 'Track wait times')
+        ],
+        'Error Handling': [
+            ('Apply error mitigation', 'ZNE, symmetry verification, etc.'),
+            ('Validate results', 'Sanity check quantum outputs'),
+            ('Detect outliers', 'Flag suspicious results'),
+            ('Implement fallbacks', 'Classical backup when quantum fails')
+        ],
+        'Post-Processing': [
+            ('Aggregate results', 'Combine results from batches'),
+            ('Statistical analysis', 'Compute confidence intervals'),
+            ('Compare to classical', 'Verify quantum advantage claims'),
+            ('Document findings', 'Record all parameters and results')
+        ]
+    }
+
+    for category, items in checklist.items():
+        print(f"\n{category}:")
+        print("-" * 40)
+        for item, description in items:
+            print(f"  [ ] {item}")
+            print(f"      {description}")
+
+    # Common pitfalls
+    print("\n\nCommon Pitfalls to Avoid:")
+    print("-" * 40)
+
+    pitfalls = [
+        "Running untranspiled circuits (silent failures or errors)",
+        "Ignoring queue times in experiment design",
+        "Using too many shots early in optimization",
+        "Not validating results against classical simulation",
+        "Hardcoding backend names (backends change)",
+        "Forgetting to handle job expiration",
+        "Not accounting for mid-circuit calibration drift"
+    ]
+
+    for p in pitfalls:
+        print(f"  - {p}")
+
+    # Success metrics
+    print("\n\nSuccess Metrics:")
+    print("-" * 40)
+
+    metrics = [
+        ('Circuit success rate', 'Fraction of circuits completing without error'),
+        ('Result quality', 'Comparison to simulator/classical benchmark'),
+        ('Cost efficiency', 'Results per dollar spent'),
+        ('Time to solution', 'Wall-clock time including queue'),
+        ('Reproducibility', 'Variance across repeated runs')
+    ]
+
+    for metric, description in metrics:
+        print(f"  {metric}:")
+        print(f"    {description}")
+
+production_checklist()
+```
+
+<Warning>
+Never deploy untested circuits to quantum hardware. Always validate on a simulator first, then test on hardware with a small number of shots before running full experiments.
+</Warning>
+
+## Summary
+
+Deploying QML on real hardware requires careful attention to practical details:
+
+1. **Hardware Selection**: Match hardware capabilities to application requirements
+2. **Transpilation**: Understand gate decomposition and routing overhead
+3. **Job Management**: Handle queuing, batching, and timeouts
+4. **Hybrid Workflows**: Minimize quantum device time
+5. **Cost Optimization**: Use shots efficiently, consider alternatives
+6. **Production Readiness**: Follow comprehensive checklists
+
+The gap between simulation and real hardware is significant—plan accordingly.
+
+## Next Steps
+
+This concludes the NISQ Applications chapter. You now have a comprehensive understanding of deploying quantum machine learning on near-term quantum hardware.

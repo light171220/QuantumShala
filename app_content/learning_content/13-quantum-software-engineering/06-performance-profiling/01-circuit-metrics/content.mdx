@@ -1,0 +1,609 @@
+---
+title: "Circuit Complexity Metrics"
+description: "Master the essential metrics for quantifying quantum circuit complexity including depth, width, gate counts, and connectivity measures that determine execution feasibility and performance on real hardware."
+duration: 55
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Calculate circuit depth and critical path length for arbitrary quantum circuits
+- Analyze gate count metrics including total gates, two-qubit gates, and gate type distribution
+- Evaluate circuit width and qubit connectivity requirements
+- Compute circuit volume and spacetime overhead metrics
+- Apply complexity metrics to compare circuit implementations and optimization strategies
+
+## 1. Introduction to Circuit Complexity
+
+When developing quantum algorithms, understanding how to measure and analyze circuit complexity is fundamental to successful execution on real hardware. Circuit complexity metrics tell us not just whether an algorithm is theoretically correct, but whether it can actually run on current or near-term quantum devices.
+
+<Definition term="Circuit Complexity">
+Circuit complexity encompasses quantitative measures of the resources required to implement a quantum circuit, including the number of qubits, gates, circuit depth, and connectivity requirements. These metrics directly impact execution time, error accumulation, and hardware feasibility.
+</Definition>
+
+The key insight is that quantum circuits operate under severe constraints:
+
+- **Decoherence limits execution time** - circuits must complete before quantum states decay
+- **Gate errors accumulate** - more gates mean more potential errors
+- **Connectivity is limited** - not all qubits can interact directly on real hardware
+
+<Tip>
+Always profile your circuits before running on real hardware. A circuit that works perfectly in simulation may be completely infeasible on actual quantum processors due to depth or connectivity constraints.
+</Tip>
+
+## 2. Circuit Depth
+
+Circuit depth is arguably the most critical metric for near-term quantum computing. It determines how long a circuit takes to execute and directly impacts error accumulation.
+
+<Definition term="Circuit Depth">
+The depth of a quantum circuit is the number of time steps required to execute the circuit, where gates that can execute in parallel count as a single time step. Mathematically, it equals the length of the longest path from any input to any output in the circuit's directed acyclic graph (DAG).
+</Definition>
+
+<Formula>
+$$D = \max_{i} \left( \sum_{t=1}^{T} \mathbb{1}[\text{qubit } i \text{ has gate at time } t] \right)$$
+</Formula>
+
+where $D$ is the circuit depth and $T$ is the total number of time steps.
+
+### Calculating Depth in Practice
+
+```python
+from qiskit import QuantumCircuit
+from qiskit.converters import circuit_to_dag
+import numpy as np
+
+def analyze_circuit_depth(circuit: QuantumCircuit) -> dict:
+    """
+    Comprehensive depth analysis for a quantum circuit.
+
+    Args:
+        circuit: A Qiskit QuantumCircuit
+
+    Returns:
+        Dictionary containing depth metrics
+    """
+    dag = circuit_to_dag(circuit)
+
+    # Basic depth
+    total_depth = circuit.depth()
+
+    # Depth by gate type
+    depth_single_qubit = circuit.depth(
+        filter_function=lambda x: x.operation.num_qubits == 1
+    )
+    depth_two_qubit = circuit.depth(
+        filter_function=lambda x: x.operation.num_qubits == 2
+    )
+
+    # Critical path analysis
+    critical_path_length = dag.longest_path()
+
+    # Per-qubit depth analysis
+    qubit_depths = []
+    for qubit in circuit.qubits:
+        qubit_ops = [node for node in dag.nodes()
+                     if hasattr(node, 'qargs') and qubit in node.qargs]
+        qubit_depths.append(len(qubit_ops))
+
+    return {
+        'total_depth': total_depth,
+        'single_qubit_depth': depth_single_qubit,
+        'two_qubit_depth': depth_two_qubit,
+        'critical_path_length': len(critical_path_length),
+        'qubit_depths': qubit_depths,
+        'max_qubit_depth': max(qubit_depths),
+        'min_qubit_depth': min(qubit_depths),
+        'depth_variance': np.var(qubit_depths)
+    }
+
+# Example: Analyze a GHZ state preparation circuit
+def create_ghz_circuit(n_qubits: int) -> QuantumCircuit:
+    """Create an n-qubit GHZ state preparation circuit."""
+    qc = QuantumCircuit(n_qubits)
+    qc.h(0)
+    for i in range(n_qubits - 1):
+        qc.cx(i, i + 1)
+    return qc
+
+# Analyze GHZ circuit
+ghz = create_ghz_circuit(5)
+metrics = analyze_circuit_depth(ghz)
+print("GHZ Circuit Depth Analysis:")
+for key, value in metrics.items():
+    print(f"  {key}: {value}")
+```
+
+### Depth and Decoherence
+
+The relationship between circuit depth and decoherence is quantified by:
+
+<Formula>
+$$P_{success} \approx \left(1 - \frac{t_{gate}}{T_2}\right)^D$$
+</Formula>
+
+where $t_{gate}$ is the gate execution time, $T_2$ is the decoherence time, and $D$ is the circuit depth.
+
+<Warning>
+For current superconducting qubits with $T_2 \approx 100 \mu s$ and $t_{gate} \approx 100 ns$, circuits deeper than approximately 1000 layers face severe decoherence issues. Plan your algorithms accordingly.
+</Warning>
+
+## 3. Gate Count Metrics
+
+Gate counts provide insight into the computational resources and error susceptibility of a circuit.
+
+### Total Gate Count
+
+```python
+def analyze_gate_counts(circuit: QuantumCircuit) -> dict:
+    """
+    Analyze gate counts and distributions in a quantum circuit.
+
+    Args:
+        circuit: A Qiskit QuantumCircuit
+
+    Returns:
+        Dictionary containing gate count metrics
+    """
+    # Count operations by type
+    ops_dict = circuit.count_ops()
+
+    # Categorize gates
+    single_qubit_gates = ['x', 'y', 'z', 'h', 's', 't', 'sdg', 'tdg',
+                          'rx', 'ry', 'rz', 'u1', 'u2', 'u3', 'u', 'id']
+    two_qubit_gates = ['cx', 'cz', 'cy', 'swap', 'iswap', 'rzz', 'rxx',
+                       'ryy', 'ecr', 'cp', 'crx', 'cry', 'crz']
+    three_qubit_gates = ['ccx', 'cswap', 'ccz']
+
+    single_count = sum(ops_dict.get(g, 0) for g in single_qubit_gates)
+    two_count = sum(ops_dict.get(g, 0) for g in two_qubit_gates)
+    three_count = sum(ops_dict.get(g, 0) for g in three_qubit_gates)
+
+    total_gates = sum(ops_dict.values())
+
+    # Calculate gate density
+    gate_density = total_gates / (circuit.num_qubits * circuit.depth()) \
+                   if circuit.depth() > 0 else 0
+
+    return {
+        'total_gates': total_gates,
+        'single_qubit_gates': single_count,
+        'two_qubit_gates': two_count,
+        'three_qubit_gates': three_count,
+        'gate_breakdown': dict(ops_dict),
+        'gate_density': gate_density,
+        'two_qubit_ratio': two_count / total_gates if total_gates > 0 else 0
+    }
+
+# Example analysis
+qc = QuantumCircuit(4)
+qc.h([0, 1, 2, 3])
+qc.cx(0, 1)
+qc.cx(1, 2)
+qc.cx(2, 3)
+qc.rz(0.5, [0, 1, 2, 3])
+
+gate_metrics = analyze_gate_counts(qc)
+print("Gate Count Analysis:")
+for key, value in gate_metrics.items():
+    print(f"  {key}: {value}")
+```
+
+### Two-Qubit Gate Cost
+
+Two-qubit gates are typically 10-100x more error-prone than single-qubit gates. The **two-qubit gate count** is often the most predictive metric for circuit fidelity:
+
+<Formula>
+$$F_{circuit} \approx F_{1Q}^{N_{1Q}} \cdot F_{2Q}^{N_{2Q}}$$
+</Formula>
+
+where $F_{1Q}$ and $F_{2Q}$ are single and two-qubit gate fidelities, and $N_{1Q}$, $N_{2Q}$ are the respective gate counts.
+
+<Definition term="T-Count">
+The T-count is the number of T gates (or T-equivalent gates) in a circuit. This metric is crucial for fault-tolerant quantum computing, where T gates require expensive magic state distillation while Clifford gates can be implemented transversally.
+</Definition>
+
+```python
+def calculate_t_count(circuit: QuantumCircuit) -> dict:
+    """
+    Calculate T-count and related metrics for fault-tolerant cost estimation.
+
+    The T-count is critical because T gates require magic state distillation
+    in fault-tolerant implementations.
+    """
+    ops = circuit.count_ops()
+
+    # T gates and their adjoints
+    t_count = ops.get('t', 0) + ops.get('tdg', 0)
+
+    # Gates that decompose into T gates
+    # Toffoli (CCX) decomposes to 7 T gates
+    toffoli_t_cost = ops.get('ccx', 0) * 7
+
+    # Controlled rotations may require T gates depending on precision
+
+    return {
+        't_count': t_count,
+        'toffoli_count': ops.get('ccx', 0),
+        'estimated_t_cost': t_count + toffoli_t_cost,
+        'clifford_count': (ops.get('h', 0) + ops.get('s', 0) +
+                          ops.get('sdg', 0) + ops.get('cx', 0))
+    }
+```
+
+## 4. Circuit Width and Qubit Connectivity
+
+### Circuit Width
+
+<Definition term="Circuit Width">
+The circuit width is the number of qubits used by the circuit. This is the simplest but most fundamental metric, as it determines whether a circuit can run on a given quantum processor.
+</Definition>
+
+```python
+def analyze_circuit_width(circuit: QuantumCircuit) -> dict:
+    """
+    Analyze qubit usage and width metrics.
+    """
+    dag = circuit_to_dag(circuit)
+
+    # Total qubits
+    total_qubits = circuit.num_qubits
+    total_clbits = circuit.num_clbits
+
+    # Active qubits (qubits that have at least one operation)
+    active_qubits = set()
+    for node in dag.op_nodes():
+        for qubit in node.qargs:
+            active_qubits.add(qubit)
+
+    # Ancilla analysis (qubits used but not measured)
+    measured_qubits = set()
+    for node in dag.op_nodes():
+        if node.op.name == 'measure':
+            measured_qubits.add(node.qargs[0])
+
+    potential_ancillas = active_qubits - measured_qubits
+
+    return {
+        'total_qubits': total_qubits,
+        'total_classical_bits': total_clbits,
+        'active_qubits': len(active_qubits),
+        'idle_qubits': total_qubits - len(active_qubits),
+        'measured_qubits': len(measured_qubits),
+        'potential_ancillas': len(potential_ancillas)
+    }
+```
+
+### Connectivity Requirements
+
+Real quantum hardware has limited qubit connectivity. Analyzing connectivity requirements helps predict SWAP overhead:
+
+```python
+def analyze_connectivity(circuit: QuantumCircuit) -> dict:
+    """
+    Analyze the connectivity requirements of a circuit.
+
+    Returns metrics about which qubits need to interact,
+    helping predict routing/SWAP overhead on real hardware.
+    """
+    dag = circuit_to_dag(circuit)
+
+    # Build interaction graph
+    interactions = {}
+    for node in dag.op_nodes():
+        if len(node.qargs) >= 2:
+            qubits = tuple(sorted([circuit.qubits.index(q) for q in node.qargs]))
+            if len(qubits) == 2:
+                interactions[qubits] = interactions.get(qubits, 0) + 1
+
+    # Calculate connectivity metrics
+    unique_interactions = len(interactions)
+    total_two_qubit_ops = sum(interactions.values())
+
+    # Maximum interactions for a single qubit pair
+    max_interaction_pair = max(interactions.items(), key=lambda x: x[1]) \
+                           if interactions else (None, 0)
+
+    # Interaction graph density
+    n = circuit.num_qubits
+    max_possible_interactions = n * (n - 1) // 2
+    connectivity_density = unique_interactions / max_possible_interactions \
+                          if max_possible_interactions > 0 else 0
+
+    return {
+        'unique_qubit_pairs': unique_interactions,
+        'total_two_qubit_ops': total_two_qubit_ops,
+        'most_connected_pair': max_interaction_pair,
+        'connectivity_density': connectivity_density,
+        'interaction_map': interactions
+    }
+
+# Example: Analyze a circuit's connectivity
+qc = QuantumCircuit(4)
+qc.cx(0, 1)
+qc.cx(0, 2)
+qc.cx(0, 3)
+qc.cx(1, 2)
+
+conn_metrics = analyze_connectivity(qc)
+print("Connectivity Analysis:")
+for key, value in conn_metrics.items():
+    print(f"  {key}: {value}")
+```
+
+## 5. Circuit Volume and Spacetime Cost
+
+### Quantum Volume Metric
+
+<Definition term="Circuit Volume">
+Circuit volume is the product of circuit width (number of qubits) and circuit depth. It represents the total "spacetime" resources required by the circuit: $V = n \times D$ where $n$ is qubit count and $D$ is depth.
+</Definition>
+
+<Formula>
+$$V = n \times D$$
+</Formula>
+
+```python
+def calculate_circuit_volume(circuit: QuantumCircuit) -> dict:
+    """
+    Calculate circuit volume and related spacetime metrics.
+    """
+    n_qubits = circuit.num_qubits
+    depth = circuit.depth()
+
+    # Basic volume
+    volume = n_qubits * depth
+
+    # Effective volume (accounting for idle qubits)
+    dag = circuit_to_dag(circuit)
+    active_volume = 0
+    for qubit in circuit.qubits:
+        qubit_ops = len([node for node in dag.nodes()
+                        if hasattr(node, 'qargs') and qubit in node.qargs])
+        active_volume += qubit_ops
+
+    # Utilization efficiency
+    utilization = active_volume / volume if volume > 0 else 0
+
+    # Gate density per spacetime unit
+    total_gates = sum(circuit.count_ops().values())
+    gate_spacetime_density = total_gates / volume if volume > 0 else 0
+
+    return {
+        'circuit_volume': volume,
+        'active_volume': active_volume,
+        'utilization_efficiency': utilization,
+        'gate_spacetime_density': gate_spacetime_density,
+        'width': n_qubits,
+        'depth': depth
+    }
+```
+
+### Comparing Circuit Implementations
+
+Volume metrics help compare different implementations of the same algorithm:
+
+```python
+def compare_circuits(circuits: list, names: list = None) -> None:
+    """
+    Compare multiple circuit implementations using key metrics.
+    """
+    if names is None:
+        names = [f"Circuit {i}" for i in range(len(circuits))]
+
+    print(f"{'Metric':<25}", end="")
+    for name in names:
+        print(f"{name:<15}", end="")
+    print()
+    print("-" * (25 + 15 * len(circuits)))
+
+    metrics_to_compare = [
+        ('Qubits', lambda c: c.num_qubits),
+        ('Depth', lambda c: c.depth()),
+        ('Total Gates', lambda c: sum(c.count_ops().values())),
+        ('CX Count', lambda c: c.count_ops().get('cx', 0)),
+        ('Volume', lambda c: c.num_qubits * c.depth()),
+    ]
+
+    for metric_name, metric_fn in metrics_to_compare:
+        print(f"{metric_name:<25}", end="")
+        for circuit in circuits:
+            print(f"{metric_fn(circuit):<15}", end="")
+        print()
+
+# Example: Compare two implementations
+def qft_standard(n: int) -> QuantumCircuit:
+    """Standard QFT implementation."""
+    qc = QuantumCircuit(n)
+    for i in range(n):
+        qc.h(i)
+        for j in range(i + 1, n):
+            qc.cp(np.pi / 2**(j-i), j, i)
+    for i in range(n // 2):
+        qc.swap(i, n - i - 1)
+    return qc
+
+def qft_approximate(n: int, precision: int = 3) -> QuantumCircuit:
+    """Approximate QFT with limited rotation precision."""
+    qc = QuantumCircuit(n)
+    for i in range(n):
+        qc.h(i)
+        for j in range(i + 1, min(i + precision + 1, n)):
+            qc.cp(np.pi / 2**(j-i), j, i)
+    for i in range(n // 2):
+        qc.swap(i, n - i - 1)
+    return qc
+
+# Compare 8-qubit QFT implementations
+standard_qft = qft_standard(8)
+approx_qft = qft_approximate(8, precision=3)
+compare_circuits([standard_qft, approx_qft],
+                 ['Standard QFT', 'Approx QFT'])
+```
+
+## 6. Comprehensive Circuit Profiler
+
+Here's a complete profiling tool that combines all metrics:
+
+```python
+class CircuitProfiler:
+    """
+    Comprehensive quantum circuit profiler.
+
+    Analyzes circuits across all major complexity dimensions and
+    provides actionable insights for optimization.
+    """
+
+    def __init__(self, circuit: QuantumCircuit):
+        self.circuit = circuit
+        self.dag = circuit_to_dag(circuit)
+        self._profile = None
+
+    def profile(self) -> dict:
+        """Generate complete circuit profile."""
+        if self._profile is not None:
+            return self._profile
+
+        self._profile = {
+            'basic': self._basic_metrics(),
+            'depth': self._depth_metrics(),
+            'gates': self._gate_metrics(),
+            'connectivity': self._connectivity_metrics(),
+            'volume': self._volume_metrics(),
+            'cost_estimates': self._cost_estimates()
+        }
+        return self._profile
+
+    def _basic_metrics(self) -> dict:
+        return {
+            'num_qubits': self.circuit.num_qubits,
+            'num_clbits': self.circuit.num_clbits,
+            'num_parameters': self.circuit.num_parameters
+        }
+
+    def _depth_metrics(self) -> dict:
+        return {
+            'total_depth': self.circuit.depth(),
+            'two_qubit_depth': self.circuit.depth(
+                filter_function=lambda x: x.operation.num_qubits == 2
+            )
+        }
+
+    def _gate_metrics(self) -> dict:
+        ops = self.circuit.count_ops()
+        total = sum(ops.values())
+        two_qubit = sum(ops.get(g, 0) for g in
+                       ['cx', 'cz', 'swap', 'iswap', 'ecr'])
+        return {
+            'total_gates': total,
+            'two_qubit_gates': two_qubit,
+            'gate_breakdown': dict(ops),
+            'two_qubit_ratio': two_qubit / total if total > 0 else 0
+        }
+
+    def _connectivity_metrics(self) -> dict:
+        interactions = set()
+        for node in self.dag.op_nodes():
+            if len(node.qargs) == 2:
+                pair = tuple(sorted([
+                    self.circuit.qubits.index(q) for q in node.qargs
+                ]))
+                interactions.add(pair)
+
+        n = self.circuit.num_qubits
+        max_pairs = n * (n - 1) // 2
+
+        return {
+            'unique_pairs': len(interactions),
+            'max_possible_pairs': max_pairs,
+            'connectivity_ratio': len(interactions) / max_pairs if max_pairs > 0 else 0
+        }
+
+    def _volume_metrics(self) -> dict:
+        depth = self.circuit.depth()
+        width = self.circuit.num_qubits
+        return {
+            'volume': width * depth,
+            'width': width,
+            'depth': depth
+        }
+
+    def _cost_estimates(self) -> dict:
+        """Estimate execution costs based on typical hardware parameters."""
+        ops = self.circuit.count_ops()
+        two_qubit = sum(ops.get(g, 0) for g in ['cx', 'cz', 'swap'])
+        single_qubit = sum(ops.values()) - two_qubit
+
+        # Typical error rates
+        f1q, f2q = 0.9995, 0.995  # Typical fidelities
+
+        estimated_fidelity = (f1q ** single_qubit) * (f2q ** two_qubit)
+
+        return {
+            'estimated_fidelity': estimated_fidelity,
+            'estimated_success_probability': estimated_fidelity,
+            'shots_for_99_confidence': int(np.ceil(
+                np.log(0.01) / np.log(1 - estimated_fidelity)
+            )) if estimated_fidelity < 1 else 1
+        }
+
+    def summary(self) -> str:
+        """Generate human-readable summary."""
+        p = self.profile()
+
+        lines = [
+            "=" * 50,
+            "CIRCUIT COMPLEXITY PROFILE",
+            "=" * 50,
+            f"Qubits: {p['basic']['num_qubits']}",
+            f"Depth: {p['depth']['total_depth']}",
+            f"Volume: {p['volume']['volume']}",
+            f"Total Gates: {p['gates']['total_gates']}",
+            f"Two-Qubit Gates: {p['gates']['two_qubit_gates']} "
+            f"({p['gates']['two_qubit_ratio']:.1%})",
+            f"Connectivity Ratio: {p['connectivity']['connectivity_ratio']:.2%}",
+            "-" * 50,
+            f"Estimated Fidelity: {p['cost_estimates']['estimated_fidelity']:.4f}",
+            "=" * 50
+        ]
+
+        return "\n".join(lines)
+
+# Usage example
+qc = QuantumCircuit(4)
+qc.h([0, 1, 2, 3])
+qc.cx(0, 1)
+qc.cx(1, 2)
+qc.cx(2, 3)
+qc.measure_all()
+
+profiler = CircuitProfiler(qc)
+print(profiler.summary())
+```
+
+## Summary
+
+In this lesson, you learned the essential metrics for quantifying quantum circuit complexity:
+
+1. **Circuit Depth** - The critical path length determining execution time and decoherence impact
+2. **Gate Counts** - Total gates, two-qubit gates, and T-count for error and fault-tolerance analysis
+3. **Circuit Width** - Qubit requirements and utilization efficiency
+4. **Connectivity** - Interaction patterns affecting routing overhead on real hardware
+5. **Circuit Volume** - Spacetime resources combining width and depth
+
+These metrics form the foundation for:
+- Predicting whether circuits will run successfully on real hardware
+- Comparing different algorithm implementations
+- Guiding optimization strategies
+- Estimating execution fidelity and required shot counts
+
+<Tip>
+Always profile your circuits before optimization. Understanding where complexity lies (depth vs. gate count vs. connectivity) determines which optimization strategies will be most effective.
+</Tip>
+
+## Further Reading
+
+- Next lesson: Resource Estimation Tools
+- Related: Circuit Optimization Techniques
+- Application: Hardware-Aware Compilation

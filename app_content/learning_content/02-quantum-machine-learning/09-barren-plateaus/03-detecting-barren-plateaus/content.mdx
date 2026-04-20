@@ -1,0 +1,468 @@
+---
+title: "Detecting Barren Plateaus"
+description: "Learn methods to detect and diagnose barren plateaus in variational quantum circuits."
+---
+
+# Detecting Barren Plateaus
+
+Before attempting to train a variational quantum circuit, it's crucial to diagnose whether it suffers from barren plateaus. This lesson covers practical detection methods.
+
+## Gradient Variance Analysis
+
+The primary diagnostic is measuring how gradient variance scales with system size.
+
+<Definition>
+**Barren Plateau Detection Criterion**:
+
+A circuit exhibits barren plateaus if:
+
+$$\text{Var}\left[\frac{\partial C}{\partial \theta_k}\right] \in O(b^{-n})$$
+
+where $b > 1$ and $n$ is the number of qubits. Fit empirical data to $\log(\text{Var}) = -\alpha n + \beta$ and check if $\alpha > 0$.
+</Definition>
+
+```python
+import numpy as np
+from typing import Callable, List, Tuple
+
+class BarrenPlateauDetector:
+    """Detect barren plateaus through gradient variance analysis."""
+
+    def __init__(self, circuit_builder: Callable):
+        """
+        Args:
+            circuit_builder: Function(n_qubits, n_layers) -> (circuit_fn, n_params)
+        """
+        self.circuit_builder = circuit_builder
+
+    def measure_gradient_variance(self, n_qubits: int, n_layers: int,
+                                   n_samples: int = 100) -> float:
+        """Measure gradient variance for given circuit size."""
+        circuit_fn, n_params = self.circuit_builder(n_qubits, n_layers)
+        dim = 2 ** n_qubits
+
+        def cost(params):
+            state = circuit_fn(params)
+            c = 0
+            for z in range(dim):
+                prob = np.abs(state[z])**2
+                parity = bin(z).count('1') % 2
+                c += prob * (1 - 2 * parity)
+            return c
+
+        gradients = []
+        for _ in range(n_samples):
+            params = np.random.uniform(0, 2*np.pi, n_params)
+            shift = np.pi / 2
+            params_p, params_m = params.copy(), params.copy()
+            params_p[0] += shift
+            params_m[0] -= shift
+            grad = (cost(params_p) - cost(params_m)) / 2
+            gradients.append(grad)
+
+        return np.var(gradients)
+
+    def detect_barren_plateau(self, qubit_range: List[int],
+                               n_layers_fn: Callable = lambda n: n,
+                               n_samples: int = 100) -> dict:
+        """Detect barren plateau by fitting scaling."""
+        variances = []
+
+        for n in qubit_range:
+            n_layers = n_layers_fn(n)
+            var = self.measure_gradient_variance(n, n_layers, n_samples)
+            variances.append(var)
+
+        # Fit log(var) = -alpha * n + beta
+        log_vars = np.log(np.array(variances) + 1e-15)
+        coeffs = np.polyfit(qubit_range, log_vars, 1)
+        alpha = -coeffs[0]  # Decay rate
+        beta = coeffs[1]
+
+        # Compute goodness of fit
+        fitted = coeffs[0] * np.array(qubit_range) + coeffs[1]
+        residuals = log_vars - fitted
+        r_squared = 1 - np.var(residuals) / np.var(log_vars)
+
+        return {
+            'qubit_range': qubit_range,
+            'variances': variances,
+            'decay_rate': alpha,
+            'intercept': beta,
+            'r_squared': r_squared,
+            'is_barren_plateau': alpha > 0.5 and r_squared > 0.8,
+            'scaling_base': np.exp(alpha)
+        }
+
+def create_hardware_efficient_circuit(n_qubits: int, n_layers: int):
+    """Build hardware-efficient ansatz."""
+    dim = 2 ** n_qubits
+    n_params = n_qubits * n_layers * 2  # RY and RZ per qubit
+
+    def circuit(params):
+        state = np.zeros(dim, dtype=complex)
+        state[0] = 1
+        param_idx = 0
+
+        for _ in range(n_layers):
+            # RY layer
+            for q in range(n_qubits):
+                theta = params[param_idx]
+                c, s = np.cos(theta/2), np.sin(theta/2)
+                new_state = np.zeros_like(state)
+                for z in range(dim):
+                    z_flip = z ^ (1 << (n_qubits - 1 - q))
+                    new_state[z] = c * state[z] - s * state[z_flip]
+                    new_state[z_flip] = s * state[z] + c * state[z_flip]
+                state = new_state
+                param_idx += 1
+
+            # RZ layer
+            for q in range(n_qubits):
+                theta = params[param_idx]
+                for z in range(dim):
+                    bit = (z >> (n_qubits - 1 - q)) & 1
+                    phase = np.exp(1j * theta/2) if bit else np.exp(-1j * theta/2)
+                    state[z] *= phase
+                param_idx += 1
+
+            # CNOT chain
+            for q in range(n_qubits - 1):
+                new_state = np.zeros_like(state)
+                for z in range(dim):
+                    ctrl = (z >> (n_qubits - 1 - q)) & 1
+                    z_new = z ^ (1 << (n_qubits - 1 - (q+1))) if ctrl else z
+                    new_state[z_new] += state[z]
+                state = new_state
+
+        return state
+
+    return circuit, n_params
+
+# Detect barren plateau
+print("Barren Plateau Detection")
+print("=" * 60)
+
+detector = BarrenPlateauDetector(create_hardware_efficient_circuit)
+result = detector.detect_barren_plateau(
+    qubit_range=[3, 4, 5, 6, 7],
+    n_layers_fn=lambda n: n,
+    n_samples=100
+)
+
+print(f"\nScaling Analysis:")
+for n, var in zip(result['qubit_range'], result['variances']):
+    print(f"  n={n}: Var[grad] = {var:.4e}")
+
+print(f"\nFit: log(Var) = -{result['decay_rate']:.3f} * n + {result['intercept']:.3f}")
+print(f"Scaling base: {result['scaling_base']:.3f}")
+print(f"R-squared: {result['r_squared']:.3f}")
+print(f"Barren Plateau Detected: {result['is_barren_plateau']}")
+```
+
+## Statistical Testing
+
+Use statistical tests to rigorously determine if gradients are vanishing.
+
+<Tip>
+A t-test can determine whether the mean gradient is significantly different from zero given the observed variance.
+</Tip>
+
+```python
+import numpy as np
+from scipy import stats
+
+def statistical_gradient_test(gradients: np.ndarray,
+                               significance: float = 0.05) -> dict:
+    """Test if gradients are statistically different from zero.
+
+    Args:
+        gradients: Array of gradient samples
+        significance: Significance level (default 0.05)
+
+    Returns:
+        Dict with test results
+    """
+    n = len(gradients)
+    mean_grad = np.mean(gradients)
+    std_grad = np.std(gradients, ddof=1)
+    se = std_grad / np.sqrt(n)
+
+    # t-test against zero
+    if se > 0:
+        t_stat = mean_grad / se
+        p_value = 2 * (1 - stats.t.cdf(abs(t_stat), df=n-1))
+    else:
+        t_stat = 0 if mean_grad == 0 else np.inf
+        p_value = 1.0 if mean_grad == 0 else 0.0
+
+    # Confidence interval
+    t_critical = stats.t.ppf(1 - significance/2, df=n-1)
+    ci_low = mean_grad - t_critical * se
+    ci_high = mean_grad + t_critical * se
+
+    # Signal-to-noise ratio
+    snr = abs(mean_grad) / std_grad if std_grad > 0 else 0
+
+    return {
+        'mean': mean_grad,
+        'std': std_grad,
+        'se': se,
+        't_statistic': t_stat,
+        'p_value': p_value,
+        'ci_95': (ci_low, ci_high),
+        'snr': snr,
+        'is_significant': p_value < significance,
+        'practical_trainability': snr > 0.1  # Rule of thumb
+    }
+
+def comprehensive_trainability_analysis(circuit_builder, n_qubits: int,
+                                         n_layers: int,
+                                         n_samples: int = 200):
+    """Comprehensive analysis of circuit trainability."""
+    circuit_fn, n_params = circuit_builder(n_qubits, n_layers)
+    dim = 2 ** n_qubits
+
+    def cost(params):
+        state = circuit_fn(params)
+        c = 0
+        for z in range(dim):
+            prob = np.abs(state[z])**2
+            parity = bin(z).count('1') % 2
+            c += prob * (1 - 2 * parity)
+        return c
+
+    # Sample gradients for multiple parameters
+    all_results = []
+
+    for param_idx in range(min(5, n_params)):  # Test first 5 params
+        gradients = []
+        for _ in range(n_samples):
+            params = np.random.uniform(0, 2*np.pi, n_params)
+            shift = np.pi / 2
+            params_p, params_m = params.copy(), params.copy()
+            params_p[param_idx] += shift
+            params_m[param_idx] -= shift
+            grad = (cost(params_p) - cost(params_m)) / 2
+            gradients.append(grad)
+
+        result = statistical_gradient_test(np.array(gradients))
+        result['param_idx'] = param_idx
+        all_results.append(result)
+
+    return all_results
+
+# Run analysis
+print("\nStatistical Trainability Analysis")
+print("=" * 60)
+
+for n in [4, 6, 8]:
+    results = comprehensive_trainability_analysis(
+        create_hardware_efficient_circuit, n, n_layers=n
+    )
+
+    print(f"\nn={n} qubits:")
+    for r in results:
+        trainable = "Yes" if r['practical_trainability'] else "No"
+        print(f"  θ_{r['param_idx']}: SNR={r['snr']:.4f}, "
+              f"p={r['p_value']:.4f}, trainable={trainable}")
+```
+
+## Gradient Distribution Analysis
+
+Examining the full distribution of gradients provides additional insights.
+
+```python
+import numpy as np
+
+def analyze_gradient_distribution(circuit_builder, n_qubits: int,
+                                   n_layers: int, n_samples: int = 500):
+    """Analyze the full gradient distribution."""
+    circuit_fn, n_params = circuit_builder(n_qubits, n_layers)
+    dim = 2 ** n_qubits
+
+    def cost(params):
+        state = circuit_fn(params)
+        c = 0
+        for z in range(dim):
+            prob = np.abs(state[z])**2
+            parity = bin(z).count('1') % 2
+            c += prob * (1 - 2 * parity)
+        return c
+
+    gradients = []
+    for _ in range(n_samples):
+        params = np.random.uniform(0, 2*np.pi, n_params)
+        shift = np.pi / 2
+        params_p, params_m = params.copy(), params.copy()
+        params_p[0] += shift
+        params_m[0] -= shift
+        grad = (cost(params_p) - cost(params_m)) / 2
+        gradients.append(grad)
+
+    gradients = np.array(gradients)
+
+    # Distribution statistics
+    analysis = {
+        'mean': np.mean(gradients),
+        'std': np.std(gradients),
+        'variance': np.var(gradients),
+        'skewness': np.mean(((gradients - np.mean(gradients)) /
+                            np.std(gradients))**3) if np.std(gradients) > 0 else 0,
+        'kurtosis': np.mean(((gradients - np.mean(gradients)) /
+                            np.std(gradients))**4) - 3 if np.std(gradients) > 0 else 0,
+        'min': np.min(gradients),
+        'max': np.max(gradients),
+        'median': np.median(gradients),
+        'iqr': np.percentile(gradients, 75) - np.percentile(gradients, 25),
+        'percentile_95_range': (np.percentile(gradients, 2.5),
+                                np.percentile(gradients, 97.5))
+    }
+
+    # Check for normality (Jarque-Bera test approximation)
+    n = len(gradients)
+    jb_stat = n/6 * (analysis['skewness']**2 + analysis['kurtosis']**2/4)
+    analysis['jarque_bera'] = jb_stat
+    analysis['is_normal'] = jb_stat < 6  # Approximate threshold
+
+    return analysis
+
+# Analyze distributions
+print("\nGradient Distribution Analysis")
+print("=" * 60)
+
+for n in [3, 5, 7]:
+    analysis = analyze_gradient_distribution(
+        create_hardware_efficient_circuit, n, n_layers=n
+    )
+
+    print(f"\nn={n} qubits:")
+    print(f"  Mean:     {analysis['mean']:.6f}")
+    print(f"  Std:      {analysis['std']:.6f}")
+    print(f"  Variance: {analysis['variance']:.2e}")
+    print(f"  Range:    [{analysis['min']:.4f}, {analysis['max']:.4f}]")
+    print(f"  95% CI:   {analysis['percentile_95_range']}")
+    print(f"  Normal:   {analysis['is_normal']}")
+```
+
+## Diagnostic Tools
+
+Practical tools for diagnosing circuit trainability.
+
+```python
+import numpy as np
+
+class TrainabilityDiagnostics:
+    """Comprehensive trainability diagnostics."""
+
+    def __init__(self, circuit_builder):
+        self.circuit_builder = circuit_builder
+
+    def run_full_diagnostic(self, n_qubits: int, n_layers: int,
+                            n_samples: int = 100) -> dict:
+        """Run comprehensive trainability diagnostic."""
+        circuit_fn, n_params = self.circuit_builder(n_qubits, n_layers)
+        dim = 2 ** n_qubits
+
+        # Cost functions at different localities
+        def make_cost(locality):
+            def cost(params):
+                state = circuit_fn(params)
+                c = 0
+                for z in range(dim):
+                    prob = np.abs(state[z])**2
+                    if locality == 'global':
+                        parity = bin(z).count('1') % 2
+                    else:
+                        first_bit = (z >> (n_qubits - 1)) & 1
+                        parity = first_bit
+                    c += prob * (1 - 2 * parity)
+                return c
+            return cost
+
+        diagnostics = {}
+
+        # Test both local and global costs
+        for locality in ['local', 'global']:
+            cost_fn = make_cost(locality)
+            gradients = []
+
+            for _ in range(n_samples):
+                params = np.random.uniform(0, 2*np.pi, n_params)
+                shift = np.pi / 2
+                params_p, params_m = params.copy(), params.copy()
+                params_p[0] += shift
+                params_m[0] -= shift
+                grad = (cost_fn(params_p) - cost_fn(params_m)) / 2
+                gradients.append(grad)
+
+            gradients = np.array(gradients)
+            diagnostics[locality] = {
+                'variance': np.var(gradients),
+                'mean_abs': np.mean(np.abs(gradients)),
+                'max_abs': np.max(np.abs(gradients)),
+                'fraction_significant': np.mean(np.abs(gradients) > 0.01)
+            }
+
+        # Overall assessment
+        diagnostics['assessment'] = {
+            'global_trainable': diagnostics['global']['variance'] > 1e-6,
+            'local_trainable': diagnostics['local']['variance'] > 1e-4,
+            'recommend_local': (diagnostics['local']['variance'] /
+                               max(diagnostics['global']['variance'], 1e-15)) > 10,
+            'severity': 'mild' if diagnostics['global']['variance'] > 1e-4
+                       else 'moderate' if diagnostics['global']['variance'] > 1e-6
+                       else 'severe'
+        }
+
+        return diagnostics
+
+    def generate_report(self, n_qubits: int, n_layers: int) -> str:
+        """Generate human-readable diagnostic report."""
+        diag = self.run_full_diagnostic(n_qubits, n_layers)
+
+        report = []
+        report.append(f"Trainability Report: {n_qubits} qubits, {n_layers} layers")
+        report.append("=" * 50)
+
+        report.append("\nGlobal Cost Function:")
+        report.append(f"  Variance: {diag['global']['variance']:.2e}")
+        report.append(f"  Mean |grad|: {diag['global']['mean_abs']:.4f}")
+
+        report.append("\nLocal Cost Function:")
+        report.append(f"  Variance: {diag['local']['variance']:.2e}")
+        report.append(f"  Mean |grad|: {diag['local']['mean_abs']:.4f}")
+
+        report.append("\nAssessment:")
+        report.append(f"  Barren Plateau Severity: {diag['assessment']['severity']}")
+        report.append(f"  Global Trainable: {diag['assessment']['global_trainable']}")
+        report.append(f"  Local Trainable: {diag['assessment']['local_trainable']}")
+
+        if diag['assessment']['recommend_local']:
+            report.append("\n  RECOMMENDATION: Use local cost function")
+
+        return "\n".join(report)
+
+# Run diagnostics
+print("\nTrainability Diagnostics")
+print("=" * 60)
+
+diagnostics = TrainabilityDiagnostics(create_hardware_efficient_circuit)
+
+for n in [4, 6, 8]:
+    print(diagnostics.generate_report(n, n_layers=n))
+    print()
+```
+
+## Summary
+
+Key detection methods for barren plateaus:
+
+1. **Scaling Analysis**: Fit gradient variance to exponential decay
+2. **Statistical Testing**: Test if gradients differ significantly from zero
+3. **Distribution Analysis**: Examine full gradient distribution properties
+4. **Comparative Analysis**: Compare local vs global cost functions
+
+<Warning>
+Always run diagnostics before committing to training a variational circuit. Detecting barren plateaus early saves significant computational resources.
+</Warning>

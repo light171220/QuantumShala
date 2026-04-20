@@ -1,0 +1,537 @@
+---
+title: "Causes of Barren Plateaus"
+description: "Explore the various causes of barren plateaus including expressibility, entanglement, noise, and cost function locality."
+---
+
+# Causes of Barren Plateaus
+
+Understanding the root causes of barren plateaus is essential for designing trainable quantum circuits. Multiple factors contribute to gradient vanishing, often interacting in complex ways.
+
+## Expressibility-Induced Barren Plateaus
+
+Highly expressive circuits that can generate nearly any quantum state are paradoxically harder to train.
+
+<Definition>
+**Expressibility-Induced Barren Plateau**:
+
+When a parameterized circuit $U(\theta)$ forms an approximate 2-design, its outputs uniformly sample the state space, leading to:
+
+$$\text{Var}\left[\partial_k C\right] \sim \frac{1}{2^n}$$
+
+where $n$ is the number of qubits.
+</Definition>
+
+```python
+import numpy as np
+
+class ExpressibilityAnalyzer:
+    """Analyze relationship between expressibility and barren plateaus."""
+
+    def __init__(self, n_qubits: int):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+
+    def compute_expressibility(self, circuit_fn, n_params: int,
+                                n_samples: int = 200) -> float:
+        """Compute expressibility via fidelity distribution."""
+        fidelities = []
+
+        for _ in range(n_samples):
+            params1 = np.random.uniform(0, 2*np.pi, n_params)
+            params2 = np.random.uniform(0, 2*np.pi, n_params)
+
+            state1 = circuit_fn(params1)
+            state2 = circuit_fn(params2)
+
+            fidelity = np.abs(np.vdot(state1, state2))**2
+            fidelities.append(fidelity)
+
+        # Compare to Haar random: mean fidelity = 1/(d+1)
+        haar_mean = 1 / (self.dim + 1)
+        actual_mean = np.mean(fidelities)
+
+        # Expressibility score (higher = more expressive)
+        return 1 - abs(actual_mean - haar_mean) / haar_mean
+
+    def compute_gradient_variance(self, circuit_fn, cost_fn,
+                                   n_params: int,
+                                   n_samples: int = 100) -> float:
+        """Compute gradient variance."""
+        gradients = []
+
+        for _ in range(n_samples):
+            params = np.random.uniform(0, 2*np.pi, n_params)
+
+            # Parameter shift
+            shift = np.pi / 2
+            params_p, params_m = params.copy(), params.copy()
+            params_p[0] += shift
+            params_m[0] -= shift
+
+            grad = (cost_fn(params_p) - cost_fn(params_m)) / 2
+            gradients.append(grad)
+
+        return np.var(gradients)
+
+def create_circuit(n_qubits: int, n_layers: int):
+    """Create a parameterized circuit function."""
+    dim = 2 ** n_qubits
+    n_params = n_qubits * n_layers
+
+    def circuit(params):
+        state = np.zeros(dim, dtype=complex)
+        state[0] = 1
+        param_idx = 0
+
+        for _ in range(n_layers):
+            for q in range(n_qubits):
+                theta = params[param_idx]
+                c, s = np.cos(theta/2), np.sin(theta/2)
+                new_state = np.zeros_like(state)
+                for z in range(dim):
+                    z_flip = z ^ (1 << (n_qubits - 1 - q))
+                    new_state[z] = c * state[z] - s * state[z_flip]
+                    new_state[z_flip] = s * state[z] + c * state[z_flip]
+                state = new_state
+                param_idx += 1
+
+            # CNOT chain
+            for q in range(n_qubits - 1):
+                new_state = np.zeros_like(state)
+                for z in range(dim):
+                    ctrl = (z >> (n_qubits - 1 - q)) & 1
+                    z_new = z ^ (1 << (n_qubits - 1 - (q+1))) if ctrl else z
+                    new_state[z_new] += state[z]
+                state = new_state
+
+        return state
+
+    return circuit, n_params
+
+def create_cost_fn(circuit_fn, n_qubits: int):
+    """Create cost function."""
+    dim = 2 ** n_qubits
+
+    def cost(params):
+        state = circuit_fn(params)
+        c = 0
+        for z in range(dim):
+            prob = np.abs(state[z])**2
+            parity = bin(z).count('1') % 2
+            c += prob * (1 - 2 * parity)
+        return c
+
+    return cost
+
+# Analyze expressibility vs trainability trade-off
+print("Expressibility vs Trainability Trade-off")
+print("=" * 60)
+
+n_qubits = 4
+analyzer = ExpressibilityAnalyzer(n_qubits)
+
+for n_layers in [1, 2, 4, 8]:
+    circuit_fn, n_params = create_circuit(n_qubits, n_layers)
+    cost_fn = create_cost_fn(circuit_fn, n_qubits)
+
+    expr = analyzer.compute_expressibility(circuit_fn, n_params)
+    var_grad = analyzer.compute_gradient_variance(circuit_fn, cost_fn, n_params)
+
+    print(f"\nLayers={n_layers}:")
+    print(f"  Expressibility: {expr:.3f}")
+    print(f"  Gradient Var:   {var_grad:.4e}")
+```
+
+## Entanglement-Induced Barren Plateaus
+
+High entanglement between qubits causes local observables to see nearly thermal states.
+
+<Formula>
+**Entanglement Entropy Bound**:
+
+For subsystem A with entanglement entropy $S_A$ near maximal:
+
+$$S_A \approx \min(|A|, n - |A|) \log 2$$
+
+Local measurements become exponentially insensitive to parameters.
+</Formula>
+
+```python
+import numpy as np
+
+def compute_entanglement_entropy(state: np.ndarray, n_qubits: int,
+                                  subsystem: list) -> float:
+    """Compute entanglement entropy for a subsystem."""
+    n_A = len(subsystem)
+    n_B = n_qubits - n_A
+    dim_A = 2 ** n_A
+    dim_B = 2 ** n_B
+    dim = 2 ** n_qubits
+
+    # Compute reduced density matrix
+    rho_A = np.zeros((dim_A, dim_A), dtype=complex)
+    complement = [q for q in range(n_qubits) if q not in subsystem]
+
+    for i in range(dim_A):
+        for j in range(dim_A):
+            for k in range(dim_B):
+                # Construct full indices
+                idx1, idx2 = 0, 0
+                for q in range(n_qubits):
+                    if q in subsystem:
+                        pos = subsystem.index(q)
+                        idx1 |= ((i >> (n_A - 1 - pos)) & 1) << (n_qubits - 1 - q)
+                        idx2 |= ((j >> (n_A - 1 - pos)) & 1) << (n_qubits - 1 - q)
+                    else:
+                        pos = complement.index(q)
+                        idx1 |= ((k >> (n_B - 1 - pos)) & 1) << (n_qubits - 1 - q)
+                        idx2 |= ((k >> (n_B - 1 - pos)) & 1) << (n_qubits - 1 - q)
+
+                rho_A[i, j] += state[idx1] * np.conj(state[idx2])
+
+    # Von Neumann entropy
+    eigenvalues = np.linalg.eigvalsh(rho_A)
+    eigenvalues = eigenvalues[eigenvalues > 1e-12]
+    entropy = -np.sum(eigenvalues * np.log2(eigenvalues + 1e-15))
+
+    return entropy
+
+def analyze_entanglement_gradient_relation():
+    """Analyze how entanglement affects gradient variance."""
+
+    print("\nEntanglement vs Gradient Variance")
+    print("=" * 60)
+
+    n_qubits = 5
+
+    for n_layers in [1, 2, 4, 8]:
+        circuit_fn, n_params = create_circuit(n_qubits, n_layers)
+        cost_fn = create_cost_fn(circuit_fn, n_qubits)
+
+        # Sample entanglement and gradients
+        entropies = []
+        gradients = []
+
+        for _ in range(50):
+            params = np.random.uniform(0, 2*np.pi, n_params)
+            state = circuit_fn(params)
+
+            # Entanglement of first qubit
+            entropy = compute_entanglement_entropy(state, n_qubits, [0])
+            entropies.append(entropy)
+
+            # Gradient
+            shift = np.pi / 2
+            params_p, params_m = params.copy(), params.copy()
+            params_p[0] += shift
+            params_m[0] -= shift
+            grad = (cost_fn(params_p) - cost_fn(params_m)) / 2
+            gradients.append(abs(grad))
+
+        print(f"\nLayers={n_layers}:")
+        print(f"  Mean entropy: {np.mean(entropies):.3f} (max=1.0)")
+        print(f"  Mean |grad|:  {np.mean(gradients):.4e}")
+        print(f"  Var[grad]:    {np.var(gradients):.4e}")
+
+analyze_entanglement_gradient_relation()
+```
+
+## Noise-Induced Barren Plateaus
+
+Quantum noise introduces additional gradient suppression beyond the unitary case.
+
+<Warning>
+Even circuits that avoid unitary barren plateaus can exhibit noise-induced barren plateaus when run on real hardware.
+</Warning>
+
+```python
+import numpy as np
+
+class NoisyCircuit:
+    """Simulate noisy quantum circuit with depolarizing noise."""
+
+    def __init__(self, n_qubits: int, noise_rate: float = 0.01):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+        self.noise_rate = noise_rate
+
+    def apply_depolarizing_noise(self, rho: np.ndarray) -> np.ndarray:
+        """Apply depolarizing noise to density matrix."""
+        identity = np.eye(self.dim) / self.dim
+        return (1 - self.noise_rate) * rho + self.noise_rate * identity
+
+    def forward(self, params: np.ndarray, n_layers: int) -> np.ndarray:
+        """Execute noisy circuit, returning density matrix."""
+        # Start with pure state
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1
+        rho = np.outer(state, state.conj())
+
+        param_idx = 0
+        for _ in range(n_layers):
+            # Rotation layer
+            for q in range(self.n_qubits):
+                theta = params[param_idx]
+                # Apply rotation via unitary conjugation
+                U = self._ry_matrix(theta, q)
+                rho = U @ rho @ U.conj().T
+                # Apply noise after each gate
+                rho = self.apply_depolarizing_noise(rho)
+                param_idx += 1
+
+            # CNOT layer
+            for q in range(self.n_qubits - 1):
+                U = self._cnot_matrix(q, q + 1)
+                rho = U @ rho @ U.conj().T
+                rho = self.apply_depolarizing_noise(rho)
+
+        return rho
+
+    def _ry_matrix(self, theta: float, qubit: int) -> np.ndarray:
+        """Build RY gate matrix."""
+        U = np.eye(self.dim, dtype=complex)
+        c, s = np.cos(theta/2), np.sin(theta/2)
+
+        for z in range(self.dim):
+            z_flip = z ^ (1 << (self.n_qubits - 1 - qubit))
+            if z < z_flip:
+                U[z, z] = c
+                U[z, z_flip] = -s
+                U[z_flip, z] = s
+                U[z_flip, z_flip] = c
+
+        return U
+
+    def _cnot_matrix(self, control: int, target: int) -> np.ndarray:
+        """Build CNOT gate matrix."""
+        U = np.zeros((self.dim, self.dim), dtype=complex)
+
+        for z in range(self.dim):
+            ctrl = (z >> (self.n_qubits - 1 - control)) & 1
+            z_new = z ^ (1 << (self.n_qubits - 1 - target)) if ctrl else z
+            U[z_new, z] = 1
+
+        return U
+
+    def compute_cost(self, rho: np.ndarray) -> float:
+        """Compute expectation value of global Z observable."""
+        observable = np.zeros((self.dim, self.dim))
+        for z in range(self.dim):
+            parity = bin(z).count('1') % 2
+            observable[z, z] = 1 - 2 * parity
+
+        return np.real(np.trace(observable @ rho))
+
+def compare_noisy_vs_noiseless():
+    """Compare gradient variance with and without noise."""
+
+    print("\nNoisy vs Noiseless Gradient Variance")
+    print("=" * 60)
+    print(f"{'Qubits':<8} {'Noiseless':<15} {'Noisy (1%)':<15} {'Noisy (5%)':<15}")
+    print("-" * 60)
+
+    for n_qubits in [2, 3, 4, 5]:
+        n_layers = n_qubits
+        n_params = n_qubits * n_layers
+
+        # Noiseless
+        circuit_fn, _ = create_circuit(n_qubits, n_layers)
+        cost_fn = create_cost_fn(circuit_fn, n_qubits)
+
+        grads_noiseless = []
+        for _ in range(50):
+            params = np.random.uniform(0, 2*np.pi, n_params)
+            shift = np.pi / 2
+            params_p, params_m = params.copy(), params.copy()
+            params_p[0] += shift
+            params_m[0] -= shift
+            grad = (cost_fn(params_p) - cost_fn(params_m)) / 2
+            grads_noiseless.append(grad)
+
+        var_noiseless = np.var(grads_noiseless)
+
+        # Noisy circuits
+        vars_noisy = []
+        for noise_rate in [0.01, 0.05]:
+            noisy = NoisyCircuit(n_qubits, noise_rate)
+            grads = []
+
+            for _ in range(50):
+                params = np.random.uniform(0, 2*np.pi, n_params)
+                shift = np.pi / 2
+                params_p, params_m = params.copy(), params.copy()
+                params_p[0] += shift
+                params_m[0] -= shift
+
+                rho_p = noisy.forward(params_p, n_layers)
+                rho_m = noisy.forward(params_m, n_layers)
+
+                grad = (noisy.compute_cost(rho_p) - noisy.compute_cost(rho_m)) / 2
+                grads.append(grad)
+
+            vars_noisy.append(np.var(grads))
+
+        print(f"{n_qubits:<8} {var_noiseless:<15.4e} {vars_noisy[0]:<15.4e} {vars_noisy[1]:<15.4e}")
+
+compare_noisy_vs_noiseless()
+```
+
+## Cost Function Locality
+
+The locality of the cost function dramatically affects barren plateau severity.
+
+<Tip>
+Local cost functions (measuring few qubits) have polynomially decaying gradients, while global cost functions (measuring all qubits) have exponentially decaying gradients.
+</Tip>
+
+```python
+import numpy as np
+
+def analyze_cost_locality():
+    """Compare gradient variance for different cost function localities."""
+
+    print("\nCost Function Locality Analysis")
+    print("=" * 60)
+
+    for n_qubits in [4, 6, 8]:
+        circuit_fn, n_params = create_circuit(n_qubits, n_layers=n_qubits)
+        dim = 2 ** n_qubits
+
+        print(f"\nn={n_qubits} qubits:")
+
+        for locality in [1, 2, n_qubits//2, n_qubits]:
+            # Cost function measuring 'locality' qubits
+            def cost_fn(params, loc=locality):
+                state = circuit_fn(params)
+                c = 0
+                for z in range(dim):
+                    prob = np.abs(state[z])**2
+                    # Parity of first 'loc' qubits only
+                    relevant_bits = z >> (n_qubits - loc)
+                    parity = bin(relevant_bits).count('1') % 2
+                    c += prob * (1 - 2 * parity)
+                return c
+
+            grads = []
+            for _ in range(100):
+                params = np.random.uniform(0, 2*np.pi, n_params)
+                shift = np.pi / 2
+                params_p, params_m = params.copy(), params.copy()
+                params_p[0] += shift
+                params_m[0] -= shift
+                grad = (cost_fn(params_p) - cost_fn(params_m)) / 2
+                grads.append(grad)
+
+            var = np.var(grads)
+            label = "global" if locality == n_qubits else f"{locality}-local"
+            print(f"  {label:<10}: Var[grad] = {var:.4e}")
+
+analyze_cost_locality()
+```
+
+## Hardware Connectivity Effects
+
+Limited hardware connectivity can actually help avoid barren plateaus.
+
+```python
+import numpy as np
+
+def compare_connectivity_patterns():
+    """Compare gradient variance for different connectivity patterns."""
+
+    print("\nHardware Connectivity and Barren Plateaus")
+    print("=" * 60)
+
+    n_qubits = 6
+    n_layers = 4
+    n_params = n_qubits * n_layers
+    dim = 2 ** n_qubits
+
+    def create_circuit_connectivity(connectivity: str):
+        """Create circuit with specified connectivity."""
+
+        def circuit(params):
+            state = np.zeros(dim, dtype=complex)
+            state[0] = 1
+            param_idx = 0
+
+            for layer in range(n_layers):
+                # Rotation layer
+                for q in range(n_qubits):
+                    theta = params[param_idx]
+                    c, s = np.cos(theta/2), np.sin(theta/2)
+                    new_state = np.zeros_like(state)
+                    for z in range(dim):
+                        z_flip = z ^ (1 << (n_qubits - 1 - q))
+                        new_state[z] = c * state[z] - s * state[z_flip]
+                        new_state[z_flip] = s * state[z] + c * state[z_flip]
+                    state = new_state
+                    param_idx += 1
+
+                # Entangling layer based on connectivity
+                if connectivity == 'linear':
+                    pairs = [(i, i+1) for i in range(n_qubits-1)]
+                elif connectivity == 'alternating':
+                    if layer % 2 == 0:
+                        pairs = [(i, i+1) for i in range(0, n_qubits-1, 2)]
+                    else:
+                        pairs = [(i, i+1) for i in range(1, n_qubits-1, 2)]
+                elif connectivity == 'all-to-all':
+                    pairs = [(i, j) for i in range(n_qubits)
+                            for j in range(i+1, n_qubits)]
+                else:
+                    pairs = []
+
+                for ctrl, tgt in pairs:
+                    new_state = np.zeros_like(state)
+                    for z in range(dim):
+                        c_bit = (z >> (n_qubits - 1 - ctrl)) & 1
+                        z_new = z ^ (1 << (n_qubits - 1 - tgt)) if c_bit else z
+                        new_state[z_new] += state[z]
+                    state = new_state
+
+            return state
+
+        return circuit
+
+    def cost_fn(state):
+        c = 0
+        for z in range(dim):
+            prob = np.abs(state[z])**2
+            parity = bin(z).count('1') % 2
+            c += prob * (1 - 2 * parity)
+        return c
+
+    for connectivity in ['none', 'alternating', 'linear', 'all-to-all']:
+        circuit = create_circuit_connectivity(connectivity)
+
+        grads = []
+        for _ in range(100):
+            params = np.random.uniform(0, 2*np.pi, n_params)
+            shift = np.pi / 2
+            params_p, params_m = params.copy(), params.copy()
+            params_p[0] += shift
+            params_m[0] -= shift
+
+            grad = (cost_fn(circuit(params_p)) - cost_fn(circuit(params_m))) / 2
+            grads.append(grad)
+
+        var = np.var(grads)
+        print(f"{connectivity:<15}: Var[grad] = {var:.4e}")
+
+compare_connectivity_patterns()
+```
+
+## Summary
+
+Key causes of barren plateaus:
+
+1. **Expressibility**: Highly expressive circuits sample uniformly, causing gradient concentration
+2. **Entanglement**: High entanglement makes local observables insensitive to parameters
+3. **Noise**: Depolarizing noise further suppresses gradients
+4. **Cost Locality**: Global cost functions lead to exponential suppression
+5. **Connectivity**: All-to-all connectivity increases barren plateau severity
+
+<Tip>
+Understanding these causes helps design mitigation strategies covered in later lessons.
+</Tip>

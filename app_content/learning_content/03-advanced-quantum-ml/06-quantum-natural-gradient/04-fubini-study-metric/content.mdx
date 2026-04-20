@@ -1,0 +1,540 @@
+---
+title: "Fubini-Study Metric"
+description: "Explore the Fubini-Study metric as the natural geometry of quantum state space and its connection to quantum natural gradients"
+---
+
+# Fubini-Study Metric
+
+The Fubini-Study metric is the natural Riemannian metric on projective Hilbert space, measuring distances between quantum states in a way that respects their physical equivalence under global phase.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Derive the Fubini-Study metric from quantum state geometry
+- Connect Fubini-Study metric to quantum Fisher information
+- Implement metric tensor computation for VQCs
+- Understand geodesics in quantum state space
+- Apply metric tensor for optimization
+- Analyze expressibility using metric properties
+
+## 1. Quantum State Space Geometry
+
+Quantum states live in projective Hilbert space, where states differing by a global phase are physically equivalent.
+
+<Definition term="Projective Hilbert Space">
+The space of physical quantum states CP^(n-1), where each point represents an equivalence class of state vectors |ψ⟩ ~ e^(iφ)|ψ⟩ under global phase.
+</Definition>
+
+The geometry of this space determines how we should measure distances and optimize over quantum states.
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+def create_parameterized_state(params, n_qubits=2):
+    """
+    Create a parameterized quantum state |ψ(θ)⟩.
+    Uses a hardware-efficient ansatz structure.
+    """
+    dim = 2**n_qubits
+
+    # Start from |00...0⟩
+    state = np.zeros(dim, dtype=complex)
+    state[0] = 1.0
+
+    param_idx = 0
+    n_layers = len(params) // (3 * n_qubits)
+
+    for layer in range(n_layers):
+        # Single-qubit rotations
+        for qubit in range(n_qubits):
+            if param_idx < len(params):
+                # RY rotation
+                angle = params[param_idx]
+                ry = np.array([
+                    [np.cos(angle/2), -np.sin(angle/2)],
+                    [np.sin(angle/2), np.cos(angle/2)]
+                ])
+                state = apply_single_qubit_gate(state, ry, qubit, n_qubits)
+                param_idx += 1
+
+        # Entangling layer (simplified)
+        for q in range(n_qubits - 1):
+            state = apply_cnot(state, q, q+1, n_qubits)
+
+    return state / np.linalg.norm(state)
+
+def apply_single_qubit_gate(state, gate, qubit, n_qubits):
+    """Apply single-qubit gate."""
+    dim = 2**n_qubits
+    new_state = np.zeros(dim, dtype=complex)
+
+    for i in range(dim):
+        bit = (i >> qubit) & 1
+        for b in range(2):
+            j = (i & ~(1 << qubit)) | (b << qubit)
+            new_state[i] += gate[bit, b] * state[j]
+
+    return new_state
+
+def apply_cnot(state, control, target, n_qubits):
+    """Apply CNOT gate."""
+    dim = 2**n_qubits
+    new_state = np.zeros(dim, dtype=complex)
+
+    for i in range(dim):
+        c_bit = (i >> control) & 1
+        if c_bit == 1:
+            j = i ^ (1 << target)  # Flip target
+            new_state[i] = state[j]
+        else:
+            new_state[i] = state[i]
+
+    return new_state
+
+# Create and analyze a parameterized state
+params = np.array([0.5, 0.3, 0.8, 0.2, 0.6, 0.4])
+state = create_parameterized_state(params)
+
+print("Parameterized quantum state:")
+print(f"State shape: {state.shape}")
+print(f"Norm: {np.linalg.norm(state):.6f}")
+print(f"State vector: {state}")
+```
+
+## 2. Fubini-Study Metric Definition
+
+The Fubini-Study metric defines infinitesimal distances in quantum state space.
+
+<Formula>
+For pure states |ψ(θ)⟩, the Fubini-Study metric tensor is:
+
+g_μν = Re[⟨∂_μψ|∂_νψ⟩ - ⟨∂_μψ|ψ⟩⟨ψ|∂_νψ⟩]
+
+where |∂_μψ⟩ = ∂|ψ⟩/∂θ_μ
+</Formula>
+
+This metric is invariant under global phase transformations and reparameterizations.
+
+```python
+def compute_state_derivatives(params, epsilon=1e-5):
+    """
+    Compute state derivatives using finite differences.
+
+    Returns:
+        state: |ψ(θ)⟩
+        derivatives: List of |∂_μψ⟩
+    """
+    n_params = len(params)
+
+    # Central state
+    state = create_parameterized_state(params)
+
+    # Compute derivatives
+    derivatives = []
+    for i in range(n_params):
+        params_plus = params.copy()
+        params_plus[i] += epsilon
+        params_minus = params.copy()
+        params_minus[i] -= epsilon
+
+        state_plus = create_parameterized_state(params_plus)
+        state_minus = create_parameterized_state(params_minus)
+
+        # Central difference
+        deriv = (state_plus - state_minus) / (2 * epsilon)
+        derivatives.append(deriv)
+
+    return state, derivatives
+
+def fubini_study_metric(params):
+    """
+    Compute the Fubini-Study metric tensor.
+
+    g_μν = Re[⟨∂_μψ|∂_νψ⟩ - ⟨∂_μψ|ψ⟩⟨ψ|∂_νψ⟩]
+    """
+    n_params = len(params)
+
+    # Get state and derivatives
+    state, derivatives = compute_state_derivatives(params)
+
+    # Compute metric tensor
+    g = np.zeros((n_params, n_params))
+
+    for mu in range(n_params):
+        for nu in range(n_params):
+            # ⟨∂_μψ|∂_νψ⟩
+            term1 = np.vdot(derivatives[mu], derivatives[nu])
+
+            # ⟨∂_μψ|ψ⟩⟨ψ|∂_νψ⟩
+            overlap_mu = np.vdot(derivatives[mu], state)
+            overlap_nu = np.vdot(state, derivatives[nu])
+            term2 = overlap_mu * overlap_nu
+
+            g[mu, nu] = np.real(term1 - term2)
+
+    return g
+
+# Compute Fubini-Study metric
+params = np.array([0.5, 0.3, 0.8, 0.2, 0.6, 0.4])
+g_fs = fubini_study_metric(params)
+
+print("Fubini-Study Metric Tensor:")
+print(f"Shape: {g_fs.shape}")
+print(f"\nMetric tensor:\n{g_fs}")
+print(f"\nEigenvalues: {np.linalg.eigvalsh(g_fs)}")
+```
+
+<Tip>
+The Fubini-Study metric is always positive semi-definite. Zero eigenvalues indicate redundant parameters that don't change the quantum state.
+</Tip>
+
+## 3. Connection to Quantum Fisher Information
+
+The Fubini-Study metric is directly related to the quantum Fisher information matrix.
+
+<Formula>
+For pure states:
+
+F_Q(μ,ν) = 4 × g_μν^FS
+
+The QFI matrix equals 4 times the Fubini-Study metric tensor.
+</Formula>
+
+```python
+def qfi_from_fubini_study(params):
+    """
+    Compute QFI matrix from Fubini-Study metric.
+
+    F_Q = 4 × g_FS
+    """
+    g_fs = fubini_study_metric(params)
+    return 4 * g_fs
+
+def verify_qfi_fubini_study_relation(params):
+    """
+    Verify the relationship F_Q = 4g_FS by computing both independently.
+    """
+    # Get state and derivatives
+    state, derivatives = compute_state_derivatives(params)
+    n_params = len(params)
+
+    # Compute Fubini-Study metric
+    g_fs = fubini_study_metric(params)
+
+    # Compute QFI directly using the pure state formula
+    # F_Q(μ,ν) = 4[Re⟨∂_μψ|∂_νψ⟩ - Re(⟨∂_μψ|ψ⟩⟨ψ|∂_νψ⟩)]
+    qfi = np.zeros((n_params, n_params))
+
+    for mu in range(n_params):
+        for nu in range(n_params):
+            term1 = np.real(np.vdot(derivatives[mu], derivatives[nu]))
+            overlap_mu = np.vdot(derivatives[mu], state)
+            overlap_nu = np.vdot(state, derivatives[nu])
+            term2 = np.real(overlap_mu * overlap_nu)
+
+            qfi[mu, nu] = 4 * (term1 - term2)
+
+    # Compare
+    qfi_from_fs = 4 * g_fs
+    difference = np.abs(qfi - qfi_from_fs)
+
+    return g_fs, qfi, np.max(difference)
+
+# Verify relationship
+params = np.array([0.5, 0.3, 0.8, 0.2])
+g_fs, qfi, max_diff = verify_qfi_fubini_study_relation(params)
+
+print("Verification: QFI = 4 × Fubini-Study")
+print(f"\nFubini-Study metric diagonal: {np.diag(g_fs)}")
+print(f"QFI matrix diagonal: {np.diag(qfi)}")
+print(f"4 × FS diagonal: {4 * np.diag(g_fs)}")
+print(f"\nMaximum difference: {max_diff:.2e}")
+```
+
+## 4. Geodesics in Quantum State Space
+
+Geodesics are the shortest paths between quantum states according to the Fubini-Study metric.
+
+<Definition term="Fubini-Study Distance">
+The geodesic distance between states |ψ⟩ and |φ⟩ is:
+
+d_FS(|ψ⟩, |φ⟩) = arccos(|⟨ψ|φ⟩|)
+
+This is the angle between state vectors in Hilbert space.
+</Definition>
+
+```python
+def fubini_study_distance(state1, state2):
+    """
+    Compute Fubini-Study (geodesic) distance between two states.
+
+    d_FS = arccos(|⟨ψ|φ⟩|)
+    """
+    overlap = np.abs(np.vdot(state1, state2))
+    # Clamp for numerical stability
+    overlap = np.clip(overlap, 0, 1)
+    return np.arccos(overlap)
+
+def geodesic_interpolation(state1, state2, t):
+    """
+    Interpolate along geodesic between states.
+
+    Returns state at parameter t ∈ [0, 1] along geodesic.
+    """
+    # Compute overlap and phase
+    overlap = np.vdot(state1, state2)
+    theta = np.arccos(np.clip(np.abs(overlap), 0, 1))
+
+    if theta < 1e-10:
+        return state1  # States are the same
+
+    # Align phase
+    phase = overlap / np.abs(overlap) if np.abs(overlap) > 1e-10 else 1.0
+    state2_aligned = state2 / phase
+
+    # Geodesic formula (spherical linear interpolation)
+    sin_theta = np.sin(theta)
+    coeff1 = np.sin((1 - t) * theta) / sin_theta
+    coeff2 = np.sin(t * theta) / sin_theta
+
+    interpolated = coeff1 * state1 + coeff2 * state2_aligned
+    return interpolated / np.linalg.norm(interpolated)
+
+def compute_geodesic_path(state1, state2, n_points=20):
+    """
+    Compute a discrete geodesic path between two states.
+    """
+    path = []
+    distances = []
+
+    for i in range(n_points + 1):
+        t = i / n_points
+        state_t = geodesic_interpolation(state1, state2, t)
+        path.append(state_t)
+
+        if i > 0:
+            dist = fubini_study_distance(path[-2], path[-1])
+            distances.append(dist)
+
+    return path, distances
+
+# Demonstrate geodesic paths
+np.random.seed(42)
+
+# Create two random normalized states
+state1 = np.random.randn(4) + 1j * np.random.randn(4)
+state1 /= np.linalg.norm(state1)
+
+state2 = np.random.randn(4) + 1j * np.random.randn(4)
+state2 /= np.linalg.norm(state2)
+
+# Total distance
+total_dist = fubini_study_distance(state1, state2)
+print(f"Total Fubini-Study distance: {total_dist:.6f}")
+
+# Geodesic path
+path, segment_distances = compute_geodesic_path(state1, state2, 10)
+print(f"Sum of segment distances: {sum(segment_distances):.6f}")
+print(f"Segments are equal (geodesic property): {np.allclose(segment_distances, segment_distances[0])}")
+```
+
+<Warning>
+Geodesic distances are bounded: 0 ≤ d_FS ≤ π/2. The maximum distance (π/2) occurs between orthogonal states.
+</Warning>
+
+## 5. Metric Tensor for Optimization
+
+The Fubini-Study metric tensor can be used directly for natural gradient optimization.
+
+```python
+class FubiniStudyOptimizer:
+    """
+    Optimizer using Fubini-Study metric for natural gradients.
+    """
+
+    def __init__(self, learning_rate=0.1, reg_lambda=1e-4):
+        self.lr = learning_rate
+        self.reg_lambda = reg_lambda
+        self.history = {'loss': [], 'distance': []}
+
+    def compute_loss_and_gradient(self, params, observable):
+        """
+        Compute loss = ⟨ψ(θ)|H|ψ(θ)⟩ and its gradient.
+        """
+        state, derivatives = compute_state_derivatives(params)
+
+        # Loss
+        loss = np.real(np.vdot(state, observable @ state))
+
+        # Gradient via chain rule
+        gradient = np.zeros(len(params))
+        for i, deriv in enumerate(derivatives):
+            gradient[i] = 2 * np.real(np.vdot(deriv, observable @ state))
+
+        return loss, gradient, state
+
+    def step(self, params, observable):
+        """
+        Perform one optimization step using Fubini-Study metric.
+        """
+        # Compute loss and gradient
+        loss, gradient, state = self.compute_loss_and_gradient(params, observable)
+
+        # Compute Fubini-Study metric
+        g_fs = fubini_study_metric(params)
+
+        # Regularize and invert
+        n = len(params)
+        g_reg = g_fs + self.reg_lambda * np.eye(n)
+
+        # Natural gradient
+        try:
+            natural_grad = np.linalg.solve(g_reg, gradient)
+        except np.linalg.LinAlgError:
+            natural_grad = gradient  # Fall back to standard gradient
+
+        # Update
+        new_params = params - self.lr * natural_grad
+
+        return new_params, loss
+
+    def optimize(self, initial_params, observable, n_steps=100):
+        """
+        Run optimization.
+        """
+        params = initial_params.copy()
+        initial_state = create_parameterized_state(params)
+
+        for step in range(n_steps):
+            params, loss = self.step(params, observable)
+
+            # Track distance from initial state
+            current_state = create_parameterized_state(params)
+            dist = fubini_study_distance(initial_state, current_state)
+
+            self.history['loss'].append(loss)
+            self.history['distance'].append(dist)
+
+        return params
+
+# Create a Hamiltonian to minimize
+def create_hamiltonian(n_qubits=2):
+    """Create a random Hermitian matrix as Hamiltonian."""
+    dim = 2**n_qubits
+    H = np.random.randn(dim, dim) + 1j * np.random.randn(dim, dim)
+    return (H + H.conj().T) / 2
+
+# Run optimization
+np.random.seed(42)
+H = create_hamiltonian(2)
+initial_params = np.random.randn(6) * 0.5
+
+optimizer = FubiniStudyOptimizer(learning_rate=0.5, reg_lambda=1e-4)
+final_params = optimizer.optimize(initial_params, H, n_steps=50)
+
+print("Fubini-Study Optimization Results:")
+print(f"Initial loss: {optimizer.history['loss'][0]:.6f}")
+print(f"Final loss: {optimizer.history['loss'][-1]:.6f}")
+print(f"Total state space distance traveled: {optimizer.history['distance'][-1]:.6f}")
+```
+
+## 6. Expressibility Analysis
+
+The Fubini-Study metric reveals information about circuit expressibility and parameter redundancy.
+
+```python
+def analyze_expressibility(params_samples, n_samples=100):
+    """
+    Analyze circuit expressibility using metric tensor properties.
+
+    Low average metric values indicate limited expressibility.
+    """
+    n_params = len(params_samples[0])
+
+    # Collect metrics
+    eigenvalue_stats = []
+    rank_deficiencies = []
+    condition_numbers = []
+
+    for params in params_samples:
+        g_fs = fubini_study_metric(params)
+
+        eigenvalues = np.linalg.eigvalsh(g_fs)
+        eigenvalue_stats.append(eigenvalues)
+
+        # Count near-zero eigenvalues (redundant parameters)
+        rank_def = np.sum(eigenvalues < 1e-6)
+        rank_deficiencies.append(rank_def)
+
+        # Condition number (excluding zero eigenvalues)
+        nonzero_eigs = eigenvalues[eigenvalues > 1e-6]
+        if len(nonzero_eigs) > 0:
+            cond = nonzero_eigs[-1] / nonzero_eigs[0]
+            condition_numbers.append(cond)
+
+    return {
+        'eigenvalues': np.array(eigenvalue_stats),
+        'rank_deficiency': np.mean(rank_deficiencies),
+        'avg_condition': np.mean(condition_numbers) if condition_numbers else float('inf')
+    }
+
+def compute_local_dimension(params, threshold=1e-6):
+    """
+    Compute local dimension of the state manifold.
+
+    This is the number of non-zero eigenvalues of the metric tensor.
+    """
+    g_fs = fubini_study_metric(params)
+    eigenvalues = np.linalg.eigvalsh(g_fs)
+    return np.sum(eigenvalues > threshold)
+
+# Analyze expressibility at different parameter regimes
+np.random.seed(42)
+
+print("Expressibility Analysis:")
+print("=" * 50)
+
+# Sample different parameter regions
+regions = {
+    'small': np.random.randn(20, 6) * 0.1,
+    'medium': np.random.randn(20, 6) * 1.0,
+    'large': np.random.randn(20, 6) * 3.0
+}
+
+for region_name, samples in regions.items():
+    stats = analyze_expressibility(samples)
+    avg_eigs = np.mean(stats['eigenvalues'], axis=0)
+
+    print(f"\n{region_name.upper()} parameter region:")
+    print(f"  Average eigenvalues: {avg_eigs}")
+    print(f"  Rank deficiency: {stats['rank_deficiency']:.1f} parameters")
+    print(f"  Condition number: {stats['avg_condition']:.2f}")
+
+# Local dimension analysis
+params = np.random.randn(6)
+local_dim = compute_local_dimension(params)
+print(f"\nLocal dimension at random point: {local_dim}/{len(params)}")
+```
+
+<Tip>
+A well-designed ansatz should have full rank (no redundant parameters) and a low condition number (balanced parameter sensitivity) across the parameter space.
+</Tip>
+
+## Summary
+
+In this lesson, you learned:
+
+- **Fubini-Study metric** is the natural geometry of quantum state space
+- **Connection to QFI**: F_Q = 4 × g_FS for pure states
+- **Geodesics** provide shortest paths between quantum states
+- **Metric tensor** enables natural gradient optimization
+- **Expressibility analysis** uses metric properties to assess circuits
+- **Rank and condition** reveal parameter redundancy and sensitivity
+
+The Fubini-Study metric provides the mathematical foundation for understanding quantum natural gradients as the true steepest descent in quantum state space.
+
+## Next Steps
+
+In the next lesson, we'll explore efficient methods for computing quantum natural gradients that scale better than direct QFI matrix computation.

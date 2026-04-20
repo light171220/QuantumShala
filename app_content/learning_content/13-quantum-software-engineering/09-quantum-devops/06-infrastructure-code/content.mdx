@@ -1,0 +1,1200 @@
+---
+title: "Infrastructure as Code for Quantum Systems"
+description: "Learn to manage quantum computing infrastructure using code-based approaches. Master Terraform, Pulumi, and cloud-native tools for provisioning quantum resources, managing access, and automating environment setup."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Apply Infrastructure as Code principles to quantum computing environments
+- Use Terraform to provision cloud resources for quantum workloads
+- Manage quantum backend access and credentials declaratively
+- Create reproducible quantum development environments with configuration management
+- Implement GitOps workflows for quantum infrastructure changes
+- Automate quantum cluster provisioning with proper security controls
+
+## 1. Infrastructure as Code for Quantum Computing
+
+Infrastructure as Code (IaC) treats infrastructure configuration as software, enabling version control, testing, and automated deployment of computing environments.
+
+<Definition term="Infrastructure as Code (IaC)">
+The practice of managing and provisioning computing infrastructure through machine-readable configuration files rather than manual processes. For quantum computing, this includes managing cloud resources, quantum backend access, credentials, and supporting services.
+</Definition>
+
+### Why IaC for Quantum Systems?
+
+| Challenge | IaC Solution |
+|-----------|--------------|
+| Environment consistency | Declarative configuration ensures identical setups |
+| Access management | Automated credential rotation and IAM policies |
+| Reproducibility | Version-controlled infrastructure definitions |
+| Disaster recovery | Rapid recreation of environments from code |
+| Audit compliance | Git history provides change tracking |
+
+<Formula>
+$$\text{Deployment Time} = T_{provision} + T_{configure} + T_{validate}$$
+</Formula>
+
+IaC reduces all three components through automation.
+
+## 2. Terraform for Quantum Infrastructure
+
+Terraform is the industry-standard tool for declarative infrastructure management.
+
+### Project Structure
+
+```
+quantum-infrastructure/
+├── environments/
+│   ├── dev/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── terraform.tfvars
+│   ├── staging/
+│   │   └── ...
+│   └── prod/
+│       └── ...
+├── modules/
+│   ├── quantum-cluster/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── outputs.tf
+│   ├── monitoring/
+│   │   └── ...
+│   └── secrets/
+│       └── ...
+├── scripts/
+│   └── init-quantum-env.sh
+└── README.md
+```
+
+### Core Infrastructure Module
+
+```hcl
+# modules/quantum-cluster/main.tf
+# Terraform module for quantum application infrastructure
+
+terraform {
+  required_version = ">= 1.5.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.23"
+    }
+  }
+}
+
+# Variables
+variable "environment" {
+  description = "Deployment environment"
+  type        = string
+}
+
+variable "cluster_name" {
+  description = "Name of the Kubernetes cluster"
+  type        = string
+}
+
+variable "quantum_backends" {
+  description = "List of quantum backends to configure"
+  type        = list(string)
+  default     = ["ibm_quantum", "ionq", "aws_braket"]
+}
+
+variable "enable_gpu" {
+  description = "Enable GPU nodes for simulation"
+  type        = bool
+  default     = false
+}
+
+# VPC for quantum workloads
+resource "aws_vpc" "quantum" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = {
+    Name        = "${var.cluster_name}-vpc"
+    Environment = var.environment
+    Purpose     = "quantum-computing"
+  }
+}
+
+# Subnets
+resource "aws_subnet" "private" {
+  count             = 3
+  vpc_id            = aws_vpc.quantum.id
+  cidr_block        = "10.0.${count.index + 1}.0/24"
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "${var.cluster_name}-private-${count.index + 1}"
+    "kubernetes.io/role/internal-elb" = "1"
+  }
+}
+
+resource "aws_subnet" "public" {
+  count                   = 3
+  vpc_id                  = aws_vpc.quantum.id
+  cidr_block              = "10.0.${count.index + 101}.0/24"
+  availability_zone       = data.aws_availability_zones.available.names[count.index]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "${var.cluster_name}-public-${count.index + 1}"
+    "kubernetes.io/role/elb" = "1"
+  }
+}
+
+# EKS Cluster for quantum workloads
+resource "aws_eks_cluster" "quantum" {
+  name     = var.cluster_name
+  role_arn = aws_iam_role.eks_cluster.arn
+  version  = "1.28"
+
+  vpc_config {
+    subnet_ids              = concat(aws_subnet.private[*].id, aws_subnet.public[*].id)
+    endpoint_private_access = true
+    endpoint_public_access  = true
+  }
+
+  encryption_config {
+    provider {
+      key_arn = aws_kms_key.eks.arn
+    }
+    resources = ["secrets"]
+  }
+
+  enabled_cluster_log_types = ["api", "audit", "authenticator"]
+
+  tags = {
+    Environment = var.environment
+    Purpose     = "quantum-computing"
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_cluster_policy
+  ]
+}
+
+# Node group for quantum simulations
+resource "aws_eks_node_group" "quantum_workers" {
+  cluster_name    = aws_eks_cluster.quantum.name
+  node_group_name = "quantum-workers"
+  node_role_arn   = aws_iam_role.eks_nodes.arn
+  subnet_ids      = aws_subnet.private[*].id
+
+  instance_types = var.enable_gpu ? ["p3.2xlarge"] : ["m5.2xlarge"]
+
+  scaling_config {
+    desired_size = 2
+    max_size     = 10
+    min_size     = 1
+  }
+
+  labels = {
+    workload = "quantum-simulation"
+  }
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+# GPU node group (optional)
+resource "aws_eks_node_group" "gpu_workers" {
+  count = var.enable_gpu ? 1 : 0
+
+  cluster_name    = aws_eks_cluster.quantum.name
+  node_group_name = "gpu-workers"
+  node_role_arn   = aws_iam_role.eks_nodes.arn
+  subnet_ids      = aws_subnet.private[*].id
+
+  instance_types = ["p3.8xlarge"]
+  ami_type       = "AL2_x86_64_GPU"
+
+  scaling_config {
+    desired_size = 1
+    max_size     = 5
+    min_size     = 0
+  }
+
+  labels = {
+    workload = "gpu-simulation"
+    "nvidia.com/gpu" = "true"
+  }
+
+  taint {
+    key    = "nvidia.com/gpu"
+    value  = "true"
+    effect = "NO_SCHEDULE"
+  }
+}
+
+# KMS key for encryption
+resource "aws_kms_key" "eks" {
+  description             = "KMS key for EKS secrets encryption"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+# Outputs
+output "cluster_endpoint" {
+  description = "EKS cluster endpoint"
+  value       = aws_eks_cluster.quantum.endpoint
+}
+
+output "cluster_name" {
+  description = "EKS cluster name"
+  value       = aws_eks_cluster.quantum.name
+}
+
+output "cluster_ca_certificate" {
+  description = "Cluster CA certificate"
+  value       = aws_eks_cluster.quantum.certificate_authority[0].data
+  sensitive   = true
+}
+```
+
+### Secrets Management Module
+
+```hcl
+# modules/secrets/main.tf
+# Secure management of quantum backend credentials
+
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+variable "environment" {
+  type = string
+}
+
+variable "quantum_backends" {
+  type = map(object({
+    enabled = bool
+    token   = string
+  }))
+  sensitive = true
+}
+
+# AWS Secrets Manager for quantum credentials
+resource "aws_secretsmanager_secret" "quantum_credentials" {
+  for_each = { for k, v in var.quantum_backends : k => v if v.enabled }
+
+  name                    = "${var.environment}/quantum/${each.key}"
+  description             = "Credentials for ${each.key} quantum backend"
+  recovery_window_in_days = 7
+
+  tags = {
+    Environment = var.environment
+    Backend     = each.key
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "quantum_credentials" {
+  for_each = aws_secretsmanager_secret.quantum_credentials
+
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    token    = var.quantum_backends[each.key].token
+    backend  = each.key
+    created  = timestamp()
+  })
+}
+
+# IAM policy for accessing quantum secrets
+resource "aws_iam_policy" "quantum_secrets_reader" {
+  name        = "${var.environment}-quantum-secrets-reader"
+  description = "Policy to read quantum backend credentials"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ]
+        Resource = [
+          for secret in aws_secretsmanager_secret.quantum_credentials :
+          secret.arn
+        ]
+      }
+    ]
+  })
+}
+
+# Automatic rotation for credentials
+resource "aws_secretsmanager_secret_rotation" "quantum_credentials" {
+  for_each = aws_secretsmanager_secret.quantum_credentials
+
+  secret_id           = each.value.id
+  rotation_lambda_arn = aws_lambda_function.credential_rotator.arn
+
+  rotation_rules {
+    automatically_after_days = 30
+  }
+}
+
+output "secret_arns" {
+  description = "ARNs of quantum credential secrets"
+  value       = { for k, v in aws_secretsmanager_secret.quantum_credentials : k => v.arn }
+}
+
+output "reader_policy_arn" {
+  description = "ARN of the secrets reader policy"
+  value       = aws_iam_policy.quantum_secrets_reader.arn
+}
+```
+
+<Warning>
+Never commit actual credentials to version control. Use environment variables, secret managers, or encrypted tfvars files for sensitive data.
+</Warning>
+
+## 3. AWS Braket Integration
+
+Terraform can provision AWS Braket resources for quantum computing.
+
+```hcl
+# modules/braket/main.tf
+# AWS Braket quantum computing resources
+
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+variable "environment" {
+  type = string
+}
+
+variable "allowed_devices" {
+  description = "List of allowed Braket devices"
+  type        = list(string)
+  default     = [
+    "arn:aws:braket:::device/quantum-simulator/amazon/sv1",
+    "arn:aws:braket:::device/quantum-simulator/amazon/tn1",
+    "arn:aws:braket:::device/quantum-simulator/amazon/dm1"
+  ]
+}
+
+variable "enable_hardware" {
+  description = "Enable access to quantum hardware"
+  type        = bool
+  default     = false
+}
+
+# S3 bucket for Braket results
+resource "aws_s3_bucket" "braket_results" {
+  bucket = "${var.environment}-braket-results-${data.aws_caller_identity.current.account_id}"
+
+  tags = {
+    Environment = var.environment
+    Purpose     = "braket-quantum-results"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "braket_results" {
+  bucket = aws_s3_bucket.braket_results.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "braket_results" {
+  bucket = aws_s3_bucket.braket_results.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "aws:kms"
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "braket_results" {
+  bucket = aws_s3_bucket.braket_results.id
+
+  rule {
+    id     = "archive-old-results"
+    status = "Enabled"
+
+    transition {
+      days          = 30
+      storage_class = "STANDARD_IA"
+    }
+
+    transition {
+      days          = 90
+      storage_class = "GLACIER"
+    }
+
+    expiration {
+      days = 365
+    }
+  }
+}
+
+# IAM role for Braket execution
+resource "aws_iam_role" "braket_execution" {
+  name = "${var.environment}-braket-execution"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "braket.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+# Braket execution policy
+resource "aws_iam_role_policy" "braket_execution" {
+  name = "braket-execution-policy"
+  role = aws_iam_role.braket_execution.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.braket_results.arn,
+          "${aws_s3_bucket.braket_results.arn}/*"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "braket:GetDevice",
+          "braket:SearchDevices",
+          "braket:CreateQuantumTask",
+          "braket:GetQuantumTask",
+          "braket:CancelQuantumTask",
+          "braket:SearchQuantumTasks"
+        ]
+        Resource = var.enable_hardware ? ["*"] : var.allowed_devices
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "arn:aws:logs:*:*:log-group:/aws/braket/*"
+      }
+    ]
+  })
+}
+
+# User access policy
+resource "aws_iam_policy" "braket_user" {
+  name        = "${var.environment}-braket-user"
+  description = "Policy for users to submit Braket quantum tasks"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "braket:CreateQuantumTask",
+          "braket:GetQuantumTask",
+          "braket:CancelQuantumTask",
+          "braket:SearchQuantumTasks",
+          "braket:GetDevice",
+          "braket:SearchDevices"
+        ]
+        Resource = var.enable_hardware ? ["*"] : var.allowed_devices
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject"
+        ]
+        Resource = "${aws_s3_bucket.braket_results.arn}/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = "iam:PassRole"
+        Resource = aws_iam_role.braket_execution.arn
+      }
+    ]
+  })
+}
+
+output "results_bucket" {
+  description = "S3 bucket for Braket results"
+  value       = aws_s3_bucket.braket_results.bucket
+}
+
+output "execution_role_arn" {
+  description = "Braket execution role ARN"
+  value       = aws_iam_role.braket_execution.arn
+}
+
+output "user_policy_arn" {
+  description = "User policy ARN for Braket access"
+  value       = aws_iam_policy.braket_user.arn
+}
+```
+
+## 4. Pulumi for Quantum Infrastructure
+
+Pulumi allows infrastructure definition in Python, which can be more natural for quantum developers.
+
+```python
+# __main__.py
+# Pulumi infrastructure for quantum applications
+
+import pulumi
+import pulumi_aws as aws
+import pulumi_kubernetes as k8s
+from typing import List, Dict
+
+# Configuration
+config = pulumi.Config()
+environment = config.require("environment")
+cluster_name = config.require("cluster_name")
+enable_gpu = config.get_bool("enable_gpu") or False
+
+# VPC for quantum workloads
+vpc = aws.ec2.Vpc(
+    "quantum-vpc",
+    cidr_block="10.0.0.0/16",
+    enable_dns_hostnames=True,
+    enable_dns_support=True,
+    tags={
+        "Name": f"{cluster_name}-vpc",
+        "Environment": environment,
+        "Purpose": "quantum-computing"
+    }
+)
+
+# Internet Gateway
+igw = aws.ec2.InternetGateway(
+    "quantum-igw",
+    vpc_id=vpc.id,
+    tags={"Name": f"{cluster_name}-igw"}
+)
+
+# Availability zones
+azs = aws.get_availability_zones(state="available")
+
+# Subnets
+private_subnets: List[aws.ec2.Subnet] = []
+public_subnets: List[aws.ec2.Subnet] = []
+
+for i in range(3):
+    private_subnet = aws.ec2.Subnet(
+        f"private-subnet-{i}",
+        vpc_id=vpc.id,
+        cidr_block=f"10.0.{i+1}.0/24",
+        availability_zone=azs.names[i],
+        tags={
+            "Name": f"{cluster_name}-private-{i}",
+            "kubernetes.io/role/internal-elb": "1"
+        }
+    )
+    private_subnets.append(private_subnet)
+
+    public_subnet = aws.ec2.Subnet(
+        f"public-subnet-{i}",
+        vpc_id=vpc.id,
+        cidr_block=f"10.0.{i+101}.0/24",
+        availability_zone=azs.names[i],
+        map_public_ip_on_launch=True,
+        tags={
+            "Name": f"{cluster_name}-public-{i}",
+            "kubernetes.io/role/elb": "1"
+        }
+    )
+    public_subnets.append(public_subnet)
+
+# EKS Cluster IAM Role
+eks_role = aws.iam.Role(
+    "eks-cluster-role",
+    assume_role_policy="""{
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Action": "sts:AssumeRole",
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "eks.amazonaws.com"
+            }
+        }]
+    }"""
+)
+
+aws.iam.RolePolicyAttachment(
+    "eks-cluster-policy",
+    role=eks_role.name,
+    policy_arn="arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+)
+
+# KMS key for secrets encryption
+kms_key = aws.kms.Key(
+    "eks-secrets-key",
+    description="KMS key for EKS secrets encryption",
+    deletion_window_in_days=7,
+    enable_key_rotation=True,
+    tags={"Environment": environment}
+)
+
+# EKS Cluster
+cluster = aws.eks.Cluster(
+    "quantum-cluster",
+    name=cluster_name,
+    role_arn=eks_role.arn,
+    version="1.28",
+    vpc_config=aws.eks.ClusterVpcConfigArgs(
+        subnet_ids=[s.id for s in private_subnets + public_subnets],
+        endpoint_private_access=True,
+        endpoint_public_access=True
+    ),
+    encryption_config=aws.eks.ClusterEncryptionConfigArgs(
+        provider=aws.eks.ClusterEncryptionConfigProviderArgs(
+            key_arn=kms_key.arn
+        ),
+        resources=["secrets"]
+    ),
+    enabled_cluster_log_types=["api", "audit", "authenticator"],
+    tags={
+        "Environment": environment,
+        "Purpose": "quantum-computing"
+    }
+)
+
+# Node IAM Role
+node_role = aws.iam.Role(
+    "eks-node-role",
+    assume_role_policy="""{
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Action": "sts:AssumeRole",
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "ec2.amazonaws.com"
+            }
+        }]
+    }"""
+)
+
+for policy_arn in [
+    "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy",
+    "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
+    "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+]:
+    aws.iam.RolePolicyAttachment(
+        f"node-policy-{policy_arn.split('/')[-1]}",
+        role=node_role.name,
+        policy_arn=policy_arn
+    )
+
+# Worker node group
+node_group = aws.eks.NodeGroup(
+    "quantum-workers",
+    cluster_name=cluster.name,
+    node_group_name="quantum-workers",
+    node_role_arn=node_role.arn,
+    subnet_ids=[s.id for s in private_subnets],
+    instance_types=["p3.2xlarge"] if enable_gpu else ["m5.2xlarge"],
+    scaling_config=aws.eks.NodeGroupScalingConfigArgs(
+        desired_size=2,
+        max_size=10,
+        min_size=1
+    ),
+    labels={"workload": "quantum-simulation"},
+    tags={"Environment": environment}
+)
+
+# Quantum credentials in Secrets Manager
+class QuantumCredentials(pulumi.ComponentResource):
+    """Component for managing quantum backend credentials."""
+
+    def __init__(self, name: str, backends: Dict[str, str], opts=None):
+        super().__init__("quantum:credentials:Manager", name, {}, opts)
+
+        self.secrets = {}
+        for backend, token in backends.items():
+            secret = aws.secretsmanager.Secret(
+                f"{name}-{backend}",
+                name=f"{environment}/quantum/{backend}",
+                description=f"Credentials for {backend} quantum backend",
+                tags={
+                    "Environment": environment,
+                    "Backend": backend
+                },
+                opts=pulumi.ResourceOptions(parent=self)
+            )
+
+            aws.secretsmanager.SecretVersion(
+                f"{name}-{backend}-version",
+                secret_id=secret.id,
+                secret_string=pulumi.Output.all(token=token).apply(
+                    lambda args: f'{{"token": "{args["token"]}", "backend": "{backend}"}}'
+                ),
+                opts=pulumi.ResourceOptions(parent=self)
+            )
+
+            self.secrets[backend] = secret
+
+        self.register_outputs({
+            "secret_arns": {k: v.arn for k, v in self.secrets.items()}
+        })
+
+
+# Create quantum credentials
+quantum_creds = QuantumCredentials(
+    "quantum-creds",
+    backends={
+        "ibm_quantum": config.require_secret("ibm_quantum_token"),
+        "ionq": config.require_secret("ionq_api_key")
+    }
+)
+
+# Exports
+pulumi.export("cluster_name", cluster.name)
+pulumi.export("cluster_endpoint", cluster.endpoint)
+pulumi.export("vpc_id", vpc.id)
+pulumi.export("kms_key_arn", kms_key.arn)
+```
+
+## 5. GitOps for Quantum Infrastructure
+
+Implement GitOps workflows for infrastructure changes.
+
+<Example>
+**GitOps Workflow with GitHub Actions**
+
+```yaml
+# .github/workflows/infrastructure.yml
+name: Quantum Infrastructure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infrastructure/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'infrastructure/**'
+
+env:
+  TF_VERSION: '1.6.0'
+  AWS_REGION: 'us-east-1'
+
+jobs:
+  validate:
+    name: Validate Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        working-directory: infrastructure
+
+      - name: Terraform Init
+        run: terraform init -backend=false
+        working-directory: infrastructure/environments/dev
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: infrastructure/environments/dev
+
+  plan:
+    name: Plan Infrastructure Changes
+    needs: validate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: infrastructure/environments/dev
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -no-color -out=tfplan
+        working-directory: infrastructure/environments/dev
+        continue-on-error: true
+
+      - name: Comment Plan on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `#### Terraform Plan 📖
+            \`\`\`
+            ${{ steps.plan.outputs.stdout }}
+            \`\`\`
+            `;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+  apply:
+    name: Apply Infrastructure Changes
+    needs: validate
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: infrastructure/environments/prod
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+        working-directory: infrastructure/environments/prod
+        env:
+          TF_VAR_ibm_quantum_token: ${{ secrets.IBM_QUANTUM_TOKEN }}
+          TF_VAR_ionq_api_key: ${{ secrets.IONQ_API_KEY }}
+```
+</Example>
+
+## 6. Environment Configuration Management
+
+Use configuration files to manage quantum environment settings.
+
+```yaml
+# config/environments/production.yaml
+# Production quantum environment configuration
+
+environment: production
+region: us-east-1
+
+cluster:
+  name: quantum-prod
+  version: "1.28"
+  node_groups:
+    - name: quantum-workers
+      instance_type: m5.2xlarge
+      min_size: 2
+      max_size: 20
+      labels:
+        workload: quantum-simulation
+    - name: gpu-workers
+      instance_type: p3.8xlarge
+      min_size: 0
+      max_size: 5
+      labels:
+        workload: gpu-simulation
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+
+quantum_backends:
+  ibm_quantum:
+    enabled: true
+    instance: ibm-q/open/main
+    max_concurrent_jobs: 5
+  aws_braket:
+    enabled: true
+    allowed_devices:
+      - sv1  # State vector simulator
+      - tn1  # Tensor network simulator
+    enable_hardware: false
+  ionq:
+    enabled: false
+
+monitoring:
+  prometheus:
+    enabled: true
+    retention_days: 30
+  grafana:
+    enabled: true
+  alertmanager:
+    enabled: true
+    slack_webhook: ${SLACK_WEBHOOK_URL}
+
+logging:
+  level: INFO
+  format: json
+  aggregation:
+    type: elasticsearch
+    retention_days: 90
+
+security:
+  encryption:
+    at_rest: true
+    in_transit: true
+  secrets_rotation_days: 30
+  network_policies: true
+```
+
+```python
+# scripts/config_loader.py
+"""Configuration loader for quantum infrastructure."""
+import yaml
+import os
+from pathlib import Path
+from typing import Dict, Any
+from dataclasses import dataclass
+
+
+@dataclass
+class ClusterConfig:
+    name: str
+    version: str
+    node_groups: list
+
+
+@dataclass
+class QuantumBackendConfig:
+    enabled: bool
+    settings: Dict[str, Any]
+
+
+def load_config(environment: str) -> Dict[str, Any]:
+    """Load configuration for an environment."""
+    config_path = Path(f"config/environments/{environment}.yaml")
+
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config not found: {config_path}")
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    # Substitute environment variables
+    config = substitute_env_vars(config)
+
+    return config
+
+
+def substitute_env_vars(obj: Any) -> Any:
+    """Recursively substitute ${VAR} with environment values."""
+    if isinstance(obj, str):
+        if obj.startswith("${") and obj.endswith("}"):
+            var_name = obj[2:-1]
+            return os.environ.get(var_name, obj)
+        return obj
+    elif isinstance(obj, dict):
+        return {k: substitute_env_vars(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [substitute_env_vars(item) for item in obj]
+    return obj
+
+
+def generate_terraform_vars(config: Dict[str, Any]) -> str:
+    """Generate terraform.tfvars from config."""
+    lines = []
+
+    lines.append(f'environment = "{config["environment"]}"')
+    lines.append(f'region = "{config["region"]}"')
+    lines.append(f'cluster_name = "{config["cluster"]["name"]}"')
+
+    # Backend configs
+    for backend, settings in config.get("quantum_backends", {}).items():
+        if settings.get("enabled"):
+            lines.append(f'{backend}_enabled = true')
+
+    return "\n".join(lines)
+```
+
+## 7. Security Best Practices
+
+Implement security controls for quantum infrastructure.
+
+```hcl
+# modules/security/main.tf
+# Security controls for quantum infrastructure
+
+# Network policies
+resource "kubernetes_network_policy" "quantum_isolation" {
+  metadata {
+    name      = "quantum-workload-isolation"
+    namespace = var.namespace
+  }
+
+  spec {
+    pod_selector {
+      match_labels = {
+        workload = "quantum"
+      }
+    }
+
+    policy_types = ["Ingress", "Egress"]
+
+    ingress {
+      from {
+        namespace_selector {
+          match_labels = {
+            name = var.namespace
+          }
+        }
+      }
+
+      ports {
+        protocol = "TCP"
+        port     = "8000"
+      }
+    }
+
+    egress {
+      # Allow quantum backend APIs
+      to {
+        ip_block {
+          cidr = "0.0.0.0/0"
+        }
+      }
+
+      ports {
+        protocol = "TCP"
+        port     = "443"
+      }
+    }
+
+    # Allow DNS
+    egress {
+      to {
+        namespace_selector {}
+        pod_selector {
+          match_labels = {
+            k8s-app = "kube-dns"
+          }
+        }
+      }
+
+      ports {
+        protocol = "UDP"
+        port     = "53"
+      }
+    }
+  }
+}
+
+# Pod security policy
+resource "kubernetes_pod_security_policy" "quantum_restricted" {
+  metadata {
+    name = "quantum-restricted"
+  }
+
+  spec {
+    privileged                 = false
+    allow_privilege_escalation = false
+
+    required_drop_capabilities = ["ALL"]
+
+    volumes = [
+      "configMap",
+      "emptyDir",
+      "projected",
+      "secret",
+      "downwardAPI",
+      "persistentVolumeClaim"
+    ]
+
+    run_as_user {
+      rule = "MustRunAsNonRoot"
+    }
+
+    se_linux {
+      rule = "RunAsAny"
+    }
+
+    fs_group {
+      rule = "RunAsAny"
+    }
+
+    supplemental_groups {
+      rule = "RunAsAny"
+    }
+
+    read_only_root_filesystem = true
+  }
+}
+```
+
+## Summary
+
+In this lesson, you learned to manage quantum infrastructure as code:
+
+1. **Terraform Basics**: Declarative infrastructure for EKS clusters and quantum resources
+2. **AWS Braket Integration**: Provisioning quantum computing resources on AWS
+3. **Pulumi with Python**: Infrastructure as code using familiar Python syntax
+4. **GitOps Workflows**: Automated infrastructure deployment with PR reviews
+5. **Configuration Management**: Environment-specific settings and secrets
+6. **Security Controls**: Network policies and pod security for quantum workloads
+
+<Tip>
+Start with a simple infrastructure setup and evolve it. Over-engineering infrastructure early leads to maintenance burden. Add complexity as your needs grow.
+</Tip>
+
+## Further Reading
+
+- Related: CI/CD for Quantum Applications
+- Related: Containerization for Quantum Applications
+- Advanced: Multi-cloud quantum infrastructure

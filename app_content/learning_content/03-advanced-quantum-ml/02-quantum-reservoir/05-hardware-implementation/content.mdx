@@ -1,0 +1,986 @@
+---
+title: "Hardware Implementations of Quantum Reservoirs"
+description: "Explore physical implementations of quantum reservoir computing across different quantum hardware platforms, from superconducting circuits to photonic systems."
+duration: 75
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand hardware requirements for quantum reservoirs
+- Compare different physical implementations
+- Analyze noise effects on reservoir performance
+- Design hardware-aware quantum reservoir algorithms
+- Implement noise-robust encoding strategies
+- Evaluate platform-specific advantages
+
+## 1. Hardware Requirements for QRC
+
+Quantum reservoir computing has specific hardware requirements that differ from gate-based quantum computing.
+
+<Definition term="QRC Hardware Requirements">
+Quantum reservoir computing requires: (1) a quantum system with natural dynamics providing sufficient complexity, (2) methods to encode classical inputs into quantum states, (3) controllable evolution times, and (4) measurement capabilities for extracting features.
+</Definition>
+
+### Key Hardware Characteristics
+
+```python
+import numpy as np
+from dataclasses import dataclass
+from typing import List, Dict
+
+@dataclass
+class QuantumHardwareSpec:
+    """Specification for quantum reservoir hardware."""
+
+    platform: str
+    n_qubits: int
+    t1_time_us: float  # Relaxation time
+    t2_time_us: float  # Dephasing time
+    gate_time_ns: float
+    readout_fidelity: float
+    connectivity: str  # 'all-to-all', 'linear', 'grid'
+    native_gates: List[str]
+
+    @property
+    def coherent_operations(self):
+        """Estimate of operations within coherence time."""
+        # Operations possible before significant decoherence
+        return int(self.t2_time_us * 1000 / self.gate_time_ns)
+
+    @property
+    def natural_dynamics_strength(self):
+        """Relative strength of natural dynamics."""
+        if self.platform == 'superconducting':
+            return 'medium'  # Need active driving
+        elif self.platform == 'trapped_ion':
+            return 'low'  # Very isolated
+        elif self.platform == 'NMR':
+            return 'high'  # Strong spin-spin coupling
+        elif self.platform == 'photonic':
+            return 'high'  # Fast optical dynamics
+        return 'unknown'
+
+
+# Example hardware specifications
+SUPERCONDUCTING_SPEC = QuantumHardwareSpec(
+    platform='superconducting',
+    n_qubits=27,
+    t1_time_us=100,
+    t2_time_us=50,
+    gate_time_ns=50,
+    readout_fidelity=0.97,
+    connectivity='grid',
+    native_gates=['Rz', 'SX', 'CX']
+)
+
+TRAPPED_ION_SPEC = QuantumHardwareSpec(
+    platform='trapped_ion',
+    n_qubits=11,
+    t1_time_us=1000000,  # Very long
+    t2_time_us=1000,
+    gate_time_ns=100000,  # Slower gates
+    readout_fidelity=0.995,
+    connectivity='all-to-all',
+    native_gates=['Rz', 'Ry', 'XX']
+)
+
+NMR_SPEC = QuantumHardwareSpec(
+    platform='NMR',
+    n_qubits=7,
+    t1_time_us=1000000,
+    t2_time_us=100000,
+    gate_time_ns=10000,
+    readout_fidelity=0.90,
+    connectivity='all-to-all',
+    native_gates=['Rx', 'Ry', 'Rz', 'ZZ']
+)
+
+
+def evaluate_platform_for_qrc(spec: QuantumHardwareSpec) -> Dict:
+    """
+    Evaluate a hardware platform for QRC suitability.
+    """
+    scores = {}
+
+    # Coherence: more operations = better
+    scores['coherence'] = min(spec.coherent_operations / 1000, 1.0)
+
+    # Connectivity: all-to-all is best for reservoir dynamics
+    connectivity_scores = {'all-to-all': 1.0, 'grid': 0.7, 'linear': 0.4}
+    scores['connectivity'] = connectivity_scores.get(spec.connectivity, 0.5)
+
+    # Measurement quality
+    scores['readout'] = spec.readout_fidelity
+
+    # Natural dynamics (less engineering needed)
+    dynamics_scores = {'high': 1.0, 'medium': 0.6, 'low': 0.3}
+    scores['natural_dynamics'] = dynamics_scores.get(
+        spec.natural_dynamics_strength, 0.5
+    )
+
+    # Overall QRC suitability
+    scores['overall'] = np.mean(list(scores.values()))
+
+    return scores
+```
+
+## 2. Superconducting Qubit Implementation
+
+Superconducting circuits are a leading platform for quantum computing and offer natural reservoir dynamics.
+
+<Definition term="Superconducting QRC">
+In superconducting quantum reservoir computing, transmon qubits coupled through capacitive or inductive connections form the reservoir. The natural Hamiltonian provides complex dynamics, while microwave pulses encode inputs and readout extracts features.
+</Definition>
+
+### Superconducting Reservoir Model
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+class SuperconductingReservoir:
+    """
+    Superconducting qubit reservoir simulation.
+
+    Models realistic superconducting hardware including:
+    - Transmon qubit dynamics
+    - Capacitive coupling
+    - T1/T2 decoherence
+    - Readout errors
+    """
+
+    def __init__(self, n_qubits, coupling_map,
+                 t1_us=100, t2_us=50, gate_time_ns=50):
+        """
+        Initialize superconducting reservoir.
+
+        Args:
+            n_qubits: Number of transmon qubits
+            coupling_map: List of (i, j) tuples for connected qubits
+            t1_us: T1 relaxation time in microseconds
+            t2_us: T2 dephasing time in microseconds
+            gate_time_ns: Single gate time in nanoseconds
+        """
+        self.n_qubits = n_qubits
+        self.dim = 2**n_qubits
+        self.coupling_map = coupling_map
+
+        # Convert times to compatible units
+        self.t1 = t1_us * 1000  # ns
+        self.t2 = t2_us * 1000  # ns
+        self.gate_time = gate_time_ns
+
+        # Build system Hamiltonian
+        self.H = self._build_transmon_hamiltonian()
+
+        # Noise operators for Lindblad evolution
+        self.decay_ops = self._build_decay_operators()
+
+        # Observables
+        self.observables = self._build_observables()
+
+        self.reset()
+
+    def _build_transmon_hamiltonian(self):
+        """Build Hamiltonian for coupled transmons."""
+        H = np.zeros((self.dim, self.dim), dtype=complex)
+
+        I = np.eye(2, dtype=complex)
+        X = np.array([[0, 1], [1, 0]], dtype=complex)
+        Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+        Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        def kron_chain(ops):
+            result = ops[0]
+            for op in ops[1:]:
+                result = np.kron(result, op)
+            return result
+
+        np.random.seed(42)
+
+        # Qubit frequencies (slight detuning for each)
+        for i in range(self.n_qubits):
+            omega = 5.0 + np.random.uniform(-0.1, 0.1)  # GHz
+            ops = [I] * self.n_qubits
+            ops[i] = Z
+            H += omega * kron_chain(ops)
+
+        # ZZ coupling between connected qubits
+        coupling_strength = 0.01  # GHz
+        for (i, j) in self.coupling_map:
+            ops = [I] * self.n_qubits
+            ops[i] = Z
+            ops[j] = Z
+            H += coupling_strength * kron_chain(ops)
+
+        # XY coupling (exchange interaction)
+        for (i, j) in self.coupling_map:
+            for P in [X, Y]:
+                ops = [I] * self.n_qubits
+                ops[i] = P
+                ops[j] = P
+                H += 0.005 * kron_chain(ops)
+
+        return H
+
+    def _build_decay_operators(self):
+        """Build Lindblad decay operators for decoherence."""
+        I = np.eye(2, dtype=complex)
+
+        # Lowering operator
+        sigma_m = np.array([[0, 0], [1, 0]], dtype=complex)
+        # Dephasing operator
+        sigma_z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        decay_ops = []
+
+        for i in range(self.n_qubits):
+            # T1 decay (amplitude damping)
+            ops = [I] * self.n_qubits
+            ops[i] = sigma_m
+            result = ops[0]
+            for op in ops[1:]:
+                result = np.kron(result, op)
+
+            gamma1 = 1.0 / self.t1
+            decay_ops.append((np.sqrt(gamma1), result))
+
+            # T2 dephasing (pure dephasing)
+            ops = [I] * self.n_qubits
+            ops[i] = sigma_z
+            result = ops[0]
+            for op in ops[1:]:
+                result = np.kron(result, op)
+
+            gamma_phi = 1.0 / self.t2 - 0.5 / self.t1
+            if gamma_phi > 0:
+                decay_ops.append((np.sqrt(gamma_phi / 2), result))
+
+        return decay_ops
+
+    def _build_observables(self):
+        """Build measurement observables."""
+        I = np.eye(2, dtype=complex)
+        paulis = [
+            np.array([[1, 0], [0, -1]], dtype=complex),  # Z
+            np.array([[0, 1], [1, 0]], dtype=complex),   # X
+        ]
+
+        observables = []
+        for i in range(self.n_qubits):
+            for P in paulis:
+                ops = [I] * self.n_qubits
+                ops[i] = P
+                result = ops[0]
+                for op in ops[1:]:
+                    result = np.kron(result, op)
+                observables.append(result)
+
+        return observables
+
+    def reset(self):
+        """Reset to ground state."""
+        self.rho = np.zeros((self.dim, self.dim), dtype=complex)
+        self.rho[0, 0] = 1.0
+
+    def _apply_noise(self, rho, dt):
+        """Apply Lindblad noise for time dt."""
+        for gamma_sqrt, L in self.decay_ops:
+            gamma = gamma_sqrt**2
+            # Lindblad dissipator
+            L_dag = L.conj().T
+            rho = rho + dt * gamma * (
+                L @ rho @ L_dag -
+                0.5 * (L_dag @ L @ rho + rho @ L_dag @ L)
+            )
+
+        # Ensure valid density matrix
+        rho = (rho + rho.conj().T) / 2
+        trace = np.trace(rho)
+        if trace > 0:
+            rho /= trace
+
+        return rho
+
+    def encode_input(self, u):
+        """Encode classical input using microwave pulse."""
+        theta = u * np.pi / 2
+
+        # Apply Ry rotation to first qubit
+        Ry = np.array([
+            [np.cos(theta/2), -np.sin(theta/2)],
+            [np.sin(theta/2), np.cos(theta/2)]
+        ], dtype=complex)
+
+        I_rest = np.eye(2**(self.n_qubits - 1), dtype=complex)
+        U_enc = np.kron(Ry, I_rest)
+
+        self.rho = U_enc @ self.rho @ U_enc.conj().T
+
+        # Noise during encoding
+        self.rho = self._apply_noise(self.rho, self.gate_time)
+
+    def evolve(self, evolution_time_ns):
+        """Evolve under natural Hamiltonian with noise."""
+        n_steps = max(1, int(evolution_time_ns / 10))
+        dt = evolution_time_ns / n_steps
+
+        for _ in range(n_steps):
+            # Unitary evolution
+            U = expm(-1j * self.H * dt * 0.001)  # Scale for units
+            self.rho = U @ self.rho @ U.conj().T
+
+            # Apply noise
+            self.rho = self._apply_noise(self.rho, dt)
+
+    def measure(self, readout_error=0.03):
+        """
+        Measure observables with readout error.
+
+        Args:
+            readout_error: Probability of bit flip in readout
+        """
+        features = []
+
+        for O in self.observables:
+            exp_val = np.real(np.trace(O @ self.rho))
+            # Add readout error effect
+            exp_val = (1 - 2*readout_error) * exp_val
+            features.append(exp_val)
+
+        return np.array(features)
+
+    def step(self, u, evolution_time_ns=100):
+        """Process single input."""
+        self.encode_input(u)
+        self.evolve(evolution_time_ns)
+        return self.measure()
+
+    def process_sequence(self, inputs, evolution_time_ns=100):
+        """Process input sequence."""
+        self.reset()
+        features = []
+        for u in inputs:
+            feat = self.step(u, evolution_time_ns)
+            features.append(feat)
+        return np.array(features)
+
+
+# Example: Create superconducting reservoir with linear coupling
+def create_linear_coupling(n_qubits):
+    """Create linear coupling map."""
+    return [(i, i+1) for i in range(n_qubits - 1)]
+
+
+def create_grid_coupling(rows, cols):
+    """Create 2D grid coupling map."""
+    coupling = []
+    n = rows * cols
+    for i in range(n):
+        row, col = i // cols, i % cols
+        # Right neighbor
+        if col < cols - 1:
+            coupling.append((i, i + 1))
+        # Bottom neighbor
+        if row < rows - 1:
+            coupling.append((i, i + cols))
+    return coupling
+```
+
+<Warning>
+Superconducting qubits have limited coherence times (typically 10-100 μs for T2). This limits the number of reservoir evolution steps before decoherence degrades performance. Design your QRC to complete within the coherence window.
+</Warning>
+
+## 3. Photonic Quantum Reservoir
+
+Photonic systems offer unique advantages for reservoir computing, including room-temperature operation and fast dynamics.
+
+<Definition term="Photonic QRC">
+Photonic quantum reservoir computing uses optical modes as the computational medium. Nonlinear optical effects, beam splitters, and phase shifters create the reservoir dynamics, while homodyne or heterodyne detection extracts continuous-variable features.
+</Definition>
+
+```python
+import numpy as np
+
+class PhotonicReservoir:
+    """
+    Photonic quantum reservoir using continuous variables.
+
+    Models optical modes with Gaussian states and linear optics.
+    """
+
+    def __init__(self, n_modes, squeezing_db=3.0, loss_rate=0.01):
+        """
+        Initialize photonic reservoir.
+
+        Args:
+            n_modes: Number of optical modes
+            squeezing_db: Initial squeezing in dB
+            loss_rate: Photon loss rate per operation
+        """
+        self.n_modes = n_modes
+        self.squeezing = 10**(squeezing_db / 10)
+        self.loss_rate = loss_rate
+
+        # For Gaussian states, track first and second moments
+        # Mean vector (x1, p1, x2, p2, ...)
+        self.mean = np.zeros(2 * n_modes)
+
+        # Covariance matrix
+        self.cov = np.eye(2 * n_modes)
+
+        # Random interferometer for dynamics
+        self._build_interferometer()
+
+        self.reset()
+
+    def _build_interferometer(self):
+        """Build random unitary interferometer."""
+        # Random unitary on n modes (using Haar measure approximation)
+        np.random.seed(42)
+
+        # Build symplectic transformation
+        # For linear optics, this is orthogonal
+        random_matrix = np.random.randn(self.n_modes, self.n_modes)
+        U, _, Vt = np.linalg.svd(random_matrix)
+        optical_unitary = U @ Vt
+
+        # Convert to symplectic (phase space) form
+        # Block diagonal with same rotation for x and p
+        self.S_interferometer = np.block([
+            [optical_unitary, np.zeros((self.n_modes, self.n_modes))],
+            [np.zeros((self.n_modes, self.n_modes)), optical_unitary]
+        ])
+
+    def reset(self):
+        """Reset to vacuum with squeezing on first mode."""
+        self.mean = np.zeros(2 * self.n_modes)
+
+        # Start with squeezed vacuum
+        self.cov = np.eye(2 * self.n_modes)
+        # Squeeze first mode
+        self.cov[0, 0] = 1.0 / self.squeezing
+        self.cov[self.n_modes, self.n_modes] = self.squeezing
+
+    def encode_displacement(self, u):
+        """Encode input as displacement on first mode."""
+        # Displace x quadrature of first mode
+        self.mean[0] += u * 2.0
+
+    def apply_interferometer(self):
+        """Apply the fixed interferometer."""
+        # Transform mean
+        self.mean = self.S_interferometer @ self.mean
+
+        # Transform covariance
+        self.cov = self.S_interferometer @ self.cov @ self.S_interferometer.T
+
+    def apply_kerr_nonlinearity(self, strength=0.1):
+        """
+        Approximate Kerr nonlinearity effect.
+
+        Real Kerr is non-Gaussian; this is a simplified model.
+        """
+        # Add noise proportional to photon number (approximate)
+        for i in range(self.n_modes):
+            n_photons = (self.cov[i, i] + self.cov[i + self.n_modes, i + self.n_modes]) / 2
+            noise = strength * n_photons
+            self.cov[i, i] += noise
+            self.cov[i + self.n_modes, i + self.n_modes] += noise
+
+    def apply_loss(self):
+        """Apply photon loss channel."""
+        eta = 1 - self.loss_rate
+
+        # Loss affects both mean and covariance
+        self.mean *= np.sqrt(eta)
+
+        # Covariance: σ → η*σ + (1-η)*I
+        self.cov = eta * self.cov + (1 - eta) * np.eye(2 * self.n_modes)
+
+    def measure_quadratures(self):
+        """
+        Measure quadrature expectation values.
+
+        In experiment, this would be homodyne detection.
+        """
+        features = []
+
+        # X quadratures
+        for i in range(self.n_modes):
+            features.append(self.mean[i])
+
+        # P quadratures
+        for i in range(self.n_modes):
+            features.append(self.mean[self.n_modes + i])
+
+        # Variances (second moments)
+        for i in range(self.n_modes):
+            features.append(self.cov[i, i])
+            features.append(self.cov[i + self.n_modes, i + self.n_modes])
+
+        return np.array(features)
+
+    def step(self, u):
+        """Process single input."""
+        self.encode_displacement(u)
+        self.apply_interferometer()
+        self.apply_kerr_nonlinearity()
+        self.apply_loss()
+        return self.measure_quadratures()
+
+    def process_sequence(self, inputs):
+        """Process input sequence."""
+        self.reset()
+        features = []
+        for u in inputs:
+            feat = self.step(u)
+            features.append(feat)
+        return np.array(features)
+```
+
+<Tip>
+Photonic systems excel at high-speed processing due to fast optical dynamics. They are particularly well-suited for time-series applications where data arrives at high rates.
+</Tip>
+
+## 4. NMR Quantum Reservoir
+
+Nuclear Magnetic Resonance (NMR) provides a natural platform for QRC with strong spin-spin couplings.
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+class NMRReservoir:
+    """
+    NMR-based quantum reservoir.
+
+    Nuclear spins in a molecule form a natural reservoir
+    with fixed coupling topology.
+    """
+
+    def __init__(self, n_spins, coupling_matrix, chemical_shifts):
+        """
+        Initialize NMR reservoir.
+
+        Args:
+            n_spins: Number of nuclear spins
+            coupling_matrix: J-coupling matrix (Hz)
+            chemical_shifts: Chemical shift frequencies (Hz)
+        """
+        self.n_spins = n_spins
+        self.dim = 2**n_spins
+        self.J = coupling_matrix
+        self.shifts = chemical_shifts
+
+        # Build NMR Hamiltonian
+        self.H = self._build_hamiltonian()
+
+        # T2 relaxation (typical for liquid NMR)
+        self.t2 = 0.1  # seconds
+
+        self.observables = self._build_observables()
+        self.reset()
+
+    def _build_hamiltonian(self):
+        """Build NMR Hamiltonian."""
+        H = np.zeros((self.dim, self.dim), dtype=complex)
+
+        I = np.eye(2, dtype=complex)
+        Iz = np.array([[0.5, 0], [0, -0.5]], dtype=complex)
+        Ix = np.array([[0, 0.5], [0.5, 0]], dtype=complex)
+        Iy = np.array([[0, -0.5j], [0.5j, 0]], dtype=complex)
+
+        def kron_chain(ops):
+            result = ops[0]
+            for op in ops[1:]:
+                result = np.kron(result, op)
+            return result
+
+        # Chemical shift terms
+        for i in range(self.n_spins):
+            ops = [I] * self.n_spins
+            ops[i] = Iz
+            H += 2 * np.pi * self.shifts[i] * kron_chain(ops)
+
+        # J-coupling terms (scalar coupling)
+        for i in range(self.n_spins):
+            for j in range(i + 1, self.n_spins):
+                if self.J[i, j] != 0:
+                    # Weak coupling: Iz Iz term
+                    ops = [I] * self.n_spins
+                    ops[i] = Iz
+                    ops[j] = Iz
+                    H += 2 * np.pi * self.J[i, j] * kron_chain(ops)
+
+        return H
+
+    def _build_observables(self):
+        """Build NMR-measurable observables."""
+        I = np.eye(2, dtype=complex)
+        Ix = np.array([[0, 0.5], [0.5, 0]], dtype=complex)
+        Iy = np.array([[0, -0.5j], [0.5j, 0]], dtype=complex)
+        Iz = np.array([[0.5, 0], [0, -0.5]], dtype=complex)
+
+        observables = []
+
+        # Single spin observables (detectable in NMR)
+        for i in range(self.n_spins):
+            for P in [Ix, Iy, Iz]:
+                ops = [I] * self.n_spins
+                ops[i] = P
+                result = ops[0]
+                for op in ops[1:]:
+                    result = np.kron(result, op)
+                observables.append(result)
+
+        return observables
+
+    def reset(self):
+        """Reset to thermal equilibrium."""
+        # High-temperature approximation
+        self.rho = np.eye(self.dim, dtype=complex) / self.dim
+
+        # Add polarization along z
+        I = np.eye(2, dtype=complex)
+        Iz = np.array([[0.5, 0], [0, -0.5]], dtype=complex)
+
+        polarization = 1e-5  # Typical NMR polarization
+        for i in range(self.n_spins):
+            ops = [I] * self.n_spins
+            ops[i] = Iz
+            result = ops[0]
+            for op in ops[1:]:
+                result = np.kron(result, op)
+            self.rho += polarization * result
+
+    def apply_rf_pulse(self, angle, phase, spin_index=0):
+        """Apply RF pulse to specific spin."""
+        I = np.eye(2, dtype=complex)
+
+        # Rotation axis determined by phase
+        Ix = np.array([[0, 0.5], [0.5, 0]], dtype=complex)
+        Iy = np.array([[0, -0.5j], [0.5j, 0]], dtype=complex)
+
+        rotation = np.cos(phase) * Ix + np.sin(phase) * Iy
+        U_single = expm(-1j * angle * 2 * rotation)
+
+        ops = [I] * self.n_spins
+        ops[spin_index] = U_single
+        U = ops[0]
+        for op in ops[1:]:
+            U = np.kron(U, op)
+
+        self.rho = U @ self.rho @ U.conj().T
+
+    def encode_input(self, u):
+        """Encode input as rotation angle."""
+        angle = u * np.pi / 4
+        self.apply_rf_pulse(angle, phase=0, spin_index=0)
+
+    def free_evolution(self, time):
+        """Free evolution under J-coupling."""
+        U = expm(-1j * self.H * time)
+        self.rho = U @ self.rho @ U.conj().T
+
+        # Apply T2 relaxation (simplified)
+        decay = np.exp(-time / self.t2)
+        rho_diag = np.diag(np.diag(self.rho))
+        rho_offdiag = self.rho - rho_diag
+        self.rho = rho_diag + decay * rho_offdiag
+
+    def measure(self):
+        """Measure spin observables."""
+        features = []
+        for O in self.observables:
+            exp_val = np.real(np.trace(O @ self.rho))
+            features.append(exp_val)
+        return np.array(features)
+
+    def step(self, u, evolution_time=0.01):
+        """Process single input."""
+        self.encode_input(u)
+        self.free_evolution(evolution_time)
+        return self.measure()
+
+
+# Example: Create 4-spin NMR reservoir (like a small molecule)
+def create_molecule_reservoir():
+    """Create NMR reservoir based on typical molecule."""
+    n_spins = 4
+
+    # J-coupling matrix (Hz) - typical values
+    J = np.array([
+        [0, 7.0, 1.5, 0.5],
+        [7.0, 0, 6.5, 2.0],
+        [1.5, 6.5, 0, 7.2],
+        [0.5, 2.0, 7.2, 0]
+    ])
+
+    # Chemical shifts (Hz from reference)
+    shifts = np.array([0, 50, 120, 180])
+
+    return NMRReservoir(n_spins, J, shifts)
+```
+
+## 5. Noise-Robust QRC Design
+
+Real quantum hardware is noisy. Designing noise-robust QRC algorithms is essential.
+
+```python
+import numpy as np
+
+class NoiseRobustQRC:
+    """
+    Noise-robust quantum reservoir computing strategies.
+    """
+
+    @staticmethod
+    def error_mitigated_features(features, calibration_data):
+        """
+        Apply readout error mitigation to features.
+
+        Args:
+            features: Raw measured features
+            calibration_data: Calibration matrix from |0⟩, |1⟩ preparation
+
+        Returns:
+            Error-mitigated features
+        """
+        # Simple linear inversion
+        # M_calibration @ true = measured
+        # true = M_calibration^(-1) @ measured
+
+        M_inv = np.linalg.pinv(calibration_data)
+        return M_inv @ features
+
+    @staticmethod
+    def temporal_averaging(reservoir, inputs, n_shots=100):
+        """
+        Average over multiple shots to reduce shot noise.
+
+        Args:
+            reservoir: Quantum reservoir instance
+            inputs: Input sequence
+            n_shots: Number of measurement repetitions
+
+        Returns:
+            Averaged features
+        """
+        all_features = []
+
+        for _ in range(n_shots):
+            reservoir.reset()
+            features = []
+            for u in inputs:
+                feat = reservoir.step(u)
+                features.append(feat)
+            all_features.append(features)
+
+        return np.mean(all_features, axis=0)
+
+    @staticmethod
+    def robust_training(X, y, noise_level_estimate=0.1):
+        """
+        Train readout with noise-aware regularization.
+
+        Args:
+            X: Feature matrix
+            y: Targets
+            noise_level_estimate: Estimated noise level
+
+        Returns:
+            Trained weights
+        """
+        # Use regularization proportional to noise
+        reg = noise_level_estimate**2 * X.shape[0]
+
+        XTX = X.T @ X + reg * np.eye(X.shape[1])
+        W = np.linalg.solve(XTX, X.T @ y)
+
+        return W
+
+    @staticmethod
+    def select_robust_observables(reservoir, n_samples=100, threshold=0.5):
+        """
+        Select observables that are robust to noise.
+
+        Args:
+            reservoir: Quantum reservoir instance
+            n_samples: Samples for variance estimation
+            threshold: Maximum acceptable variance
+
+        Returns:
+            Indices of robust observables
+        """
+        # Run multiple times and measure variance
+        variances = []
+
+        test_inputs = np.random.uniform(-1, 1, n_samples)
+
+        all_features = []
+        for _ in range(10):
+            reservoir.reset()
+            features = reservoir.process_sequence(test_inputs)
+            all_features.append(features)
+
+        all_features = np.array(all_features)
+        variances = np.var(all_features, axis=0).mean(axis=0)
+
+        # Select observables with low variance
+        robust_indices = np.where(variances < threshold)[0]
+
+        return robust_indices
+
+
+class AdaptiveEncodingQRC:
+    """
+    QRC with encoding adapted to hardware noise characteristics.
+    """
+
+    def __init__(self, base_reservoir, noise_profile):
+        """
+        Initialize adaptive QRC.
+
+        Args:
+            base_reservoir: Base reservoir implementation
+            noise_profile: Dict with noise characteristics
+        """
+        self.reservoir = base_reservoir
+        self.noise = noise_profile
+
+        # Optimize encoding based on noise
+        self.encoding_scale = self._optimize_encoding()
+
+    def _optimize_encoding(self):
+        """
+        Find optimal input scaling for noise level.
+
+        Too small: signal lost in noise
+        Too large: nonlinear distortion
+        """
+        noise_std = self.noise.get('readout_std', 0.05)
+
+        # Heuristic: encoding should be ~3-5x noise level
+        optimal_scale = max(0.1, min(1.0, 4 * noise_std))
+
+        return optimal_scale
+
+    def encode_and_step(self, u):
+        """Process input with adaptive encoding."""
+        scaled_input = u * self.encoding_scale
+        return self.reservoir.step(scaled_input)
+```
+
+<Warning>
+Noise can both help and hurt QRC performance. Some noise provides beneficial regularization and prevents overfitting, but excessive noise destroys the quantum features that provide computational advantage.
+</Warning>
+
+## 6. Platform Comparison and Selection
+
+Choosing the right platform depends on the specific QRC application.
+
+```python
+def compare_platforms_for_task(task_type, data_rate_hz):
+    """
+    Compare hardware platforms for a specific task.
+
+    Args:
+        task_type: 'memory', 'nonlinear', or 'classification'
+        data_rate_hz: Required data processing rate
+
+    Returns:
+        Ranked list of platforms with scores
+    """
+    platforms = {
+        'superconducting': {
+            'coherence_time_us': 50,
+            'operation_time_ns': 50,
+            'n_qubits': 27,
+            'readout_fidelity': 0.97,
+            'room_temp': False
+        },
+        'trapped_ion': {
+            'coherence_time_us': 1000,
+            'operation_time_ns': 100000,
+            'n_qubits': 11,
+            'readout_fidelity': 0.995,
+            'room_temp': False
+        },
+        'photonic': {
+            'coherence_time_us': 1,  # Very fast dynamics
+            'operation_time_ns': 1,
+            'n_modes': 16,
+            'detection_efficiency': 0.9,
+            'room_temp': True
+        },
+        'NMR': {
+            'coherence_time_us': 100000,
+            'operation_time_ns': 10000,
+            'n_spins': 7,
+            'readout_fidelity': 0.90,
+            'room_temp': True
+        }
+    }
+
+    scores = {}
+
+    for platform, specs in platforms.items():
+        score = 0
+
+        # Data rate compatibility
+        max_rate = 1e9 / specs['operation_time_ns']
+        if max_rate >= data_rate_hz:
+            score += 30
+        else:
+            score += 30 * (max_rate / data_rate_hz)
+
+        # Task-specific scoring
+        if task_type == 'memory':
+            # Memory tasks benefit from long coherence
+            coherence_score = min(30, specs['coherence_time_us'] / 10)
+            score += coherence_score
+
+        elif task_type == 'nonlinear':
+            # Nonlinear tasks benefit from more qubits/modes
+            n_elements = specs.get('n_qubits', specs.get('n_modes', specs.get('n_spins', 1)))
+            score += min(30, n_elements * 3)
+
+        elif task_type == 'classification':
+            # Classification benefits from readout quality
+            fidelity = specs.get('readout_fidelity', specs.get('detection_efficiency', 0.9))
+            score += 30 * fidelity
+
+        # Practical considerations
+        if specs.get('room_temp', False):
+            score += 10  # Easier to deploy
+
+        scores[platform] = score
+
+    # Sort by score
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+    return ranked
+```
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Hardware requirements** for QRC differ from gate-based QC
+2. **Superconducting qubits** offer medium-scale systems with good coherence
+3. **Photonic systems** provide high-speed processing at room temperature
+4. **NMR reservoirs** leverage natural molecular dynamics
+5. **Noise robustness** is crucial for practical implementations
+6. **Platform selection** depends on task requirements and constraints
+
+Hardware-aware design is essential for realizing practical quantum reservoir computing systems.
+
+## Further Reading
+
+- Next lesson: Applications of Quantum Reservoir Computing
+- Related: NISQ Device Optimization
+- Application: Real-Time Signal Processing with QRC

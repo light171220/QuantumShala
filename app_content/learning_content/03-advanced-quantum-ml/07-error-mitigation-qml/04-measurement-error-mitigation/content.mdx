@@ -1,0 +1,493 @@
+---
+title: "Measurement Error Mitigation"
+description: "Learn techniques to mitigate readout errors in quantum measurements through confusion matrix inversion"
+---
+
+# Measurement Error Mitigation
+
+Measurement errors are a significant source of noise in NISQ devices. This lesson covers techniques to characterize and correct readout errors using calibration matrices.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Characterize measurement errors with confusion matrices
+- Implement matrix inversion mitigation
+- Handle ill-conditioned measurement matrices
+- Apply iterative mitigation methods
+- Scale mitigation to multi-qubit systems
+- Combine with other error mitigation techniques
+
+## 1. Measurement Error Model
+
+Readout errors cause incorrect measurement outcomes.
+
+<Definition term="Confusion Matrix">
+The confusion matrix M relates noisy measurements p_noisy to ideal probabilities p_ideal:
+
+p_noisy = M · p_ideal
+
+where M[i,j] = P(measure i | prepared j)
+</Definition>
+
+```python
+import numpy as np
+from scipy.linalg import inv
+
+def create_confusion_matrix(p0_to_1=0.02, p1_to_0=0.05):
+    """
+    Create single-qubit confusion matrix.
+
+    Args:
+        p0_to_1: P(measure 1 | prepared 0)
+        p1_to_0: P(measure 0 | prepared 1)
+
+    Returns:
+        2x2 confusion matrix
+    """
+    M = np.array([
+        [1 - p0_to_1, p1_to_0],
+        [p0_to_1, 1 - p1_to_0]
+    ])
+    return M
+
+def simulate_noisy_measurement(ideal_probs, confusion_matrix):
+    """Apply measurement noise to ideal probabilities."""
+    return confusion_matrix @ ideal_probs
+
+# Demonstrate measurement error
+M = create_confusion_matrix(p0_to_1=0.02, p1_to_0=0.08)
+
+print("Single-Qubit Confusion Matrix:")
+print("=" * 50)
+print(f"M = \n{M}")
+print(f"\nP(1|0) = {M[1,0]:.2%} (false positive)")
+print(f"P(0|1) = {M[0,1]:.2%} (false negative)")
+
+# Apply to ideal state
+ideal = np.array([0.3, 0.7])  # 30% |0⟩, 70% |1⟩
+noisy = simulate_noisy_measurement(ideal, M)
+
+print(f"\nIdeal probabilities: {ideal}")
+print(f"Noisy probabilities: {noisy}")
+```
+
+## 2. Matrix Inversion Mitigation
+
+Invert the confusion matrix to recover ideal probabilities.
+
+<Formula>
+If p_noisy = M · p_ideal, then:
+
+p_ideal = M⁻¹ · p_noisy
+
+The mitigated probabilities are obtained by inverting the calibrated confusion matrix.
+</Formula>
+
+```python
+class MeasurementErrorMitigator:
+    """
+    Mitigate measurement errors using confusion matrix.
+    """
+
+    def __init__(self, n_qubits=1):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+        self.confusion_matrix = None
+        self.inverse_matrix = None
+
+    def calibrate(self, calibration_data):
+        """
+        Calibrate confusion matrix from data.
+
+        Args:
+            calibration_data: Dict mapping prepared state to measured counts
+                              e.g., {'00': {'00': 950, '01': 30, '10': 15, '11': 5}}
+        """
+        self.confusion_matrix = np.zeros((self.dim, self.dim))
+
+        for prep_state, counts in calibration_data.items():
+            prep_idx = int(prep_state, 2)
+            total = sum(counts.values())
+
+            for meas_state, count in counts.items():
+                meas_idx = int(meas_state, 2)
+                self.confusion_matrix[meas_idx, prep_idx] = count / total
+
+        # Compute inverse
+        try:
+            self.inverse_matrix = inv(self.confusion_matrix)
+        except np.linalg.LinAlgError:
+            # Use pseudo-inverse if singular
+            self.inverse_matrix = np.linalg.pinv(self.confusion_matrix)
+
+    def mitigate(self, noisy_probs):
+        """
+        Apply mitigation to noisy probabilities.
+        """
+        if self.inverse_matrix is None:
+            raise ValueError("Must calibrate first")
+
+        mitigated = self.inverse_matrix @ noisy_probs
+
+        # Clip to valid probabilities
+        mitigated = np.clip(mitigated, 0, 1)
+        mitigated /= np.sum(mitigated)
+
+        return mitigated
+
+# Single qubit example
+print("\nSingle-Qubit Measurement Mitigation:")
+print("=" * 50)
+
+mitigator = MeasurementErrorMitigator(n_qubits=1)
+
+# Calibration data
+calibration = {
+    '0': {'0': 980, '1': 20},   # Prepare |0⟩
+    '1': {'0': 50, '1': 950}    # Prepare |1⟩
+}
+
+mitigator.calibrate(calibration)
+print(f"Confusion matrix:\n{mitigator.confusion_matrix}")
+
+# Apply mitigation
+ideal = np.array([0.3, 0.7])
+noisy = mitigator.confusion_matrix @ ideal
+mitigated = mitigator.mitigate(noisy)
+
+print(f"\nIdeal: {ideal}")
+print(f"Noisy: {noisy}")
+print(f"Mitigated: {mitigated}")
+print(f"Error reduction: {np.linalg.norm(noisy-ideal):.4f} → {np.linalg.norm(mitigated-ideal):.4f}")
+```
+
+<Tip>
+Calibration should be performed regularly as measurement errors can drift over time due to environmental changes.
+</Tip>
+
+## 3. Multi-Qubit Scaling
+
+Extend mitigation to multi-qubit systems.
+
+```python
+def tensor_confusion_matrices(M1, M2):
+    """
+    Create 2-qubit confusion matrix from single-qubit matrices.
+
+    Assumes independent errors.
+    """
+    return np.kron(M1, M2)
+
+class TensoredMitigator:
+    """
+    Tensored measurement error mitigation.
+
+    Assumes independent per-qubit errors for scalability.
+    """
+
+    def __init__(self, qubit_matrices):
+        """
+        Args:
+            qubit_matrices: List of 2x2 confusion matrices, one per qubit
+        """
+        self.qubit_matrices = qubit_matrices
+        self.n_qubits = len(qubit_matrices)
+
+        # Compute full confusion matrix
+        self.full_matrix = qubit_matrices[0]
+        for M in qubit_matrices[1:]:
+            self.full_matrix = np.kron(self.full_matrix, M)
+
+        # Invert
+        self.inverse = np.linalg.pinv(self.full_matrix)
+
+    def mitigate(self, noisy_probs):
+        """Apply tensored mitigation."""
+        mitigated = self.inverse @ noisy_probs
+        mitigated = np.clip(mitigated, 0, 1)
+        return mitigated / np.sum(mitigated)
+
+# 2-qubit example
+print("\nTwo-Qubit Tensored Mitigation:")
+print("=" * 50)
+
+M0 = create_confusion_matrix(0.02, 0.05)  # Qubit 0
+M1 = create_confusion_matrix(0.03, 0.06)  # Qubit 1
+
+tensored = TensoredMitigator([M0, M1])
+
+print(f"Full matrix shape: {tensored.full_matrix.shape}")
+
+# Test on Bell state measurement
+ideal = np.array([0.5, 0, 0, 0.5])  # |00⟩ + |11⟩
+noisy = tensored.full_matrix @ ideal
+mitigated = tensored.mitigate(noisy)
+
+print(f"\nBell state measurement:")
+print(f"Ideal: {ideal}")
+print(f"Noisy: {noisy}")
+print(f"Mitigated: {mitigated}")
+```
+
+<Warning>
+Full confusion matrix grows as 2^n × 2^n. For many qubits, use tensored or sparse methods to avoid exponential memory.
+</Warning>
+
+## 4. Iterative Methods
+
+Use iterative methods for large systems without matrix inversion.
+
+```python
+def iterative_mitigation(noisy_probs, confusion_matrix, max_iter=100, tol=1e-6):
+    """
+    Iterative least-squares mitigation.
+
+    Solves min ||M·x - p_noisy||² subject to x ≥ 0, sum(x) = 1.
+    """
+    n = len(noisy_probs)
+
+    # Initialize
+    x = noisy_probs.copy()
+
+    for iteration in range(max_iter):
+        # Gradient step
+        residual = confusion_matrix @ x - noisy_probs
+        gradient = confusion_matrix.T @ residual
+
+        # Step size (simple fixed)
+        alpha = 0.1
+
+        # Update
+        x_new = x - alpha * gradient
+
+        # Project to probability simplex
+        x_new = np.clip(x_new, 0, None)
+        x_new /= np.sum(x_new) + 1e-10
+
+        # Check convergence
+        if np.linalg.norm(x_new - x) < tol:
+            return x_new
+
+        x = x_new
+
+    return x
+
+# Compare iterative vs direct
+print("\nIterative vs Direct Mitigation:")
+print("=" * 50)
+
+M = create_confusion_matrix(0.05, 0.08)
+ideal = np.array([0.4, 0.6])
+noisy = M @ ideal
+
+# Direct
+direct = inv(M) @ noisy
+direct = np.clip(direct, 0, 1)
+direct /= np.sum(direct)
+
+# Iterative
+iterative = iterative_mitigation(noisy, M)
+
+print(f"Ideal: {ideal}")
+print(f"Direct mitigation: {direct}")
+print(f"Iterative mitigation: {iterative}")
+```
+
+## 5. Calibration Circuits
+
+Generate circuits for confusion matrix calibration.
+
+```python
+def calibration_circuits(n_qubits):
+    """
+    Generate calibration circuits for all basis states.
+
+    Returns:
+        List of (state_label, circuit_description)
+    """
+    circuits = []
+
+    for i in range(2 ** n_qubits):
+        # Binary string for state
+        state = format(i, f'0{n_qubits}b')
+
+        # Circuit: X gates to prepare state
+        circuit = []
+        for q, bit in enumerate(state):
+            if bit == '1':
+                circuit.append(f'X({q})')
+
+        circuits.append((state, circuit))
+
+    return circuits
+
+def run_calibration(n_qubits, noise_model, n_shots=10000):
+    """
+    Simulate calibration measurement.
+
+    Args:
+        n_qubits: Number of qubits
+        noise_model: Dict with per-qubit error rates
+        n_shots: Shots per basis state
+
+    Returns:
+        Calibration data dict
+    """
+    calibration_data = {}
+
+    for state_idx in range(2 ** n_qubits):
+        state_label = format(state_idx, f'0{n_qubits}b')
+        counts = {}
+
+        for _ in range(n_shots):
+            measured = list(state_label)
+
+            # Apply measurement errors
+            for q in range(n_qubits):
+                p_flip = noise_model[q]['p1_to_0'] if measured[q] == '1' else noise_model[q]['p0_to_1']
+
+                if np.random.rand() < p_flip:
+                    measured[q] = '0' if measured[q] == '1' else '1'
+
+            measured_str = ''.join(measured)
+            counts[measured_str] = counts.get(measured_str, 0) + 1
+
+        calibration_data[state_label] = counts
+
+    return calibration_data
+
+# Demonstrate calibration
+print("\nCalibration Circuit Generation:")
+print("=" * 50)
+
+circuits = calibration_circuits(2)
+print("Calibration circuits for 2 qubits:")
+for state, circuit in circuits:
+    print(f"  |{state}⟩: {circuit if circuit else 'no gates'}")
+
+# Run calibration
+noise_model = {
+    0: {'p0_to_1': 0.02, 'p1_to_0': 0.05},
+    1: {'p0_to_1': 0.03, 'p1_to_0': 0.07}
+}
+
+np.random.seed(42)
+cal_data = run_calibration(2, noise_model, n_shots=5000)
+
+print(f"\nCalibration results (5000 shots per state):")
+for state, counts in cal_data.items():
+    print(f"  Prepared |{state}⟩: {dict(sorted(counts.items()))}")
+```
+
+## 6. Complete Pipeline
+
+Full measurement error mitigation pipeline.
+
+```python
+class MeasurementMitigationPipeline:
+    """
+    Complete measurement error mitigation workflow.
+    """
+
+    def __init__(self, n_qubits):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+        self.calibrated = False
+        self.confusion_matrix = None
+        self.mitigator = None
+
+    def calibrate(self, backend_or_data, n_shots=10000):
+        """
+        Calibrate from backend or data.
+        """
+        if isinstance(backend_or_data, dict):
+            # Direct calibration data
+            cal_data = backend_or_data
+        else:
+            # Simulate calibration (in practice, run on hardware)
+            cal_data = run_calibration(self.n_qubits, backend_or_data, n_shots)
+
+        # Build confusion matrix
+        self.confusion_matrix = np.zeros((self.dim, self.dim))
+
+        for prep_state, counts in cal_data.items():
+            prep_idx = int(prep_state, 2)
+            total = sum(counts.values())
+
+            for meas_state, count in counts.items():
+                meas_idx = int(meas_state, 2)
+                self.confusion_matrix[meas_idx, prep_idx] = count / total
+
+        self.calibrated = True
+
+    def mitigate_counts(self, counts, total_shots=None):
+        """
+        Mitigate raw measurement counts.
+        """
+        if not self.calibrated:
+            raise ValueError("Must calibrate first")
+
+        # Convert counts to probability vector
+        if total_shots is None:
+            total_shots = sum(counts.values())
+
+        probs = np.zeros(self.dim)
+        for state, count in counts.items():
+            idx = int(state, 2)
+            probs[idx] = count / total_shots
+
+        # Apply mitigation
+        inv_M = np.linalg.pinv(self.confusion_matrix)
+        mitigated_probs = inv_M @ probs
+
+        # Clip and normalize
+        mitigated_probs = np.clip(mitigated_probs, 0, 1)
+        mitigated_probs /= np.sum(mitigated_probs)
+
+        # Convert back to counts
+        mitigated_counts = {}
+        for i in range(self.dim):
+            if mitigated_probs[i] > 1e-6:
+                state = format(i, f'0{self.n_qubits}b')
+                mitigated_counts[state] = mitigated_probs[i] * total_shots
+
+        return mitigated_counts
+
+# Full pipeline demo
+print("\nComplete Mitigation Pipeline:")
+print("=" * 50)
+
+pipeline = MeasurementMitigationPipeline(n_qubits=2)
+
+# Calibrate
+pipeline.calibrate(noise_model, n_shots=10000)
+print(f"Calibrated confusion matrix:\n{pipeline.confusion_matrix}")
+
+# Simulate noisy measurement of Bell state
+ideal_counts = {'00': 5000, '11': 5000}
+noisy_counts = {'00': 4650, '01': 200, '10': 180, '11': 4970}
+
+mitigated = pipeline.mitigate_counts(noisy_counts, total_shots=10000)
+
+print(f"\nIdeal: {ideal_counts}")
+print(f"Noisy: {noisy_counts}")
+print(f"Mitigated: {dict((k, round(v)) for k, v in mitigated.items())}")
+```
+
+## Summary
+
+In this lesson, you learned:
+
+- **Confusion matrix**: P(measure i | prepared j) characterizes readout errors
+- **Matrix inversion**: p_ideal = M⁻¹ · p_noisy recovers ideal probabilities
+- **Multi-qubit scaling**: Tensor products for independent errors
+- **Iterative methods**: Avoid large matrix inversion
+- **Calibration**: Prepare and measure all basis states
+- **Pipeline**: Complete workflow from calibration to mitigation
+
+Measurement error mitigation is often the first line of defense and can be combined with other techniques.
+
+## Next Steps
+
+In the next lesson, we'll explore learning-based error mitigation methods that use machine learning to predict and correct errors.

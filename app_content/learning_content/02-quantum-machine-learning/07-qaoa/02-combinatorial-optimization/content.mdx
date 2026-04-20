@@ -1,0 +1,455 @@
+---
+title: "Combinatorial Optimization Problems"
+description: "Learn to formulate various combinatorial optimization problems as QAOA cost Hamiltonians."
+---
+
+# Combinatorial Optimization Problems
+
+QAOA can tackle many combinatorial problems by encoding them as cost Hamiltonians. This lesson covers problem formulations from graph partitioning to scheduling.
+
+## QUBO Formulation
+
+Most problems are first cast as Quadratic Unconstrained Binary Optimization (QUBO).
+
+<Definition>
+**QUBO**: Minimize/maximize a quadratic function over binary variables:
+
+$$C(z) = \sum_i a_i z_i + \sum_{i<j} b_{ij} z_i z_j$$
+
+where $z_i \in \{0, 1\}$.
+</Definition>
+
+```python
+import numpy as np
+
+def qubo_to_hamiltonian(Q, offset=0):
+    """
+    Convert QUBO matrix to Ising Hamiltonian.
+
+    QUBO: C(z) = z^T Q z (z in {0,1})
+    Ising: H(s) = s^T J s + h^T s (s in {-1,+1})
+
+    Args:
+        Q: QUBO matrix (upper triangular)
+        offset: Constant offset
+
+    Returns:
+        h (linear), J (quadratic), constant
+    """
+    n = Q.shape[0]
+
+    # Conversion: z = (1 - s) / 2 where s in {-1,+1}
+    h = np.zeros(n)
+    J = np.zeros((n, n))
+    constant = offset
+
+    for i in range(n):
+        for j in range(i, n):
+            if i == j:
+                # Linear term: Q[i,i] * z_i = Q[i,i] * (1-s_i)/2
+                h[i] -= Q[i, i] / 2
+                constant += Q[i, i] / 2
+            else:
+                # Quadratic: Q[i,j] * z_i * z_j
+                J[i, j] = Q[i, j] / 4
+                h[i] -= Q[i, j] / 4
+                h[j] -= Q[i, j] / 4
+                constant += Q[i, j] / 4
+
+    return h, J, constant
+
+# Example: Simple QUBO
+Q = np.array([
+    [1, -2, 0],
+    [0, 2, -1],
+    [0, 0, 1]
+])
+
+h, J, c = qubo_to_hamiltonian(Q)
+print("QUBO to Ising conversion:")
+print(f"Q matrix:\n{Q}")
+print(f"\nIsing h (linear): {h}")
+print(f"Ising J (quadratic):\n{J}")
+print(f"Constant: {c}")
+```
+
+## MaxCut Problem
+
+MaxCut is the canonical QAOA benchmark problem.
+
+<Formula>
+**MaxCut Hamiltonian**: For graph G = (V, E):
+
+$$C = \sum_{(i,j) \in E} w_{ij} \frac{1 - Z_i Z_j}{2}$$
+
+Maximizing C partitions vertices to maximize edges cut.
+</Formula>
+
+```python
+import numpy as np
+
+class MaxCutProblem:
+    """MaxCut problem formulation."""
+
+    def __init__(self, n_vertices, edges):
+        self.n = n_vertices
+        self.edges = edges
+        self.hamiltonian = self._build_hamiltonian()
+
+    def _build_hamiltonian(self):
+        """Build cost Hamiltonian matrix."""
+        dim = 2 ** self.n
+        H = np.zeros((dim, dim))
+
+        for z in range(dim):
+            z_bits = [int(b) for b in format(z, f'0{self.n}b')]
+            cost = 0
+            for i, j, w in self.edges:
+                si = 1 - 2 * z_bits[i]
+                sj = 1 - 2 * z_bits[j]
+                cost += w * (1 - si * sj) / 2
+            H[z, z] = cost
+
+        return H
+
+    def evaluate(self, z):
+        """Evaluate cut value for bitstring."""
+        cut = 0
+        for i, j, w in self.edges:
+            if z[i] != z[j]:
+                cut += w
+        return cut
+
+    def optimal_solution(self):
+        """Find optimal by brute force."""
+        best_z = None
+        best_cost = -np.inf
+
+        for z in range(2**self.n):
+            z_bits = [int(b) for b in format(z, f'0{self.n}b')]
+            cost = self.evaluate(z_bits)
+            if cost > best_cost:
+                best_cost = cost
+                best_z = z_bits
+
+        return best_z, best_cost
+
+# Example graphs
+graphs = {
+    'triangle': {
+        'n': 3,
+        'edges': [(0, 1, 1), (1, 2, 1), (2, 0, 1)]
+    },
+    'square': {
+        'n': 4,
+        'edges': [(0, 1, 1), (1, 2, 1), (2, 3, 1), (3, 0, 1)]
+    },
+    'star': {
+        'n': 4,
+        'edges': [(0, 1, 1), (0, 2, 1), (0, 3, 1)]
+    }
+}
+
+print("MaxCut Problem Examples")
+print("=" * 40)
+
+for name, g in graphs.items():
+    problem = MaxCutProblem(g['n'], g['edges'])
+    opt_z, opt_cost = problem.optimal_solution()
+    print(f"\n{name.capitalize()} graph:")
+    print(f"  Vertices: {g['n']}, Edges: {len(g['edges'])}")
+    print(f"  Optimal: {opt_z} with cut = {opt_cost}")
+```
+
+## Constraint Satisfaction
+
+SAT problems can be encoded using penalty terms.
+
+<Warning>
+Constraint encoding typically requires careful tuning of penalty strengths. Too small penalties may be violated; too large can create optimization difficulties.
+</Warning>
+
+```python
+import numpy as np
+
+class SATtoProblem:
+    """Convert SAT clauses to optimization problem."""
+
+    def __init__(self, n_vars, clauses):
+        """
+        Initialize SAT problem.
+
+        Args:
+            n_vars: Number of boolean variables
+            clauses: List of clauses, each clause is list of literals
+                     Positive int = variable, negative = negation
+        """
+        self.n = n_vars
+        self.clauses = clauses
+
+    def clause_to_cost(self, clause):
+        """
+        Convert clause to cost contribution.
+
+        Clause (x1 OR NOT x2 OR x3) is satisfied unless
+        x1=0, x2=1, x3=0.
+        """
+        def clause_value(z):
+            for lit in clause:
+                var = abs(lit) - 1
+                if lit > 0 and z[var] == 1:
+                    return 1  # Satisfied
+                if lit < 0 and z[var] == 0:
+                    return 1  # Satisfied
+            return 0  # Unsatisfied
+
+        return clause_value
+
+    def evaluate(self, z):
+        """Count satisfied clauses."""
+        satisfied = 0
+        for clause in self.clauses:
+            cost_fn = self.clause_to_cost(clause)
+            satisfied += cost_fn(z)
+        return satisfied
+
+    def build_hamiltonian(self):
+        """Build cost Hamiltonian for MaxSAT."""
+        dim = 2 ** self.n
+        H = np.zeros((dim, dim))
+
+        for z_int in range(dim):
+            z = [int(b) for b in format(z_int, f'0{self.n}b')]
+            H[z_int, z_int] = self.evaluate(z)
+
+        return H
+
+# Example: 3-SAT instance
+# (x1 OR x2 OR x3) AND (NOT x1 OR x2) AND (NOT x2 OR NOT x3)
+clauses = [
+    [1, 2, 3],      # x1 OR x2 OR x3
+    [-1, 2],        # NOT x1 OR x2
+    [-2, -3]        # NOT x2 OR NOT x3
+]
+
+sat = SATtoProblem(3, clauses)
+
+print("3-SAT Problem Example")
+print("=" * 40)
+print("Clauses:", clauses)
+print("\nEvaluating all assignments:")
+
+for z_int in range(8):
+    z = [int(b) for b in format(z_int, '03b')]
+    sat_count = sat.evaluate(z)
+    status = "SAT" if sat_count == len(clauses) else f"{sat_count}/{len(clauses)}"
+    print(f"  x={z}: {status}")
+```
+
+## Traveling Salesman Problem
+
+TSP requires encoding permutations into binary variables.
+
+<Definition>
+**TSP Encoding**: Use one-hot encoding with n² binary variables:
+
+$$x_{i,t} = 1 \text{ if city } i \text{ is visited at time } t$$
+
+Subject to: each city visited once, one city per time step.
+</Definition>
+
+```python
+import numpy as np
+
+class TSPProblem:
+    """Traveling Salesman Problem formulation."""
+
+    def __init__(self, distances, penalty=10):
+        """
+        Initialize TSP.
+
+        Args:
+            distances: n x n distance matrix
+            penalty: Penalty weight for constraint violations
+        """
+        self.n = distances.shape[0]
+        self.dist = distances
+        self.penalty = penalty
+
+    def n_qubits(self):
+        """Number of qubits needed."""
+        return self.n * self.n
+
+    def encode_tour(self, tour):
+        """Encode tour as binary string."""
+        x = np.zeros((self.n, self.n), dtype=int)
+        for t, city in enumerate(tour):
+            x[city, t] = 1
+        return x.flatten()
+
+    def decode_tour(self, x):
+        """Decode binary string to tour."""
+        x = np.array(x).reshape(self.n, self.n)
+        tour = []
+        for t in range(self.n):
+            for city in range(self.n):
+                if x[city, t] == 1:
+                    tour.append(city)
+                    break
+        return tour
+
+    def tour_length(self, tour):
+        """Calculate tour length."""
+        length = 0
+        for t in range(self.n):
+            i = tour[t]
+            j = tour[(t + 1) % self.n]
+            length += self.dist[i, j]
+        return length
+
+    def evaluate(self, x):
+        """
+        Evaluate TSP cost with penalties.
+
+        Cost = tour_length + penalties for constraint violations
+        """
+        x = np.array(x).reshape(self.n, self.n)
+
+        # Tour length (if valid)
+        tour_cost = 0
+        for t in range(self.n):
+            for t_next in range((t + 1) % self.n, (t + 1) % self.n + 1):
+                t_next = t_next % self.n
+                for i in range(self.n):
+                    for j in range(self.n):
+                        tour_cost += self.dist[i, j] * x[i, t] * x[j, t_next]
+
+        # Constraint 1: Each city visited exactly once
+        city_penalty = 0
+        for i in range(self.n):
+            city_penalty += (sum(x[i, :]) - 1) ** 2
+
+        # Constraint 2: One city per time step
+        time_penalty = 0
+        for t in range(self.n):
+            time_penalty += (sum(x[:, t]) - 1) ** 2
+
+        return tour_cost + self.penalty * (city_penalty + time_penalty)
+
+# Example: 3-city TSP
+distances = np.array([
+    [0, 1, 2],
+    [1, 0, 1],
+    [2, 1, 0]
+])
+
+tsp = TSPProblem(distances)
+print("Traveling Salesman Problem")
+print("=" * 40)
+print(f"Cities: {tsp.n}, Qubits needed: {tsp.n_qubits()}")
+print(f"\nDistance matrix:\n{distances}")
+
+# Test valid tour
+tour = [0, 1, 2]
+x = tsp.encode_tour(tour)
+cost = tsp.evaluate(x)
+length = tsp.tour_length(tour)
+print(f"\nTour {tour}: length={length}, QAOA cost={cost}")
+```
+
+## Portfolio Optimization
+
+Financial portfolio selection as QAOA problem.
+
+```python
+import numpy as np
+
+class PortfolioOptimization:
+    """Mean-variance portfolio optimization."""
+
+    def __init__(self, returns, covariance, risk_aversion=0.5):
+        """
+        Initialize portfolio problem.
+
+        Args:
+            returns: Expected returns vector
+            covariance: Covariance matrix
+            risk_aversion: Trade-off parameter
+        """
+        self.n = len(returns)
+        self.returns = returns
+        self.cov = covariance
+        self.risk_aversion = risk_aversion
+
+    def evaluate(self, x):
+        """
+        Evaluate portfolio.
+
+        Maximize: expected_return - risk_aversion * variance
+        """
+        x = np.array(x)
+        expected_return = np.dot(self.returns, x)
+        variance = x @ self.cov @ x
+        return expected_return - self.risk_aversion * variance
+
+    def build_qubo(self):
+        """Build QUBO matrix for portfolio."""
+        Q = np.zeros((self.n, self.n))
+
+        # Linear terms (returns)
+        for i in range(self.n):
+            Q[i, i] = -self.returns[i]  # Negative for maximization
+
+        # Quadratic terms (covariance)
+        for i in range(self.n):
+            for j in range(i, self.n):
+                if i == j:
+                    Q[i, i] += self.risk_aversion * self.cov[i, i]
+                else:
+                    Q[i, j] += self.risk_aversion * self.cov[i, j]
+
+        return Q
+
+# Example
+returns = np.array([0.05, 0.08, 0.12, 0.04])  # Expected returns
+covariance = np.array([
+    [0.01, 0.002, 0.001, 0.0],
+    [0.002, 0.02, 0.003, 0.001],
+    [0.001, 0.003, 0.04, 0.002],
+    [0.0, 0.001, 0.002, 0.005]
+])
+
+portfolio = PortfolioOptimization(returns, covariance, risk_aversion=1.0)
+
+print("Portfolio Optimization")
+print("=" * 40)
+print(f"Assets: {portfolio.n}")
+print(f"Expected returns: {returns}")
+
+# Evaluate some portfolios
+portfolios = [
+    [1, 0, 0, 0],  # Asset 0 only
+    [0, 0, 1, 0],  # Asset 2 only (highest return)
+    [1, 1, 0, 0],  # Assets 0 and 1
+    [1, 1, 1, 1],  # All assets
+]
+
+print("\nPortfolio evaluations:")
+for p in portfolios:
+    val = portfolio.evaluate(p)
+    ret = np.dot(returns, p)
+    var = np.array(p) @ covariance @ np.array(p)
+    print(f"  {p}: value={val:.4f}, return={ret:.2%}, variance={var:.4f}")
+```
+
+## Summary
+
+Problem formulation for QAOA involves:
+
+1. **QUBO representation** as foundation
+2. **Ising/Pauli encoding** for quantum implementation
+3. **Constraint penalties** for feasibility
+4. **Problem-specific encodings** (TSP, scheduling)
+5. **Trade-off parameters** for multi-objective problems
+
+The next lesson covers specialized mixer Hamiltonians for constrained problems.

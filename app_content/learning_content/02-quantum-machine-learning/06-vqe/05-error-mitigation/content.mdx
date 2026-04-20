@@ -1,0 +1,646 @@
+---
+title: "Error Mitigation for VQE"
+description: "Learn error mitigation techniques including zero-noise extrapolation, probabilistic error cancellation, and symmetry verification."
+---
+
+# Error Mitigation for VQE
+
+Quantum error mitigation enables more accurate results from noisy quantum computers without the full overhead of error correction. These techniques are essential for extracting meaningful results from NISQ devices.
+
+## The Need for Error Mitigation
+
+VQE circuits on real hardware suffer from various noise sources.
+
+<Definition>
+**Noise Sources in VQE**:
+- Gate errors: Imperfect implementation of quantum gates
+- Decoherence: T1 (relaxation) and T2 (dephasing)
+- Crosstalk: Unwanted interactions between qubits
+- Measurement errors: Readout fidelity limitations
+</Definition>
+
+```python
+import numpy as np
+
+def simulate_noisy_expectation(ideal_value, noise_params):
+    """
+    Simulate effect of noise on expectation value.
+
+    Args:
+        ideal_value: Noise-free expectation value
+        noise_params: Dict with noise parameters
+
+    Returns:
+        Noisy expectation value
+    """
+    gate_error_rate = noise_params.get('gate_error', 0.01)
+    n_gates = noise_params.get('n_gates', 50)
+    decoherence_factor = noise_params.get('decoherence', 0.95)
+
+    # Gate errors: exponential suppression
+    gate_fidelity = (1 - gate_error_rate) ** n_gates
+
+    # Combined effect (simplified model)
+    noisy_value = ideal_value * gate_fidelity * decoherence_factor
+
+    # Add measurement noise
+    measurement_noise = np.random.normal(0, 0.02)
+    noisy_value += measurement_noise
+
+    return noisy_value
+
+# Example
+ideal = -1.5  # Ideal ground state energy
+
+noise_params = {
+    'gate_error': 0.005,
+    'n_gates': 100,
+    'decoherence': 0.9
+}
+
+noisy = simulate_noisy_expectation(ideal, noise_params)
+print(f"Ideal energy: {ideal:.4f}")
+print(f"Noisy energy: {noisy:.4f}")
+print(f"Error: {abs(noisy - ideal):.4f}")
+```
+
+## Zero-Noise Extrapolation (ZNE)
+
+ZNE amplifies noise to estimate the zero-noise limit.
+
+<Formula>
+**Zero-Noise Extrapolation**: Measure at multiple noise levels λ₁, λ₂, ..., λₙ and extrapolate to λ = 0:
+
+$$E(0) = \sum_i w_i E(\lambda_i)$$
+
+Common scaling: λ = 1, 3, 5 (achieved by gate folding or pulse stretching)
+</Formula>
+
+<Tip>
+Richardson extrapolation provides optimal weights for polynomial noise models. Linear extrapolation works well when noise is weak.
+</Tip>
+
+```python
+import numpy as np
+from numpy.polynomial import polynomial as P
+
+class ZeroNoiseExtrapolation:
+    """
+    Zero-noise extrapolation for error mitigation.
+    """
+
+    def __init__(self, scale_factors=[1, 3, 5]):
+        """
+        Initialize ZNE.
+
+        Args:
+            scale_factors: Noise amplification factors
+        """
+        self.scale_factors = np.array(scale_factors)
+
+    def linear_extrapolation(self, values):
+        """
+        Linear extrapolation to zero noise.
+
+        Args:
+            values: Expectation values at each scale factor
+
+        Returns:
+            Extrapolated zero-noise value
+        """
+        # Fit line: E(λ) = a + b*λ
+        coeffs = np.polyfit(self.scale_factors, values, 1)
+        # Extrapolate to λ = 0
+        return coeffs[1]  # Intercept
+
+    def richardson_extrapolation(self, values):
+        """
+        Richardson extrapolation for polynomial noise model.
+
+        Args:
+            values: Expectation values at each scale factor
+
+        Returns:
+            Extrapolated zero-noise value
+        """
+        n = len(self.scale_factors)
+
+        # Build Vandermonde-like matrix
+        A = np.zeros((n, n))
+        for i, lam in enumerate(self.scale_factors):
+            for j in range(n):
+                A[i, j] = lam ** j
+
+        # Solve for coefficients
+        coeffs = np.linalg.solve(A, values)
+
+        # Zero-noise value is the constant term
+        return coeffs[0]
+
+    def exponential_extrapolation(self, values):
+        """
+        Exponential decay model extrapolation.
+
+        Assumes E(λ) = E(0) * exp(-γλ) + c
+        """
+        # Fit log-linear model for two-parameter fit
+        log_vals = np.log(np.abs(values) + 1e-10)
+        coeffs = np.polyfit(self.scale_factors, log_vals, 1)
+
+        # Extrapolate
+        return np.exp(coeffs[1])
+
+# Example
+def run_zne_demo():
+    """Demonstrate ZNE on simulated data."""
+    # True zero-noise value
+    E_ideal = -1.5
+
+    # Simulated noisy values at different scale factors
+    # E(λ) ≈ E_ideal * (1 - 0.1*λ)
+    scale_factors = [1, 2, 3, 4, 5]
+    noise_rate = 0.08
+    values = [E_ideal * (1 - noise_rate * lam) for lam in scale_factors]
+
+    # Add some measurement noise
+    values = np.array(values) + np.random.normal(0, 0.02, len(values))
+
+    print("Zero-Noise Extrapolation Demo")
+    print("=" * 40)
+    print(f"\nIdeal (zero-noise) value: {E_ideal:.4f}")
+    print(f"Noisy at λ=1: {values[0]:.4f}")
+
+    zne = ZeroNoiseExtrapolation(scale_factors)
+
+    linear = zne.linear_extrapolation(values)
+    richardson = zne.richardson_extrapolation(values)
+
+    print(f"\nExtrapolated values:")
+    print(f"  Linear: {linear:.4f} (error: {abs(linear - E_ideal):.4f})")
+    print(f"  Richardson: {richardson:.4f} (error: {abs(richardson - E_ideal):.4f})")
+
+run_zne_demo()
+```
+
+## Gate Folding
+
+Gate folding is the most common technique for noise amplification.
+
+<Definition>
+**Gate Folding**: To amplify noise by factor λ = 2k+1:
+
+$$G \rightarrow G (G^\dagger G)^k$$
+
+This applies the gate 2k+1 times total while implementing the same unitary.
+</Definition>
+
+```python
+import numpy as np
+
+class GateFolding:
+    """
+    Gate folding for noise amplification.
+    """
+
+    def fold_circuit(self, gates, scale_factor):
+        """
+        Fold circuit to amplify noise.
+
+        Args:
+            gates: List of gate operations
+            scale_factor: Target amplification (odd integer or float)
+
+        Returns:
+            Folded circuit
+        """
+        if scale_factor == 1:
+            return gates.copy()
+
+        folded = []
+
+        # For odd integer scale factors
+        if isinstance(scale_factor, int) and scale_factor % 2 == 1:
+            k = (scale_factor - 1) // 2
+            for gate in gates:
+                # Apply G (G† G)^k
+                folded.append(gate)
+                for _ in range(k):
+                    folded.append(self._inverse(gate))
+                    folded.append(gate)
+        else:
+            # Partial folding for non-integer scale factors
+            folded = self._partial_fold(gates, scale_factor)
+
+        return folded
+
+    def _inverse(self, gate):
+        """Get inverse of a gate."""
+        return {
+            'type': gate['type'] + '_dag',
+            'qubits': gate['qubits'],
+            'params': [-p for p in gate.get('params', [])]
+        }
+
+    def _partial_fold(self, gates, scale_factor):
+        """Partial folding for non-integer scale factors."""
+        n_gates = len(gates)
+        target_gates = int(n_gates * scale_factor)
+
+        # Full folding for some gates
+        n_full_fold = (target_gates - n_gates) // 2
+        folded = []
+
+        for i, gate in enumerate(gates):
+            folded.append(gate)
+            if i < n_full_fold:
+                folded.append(self._inverse(gate))
+                folded.append(gate)
+
+        return folded
+
+    def estimate_noise_amplification(self, original_length, scale_factor):
+        """Estimate actual noise amplification achieved."""
+        if isinstance(scale_factor, int) and scale_factor % 2 == 1:
+            return scale_factor
+        else:
+            # For partial folding
+            folded_length = len(self.fold_circuit(
+                [{'type': 'dummy', 'qubits': [0], 'params': []}] * original_length,
+                scale_factor
+            ))
+            return folded_length / original_length
+
+# Example
+folding = GateFolding()
+
+# Sample circuit
+circuit = [
+    {'type': 'RY', 'qubits': [0], 'params': [0.5]},
+    {'type': 'CNOT', 'qubits': [0, 1], 'params': []},
+    {'type': 'RZ', 'qubits': [1], 'params': [0.3]}
+]
+
+print("Gate Folding Demo")
+print("=" * 40)
+print(f"Original circuit: {len(circuit)} gates")
+
+for sf in [1, 3, 5]:
+    folded = folding.fold_circuit(circuit, sf)
+    print(f"Scale factor {sf}: {len(folded)} gates")
+```
+
+## Probabilistic Error Cancellation (PEC)
+
+PEC represents the inverse noise channel as a quasi-probability distribution.
+
+<Warning>
+PEC provides unbiased estimates but with exponentially increasing variance as circuit depth grows. The sampling overhead scales as O(γ^{2n}) where n is the number of gates.
+</Warning>
+
+```python
+import numpy as np
+
+class ProbabilisticErrorCancellation:
+    """
+    Probabilistic error cancellation for error mitigation.
+    """
+
+    def __init__(self, noise_model):
+        """
+        Initialize PEC with noise model.
+
+        Args:
+            noise_model: Dict mapping gates to noise parameters
+        """
+        self.noise_model = noise_model
+        self.quasi_probs = self._compute_quasi_probs()
+
+    def _compute_quasi_probs(self):
+        """Compute quasi-probability representations."""
+        quasi_probs = {}
+
+        for gate, noise_params in self.noise_model.items():
+            # For depolarizing noise with error rate p
+            p = noise_params.get('depolarizing', 0.01)
+
+            # Inverse channel representation
+            # Ideal = (1-p)*Noisy + correction terms
+            gamma = 1 / (1 - 4*p/3)  # Normalization factor
+
+            quasi_probs[gate] = {
+                'gamma': gamma,
+                'probs': {
+                    'I': (1 - p) * gamma,
+                    'X': -p/3 * gamma,
+                    'Y': -p/3 * gamma,
+                    'Z': -p/3 * gamma
+                }
+            }
+
+        return quasi_probs
+
+    def sample_correction(self, gate):
+        """
+        Sample a correction operation from quasi-probability.
+
+        Returns:
+            (operation, sign) tuple
+        """
+        qp = self.quasi_probs.get(gate, self.quasi_probs['default'])
+
+        # Sample from |prob| distribution
+        operations = list(qp['probs'].keys())
+        probs = np.array([abs(p) for p in qp['probs'].values()])
+        probs /= probs.sum()
+
+        op = np.random.choice(operations, p=probs)
+        sign = np.sign(qp['probs'][op])
+
+        return op, sign
+
+    def compute_sampling_overhead(self, n_gates):
+        """
+        Compute the sampling overhead for PEC.
+
+        Returns:
+            Expected overhead factor
+        """
+        total_gamma = 1.0
+        for gate in ['default'] * n_gates:
+            total_gamma *= self.quasi_probs[gate]['gamma']
+
+        return total_gamma ** 2
+
+# Example
+noise_model = {
+    'default': {'depolarizing': 0.01},
+    'CNOT': {'depolarizing': 0.02}
+}
+
+pec = ProbabilisticErrorCancellation(noise_model)
+
+print("Probabilistic Error Cancellation")
+print("=" * 40)
+
+print("\nQuasi-probability decomposition:")
+for gate, qp in pec.quasi_probs.items():
+    print(f"\n{gate}:")
+    print(f"  γ = {qp['gamma']:.4f}")
+    for op, prob in qp['probs'].items():
+        print(f"  {op}: {prob:+.4f}")
+
+print("\nSampling overhead for n gates:")
+for n in [10, 50, 100, 200]:
+    overhead = pec.compute_sampling_overhead(n)
+    print(f"  n={n}: {overhead:.2e}x more samples")
+```
+
+## Symmetry Verification
+
+Physical symmetries can be used to detect and discard erroneous results.
+
+<Definition>
+**Symmetry Verification**: For conserved quantities Q (like particle number or spin):
+
+1. Measure the symmetry operator Q
+2. Post-select on states with correct eigenvalue
+3. Only these contribute to the expectation value
+</Definition>
+
+```python
+import numpy as np
+
+class SymmetryVerification:
+    """
+    Symmetry-based error mitigation.
+    """
+
+    def __init__(self, n_qubits, target_particle_number):
+        """
+        Initialize symmetry verification.
+
+        Args:
+            n_qubits: Number of qubits
+            target_particle_number: Expected particle count
+        """
+        self.n_qubits = n_qubits
+        self.target_n = target_particle_number
+
+    def check_particle_number(self, bitstring):
+        """Check if bitstring has correct particle number."""
+        return bitstring.count('1') == self.target_n
+
+    def filter_results(self, measurement_results):
+        """
+        Filter measurement results by symmetry.
+
+        Args:
+            measurement_results: Dict of bitstring -> count
+
+        Returns:
+            Filtered results and discard fraction
+        """
+        filtered = {}
+        total = sum(measurement_results.values())
+        kept = 0
+
+        for bitstring, count in measurement_results.items():
+            if self.check_particle_number(bitstring):
+                filtered[bitstring] = count
+                kept += count
+
+        discard_fraction = 1 - kept / total
+
+        return filtered, discard_fraction
+
+    def symmetry_expanded_measurement(self, state, observable, n_shots=1000):
+        """
+        Measure with symmetry expansion.
+
+        Measures both the observable and symmetry operator.
+        """
+        dim = len(state)
+
+        # Sample measurements
+        probs = np.abs(state) ** 2
+        outcomes = np.random.choice(dim, size=n_shots, p=probs)
+
+        # Filter by symmetry
+        valid_outcomes = []
+        for outcome in outcomes:
+            bitstring = format(outcome, f'0{self.n_qubits}b')
+            if self.check_particle_number(bitstring):
+                valid_outcomes.append(outcome)
+
+        efficiency = len(valid_outcomes) / n_shots
+
+        return {
+            'valid_shots': len(valid_outcomes),
+            'efficiency': efficiency,
+            'outcomes': valid_outcomes
+        }
+
+# Example
+print("Symmetry Verification")
+print("=" * 40)
+
+sv = SymmetryVerification(n_qubits=4, target_particle_number=2)
+
+# Simulated noisy measurements (should be 2-particle states)
+measurements = {
+    '0011': 400,  # Correct
+    '0101': 350,  # Correct
+    '0110': 100,  # Correct
+    '1001': 50,   # Correct
+    '0001': 30,   # Error: 1 particle
+    '0111': 40,   # Error: 3 particles
+    '0000': 20,   # Error: 0 particles
+    '1111': 10    # Error: 4 particles
+}
+
+filtered, discard = sv.filter_results(measurements)
+
+print(f"\nOriginal measurements:")
+for bs, count in sorted(measurements.items()):
+    n_particles = bs.count('1')
+    status = "✓" if n_particles == 2 else f"✗ ({n_particles}p)"
+    print(f"  {bs}: {count:4d} {status}")
+
+print(f"\nFiltered (kept {(1-discard)*100:.1f}%):")
+for bs, count in sorted(filtered.items()):
+    print(f"  {bs}: {count:4d}")
+```
+
+## Combining Techniques
+
+Multiple error mitigation techniques can be combined for better results.
+
+```python
+import numpy as np
+
+class CombinedErrorMitigation:
+    """
+    Combine multiple error mitigation techniques.
+    """
+
+    def __init__(self, techniques):
+        """
+        Initialize with list of techniques.
+
+        Args:
+            techniques: List of technique names to apply
+        """
+        self.techniques = techniques
+
+    def mitigate(self, noisy_value, context):
+        """
+        Apply combined mitigation.
+
+        Args:
+            noisy_value: Noisy measurement result
+            context: Dict with technique-specific parameters
+
+        Returns:
+            Mitigated value and metadata
+        """
+        value = noisy_value
+        metadata = {'original': noisy_value}
+
+        for technique in self.techniques:
+            if technique == 'symmetry':
+                value, efficiency = self._apply_symmetry(value, context)
+                metadata['symmetry_efficiency'] = efficiency
+
+            elif technique == 'zne':
+                value = self._apply_zne(value, context)
+                metadata['zne_applied'] = True
+
+            elif technique == 'readout':
+                value = self._apply_readout_mitigation(value, context)
+                metadata['readout_mitigated'] = True
+
+        metadata['final'] = value
+        return value, metadata
+
+    def _apply_symmetry(self, value, context):
+        """Apply symmetry verification."""
+        # Simulate efficiency reduction
+        efficiency = context.get('symmetry_efficiency', 0.9)
+        # Symmetry can correct some errors
+        correction = context.get('symmetry_correction', 0.05)
+        return value * (1 + correction), efficiency
+
+    def _apply_zne(self, value, context):
+        """Apply zero-noise extrapolation."""
+        # Simplified: use provided extrapolation factor
+        zne_correction = context.get('zne_correction', 0.1)
+        return value * (1 + zne_correction)
+
+    def _apply_readout_mitigation(self, value, context):
+        """Apply readout error mitigation."""
+        readout_factor = context.get('readout_factor', 1.02)
+        return value * readout_factor
+
+    def estimate_total_overhead(self, context):
+        """Estimate total sampling overhead."""
+        overhead = 1.0
+
+        for technique in self.techniques:
+            if technique == 'symmetry':
+                # Overhead from discarding
+                efficiency = context.get('symmetry_efficiency', 0.9)
+                overhead /= efficiency
+
+            elif technique == 'zne':
+                # Need measurements at multiple noise levels
+                n_scale_factors = context.get('n_scale_factors', 3)
+                overhead *= n_scale_factors
+
+            elif technique == 'pec':
+                # Exponential overhead
+                pec_gamma = context.get('pec_gamma', 1.5)
+                n_gates = context.get('n_gates', 50)
+                overhead *= (pec_gamma ** (2 * n_gates))
+
+        return overhead
+
+# Example
+print("Combined Error Mitigation")
+print("=" * 40)
+
+# Apply ZNE + Symmetry + Readout mitigation
+combined = CombinedErrorMitigation(['readout', 'symmetry', 'zne'])
+
+noisy_value = -1.3  # Noisy measurement
+ideal_value = -1.5  # True value
+
+context = {
+    'symmetry_efficiency': 0.85,
+    'symmetry_correction': 0.03,
+    'zne_correction': 0.08,
+    'readout_factor': 1.02
+}
+
+mitigated, metadata = combined.mitigate(noisy_value, context)
+
+print(f"\nIdeal value: {ideal_value:.4f}")
+print(f"Noisy value: {noisy_value:.4f}")
+print(f"Mitigated value: {mitigated:.4f}")
+print(f"\nError reduction: {abs(noisy_value - ideal_value):.4f} → {abs(mitigated - ideal_value):.4f}")
+
+print(f"\nOverhead estimate:")
+overhead = combined.estimate_total_overhead(context)
+print(f"  {overhead:.2f}x more measurements needed")
+```
+
+## Summary
+
+Error mitigation is essential for useful NISQ VQE:
+
+1. **ZNE** extrapolates to zero noise from amplified measurements
+2. **Gate folding** amplifies noise by repeating gates
+3. **PEC** uses quasi-probability sampling (high overhead)
+4. **Symmetry verification** discards unphysical results
+5. **Combined approaches** often work best
+
+The final lesson covers practical VQE applications in chemistry and materials science.

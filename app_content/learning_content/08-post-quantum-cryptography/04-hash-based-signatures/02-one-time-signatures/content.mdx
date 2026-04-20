@@ -1,0 +1,729 @@
+---
+title: "One-Time Signatures: Lamport and Winternitz Constructions"
+description: "Master the building blocks of hash-based cryptography. Implement Lamport signatures for conceptual clarity and Winternitz OTS (WOTS) for practical efficiency."
+duration: 70
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Implement complete Lamport one-time signatures
+- Understand the Winternitz time-space tradeoff
+- Calculate WOTS parameters for different security/size requirements
+- Analyze the security of one-time signature schemes
+- Implement WOTS+ with domain separation
+
+## 1. Lamport Signatures: The Simplest Construction
+
+<Definition term="Lamport Signature">
+A one-time signature scheme where:
+- **Secret key**: $2n$ random $n$-bit values: $(sk_0^{(i)}, sk_1^{(i)})$ for $i \in [1,n]$
+- **Public key**: $2n$ hashes: $(pk_0^{(i)}, pk_1^{(i)}) = (H(sk_0^{(i)}), H(sk_1^{(i)}))$
+- **Signature on $m$**: For each bit $b_i$ of $H(m)$, reveal $sk_{b_i}^{(i)}$
+</Definition>
+
+```python
+import hashlib
+import secrets
+from typing import Tuple, List
+import numpy as np
+
+class LamportOTS:
+    """
+    Lamport One-Time Signature Scheme.
+    
+    The most conceptually simple hash-based signature:
+    - Generate 2n random secrets
+    - Public key = hash of each secret
+    - Signature reveals one secret per message bit
+    """
+    
+    def __init__(self, n: int = 256):
+        """
+        Initialize Lamport OTS.
+        
+        Args:
+            n: Security parameter (bit length of hash output)
+        """
+        self.n = n
+        self.hash_bytes = n // 8
+    
+    def _hash(self, data: bytes) -> bytes:
+        """Hash function (SHA-256 truncated to n bits)."""
+        return hashlib.sha256(data).digest()[:self.hash_bytes]
+    
+    def keygen(self) -> Tuple[List[Tuple[bytes, bytes]], List[Tuple[bytes, bytes]]]:
+        """
+        Generate Lamport key pair.
+        
+        Returns:
+            sk: Secret key - list of (sk_0, sk_1) pairs
+            pk: Public key - list of (H(sk_0), H(sk_1)) pairs
+        """
+        sk = []
+        pk = []
+        
+        for i in range(self.n):
+            # Two random secrets per bit position
+            sk_0 = secrets.token_bytes(self.hash_bytes)
+            sk_1 = secrets.token_bytes(self.hash_bytes)
+            
+            # Public key is hashes of secrets
+            pk_0 = self._hash(sk_0)
+            pk_1 = self._hash(sk_1)
+            
+            sk.append((sk_0, sk_1))
+            pk.append((pk_0, pk_1))
+        
+        return sk, pk
+    
+    def sign(self, sk: List[Tuple[bytes, bytes]], message: bytes) -> List[bytes]:
+        """
+        Sign a message (ONE TIME ONLY!).
+        
+        Args:
+            sk: Secret key
+            message: Message to sign
+        
+        Returns:
+            Signature (n secret values)
+        """
+        # Hash the message
+        msg_hash = self._hash(message)
+        
+        signature = []
+        for i in range(self.n):
+            byte_idx = i // 8
+            bit_idx = 7 - (i % 8)
+            bit = (msg_hash[byte_idx] >> bit_idx) & 1
+            
+            # Reveal the secret corresponding to this bit
+            signature.append(sk[i][bit])
+        
+        return signature
+    
+    def verify(self, pk: List[Tuple[bytes, bytes]], message: bytes, 
+               signature: List[bytes]) -> bool:
+        """
+        Verify a Lamport signature.
+        
+        Args:
+            pk: Public key
+            message: Message that was signed
+            signature: Signature to verify
+        
+        Returns:
+            True if signature is valid
+        """
+        if len(signature) != self.n:
+            return False
+        
+        msg_hash = self._hash(message)
+        
+        for i in range(self.n):
+            byte_idx = i // 8
+            bit_idx = 7 - (i % 8)
+            bit = (msg_hash[byte_idx] >> bit_idx) & 1
+            
+            # Check that hash of revealed secret matches public key
+            if self._hash(signature[i]) != pk[i][bit]:
+                return False
+        
+        return True
+    
+    def get_sizes(self) -> dict:
+        """Return sizes in bytes."""
+        return {
+            'secret_key': 2 * self.n * self.hash_bytes,
+            'public_key': 2 * self.n * self.hash_bytes,
+            'signature': self.n * self.hash_bytes
+        }
+
+
+def demonstrate_lamport():
+    """Demonstrate Lamport signatures."""
+    print("LAMPORT ONE-TIME SIGNATURE")
+    print("=" * 65)
+    
+    lamport = LamportOTS(256)
+    
+    # Show sizes
+    sizes = lamport.get_sizes()
+    print(f"\nSizes for 256-bit security:")
+    print(f"  Secret key: {sizes['secret_key']:,} bytes ({sizes['secret_key']//1024} KB)")
+    print(f"  Public key: {sizes['public_key']:,} bytes ({sizes['public_key']//1024} KB)")
+    print(f"  Signature:  {sizes['signature']:,} bytes ({sizes['signature']//1024} KB)")
+    
+    # Generate keys
+    print(f"\n1. KEY GENERATION")
+    sk, pk = lamport.keygen()
+    print(f"   Generated {len(sk)} secret key pairs")
+    print(f"   First sk pair: ({sk[0][0][:8].hex()}..., {sk[0][1][:8].hex()}...)")
+    print(f"   First pk pair: ({pk[0][0][:8].hex()}..., {pk[0][1][:8].hex()}...)")
+    
+    # Sign
+    print(f"\n2. SIGNING")
+    message = b"Transfer 1000 coins to Alice"
+    signature = lamport.sign(sk, message)
+    print(f"   Message: {message}")
+    print(f"   Signature: {len(signature)} hash values")
+    
+    # Verify
+    print(f"\n3. VERIFICATION")
+    valid = lamport.verify(pk, message, signature)
+    print(f"   Valid: {valid}")
+    
+    # Wrong message
+    wrong_msg = b"Transfer 9999 coins to Eve"
+    valid_wrong = lamport.verify(pk, wrong_msg, signature)
+    print(f"   Wrong message valid: {valid_wrong}")
+
+demonstrate_lamport()
+```
+
+## 2. The Winternitz Optimization
+
+Lamport signatures are simple but large. Winternitz OTS (WOTS) trades computation for size.
+
+<Definition term="Winternitz OTS (WOTS)">
+Instead of one secret per message bit, WOTS uses hash chains:
+- Parameter $w$: Winternitz parameter (typically 4, 16, or 256)
+- Each secret value is hashed up to $w-1$ times
+- Message encoded in base $w$ instead of base 2
+- Signature size reduced by factor of $\log_2(w)$
+</Definition>
+
+<Formula>
+$$\text{Lamport: } n \text{ secrets for } n \text{ message bits}$$
+$$\text{WOTS: } \lceil n/\log_2 w \rceil + \lceil \log_2(\lceil n/\log_2 w \rceil \cdot (w-1))/\log_2 w \rceil \text{ secrets}$$
+$$\text{For } n=256, w=16: \text{ only } 67 \text{ chains instead of } 256$$
+</Formula>
+
+```python
+import math
+
+class WinternitzOTS:
+    """
+    Winternitz One-Time Signature Scheme (WOTS).
+    
+    Key insight: Instead of 1 secret per bit, use hash chains.
+    - Parameter w: number of hash iterations per chain
+    - Message encoded in base w (digits 0 to w-1)
+    - Signature reveals intermediate hash values
+    """
+    
+    def __init__(self, n: int = 256, w: int = 16):
+        """
+        Initialize WOTS.
+        
+        Args:
+            n: Security parameter (hash output bits)
+            w: Winternitz parameter (must be power of 2)
+        """
+        if w & (w - 1) != 0:
+            raise ValueError("w must be power of 2")
+        
+        self.n = n
+        self.w = w
+        self.hash_bytes = n // 8
+        
+        # Calculate number of chains needed
+        self.log_w = int(math.log2(w))
+        
+        # l1: chains for message
+        self.l1 = math.ceil(n / self.log_w)
+        
+        # l2: chains for checksum
+        # Checksum can be at most l1 * (w-1)
+        self.l2 = math.floor(math.log2(self.l1 * (w - 1)) / self.log_w) + 1
+        
+        # Total chains
+        self.l = self.l1 + self.l2
+    
+    def _hash(self, data: bytes) -> bytes:
+        """Hash function."""
+        return hashlib.sha256(data).digest()[:self.hash_bytes]
+    
+    def _chain(self, x: bytes, start: int, steps: int) -> bytes:
+        """
+        Apply hash function 'steps' times starting from position 'start'.
+        
+        chain(x, i, j) = H^j(x) starting at position i
+        """
+        result = x
+        for _ in range(steps):
+            result = self._hash(result)
+        return result
+    
+    def _base_w(self, data: bytes, out_len: int) -> List[int]:
+        """
+        Convert bytes to base-w representation.
+        
+        Returns list of 'out_len' digits in range [0, w-1].
+        """
+        # Convert bytes to integer
+        num = int.from_bytes(data, 'big')
+        
+        digits = []
+        for _ in range(out_len):
+            digits.append(num % self.w)
+            num //= self.w
+        
+        # Reverse to get most significant first
+        return digits[::-1]
+    
+    def keygen(self) -> Tuple[List[bytes], List[bytes]]:
+        """
+        Generate WOTS key pair.
+        
+        Returns:
+            sk: l random secret values
+            pk: l public values (end of each chain)
+        """
+        sk = [secrets.token_bytes(self.hash_bytes) for _ in range(self.l)]
+        pk = [self._chain(sk[i], 0, self.w - 1) for i in range(self.l)]
+        
+        return sk, pk
+    
+    def sign(self, sk: List[bytes], message: bytes) -> List[bytes]:
+        """
+        Sign a message.
+        
+        Args:
+            sk: Secret key
+            message: Message to sign
+        
+        Returns:
+            Signature (l intermediate chain values)
+        """
+        # Hash message
+        msg_hash = self._hash(message)
+        
+        # Convert to base-w
+        msg_digits = self._base_w(msg_hash, self.l1)
+        
+        # Compute checksum
+        checksum = sum(self.w - 1 - d for d in msg_digits)
+        
+        # Convert checksum to base-w
+        checksum_bytes = checksum.to_bytes(
+            math.ceil(math.log2(self.l1 * (self.w - 1) + 1) / 8) + 1, 'big'
+        )
+        checksum_digits = self._base_w(checksum_bytes, self.l2)
+        
+        # Combine message and checksum digits
+        all_digits = msg_digits + checksum_digits
+        
+        # Generate signature: chain each sk[i] by digit[i] steps
+        signature = []
+        for i in range(self.l):
+            sig_i = self._chain(sk[i], 0, all_digits[i])
+            signature.append(sig_i)
+        
+        return signature
+    
+    def verify(self, pk: List[bytes], message: bytes, 
+               signature: List[bytes]) -> bool:
+        """
+        Verify a WOTS signature.
+        
+        For each chain, complete the chain from signature to end
+        and check it matches public key.
+        """
+        if len(signature) != self.l:
+            return False
+        
+        # Recompute digits
+        msg_hash = self._hash(message)
+        msg_digits = self._base_w(msg_hash, self.l1)
+        
+        checksum = sum(self.w - 1 - d for d in msg_digits)
+        checksum_bytes = checksum.to_bytes(
+            math.ceil(math.log2(self.l1 * (self.w - 1) + 1) / 8) + 1, 'big'
+        )
+        checksum_digits = self._base_w(checksum_bytes, self.l2)
+        
+        all_digits = msg_digits + checksum_digits
+        
+        # Verify each chain
+        for i in range(self.l):
+            # Complete chain from signature position to end
+            remaining_steps = self.w - 1 - all_digits[i]
+            computed_pk = self._chain(signature[i], 0, remaining_steps)
+            
+            if computed_pk != pk[i]:
+                return False
+        
+        return True
+    
+    def get_sizes(self) -> dict:
+        """Return sizes in bytes."""
+        return {
+            'secret_key': self.l * self.hash_bytes,
+            'public_key': self.l * self.hash_bytes,
+            'signature': self.l * self.hash_bytes,
+            'chains': self.l,
+            'l1': self.l1,
+            'l2': self.l2
+        }
+
+
+def compare_lamport_wots():
+    """Compare Lamport and WOTS sizes."""
+    print("\nLAMPORT vs WOTS COMPARISON")
+    print("=" * 65)
+    
+    lamport = LamportOTS(256)
+    
+    print(f"\n{'Scheme':<20} {'SK (KB)':<12} {'PK (KB)':<12} {'Sig (KB)':<12} {'Chains'}")
+    print("-" * 70)
+    
+    # Lamport
+    l_sizes = lamport.get_sizes()
+    print(f"{'Lamport':<20} {l_sizes['secret_key']/1024:<12.1f} "
+          f"{l_sizes['public_key']/1024:<12.1f} {l_sizes['signature']/1024:<12.1f} {'256'}")
+    
+    # WOTS with different w
+    for w in [4, 16, 256]:
+        wots = WinternitzOTS(256, w)
+        w_sizes = wots.get_sizes()
+        print(f"{'WOTS (w=' + str(w) + ')':<20} {w_sizes['secret_key']/1024:<12.1f} "
+              f"{w_sizes['public_key']/1024:<12.1f} {w_sizes['signature']/1024:<12.1f} "
+              f"{w_sizes['chains']}")
+    
+    print(f"\nTradeoff: Higher w = smaller signatures but more hash operations")
+    print(f"  w=16: Sign requires up to 15 hashes per chain")
+    print(f"  w=256: Sign requires up to 255 hashes per chain")
+
+compare_lamport_wots()
+```
+
+## 3. Understanding the WOTS Checksum
+
+The checksum is crucial for security—without it, an attacker could forge signatures.
+
+```python
+def explain_checksum():
+    """Explain why WOTS needs a checksum."""
+    print("\nWOTS CHECKSUM EXPLANATION")
+    print("=" * 65)
+    
+    explanation = """
+    WITHOUT CHECKSUM - VULNERABLE TO FORGERY:
+    
+    Suppose message M has digit d_i at position i.
+    Signature reveals chain value at position d_i.
+    
+    If attacker wants to forge signature on M' where d'_i > d_i:
+    - They need value at position d'_i
+    - But they only have value at position d_i
+    - To get d'_i, need to hash MORE times
+    - They CAN do this! Just hash signature[i] more times.
+    
+    Example:
+    M  encodes to: [3, 5, 2, 7, ...]  
+    M' encodes to: [3, 6, 2, 9, ...]
+                      ↑     ↑
+    Attacker can hash sig[1] once more to get position 6
+    Attacker can hash sig[3] twice more to get position 9
+    
+    THE FIX - CHECKSUM:
+    
+    Add checksum = Σ(w-1 - d_i) to the message digits.
+    
+    Key insight: If ANY message digit increases, checksum DECREASES.
+    
+    M  checksum: (w-1-3) + (w-1-5) + ... = C
+    M' checksum: (w-1-3) + (w-1-6) + ... = C - 1  (decreased!)
+    
+    But to forge M', attacker needs checksum chain position C-1,
+    which is EARLIER in the chain than position C.
+    Going backwards in a hash chain = finding preimages = HARD!
+    """
+    print(explanation)
+    
+    # Demonstrate with example
+    print("CONCRETE EXAMPLE (w=16):")
+    print("-" * 50)
+    
+    w = 16
+    # Original message digits
+    msg_digits = [3, 5, 2, 7, 10, 1]
+    checksum_orig = sum(w - 1 - d for d in msg_digits)
+    
+    print(f"Original message digits: {msg_digits}")
+    print(f"Original checksum: {checksum_orig}")
+    
+    # Forged message (some digits increased)
+    forged_digits = [3, 6, 2, 9, 10, 1]  # Position 1: 5→6, Position 3: 7→9
+    checksum_forged = sum(w - 1 - d for d in forged_digits)
+    
+    print(f"\nForged message digits:  {forged_digits}")
+    print(f"Forged checksum: {checksum_forged}")
+    print(f"Checksum change: {checksum_forged - checksum_orig}")
+    
+    print(f"\nTo forge, attacker needs checksum position {checksum_forged}")
+    print(f"But signature only reveals position {checksum_orig}")
+    print(f"Would need to 'reverse' {checksum_orig - checksum_forged} hash steps")
+    print(f"This requires breaking preimage resistance!")
+
+explain_checksum()
+```
+
+## 4. WOTS+ with Domain Separation
+
+WOTS+ improves on basic WOTS with additional features for security proofs.
+
+```python
+class WOTSPlus:
+    """
+    WOTS+ (WOTS-Plus): Improved Winternitz OTS.
+    
+    Improvements over basic WOTS:
+    1. Bitmask XOR before each hash (randomized hashing)
+    2. Domain separation (different hash functions for different purposes)
+    3. Enables tighter security proofs
+    """
+    
+    def __init__(self, n: int = 256, w: int = 16):
+        self.n = n
+        self.w = w
+        self.hash_bytes = n // 8
+        
+        self.log_w = int(math.log2(w))
+        self.l1 = math.ceil(n / self.log_w)
+        self.l2 = math.floor(math.log2(self.l1 * (w - 1)) / self.log_w) + 1
+        self.l = self.l1 + self.l2
+    
+    def _prf(self, key: bytes, input_data: bytes) -> bytes:
+        """Pseudorandom function for key derivation."""
+        return hashlib.sha256(key + input_data).digest()[:self.hash_bytes]
+    
+    def _hash_with_address(self, data: bytes, address: bytes, 
+                           public_seed: bytes) -> bytes:
+        """
+        Hash with domain separation using address.
+        
+        Different addresses ensure independent hash instances.
+        """
+        # Derive mask from public seed and address
+        mask = self._prf(public_seed, b'\x00' + address)
+        
+        # Apply mask and hash
+        masked = bytes(a ^ b for a, b in zip(data, mask))
+        return hashlib.sha256(public_seed + address + masked).digest()[:self.hash_bytes]
+    
+    def _chain(self, x: bytes, start: int, steps: int, 
+               chain_addr: int, public_seed: bytes) -> bytes:
+        """Chain function with address for domain separation."""
+        result = x
+        for j in range(steps):
+            # Create address encoding chain index and step
+            address = chain_addr.to_bytes(4, 'big') + (start + j).to_bytes(4, 'big')
+            result = self._hash_with_address(result, address, public_seed)
+        return result
+    
+    def keygen(self) -> Tuple[bytes, bytes, List[bytes]]:
+        """
+        Generate WOTS+ key pair.
+        
+        Returns:
+            secret_seed: Seed for secret key generation
+            public_seed: Public randomness
+            pk: Public key (l chain endpoints)
+        """
+        secret_seed = secrets.token_bytes(self.hash_bytes)
+        public_seed = secrets.token_bytes(self.hash_bytes)
+        
+        # Derive secret key values from seed
+        sk = [self._prf(secret_seed, i.to_bytes(4, 'big')) for i in range(self.l)]
+        
+        # Compute public key
+        pk = [self._chain(sk[i], 0, self.w - 1, i, public_seed) 
+              for i in range(self.l)]
+        
+        return secret_seed, public_seed, pk
+    
+    def _base_w(self, data: bytes, out_len: int) -> List[int]:
+        """Convert to base-w representation."""
+        num = int.from_bytes(data, 'big')
+        digits = []
+        for _ in range(out_len):
+            digits.append(num % self.w)
+            num //= self.w
+        return digits[::-1]
+    
+    def sign(self, secret_seed: bytes, public_seed: bytes, 
+             message: bytes) -> List[bytes]:
+        """Sign message with WOTS+."""
+        # Derive secret key
+        sk = [self._prf(secret_seed, i.to_bytes(4, 'big')) for i in range(self.l)]
+        
+        # Compute message digits + checksum
+        msg_hash = hashlib.sha256(message).digest()[:self.hash_bytes]
+        msg_digits = self._base_w(msg_hash, self.l1)
+        
+        checksum = sum(self.w - 1 - d for d in msg_digits)
+        checksum_bytes = checksum.to_bytes(4, 'big')
+        checksum_digits = self._base_w(checksum_bytes, self.l2)
+        
+        all_digits = msg_digits + checksum_digits
+        
+        # Generate signature
+        signature = [self._chain(sk[i], 0, all_digits[i], i, public_seed)
+                    for i in range(self.l)]
+        
+        return signature
+    
+    def verify(self, public_seed: bytes, pk: List[bytes], 
+               message: bytes, signature: List[bytes]) -> bool:
+        """Verify WOTS+ signature."""
+        if len(signature) != self.l:
+            return False
+        
+        # Recompute digits
+        msg_hash = hashlib.sha256(message).digest()[:self.hash_bytes]
+        msg_digits = self._base_w(msg_hash, self.l1)
+        
+        checksum = sum(self.w - 1 - d for d in msg_digits)
+        checksum_bytes = checksum.to_bytes(4, 'big')
+        checksum_digits = self._base_w(checksum_bytes, self.l2)
+        
+        all_digits = msg_digits + checksum_digits
+        
+        # Complete chains and verify
+        for i in range(self.l):
+            remaining = self.w - 1 - all_digits[i]
+            computed = self._chain(signature[i], all_digits[i], remaining, i, public_seed)
+            if computed != pk[i]:
+                return False
+        
+        return True
+
+
+def demonstrate_wots_plus():
+    """Demonstrate WOTS+."""
+    print("\nWOTS+ DEMONSTRATION")
+    print("=" * 65)
+    
+    wots = WOTSPlus(256, 16)
+    
+    print(f"Parameters: n=256, w=16")
+    print(f"  l1 (message chains): {wots.l1}")
+    print(f"  l2 (checksum chains): {wots.l2}")
+    print(f"  Total chains: {wots.l}")
+    
+    # Key generation
+    secret_seed, public_seed, pk = wots.keygen()
+    print(f"\nKey Generation:")
+    print(f"  Secret seed: {secret_seed[:16].hex()}...")
+    print(f"  Public seed: {public_seed[:16].hex()}...")
+    print(f"  Public key: {len(pk)} chain endpoints")
+    
+    # Sign
+    message = b"Test message for WOTS+"
+    signature = wots.sign(secret_seed, public_seed, message)
+    print(f"\nSigning:")
+    print(f"  Message: {message}")
+    print(f"  Signature: {len(signature)} values")
+    
+    # Verify
+    valid = wots.verify(public_seed, pk, message, signature)
+    print(f"\nVerification: {valid}")
+
+demonstrate_wots_plus()
+```
+
+## 5. Security Analysis
+
+```python
+def security_analysis():
+    """Analyze OTS security properties."""
+    print("\nONE-TIME SIGNATURE SECURITY ANALYSIS")
+    print("=" * 65)
+    
+    security = """
+    LAMPORT SECURITY:
+    ─────────────────
+    Security Assumption: Preimage resistance of H
+    
+    Attack scenario: Forge signature on M' ≠ M after seeing sig on M
+    
+    For some bit position i where M[i] ≠ M'[i]:
+    - If M[i]=0, M'[i]=1: Attacker has H(sk_0), needs sk_1
+    - To get sk_1: Must find preimage of pk_1 = H(sk_1)
+    
+    Security level: 2^n for n-bit hash (2^(n/2) quantum with Grover)
+    
+    
+    WOTS SECURITY:
+    ──────────────
+    Security Assumption: Second-preimage resistance of H
+    
+    Slightly weaker than Lamport (technical detail in proofs)
+    
+    Attack scenarios:
+    1. Increase message digit: Need to hash forward (easy, but checksum 
+       prevents this)
+    2. Decrease checksum digit: Need to find preimage (hard!)
+    3. Direct forgery: Need second preimage for chain endpoint (hard!)
+    
+    Security level: 2^n second-preimage resistance
+    
+    
+    WOTS+ SECURITY:
+    ───────────────
+    Additional features for provable security:
+    
+    1. Domain separation: Each chain uses different hash instance
+       → Prevents multi-target attacks
+    
+    2. Randomized hashing (bitmasks): 
+       → Enables proof in standard model (not just ROM)
+    
+    3. Address-based derivation:
+       → Cleaner composition in larger schemes (XMSS, SPHINCS+)
+    """
+    print(security)
+    
+    # Quantitative comparison
+    print("\nQUANTITATIVE SECURITY COMPARISON:")
+    print("-" * 50)
+    
+    schemes = [
+        ('Lamport-256', 256, 'Preimage', 256, 128),
+        ('WOTS-256 (w=16)', 256, '2nd-Preimage', 256, 128),
+        ('WOTS+-256 (w=16)', 256, '2nd-Preimage + PRF', 256, 128),
+    ]
+    
+    print(f"{'Scheme':<20} {'Hash':<6} {'Assumption':<20} {'Classical':<10} {'Quantum'}")
+    print("-" * 75)
+    for name, hash_bits, assumption, classical, quantum in schemes:
+        print(f"{name:<20} {hash_bits:<6} {assumption:<20} "
+              f"2^{classical:<8} 2^{quantum}")
+
+security_analysis()
+```
+
+## Summary
+
+In this lesson, you learned about one-time signatures:
+
+1. **Lamport Signatures**: Simple but large, one secret per message bit
+2. **Security Basis**: Relies on preimage/second-preimage resistance
+3. **WOTS**: Trades computation for smaller signatures via hash chains
+4. **Winternitz Parameter**: Higher $w$ = smaller signatures, more hashing
+5. **Checksum**: Prevents forgery by making increases impossible
+6. **WOTS+**: Domain separation for provable security
+7. **Size Comparison**: WOTS with $w=16$ is ~4× smaller than Lamport
+8. **Building Block**: Used in Merkle trees for many-time signatures
+
+These one-time schemes are the foundation for XMSS, LMS, and SPHINCS+.
+
+## Further Reading
+
+- Next lesson: Merkle Trees and Many-Time Signatures
+- Related: Hash chain security analysis
+- Advanced: WOTS+ security proofs

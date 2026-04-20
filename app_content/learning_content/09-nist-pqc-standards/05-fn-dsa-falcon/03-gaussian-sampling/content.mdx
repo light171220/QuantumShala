@@ -1,0 +1,515 @@
+---
+title: "Fast Fourier Gaussian Sampling"
+description: "Understanding the FFT-based Gaussian sampling technique that enables efficient signing in FN-DSA/FALCON."
+keywords: ["gaussian-sampling", "fft", "lattice", "falcon", "discrete-gaussian"]
+---
+
+# Fast Fourier Gaussian Sampling
+
+FN-DSA's efficiency comes from its innovative FFT-based Gaussian sampling algorithm. This technique enables efficient sampling of short lattice vectors while maintaining security guarantees.
+
+## Why Gaussian Sampling?
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              THE NEED FOR GAUSSIAN SAMPLING                     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Signing Goal:                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Given message hash c, find short (s₁, s₂) such that: │  │
+│   │   s₁ + h·s₂ ≡ c (mod q)                               │  │
+│   │                                                         │  │
+│   │   Must find "short" solution (small coefficients)      │  │
+│   │   Must not leak secret key through signatures          │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Problem with Naive Approach:                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Simple: Just use trapdoor to find closest point      │  │
+│   │                                                         │  │
+│   │   DANGER: Signatures would reveal information about    │  │
+│   │   the secret basis (f, g, F, G)!                       │  │
+│   │                                                         │  │
+│   │   After many signatures:                               │  │
+│   │   • Statistical patterns emerge                        │  │
+│   │   • Secret key can be recovered                       │  │
+│   │   • Similar to Fiat-Shamir without masking            │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Solution: Gaussian Sampling                                   │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Sample signature from a Gaussian distribution        │  │
+│   │                                                         │  │
+│   │   Key property: Distribution of (s₁, s₂) depends only │  │
+│   │   on c, NOT on the specific secret key used!          │  │
+│   │                                                         │  │
+│   │   Same distribution regardless of which (f,g,F,G)      │  │
+│   │   → No information leakage about secret key           │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Discrete Gaussian Distribution
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              DISCRETE GAUSSIAN OVER LATTICES                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Continuous Gaussian (for reference):                         │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   ρ_σ(x) = exp(-||x||²/(2σ²))                          │  │
+│   │                                                         │  │
+│   │   Bell curve centered at origin                        │  │
+│   │   σ = standard deviation (spread)                      │  │
+│   │                                                         │  │
+│   │              ∧                                          │  │
+│   │             /|\                                         │  │
+│   │            / | \                                        │  │
+│   │           /  |  \                                       │  │
+│   │          /   |   \                                      │  │
+│   │      ___/    |    \___                                  │  │
+│   │   ──────────────────────→                               │  │
+│   │          -σ  0  +σ                                      │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Discrete Gaussian (over lattice L):                          │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   D_{L,σ,c}(x) = ρ_σ(x - c) / Σ_{v ∈ L} ρ_σ(v - c)    │  │
+│   │                                                         │  │
+│   │   • Only defined on lattice points                     │  │
+│   │   • Centered at target c                               │  │
+│   │   • Probability proportional to Gaussian weight        │  │
+│   │                                                         │  │
+│   │   ·     ·     ·     ·     ·     ·     ·                │  │
+│   │   ·     ·     ·  *  ·     ·     ·                      │  │
+│   │   ·     ·  *  ·  ●  ·  *  ·     ·  (● = target c)     │  │
+│   │   ·     ·     ·  *  ·     ·     ·  (* = high prob)    │  │
+│   │   ·     ·     ·     ·     ·     ·                      │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Key Properties:                                               │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   1. Smoothing: For σ large enough, distribution      │  │
+│   │      is statistically close to uniform on coset       │  │
+│   │                                                         │  │
+│   │   2. Concentration: Most samples within σ√n of c      │  │
+│   │                                                         │  │
+│   │   3. Independence: Distribution independent of        │  │
+│   │      which basis was used to sample                   │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Klein/GPV Sampling
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              KLEIN/GPV SAMPLING ALGORITHM                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Basic Idea: Sample coordinate by coordinate using            │
+│   Gram-Schmidt orthogonalization                               │
+│                                                                 │
+│   Algorithm (simplified):                                       │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Input: Basis B = [b₁, ..., bₙ], target c, width σ   │  │
+│   │   Output: Sample v ∈ L close to c                      │  │
+│   │                                                         │  │
+│   │   1. Compute Gram-Schmidt: b₁*, ..., bₙ*              │  │
+│   │                                                         │  │
+│   │   2. Express c in basis: c = Σ cᵢ bᵢ                  │  │
+│   │                                                         │  │
+│   │   3. For i = n down to 1:                              │  │
+│   │      • c'ᵢ = projection of c onto bᵢ*                 │  │
+│   │      • Sample zᵢ from D_{Z, σ/||bᵢ*||, c'ᵢ}           │  │
+│   │      • c = c - zᵢ bᵢ                                  │  │
+│   │                                                         │  │
+│   │   4. Return v = Σ zᵢ bᵢ                                │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Requirement: σ ≥ ||b̃|| · smoothing_parameter                │
+│   where ||b̃|| = max ||bᵢ*|| (max Gram-Schmidt norm)           │
+│                                                                 │
+│   Problem: This is O(n²) - too slow for large n               │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## FFT-Based Sampling (FALCON's Innovation)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              FFT-BASED GAUSSIAN SAMPLING                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Key Insight: NTRU basis has special structure!               │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Basis B = [[f, F], [g, G]] represents polynomials    │  │
+│   │   Polynomial multiplication ≈ FFT in O(n log n)        │  │
+│   │                                                         │  │
+│   │   Gram-Schmidt in FFT domain also O(n log n)!         │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   FALCON's Tree-Based Sampling:                                │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Structure: Binary tree with n leaves                 │  │
+│   │                                                         │  │
+│   │              [Root]                                     │  │
+│   │             /      \                                    │  │
+│   │          [L]        [R]                                 │  │
+│   │         /   \      /   \                                │  │
+│   │        ...  ...   ...  ...                              │  │
+│   │       / \  / \   / \  / \                               │  │
+│   │      [leaves = individual coefficients]                │  │
+│   │                                                         │  │
+│   │   Each node: Sample based on children                  │  │
+│   │   Process: Leaves → Root (bottom-up)                   │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Algorithm Sketch:                                            │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   1. Precompute FFT of basis polynomials               │  │
+│   │                                                         │  │
+│   │   2. Build "FALCON tree" encoding Gram-Schmidt info    │  │
+│   │                                                         │  │
+│   │   3. At signing time:                                  │  │
+│   │      a. Compute target t = (c, 0) in FFT domain        │  │
+│   │      b. Recursively sample through tree                │  │
+│   │      c. Combine samples to get (s₁, s₂)               │  │
+│   │                                                         │  │
+│   │   Complexity: O(n log n) instead of O(n²)             │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Sampling Over Integers
+
+```python
+import numpy as np
+import math
+
+def discrete_gaussian_1d(sigma: float, center: float = 0.0) -> int:
+    """
+    Sample from discrete Gaussian distribution over integers.
+
+    Uses rejection sampling with uniform proposal.
+    Educational implementation - not constant time.
+    """
+    # Determine sampling range (tail bound)
+    tail_bound = int(math.ceil(sigma * 6))
+
+    while True:
+        # Sample uniformly in range
+        x = np.random.randint(-tail_bound, tail_bound + 1)
+
+        # Accept with Gaussian probability
+        weight = math.exp(-((x - center) ** 2) / (2 * sigma ** 2))
+
+        if np.random.random() < weight:
+            return x
+
+
+def sample_gaussian_vector(sigma: float, n: int, center: np.ndarray = None) -> np.ndarray:
+    """
+    Sample n-dimensional discrete Gaussian.
+    Independent sampling per coordinate (simplified).
+    """
+    if center is None:
+        center = np.zeros(n)
+
+    return np.array([discrete_gaussian_1d(sigma, c) for c in center])
+
+
+# Demonstration
+print("Discrete Gaussian Sampling Demo")
+print("=" * 50)
+
+sigma = 3.0
+n_samples = 10000
+
+# Sample many points
+samples = [discrete_gaussian_1d(sigma) for _ in range(n_samples)]
+
+print(f"\nSigma = {sigma}")
+print(f"Mean: {np.mean(samples):.3f} (expected: 0)")
+print(f"Std dev: {np.std(samples):.3f} (expected: ~{sigma:.1f})")
+
+# Show histogram
+from collections import Counter
+counts = Counter(samples)
+print("\nDistribution:")
+for x in range(-10, 11):
+    bar = "*" * (counts.get(x, 0) // 100)
+    print(f"{x:3d}: {bar}")
+```
+
+## The FALCON Tree
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              FALCON TREE STRUCTURE                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Tree Node Contents:                                          │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Each internal node stores:                           │  │
+│   │   • LDL* decomposition information                    │  │
+│   │   • Relates to Gram-Schmidt of that subtree           │  │
+│   │                                                         │  │
+│   │   Leaf nodes:                                           │  │
+│   │   • Sigma value for that coordinate                   │  │
+│   │   • Used for final integer sampling                   │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Tree Construction (Key Generation):                          │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   1. Compute G = B^T · B (Gram matrix)                │  │
+│   │                                                         │  │
+│   │   2. In FFT domain, G becomes diagonal at leaves      │  │
+│   │                                                         │  │
+│   │   3. Build tree bottom-up:                            │  │
+│   │      • Leaves: diagonal entries of FFT(G)             │  │
+│   │      • Internal: LDL* merge of children               │  │
+│   │                                                         │  │
+│   │   4. Store tree with secret key                       │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Sampling Process (Signing):                                  │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   ffSampling(t, T):  // t = target, T = tree         │  │
+│   │     if T is leaf:                                      │  │
+│   │       return SampleZ(σ_leaf, t)  // Integer sample   │  │
+│   │                                                         │  │
+│   │     // Split target for children                      │  │
+│   │     (t₀, t₁) = splitFFT(t)                           │  │
+│   │                                                         │  │
+│   │     // Recursively sample                             │  │
+│   │     z₁ = ffSampling(t₁, T.right)                     │  │
+│   │     t₀' = t₀ + z₁ * T.l  // Adjust left target      │  │
+│   │     z₀ = ffSampling(t₀', T.left)                     │  │
+│   │                                                         │  │
+│   │     return mergeFFT(z₀, z₁)                          │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Floating-Point Considerations
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              FLOATING-POINT REQUIREMENTS                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Why Floating-Point?                                          │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   FALCON's FFT sampling requires:                      │  │
+│   │   • Complex number arithmetic                          │  │
+│   │   • Exponential function (for Gaussian)               │  │
+│   │   • Square roots (for normalization)                  │  │
+│   │   • Division with high precision                      │  │
+│   │                                                         │  │
+│   │   Integer-only versions exist but are slower          │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Precision Requirements:                                       │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   FN-DSA-512:  53-bit mantissa (double precision OK)  │  │
+│   │   FN-DSA-1024: 53-bit mantissa (with care)            │  │
+│   │                                                         │  │
+│   │   Critical operations:                                  │  │
+│   │   • FFT butterfly computations                        │  │
+│   │   • LDL* decomposition                                │  │
+│   │   • Gaussian sampling accept/reject                   │  │
+│   │                                                         │  │
+│   │   Rounding errors can:                                 │  │
+│   │   • Cause signature verification failure              │  │
+│   │   • Create side-channel vulnerabilities              │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Side-Channel Concerns:                                        │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Floating-point operations may leak information:     │  │
+│   │                                                         │  │
+│   │   • Denormal numbers cause timing variations          │  │
+│   │   • Exceptions (overflow/underflow) are observable    │  │
+│   │   • Branch mispredictions on comparisons              │  │
+│   │                                                         │  │
+│   │   Mitigations:                                          │  │
+│   │   • Avoid denormals (flush to zero mode)              │  │
+│   │   • Careful implementation of sampling                │  │
+│   │   • Constant-time floating-point where possible       │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Complete Signing Example
+
+```python
+import numpy as np
+from numpy.fft import fft, ifft
+
+def falcon_sign_simplified(message: bytes, secret_key: dict,
+                           public_key: np.ndarray) -> dict:
+    """
+    Simplified FALCON signing (educational).
+
+    In reality, uses tree-based FFT sampling.
+    """
+    n = len(public_key)
+
+    # 1. Hash message to polynomial c
+    c = hash_to_polynomial(message, n)
+
+    # 2. Compute target in FFT domain
+    c_fft = fft(c)
+
+    # 3. Sample using secret key trapdoor
+    # Real FALCON uses tree-based sampling
+    s1, s2 = gaussian_sample_ntru(c, secret_key)
+
+    # 4. Compress signature
+    # Real FALCON uses Golomb-Rice compression
+    signature = {
+        'r': np.random.bytes(40),  # Random salt
+        's2_compressed': compress_polynomial(s2)
+    }
+
+    return signature
+
+
+def hash_to_polynomial(message: bytes, n: int) -> np.ndarray:
+    """Hash message to polynomial (simplified)."""
+    import hashlib
+    h = hashlib.shake_256(message)
+    coeffs = []
+    for i in range(n):
+        byte = h.digest(n * 2)[i * 2:(i + 1) * 2]
+        coeffs.append(int.from_bytes(byte, 'big') % 12289)
+    return np.array(coeffs)
+
+
+def gaussian_sample_ntru(c: np.ndarray, sk: dict) -> tuple:
+    """
+    Sample Gaussian signature using NTRU trapdoor.
+    Simplified - real implementation uses FFT tree.
+    """
+    f, g, F, G = sk['f'], sk['g'], sk['F'], sk['G']
+    n = len(f)
+    sigma = sk['sigma']
+
+    # Target: need (s1, s2) with s1 + h*s2 = c mod q
+    # Use trapdoor to sample Gaussian close to (c, 0)
+
+    # Simplified: use Klein-like sampling (O(n^2), not real FALCON)
+    # Real FALCON is O(n log n) with FFT
+
+    # Sample perturbation
+    z1 = sample_gaussian_vector(sigma, n)
+    z2 = sample_gaussian_vector(sigma, n)
+
+    # Adjust to satisfy equation (simplified)
+    s2 = z2
+    s1 = c - poly_mul(sk['h'], s2, 12289)
+    s1 = s1 % 12289
+
+    return s1, s2
+
+
+def poly_mul(a: np.ndarray, b: np.ndarray, q: int) -> np.ndarray:
+    """Polynomial multiplication mod (X^n + 1) mod q."""
+    n = len(a)
+    product = np.convolve(a, b)
+
+    # Reduce mod X^n + 1
+    while len(product) > n:
+        for i in range(len(product) - n):
+            product[i] = product[i] - product[n + i]
+        product = product[:n]
+
+    return product % q
+
+
+def compress_polynomial(s: np.ndarray) -> bytes:
+    """Compress polynomial coefficients (simplified)."""
+    # Real FALCON uses sophisticated compression
+    return s.astype(np.int16).tobytes()
+
+
+print("Simplified FALCON Signing Demo")
+print("=" * 50)
+print("\nNote: This is a conceptual demonstration.")
+print("Real FALCON uses FFT-based tree sampling for efficiency.")
+
+# Would need full key generation for actual signing
+# This demonstrates the conceptual flow
+```
+
+## Summary
+
+FFT-based Gaussian sampling in FN-DSA:
+
+**Why Gaussian?**
+- Signatures must not leak secret key information
+- Gaussian distribution provides statistical hiding
+- Same distribution regardless of which trapdoor used
+
+**Klein/GPV Algorithm:**
+- Basic lattice Gaussian sampling
+- Uses Gram-Schmidt orthogonalization
+- O(n²) complexity - too slow for FALCON
+
+**FALCON's FFT Innovation:**
+- Exploits NTRU structure for efficiency
+- Binary tree encoding of Gram-Schmidt info
+- O(n log n) sampling using FFT
+- Enables practical signing times
+
+**Floating-Point Requirements:**
+- FFT requires complex arithmetic
+- 53-bit precision (double) typically sufficient
+- Side-channel concerns with FP operations
+- Careful implementation needed
+
+**Key Parameters:**
+- Gaussian width σ must be large enough for security
+- But not too large (affects signature size)
+- Balances security and efficiency

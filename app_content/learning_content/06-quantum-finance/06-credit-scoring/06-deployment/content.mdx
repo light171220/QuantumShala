@@ -1,0 +1,1224 @@
+---
+title: "Deployment and Production Considerations"
+description: "Deploying quantum credit scoring models to production with monitoring, scalability, and regulatory compliance."
+---
+
+# Deployment and Production Considerations
+
+Deploying quantum credit scoring models to production presents unique challenges beyond traditional ML deployment. This lesson covers architectures, monitoring strategies, and regulatory requirements for production quantum systems.
+
+## Production Architecture
+
+<Definition term="Hybrid Deployment">
+A production architecture that combines quantum and classical components, with fallback mechanisms to ensure reliability when quantum resources are unavailable.
+</Definition>
+
+### Quantum Credit Scoring Service
+
+```python
+import numpy as np
+from typing import Dict, List, Optional, Tuple, Any
+from dataclasses import dataclass, field
+from enum import Enum
+from datetime import datetime
+import json
+import hashlib
+
+
+class ModelType(Enum):
+    """Type of model to use for scoring."""
+    QUANTUM = "quantum"
+    CLASSICAL = "classical"
+    HYBRID = "hybrid"
+
+
+class ServiceStatus(Enum):
+    """Service health status."""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
+
+
+@dataclass
+class ScoringRequest:
+    """Credit scoring request."""
+    request_id: str
+    customer_id: str
+    features: Dict[str, float]
+    timestamp: datetime = field(default_factory=datetime.now)
+    priority: str = "normal"
+
+
+@dataclass
+class ScoringResponse:
+    """Credit scoring response."""
+    request_id: str
+    customer_id: str
+    score: float
+    probability_of_default: float
+    risk_category: str
+    model_type: ModelType
+    confidence: float
+    explanation: Dict[str, float]
+    latency_ms: float
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+class QuantumCreditScoringService:
+    """
+    Production service for quantum credit scoring.
+
+    Features:
+    - Hybrid quantum-classical architecture
+    - Automatic fallback mechanisms
+    - Request queuing and batching
+    - Comprehensive logging and monitoring
+    """
+
+    def __init__(
+        self,
+        quantum_model,
+        classical_model,
+        config: Dict[str, Any]
+    ):
+        self.quantum_model = quantum_model
+        self.classical_model = classical_model
+        self.config = config
+
+        # Service state
+        self.quantum_available = True
+        self.request_count = 0
+        self.error_count = 0
+        self.latency_history = []
+
+        # Thresholds
+        self.quantum_timeout_ms = config.get('quantum_timeout_ms', 5000)
+        self.max_batch_size = config.get('max_batch_size', 32)
+        self.error_threshold = config.get('error_threshold', 0.1)
+
+        # Risk category thresholds
+        self.risk_thresholds = {
+            'low': 0.2,
+            'medium': 0.5,
+            'high': 0.8
+        }
+
+    def score(self, request: ScoringRequest) -> ScoringResponse:
+        """
+        Score a credit application.
+
+        Attempts quantum scoring with fallback to classical.
+        """
+        start_time = datetime.now()
+        self.request_count += 1
+
+        try:
+            # Prepare features
+            features = self._prepare_features(request.features)
+
+            # Choose model based on availability and priority
+            model_type, score, probability, confidence = self._get_score(
+                features, request.priority
+            )
+
+            # Calculate risk category
+            risk_category = self._calculate_risk_category(probability)
+
+            # Generate explanation
+            explanation = self._generate_explanation(
+                features, model_type
+            )
+
+            # Calculate latency
+            latency_ms = (datetime.now() - start_time).total_seconds() * 1000
+            self.latency_history.append(latency_ms)
+
+            return ScoringResponse(
+                request_id=request.request_id,
+                customer_id=request.customer_id,
+                score=score,
+                probability_of_default=probability,
+                risk_category=risk_category,
+                model_type=model_type,
+                confidence=confidence,
+                explanation=explanation,
+                latency_ms=latency_ms
+            )
+
+        except Exception as e:
+            self.error_count += 1
+            self._check_circuit_breaker()
+            raise RuntimeError(f"Scoring failed: {str(e)}")
+
+    def _get_score(
+        self,
+        features: np.ndarray,
+        priority: str
+    ) -> Tuple[ModelType, float, float, float]:
+        """Get score using appropriate model."""
+
+        # High priority or quantum unavailable: use classical
+        if priority == "high" or not self.quantum_available:
+            return self._classical_score(features)
+
+        # Try quantum with timeout
+        try:
+            return self._quantum_score(features)
+        except TimeoutError:
+            return self._classical_score(features)
+
+    def _quantum_score(
+        self,
+        features: np.ndarray
+    ) -> Tuple[ModelType, float, float, float]:
+        """Score using quantum model."""
+        # Simulate quantum scoring
+        probability = self.quantum_model.predict_proba(features)
+        score = 1000 * (1 - probability)  # Higher score = lower risk
+        confidence = 0.92  # Quantum typically has higher confidence
+
+        return ModelType.QUANTUM, score, probability, confidence
+
+    def _classical_score(
+        self,
+        features: np.ndarray
+    ) -> Tuple[ModelType, float, float, float]:
+        """Score using classical model."""
+        probability = self.classical_model.predict_proba(features)
+        score = 1000 * (1 - probability)
+        confidence = 0.85
+
+        return ModelType.CLASSICAL, score, probability, confidence
+
+    def _prepare_features(self, raw_features: Dict[str, float]) -> np.ndarray:
+        """Prepare and validate features."""
+        required_features = self.config.get('required_features', [])
+
+        # Validate all required features present
+        missing = set(required_features) - set(raw_features.keys())
+        if missing:
+            raise ValueError(f"Missing required features: {missing}")
+
+        # Extract in correct order
+        return np.array([raw_features[f] for f in required_features])
+
+    def _calculate_risk_category(self, probability: float) -> str:
+        """Categorize risk level."""
+        if probability < self.risk_thresholds['low']:
+            return 'low'
+        elif probability < self.risk_thresholds['medium']:
+            return 'medium'
+        elif probability < self.risk_thresholds['high']:
+            return 'high'
+        else:
+            return 'very_high'
+
+    def _generate_explanation(
+        self,
+        features: np.ndarray,
+        model_type: ModelType
+    ) -> Dict[str, float]:
+        """Generate feature importance explanation."""
+        # Simplified SHAP-like explanation
+        feature_names = self.config.get('required_features', [])
+
+        # Mock importance values for demonstration
+        importances = np.abs(features) / np.sum(np.abs(features) + 1e-8)
+
+        return dict(zip(feature_names, importances.tolist()))
+
+    def _check_circuit_breaker(self):
+        """Check if quantum should be disabled."""
+        if self.request_count > 100:
+            error_rate = self.error_count / self.request_count
+            if error_rate > self.error_threshold:
+                self.quantum_available = False
+
+    def get_health(self) -> Dict[str, Any]:
+        """Get service health status."""
+        error_rate = self.error_count / max(1, self.request_count)
+        avg_latency = np.mean(self.latency_history[-100:]) if self.latency_history else 0
+
+        if error_rate > 0.1 or avg_latency > 5000:
+            status = ServiceStatus.UNHEALTHY
+        elif error_rate > 0.05 or avg_latency > 2000:
+            status = ServiceStatus.DEGRADED
+        else:
+            status = ServiceStatus.HEALTHY
+
+        return {
+            'status': status.value,
+            'quantum_available': self.quantum_available,
+            'request_count': self.request_count,
+            'error_rate': error_rate,
+            'avg_latency_ms': avg_latency,
+            'timestamp': datetime.now().isoformat()
+        }
+```
+
+## Model Monitoring
+
+<Tip>
+Continuous monitoring is critical for credit models. Regulatory requirements mandate tracking model performance and drift over time.
+</Tip>
+
+### Drift Detection and Monitoring
+
+```python
+from scipy import stats
+from collections import deque
+
+
+@dataclass
+class DriftReport:
+    """Report on model or data drift."""
+    timestamp: datetime
+    drift_type: str
+    metric_name: str
+    current_value: float
+    baseline_value: float
+    drift_score: float
+    is_significant: bool
+    recommended_action: str
+
+
+class ModelMonitor:
+    """
+    Monitor quantum credit scoring model in production.
+
+    Tracks:
+    - Prediction drift
+    - Feature drift
+    - Performance degradation
+    - Fairness metrics over time
+    """
+
+    def __init__(
+        self,
+        baseline_stats: Dict[str, Any],
+        config: Dict[str, Any]
+    ):
+        self.baseline_stats = baseline_stats
+        self.config = config
+
+        # Rolling windows for monitoring
+        self.window_size = config.get('window_size', 1000)
+        self.predictions = deque(maxlen=self.window_size)
+        self.actuals = deque(maxlen=self.window_size)
+        self.features_history = deque(maxlen=self.window_size)
+
+        # Thresholds
+        self.psi_threshold = config.get('psi_threshold', 0.2)
+        self.performance_threshold = config.get('performance_threshold', 0.05)
+
+        # Alert tracking
+        self.alerts = []
+
+    def record_prediction(
+        self,
+        features: Dict[str, float],
+        prediction: float,
+        model_type: str
+    ):
+        """Record a prediction for monitoring."""
+        self.predictions.append({
+            'value': prediction,
+            'model_type': model_type,
+            'timestamp': datetime.now()
+        })
+        self.features_history.append(features)
+
+    def record_outcome(self, prediction_id: str, actual: int):
+        """Record actual outcome when available."""
+        self.actuals.append({
+            'prediction_id': prediction_id,
+            'actual': actual,
+            'timestamp': datetime.now()
+        })
+
+    def check_prediction_drift(self) -> Optional[DriftReport]:
+        """Check for drift in prediction distribution."""
+        if len(self.predictions) < self.window_size // 2:
+            return None
+
+        current_predictions = [p['value'] for p in self.predictions]
+        baseline_mean = self.baseline_stats.get('prediction_mean', 0.5)
+        baseline_std = self.baseline_stats.get('prediction_std', 0.2)
+
+        # Calculate Population Stability Index (PSI)
+        psi = self._calculate_psi(
+            current_predictions,
+            baseline_mean,
+            baseline_std
+        )
+
+        is_significant = psi > self.psi_threshold
+
+        if is_significant:
+            action = "Investigate prediction shift. Consider model retraining."
+        else:
+            action = "No action required."
+
+        return DriftReport(
+            timestamp=datetime.now(),
+            drift_type="prediction_drift",
+            metric_name="PSI",
+            current_value=np.mean(current_predictions),
+            baseline_value=baseline_mean,
+            drift_score=psi,
+            is_significant=is_significant,
+            recommended_action=action
+        )
+
+    def check_feature_drift(self) -> List[DriftReport]:
+        """Check for drift in input features."""
+        if len(self.features_history) < self.window_size // 2:
+            return []
+
+        reports = []
+        feature_names = list(self.features_history[0].keys())
+
+        for feature in feature_names:
+            current_values = [f[feature] for f in self.features_history]
+            baseline_mean = self.baseline_stats['features'].get(
+                feature, {}
+            ).get('mean', 0)
+            baseline_std = self.baseline_stats['features'].get(
+                feature, {}
+            ).get('std', 1)
+
+            # KS test for distribution shift
+            normalized_current = (
+                np.array(current_values) - baseline_mean
+            ) / (baseline_std + 1e-8)
+
+            ks_stat, p_value = stats.kstest(
+                normalized_current, 'norm'
+            )
+
+            is_significant = p_value < 0.05
+
+            if is_significant:
+                reports.append(DriftReport(
+                    timestamp=datetime.now(),
+                    drift_type="feature_drift",
+                    metric_name=f"{feature}_KS",
+                    current_value=np.mean(current_values),
+                    baseline_value=baseline_mean,
+                    drift_score=ks_stat,
+                    is_significant=True,
+                    recommended_action=f"Feature '{feature}' distribution has shifted."
+                ))
+
+        return reports
+
+    def check_performance_degradation(self) -> Optional[DriftReport]:
+        """Check if model performance has degraded."""
+        if len(self.actuals) < 100:
+            return None
+
+        # Calculate current AUC
+        predictions = [p['value'] for p in list(self.predictions)[-len(self.actuals):]]
+        actuals = [a['actual'] for a in self.actuals]
+
+        current_auc = self._calculate_auc(predictions, actuals)
+        baseline_auc = self.baseline_stats.get('auc', 0.75)
+
+        degradation = baseline_auc - current_auc
+        is_significant = degradation > self.performance_threshold
+
+        if is_significant:
+            action = "Model performance has degraded. Trigger retraining pipeline."
+        else:
+            action = "Performance within acceptable range."
+
+        return DriftReport(
+            timestamp=datetime.now(),
+            drift_type="performance_degradation",
+            metric_name="AUC_degradation",
+            current_value=current_auc,
+            baseline_value=baseline_auc,
+            drift_score=degradation,
+            is_significant=is_significant,
+            recommended_action=action
+        )
+
+    def _calculate_psi(
+        self,
+        current: List[float],
+        baseline_mean: float,
+        baseline_std: float
+    ) -> float:
+        """Calculate Population Stability Index."""
+        # Discretize into bins
+        bins = np.linspace(0, 1, 11)
+
+        current_hist, _ = np.histogram(current, bins=bins, density=True)
+
+        # Generate baseline histogram from normal distribution
+        baseline_samples = np.random.normal(
+            baseline_mean, baseline_std, 10000
+        )
+        baseline_samples = np.clip(baseline_samples, 0, 1)
+        baseline_hist, _ = np.histogram(baseline_samples, bins=bins, density=True)
+
+        # PSI calculation
+        epsilon = 1e-8
+        current_hist = current_hist + epsilon
+        baseline_hist = baseline_hist + epsilon
+
+        psi = np.sum(
+            (current_hist - baseline_hist) *
+            np.log(current_hist / baseline_hist)
+        )
+
+        return psi
+
+    def _calculate_auc(
+        self,
+        predictions: List[float],
+        actuals: List[int]
+    ) -> float:
+        """Calculate AUC-ROC."""
+        if len(set(actuals)) < 2:
+            return 0.5
+
+        # Simple AUC calculation
+        pairs = list(zip(predictions, actuals))
+        pairs.sort(reverse=True)
+
+        n_pos = sum(actuals)
+        n_neg = len(actuals) - n_pos
+
+        if n_pos == 0 or n_neg == 0:
+            return 0.5
+
+        auc = 0
+        tp = 0
+
+        for pred, actual in pairs:
+            if actual == 1:
+                tp += 1
+            else:
+                auc += tp
+
+        return auc / (n_pos * n_neg)
+
+    def generate_monitoring_report(self) -> Dict[str, Any]:
+        """Generate comprehensive monitoring report."""
+        prediction_drift = self.check_prediction_drift()
+        feature_drifts = self.check_feature_drift()
+        performance = self.check_performance_degradation()
+
+        return {
+            'timestamp': datetime.now().isoformat(),
+            'sample_size': len(self.predictions),
+            'prediction_drift': {
+                'psi': prediction_drift.drift_score if prediction_drift else None,
+                'is_significant': prediction_drift.is_significant if prediction_drift else False
+            },
+            'feature_drifts': [
+                {
+                    'feature': d.metric_name.replace('_KS', ''),
+                    'ks_statistic': d.drift_score,
+                    'is_significant': d.is_significant
+                }
+                for d in feature_drifts
+            ],
+            'performance': {
+                'current_auc': performance.current_value if performance else None,
+                'baseline_auc': performance.baseline_value if performance else None,
+                'degraded': performance.is_significant if performance else False
+            },
+            'alerts': [d.recommended_action for d in feature_drifts if d.is_significant]
+        }
+```
+
+## Regulatory Compliance
+
+<Warning>
+Credit scoring models must comply with regulations like ECOA, FCRA, and SR 11-7. Non-compliance can result in significant fines and legal action.
+</Warning>
+
+### Compliance Framework
+
+```python
+@dataclass
+class ComplianceCheck:
+    """Result of a compliance check."""
+    regulation: str
+    requirement: str
+    status: str  # 'pass', 'fail', 'warning'
+    details: str
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+class RegulatoryComplianceManager:
+    """
+    Manage regulatory compliance for credit scoring models.
+
+    Covers:
+    - Equal Credit Opportunity Act (ECOA)
+    - Fair Credit Reporting Act (FCRA)
+    - SR 11-7 Model Risk Management
+    """
+
+    def __init__(self, model_registry: Dict[str, Any]):
+        self.model_registry = model_registry
+        self.compliance_log = []
+        self.protected_attributes = [
+            'race', 'color', 'religion', 'national_origin',
+            'sex', 'marital_status', 'age'
+        ]
+
+    def run_compliance_checks(
+        self,
+        model_id: str,
+        validation_data: Dict[str, Any]
+    ) -> List[ComplianceCheck]:
+        """Run all compliance checks for a model."""
+        checks = []
+
+        # ECOA checks
+        checks.extend(self._check_ecoa_compliance(model_id, validation_data))
+
+        # FCRA checks
+        checks.extend(self._check_fcra_compliance(model_id))
+
+        # SR 11-7 checks
+        checks.extend(self._check_sr117_compliance(model_id, validation_data))
+
+        self.compliance_log.extend(checks)
+        return checks
+
+    def _check_ecoa_compliance(
+        self,
+        model_id: str,
+        validation_data: Dict[str, Any]
+    ) -> List[ComplianceCheck]:
+        """Check ECOA fair lending requirements."""
+        checks = []
+
+        # Check 1: No protected attributes in model
+        model_features = self.model_registry[model_id].get('features', [])
+        protected_in_model = set(model_features) & set(self.protected_attributes)
+
+        if protected_in_model:
+            checks.append(ComplianceCheck(
+                regulation="ECOA",
+                requirement="No protected attributes as model inputs",
+                status="fail",
+                details=f"Protected attributes found: {protected_in_model}"
+            ))
+        else:
+            checks.append(ComplianceCheck(
+                regulation="ECOA",
+                requirement="No protected attributes as model inputs",
+                status="pass",
+                details="No protected attributes used as direct inputs"
+            ))
+
+        # Check 2: Disparate impact analysis
+        if 'fairness_metrics' in validation_data:
+            di_ratio = validation_data['fairness_metrics'].get(
+                'disparate_impact_ratio', 1.0
+            )
+
+            if di_ratio < 0.8:
+                checks.append(ComplianceCheck(
+                    regulation="ECOA",
+                    requirement="Disparate impact ratio >= 0.8 (4/5ths rule)",
+                    status="fail",
+                    details=f"Disparate impact ratio: {di_ratio:.3f}"
+                ))
+            elif di_ratio < 0.9:
+                checks.append(ComplianceCheck(
+                    regulation="ECOA",
+                    requirement="Disparate impact ratio >= 0.8 (4/5ths rule)",
+                    status="warning",
+                    details=f"Disparate impact ratio: {di_ratio:.3f} (borderline)"
+                ))
+            else:
+                checks.append(ComplianceCheck(
+                    regulation="ECOA",
+                    requirement="Disparate impact ratio >= 0.8 (4/5ths rule)",
+                    status="pass",
+                    details=f"Disparate impact ratio: {di_ratio:.3f}"
+                ))
+
+        return checks
+
+    def _check_fcra_compliance(self, model_id: str) -> List[ComplianceCheck]:
+        """Check FCRA adverse action requirements."""
+        checks = []
+
+        # Check: Model supports adverse action reasons
+        model_info = self.model_registry.get(model_id, {})
+        has_explanations = model_info.get('supports_explanations', False)
+
+        if has_explanations:
+            checks.append(ComplianceCheck(
+                regulation="FCRA",
+                requirement="Provide adverse action reasons",
+                status="pass",
+                details="Model supports feature importance explanations"
+            ))
+        else:
+            checks.append(ComplianceCheck(
+                regulation="FCRA",
+                requirement="Provide adverse action reasons",
+                status="fail",
+                details="Model must provide reasons for credit denials"
+            ))
+
+        return checks
+
+    def _check_sr117_compliance(
+        self,
+        model_id: str,
+        validation_data: Dict[str, Any]
+    ) -> List[ComplianceCheck]:
+        """Check SR 11-7 model risk management requirements."""
+        checks = []
+        model_info = self.model_registry.get(model_id, {})
+
+        # Check 1: Model documentation
+        has_documentation = model_info.get('documentation_complete', False)
+        checks.append(ComplianceCheck(
+            regulation="SR 11-7",
+            requirement="Complete model documentation",
+            status="pass" if has_documentation else "fail",
+            details="Model documentation " + (
+                "is complete" if has_documentation else "is incomplete"
+            )
+        ))
+
+        # Check 2: Independent validation
+        has_validation = model_info.get('independently_validated', False)
+        checks.append(ComplianceCheck(
+            regulation="SR 11-7",
+            requirement="Independent model validation",
+            status="pass" if has_validation else "fail",
+            details="Model " + (
+                "has been" if has_validation else "has not been"
+            ) + " independently validated"
+        ))
+
+        # Check 3: Ongoing monitoring plan
+        has_monitoring = model_info.get('monitoring_plan', False)
+        checks.append(ComplianceCheck(
+            regulation="SR 11-7",
+            requirement="Ongoing monitoring plan",
+            status="pass" if has_monitoring else "fail",
+            details="Monitoring plan " + (
+                "is in place" if has_monitoring else "is required"
+            )
+        ))
+
+        # Check 4: Performance thresholds
+        if 'performance_metrics' in validation_data:
+            auc = validation_data['performance_metrics'].get('auc', 0)
+            min_auc = 0.65  # Regulatory minimum threshold
+
+            checks.append(ComplianceCheck(
+                regulation="SR 11-7",
+                requirement="Model performance above minimum threshold",
+                status="pass" if auc >= min_auc else "fail",
+                details=f"AUC: {auc:.3f} (minimum: {min_auc})"
+            ))
+
+        return checks
+
+    def generate_compliance_report(
+        self,
+        model_id: str
+    ) -> Dict[str, Any]:
+        """Generate compliance report for regulators."""
+        model_checks = [
+            c for c in self.compliance_log
+            if c.regulation in ['ECOA', 'FCRA', 'SR 11-7']
+        ]
+
+        summary = {
+            'pass': len([c for c in model_checks if c.status == 'pass']),
+            'fail': len([c for c in model_checks if c.status == 'fail']),
+            'warning': len([c for c in model_checks if c.status == 'warning'])
+        }
+
+        return {
+            'model_id': model_id,
+            'report_date': datetime.now().isoformat(),
+            'summary': summary,
+            'overall_status': 'compliant' if summary['fail'] == 0 else 'non-compliant',
+            'checks': [
+                {
+                    'regulation': c.regulation,
+                    'requirement': c.requirement,
+                    'status': c.status,
+                    'details': c.details
+                }
+                for c in model_checks
+            ],
+            'remediation_required': [
+                c.details for c in model_checks if c.status == 'fail'
+            ]
+        }
+```
+
+## Quantum Hardware Considerations
+
+<Definition term="Quantum Hardware Abstraction">
+A software layer that abstracts the differences between quantum hardware providers, enabling code portability and fallback mechanisms.
+</Definition>
+
+### Hardware Abstraction Layer
+
+```python
+class QuantumBackendManager:
+    """
+    Manage quantum hardware backends for production.
+
+    Features:
+    - Multiple backend support
+    - Automatic failover
+    - Queue management
+    - Cost optimization
+    """
+
+    def __init__(self, backends_config: Dict[str, Any]):
+        self.backends = {}
+        self.backend_status = {}
+        self.queue_depths = {}
+
+        for name, config in backends_config.items():
+            self.backends[name] = self._initialize_backend(name, config)
+            self.backend_status[name] = 'available'
+            self.queue_depths[name] = 0
+
+    def _initialize_backend(
+        self,
+        name: str,
+        config: Dict[str, Any]
+    ):
+        """Initialize a quantum backend."""
+        # In production, this would connect to actual quantum hardware
+        return {
+            'name': name,
+            'provider': config.get('provider', 'simulator'),
+            'qubits': config.get('qubits', 8),
+            'error_rate': config.get('error_rate', 0.001),
+            'cost_per_shot': config.get('cost_per_shot', 0.0),
+            'max_shots': config.get('max_shots', 10000)
+        }
+
+    def select_backend(
+        self,
+        circuit_depth: int,
+        required_qubits: int,
+        priority: str = 'normal'
+    ) -> str:
+        """Select optimal backend for a job."""
+        candidates = []
+
+        for name, backend in self.backends.items():
+            # Check availability
+            if self.backend_status[name] != 'available':
+                continue
+
+            # Check qubit count
+            if backend['qubits'] < required_qubits:
+                continue
+
+            # Score based on queue depth and error rate
+            score = (
+                -self.queue_depths[name] * 0.1 +
+                -backend['error_rate'] * 100 +
+                -backend['cost_per_shot'] * 10
+            )
+
+            candidates.append((name, score))
+
+        if not candidates:
+            raise RuntimeError("No suitable backend available")
+
+        # Sort by score (higher is better)
+        candidates.sort(key=lambda x: x[1], reverse=True)
+
+        return candidates[0][0]
+
+    def submit_job(
+        self,
+        backend_name: str,
+        circuit,
+        shots: int
+    ) -> str:
+        """Submit a job to a backend."""
+        if backend_name not in self.backends:
+            raise ValueError(f"Unknown backend: {backend_name}")
+
+        self.queue_depths[backend_name] += 1
+
+        # Generate job ID
+        job_id = hashlib.md5(
+            f"{backend_name}_{datetime.now().isoformat()}".encode()
+        ).hexdigest()[:12]
+
+        return job_id
+
+    def get_job_result(self, job_id: str, backend_name: str):
+        """Get results from a completed job."""
+        # Simulate result retrieval
+        self.queue_depths[backend_name] = max(
+            0, self.queue_depths[backend_name] - 1
+        )
+
+        # Return mock results
+        return {
+            'job_id': job_id,
+            'status': 'completed',
+            'counts': {'0': 500, '1': 500}
+        }
+
+    def get_backend_status(self) -> Dict[str, Any]:
+        """Get status of all backends."""
+        return {
+            name: {
+                'status': self.backend_status[name],
+                'queue_depth': self.queue_depths[name],
+                'qubits': backend['qubits'],
+                'error_rate': backend['error_rate']
+            }
+            for name, backend in self.backends.items()
+        }
+
+
+class HybridExecutionEngine:
+    """
+    Execute credit scoring with hybrid quantum-classical approach.
+
+    Handles:
+    - Circuit compilation
+    - Error mitigation
+    - Result aggregation
+    """
+
+    def __init__(
+        self,
+        backend_manager: QuantumBackendManager,
+        error_mitigation_level: int = 1
+    ):
+        self.backend_manager = backend_manager
+        self.error_mitigation_level = error_mitigation_level
+
+    def execute_scoring_circuit(
+        self,
+        circuit,
+        parameters: np.ndarray,
+        shots: int = 1000
+    ) -> Dict[str, Any]:
+        """Execute a parameterized scoring circuit."""
+        # Select backend
+        backend_name = self.backend_manager.select_backend(
+            circuit_depth=len(circuit) if hasattr(circuit, '__len__') else 10,
+            required_qubits=8
+        )
+
+        # Submit job
+        job_id = self.backend_manager.submit_job(
+            backend_name, circuit, shots
+        )
+
+        # Get results
+        result = self.backend_manager.get_job_result(job_id, backend_name)
+
+        # Apply error mitigation
+        if self.error_mitigation_level > 0:
+            result = self._apply_error_mitigation(result)
+
+        # Convert to probability
+        counts = result['counts']
+        total = sum(counts.values())
+        probability = counts.get('1', 0) / total
+
+        return {
+            'probability': probability,
+            'confidence': 1.0 - self.backend_manager.backends[backend_name]['error_rate'],
+            'backend': backend_name,
+            'shots': shots,
+            'job_id': job_id
+        }
+
+    def _apply_error_mitigation(
+        self,
+        result: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Apply error mitigation to results."""
+        # Simple readout error mitigation
+        counts = result['counts']
+
+        # Assume symmetric readout error
+        error_rate = 0.02
+        correction_matrix = np.array([
+            [1 - error_rate, error_rate],
+            [error_rate, 1 - error_rate]
+        ])
+
+        # Apply inverse correction
+        probs = np.array([
+            counts.get('0', 0),
+            counts.get('1', 0)
+        ]) / sum(counts.values())
+
+        corrected = np.linalg.solve(correction_matrix, probs)
+        corrected = np.clip(corrected, 0, 1)
+        corrected = corrected / corrected.sum()
+
+        total = sum(counts.values())
+        result['counts'] = {
+            '0': int(corrected[0] * total),
+            '1': int(corrected[1] * total)
+        }
+
+        return result
+```
+
+## Deployment Strategies
+
+<Formula>
+Canary Deployment Success Rate = (Canary AUC - Production AUC) / Production AUC × 100%
+</Formula>
+
+### A/B Testing and Canary Deployment
+
+```python
+class DeploymentManager:
+    """
+    Manage model deployments with A/B testing and canary releases.
+    """
+
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.active_models = {}
+        self.traffic_split = {}
+        self.deployment_history = []
+
+    def deploy_canary(
+        self,
+        model_id: str,
+        model,
+        canary_percentage: float = 5.0
+    ) -> Dict[str, Any]:
+        """Deploy a model as canary."""
+        # Validate canary percentage
+        if canary_percentage < 1 or canary_percentage > 50:
+            raise ValueError("Canary percentage must be between 1 and 50")
+
+        # Register model
+        self.active_models[model_id] = {
+            'model': model,
+            'status': 'canary',
+            'deployed_at': datetime.now(),
+            'traffic_percentage': canary_percentage
+        }
+
+        # Update traffic split
+        self._rebalance_traffic(model_id, canary_percentage)
+
+        self.deployment_history.append({
+            'action': 'canary_deploy',
+            'model_id': model_id,
+            'percentage': canary_percentage,
+            'timestamp': datetime.now().isoformat()
+        })
+
+        return {
+            'status': 'success',
+            'model_id': model_id,
+            'traffic_percentage': canary_percentage
+        }
+
+    def promote_canary(self, model_id: str) -> Dict[str, Any]:
+        """Promote canary to full production."""
+        if model_id not in self.active_models:
+            raise ValueError(f"Model {model_id} not found")
+
+        if self.active_models[model_id]['status'] != 'canary':
+            raise ValueError(f"Model {model_id} is not a canary")
+
+        # Find current production model
+        current_production = None
+        for mid, info in self.active_models.items():
+            if info['status'] == 'production':
+                current_production = mid
+                break
+
+        # Promote canary
+        self.active_models[model_id]['status'] = 'production'
+        self.active_models[model_id]['traffic_percentage'] = 100.0
+
+        # Demote old production
+        if current_production:
+            self.active_models[current_production]['status'] = 'deprecated'
+            self.active_models[current_production]['traffic_percentage'] = 0.0
+
+        self.deployment_history.append({
+            'action': 'promote_canary',
+            'model_id': model_id,
+            'previous_production': current_production,
+            'timestamp': datetime.now().isoformat()
+        })
+
+        return {
+            'status': 'success',
+            'promoted_model': model_id,
+            'deprecated_model': current_production
+        }
+
+    def rollback(self, target_model_id: str) -> Dict[str, Any]:
+        """Rollback to a previous model version."""
+        if target_model_id not in self.active_models:
+            raise ValueError(f"Model {target_model_id} not found")
+
+        # Reset all traffic to target
+        for mid in self.active_models:
+            if mid == target_model_id:
+                self.active_models[mid]['status'] = 'production'
+                self.active_models[mid]['traffic_percentage'] = 100.0
+            else:
+                self.active_models[mid]['status'] = 'deprecated'
+                self.active_models[mid]['traffic_percentage'] = 0.0
+
+        self.deployment_history.append({
+            'action': 'rollback',
+            'target_model': target_model_id,
+            'timestamp': datetime.now().isoformat()
+        })
+
+        return {
+            'status': 'success',
+            'active_model': target_model_id
+        }
+
+    def route_request(self, request_id: str) -> str:
+        """Route a request to appropriate model based on traffic split."""
+        # Simple hash-based routing for consistency
+        hash_value = int(hashlib.md5(request_id.encode()).hexdigest(), 16)
+        percentage = (hash_value % 10000) / 100.0
+
+        cumulative = 0.0
+        for model_id, info in self.active_models.items():
+            if info['traffic_percentage'] > 0:
+                cumulative += info['traffic_percentage']
+                if percentage < cumulative:
+                    return model_id
+
+        # Default to first available model
+        for model_id, info in self.active_models.items():
+            if info['status'] in ['production', 'canary']:
+                return model_id
+
+        raise RuntimeError("No model available for routing")
+
+    def _rebalance_traffic(self, new_model_id: str, new_percentage: float):
+        """Rebalance traffic when adding new model."""
+        # Reduce production model traffic
+        for model_id, info in self.active_models.items():
+            if model_id != new_model_id and info['status'] == 'production':
+                info['traffic_percentage'] = 100.0 - new_percentage
+```
+
+## Audit Trail and Logging
+
+```python
+class AuditLogger:
+    """
+    Maintain audit trail for credit decisions.
+
+    Required for regulatory compliance and model governance.
+    """
+
+    def __init__(self, storage_path: str):
+        self.storage_path = storage_path
+        self.log_buffer = []
+        self.buffer_size = 100
+
+    def log_decision(
+        self,
+        request: ScoringRequest,
+        response: ScoringResponse,
+        model_version: str
+    ):
+        """Log a credit decision for audit."""
+        audit_record = {
+            'timestamp': datetime.now().isoformat(),
+            'request_id': request.request_id,
+            'customer_id': request.customer_id,
+            'features_hash': self._hash_features(request.features),
+            'model_version': model_version,
+            'model_type': response.model_type.value,
+            'score': response.score,
+            'probability_of_default': response.probability_of_default,
+            'risk_category': response.risk_category,
+            'confidence': response.confidence,
+            'latency_ms': response.latency_ms,
+            'explanation_top_factors': dict(
+                sorted(
+                    response.explanation.items(),
+                    key=lambda x: abs(x[1]),
+                    reverse=True
+                )[:5]
+            )
+        }
+
+        self.log_buffer.append(audit_record)
+
+        if len(self.log_buffer) >= self.buffer_size:
+            self._flush_buffer()
+
+    def _hash_features(self, features: Dict[str, float]) -> str:
+        """Hash features for privacy while maintaining auditability."""
+        feature_str = json.dumps(features, sort_keys=True)
+        return hashlib.sha256(feature_str.encode()).hexdigest()
+
+    def _flush_buffer(self):
+        """Flush log buffer to storage."""
+        # In production, this would write to secure storage
+        self.log_buffer = []
+
+    def query_decisions(
+        self,
+        customer_id: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> List[Dict[str, Any]]:
+        """Query historical decisions for audit."""
+        # Filter buffered records
+        results = []
+
+        for record in self.log_buffer:
+            if customer_id and record['customer_id'] != customer_id:
+                continue
+
+            record_time = datetime.fromisoformat(record['timestamp'])
+
+            if start_date and record_time < start_date:
+                continue
+
+            if end_date and record_time > end_date:
+                continue
+
+            results.append(record)
+
+        return results
+```
+
+## Key Takeaways
+
+1. **Hybrid Architecture**: Always design with fallback to classical models when quantum is unavailable
+2. **Continuous Monitoring**: Track drift, performance, and fairness metrics in real-time
+3. **Regulatory Compliance**: Implement checks for ECOA, FCRA, and SR 11-7 requirements
+4. **Hardware Abstraction**: Use abstraction layers for backend portability
+5. **Audit Trails**: Maintain comprehensive logs for regulatory review
+6. **Canary Deployments**: Gradually roll out new models with careful monitoring
+
+Production deployment of quantum credit scoring requires balancing innovation with reliability and compliance. The hybrid approach ensures business continuity while exploring quantum advantages.

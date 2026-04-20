@@ -1,0 +1,537 @@
+---
+title: "Probabilistic Error Cancellation"
+description: "Learn probabilistic error cancellation to exactly invert noise channels at the cost of increased sampling overhead"
+---
+
+# Probabilistic Error Cancellation
+
+Probabilistic Error Cancellation (PEC) is an error mitigation technique that exactly inverts noise by representing the inverse noise channel as a quasi-probability distribution over implementable operations.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the principle of noise inversion
+- Implement quasi-probability decomposition
+- Compute sampling overhead for PEC
+- Handle multi-gate noise correction
+- Combine PEC with circuit compilation
+- Analyze accuracy vs overhead tradeoffs
+
+## 1. The PEC Principle
+
+PEC works by decomposing the inverse noise channel into a sum of implementable operations.
+
+<Definition term="Probabilistic Error Cancellation">
+Given a noisy gate N(G) = E∘G (noise E following ideal gate G), PEC applies:
+
+E⁻¹ = Σᵢ qᵢ Oᵢ
+
+where qᵢ are quasi-probabilities (can be negative) and Oᵢ are implementable operations.
+</Definition>
+
+```python
+import numpy as np
+
+def pauli_basis():
+    """Return Pauli matrices as a basis for operations."""
+    I = np.eye(2, dtype=complex)
+    X = np.array([[0, 1], [1, 0]], dtype=complex)
+    Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+    Z = np.array([[1, 0], [0, -1]], dtype=complex)
+    return {'I': I, 'X': X, 'Y': Y, 'Z': Z}
+
+def depolarizing_inverse(p):
+    """
+    Compute quasi-probability decomposition of depolarizing channel inverse.
+
+    Depolarizing: E(ρ) = (1-p)ρ + (p/3)(XρX + YρY + ZρZ)
+
+    The inverse is:
+    E⁻¹(ρ) = aI·ρ + bX·ρ·X + bY·ρ·Y + bZ·ρ·Z
+
+    where a and b are quasi-probabilities.
+    """
+    # For depolarizing channel
+    # a = (1 + 2p/3) / (1 - 4p/3)
+    # b = -p/3 / (1 - 4p/3)
+
+    denominator = 1 - 4*p/3
+    if abs(denominator) < 1e-10:
+        raise ValueError("Cannot invert: p too large")
+
+    a = (1 - p) / denominator
+    b = -p/3 / denominator
+
+    return {
+        'I': a,
+        'X': b,
+        'Y': b,
+        'Z': b
+    }
+
+def sampling_overhead(quasi_probs):
+    """
+    Compute sampling overhead γ = (Σ|qᵢ|)².
+
+    Higher γ means more samples needed for same precision.
+    """
+    total = sum(abs(q) for q in quasi_probs.values())
+    return total ** 2
+
+# Analyze PEC for depolarizing noise
+print("PEC for Depolarizing Channel:")
+print("=" * 50)
+
+for p in [0.01, 0.05, 0.1, 0.2]:
+    try:
+        quasi_probs = depolarizing_inverse(p)
+        gamma = sampling_overhead(quasi_probs)
+
+        print(f"\nNoise p = {p:.2f}:")
+        print(f"  Quasi-probabilities: I={quasi_probs['I']:.4f}, X/Y/Z={quasi_probs['X']:.4f}")
+        print(f"  Sampling overhead γ = {gamma:.2f}")
+        print(f"  Samples needed for same variance: {gamma:.1f}x")
+    except ValueError as e:
+        print(f"\nNoise p = {p:.2f}: {e}")
+```
+
+## 2. Quasi-Probability Sampling
+
+Sample from quasi-probability distribution to implement PEC.
+
+<Formula>
+For quasi-probability distribution {qᵢ}:
+
+1. Compute probabilities pᵢ = |qᵢ| / γ
+2. Sample operation index i ~ pᵢ
+3. Apply operation Oᵢ with sign sᵢ = sign(qᵢ)
+4. Multiply result by γ·sᵢ
+</Formula>
+
+```python
+class PECSampler:
+    """
+    Sample from quasi-probability distribution for PEC.
+    """
+
+    def __init__(self, quasi_probs):
+        """
+        Args:
+            quasi_probs: Dict mapping operation names to quasi-probabilities
+        """
+        self.operations = list(quasi_probs.keys())
+        self.quasi_probs = np.array([quasi_probs[op] for op in self.operations])
+        self.gamma = sum(abs(q) for q in self.quasi_probs)
+        self.probs = np.abs(self.quasi_probs) / self.gamma
+        self.signs = np.sign(self.quasi_probs)
+
+    def sample(self):
+        """
+        Sample one operation from quasi-probability distribution.
+
+        Returns:
+            operation: Name of sampled operation
+            sign: Sign to apply to result
+            gamma: Scaling factor
+        """
+        idx = np.random.choice(len(self.operations), p=self.probs)
+        return self.operations[idx], self.signs[idx], self.gamma
+
+    def sample_batch(self, n_samples):
+        """Sample multiple operations."""
+        indices = np.random.choice(len(self.operations), size=n_samples, p=self.probs)
+        operations = [self.operations[i] for i in indices]
+        signs = self.signs[indices]
+        return operations, signs, self.gamma
+
+def demonstrate_pec_sampling():
+    """Demonstrate PEC sampling for depolarizing noise."""
+    p = 0.05
+    quasi_probs = depolarizing_inverse(p)
+
+    sampler = PECSampler(quasi_probs)
+
+    # Sample many times
+    n_samples = 10000
+    ops, signs, gamma = sampler.sample_batch(n_samples)
+
+    # Count operations
+    from collections import Counter
+    counts = Counter(ops)
+
+    print("PEC Sampling Distribution:")
+    print(f"Noise level: {p}")
+    print(f"Sampling overhead γ = {gamma:.4f}")
+    print(f"\nOperation counts (from {n_samples} samples):")
+    for op in ['I', 'X', 'Y', 'Z']:
+        expected = abs(quasi_probs[op]) / gamma * n_samples
+        actual = counts[op]
+        print(f"  {op}: {actual} (expected: {expected:.0f})")
+
+    # Check sign distribution
+    positive_frac = np.mean(signs > 0)
+    print(f"\nPositive sign fraction: {positive_frac:.4f}")
+
+demonstrate_pec_sampling()
+```
+
+<Tip>
+The sampling overhead γ² determines how many more samples are needed. For 1% depolarizing noise, γ² ≈ 1.04; for 10% noise, γ² ≈ 1.49.
+</Tip>
+
+## 3. PEC for Quantum Circuits
+
+Apply PEC to entire quantum circuits.
+
+```python
+class PECCircuitRunner:
+    """
+    Run quantum circuits with PEC error mitigation.
+    """
+
+    def __init__(self, noise_prob=0.02):
+        self.noise_prob = noise_prob
+        self.paulis = pauli_basis()
+
+    def noisy_gate(self, rho, gate):
+        """Apply noisy gate: depolarizing noise after ideal gate."""
+        # Ideal gate
+        rho = gate @ rho @ gate.conj().T
+
+        # Depolarizing noise
+        p = self.noise_prob
+        X, Y, Z = self.paulis['X'], self.paulis['Y'], self.paulis['Z']
+        rho = (1-p) * rho + (p/3) * (X@rho@X + Y@rho@Y + Z@rho@Z)
+
+        return rho
+
+    def apply_pec_operation(self, rho, pec_op):
+        """Apply a PEC correction operation."""
+        pauli = self.paulis[pec_op]
+        return pauli @ rho @ pauli
+
+    def run_with_pec(self, gates, observable, n_samples=1000):
+        """
+        Run circuit with PEC mitigation.
+
+        Args:
+            gates: List of ideal gates
+            observable: Observable to measure
+            n_samples: Number of PEC samples
+
+        Returns:
+            Mitigated expectation value
+        """
+        # Get quasi-probabilities for inverse channel
+        quasi_probs = depolarizing_inverse(self.noise_prob)
+        sampler = PECSampler(quasi_probs)
+
+        results = []
+
+        for _ in range(n_samples):
+            # Run circuit
+            rho = np.array([[1, 0], [0, 0]], dtype=complex)
+
+            total_sign = 1
+            total_gamma = 1
+
+            for gate in gates:
+                # Apply noisy gate
+                rho = self.noisy_gate(rho, gate)
+
+                # Sample PEC correction
+                op, sign, gamma = sampler.sample()
+                rho = self.apply_pec_operation(rho, op)
+
+                total_sign *= sign
+                total_gamma *= gamma
+
+            # Measure
+            exp_val = np.real(np.trace(rho @ observable))
+            results.append(exp_val * total_sign * total_gamma)
+
+        return np.mean(results)
+
+    def run_noisy(self, gates, observable):
+        """Run without mitigation for comparison."""
+        rho = np.array([[1, 0], [0, 0]], dtype=complex)
+
+        for gate in gates:
+            rho = self.noisy_gate(rho, gate)
+
+        return np.real(np.trace(rho @ observable))
+
+    def run_ideal(self, gates, observable):
+        """Run ideal (noiseless) circuit."""
+        rho = np.array([[1, 0], [0, 0]], dtype=complex)
+
+        for gate in gates:
+            rho = gate @ rho @ gate.conj().T
+
+        return np.real(np.trace(rho @ observable))
+
+# Demonstrate PEC
+print("\nPEC for Quantum Circuit:")
+print("=" * 50)
+
+H = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+RY = lambda t: np.array([[np.cos(t/2), -np.sin(t/2)],
+                         [np.sin(t/2), np.cos(t/2)]], dtype=complex)
+Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+circuit = [H, RY(0.5), RY(0.3)]
+
+np.random.seed(42)
+
+for noise_p in [0.02, 0.05, 0.1]:
+    runner = PECCircuitRunner(noise_prob=noise_p)
+
+    ideal = runner.run_ideal(circuit, Z)
+    noisy = runner.run_noisy(circuit, Z)
+    pec = runner.run_with_pec(circuit, Z, n_samples=5000)
+
+    print(f"\nNoise = {noise_p:.0%}:")
+    print(f"  Ideal: {ideal:.4f}")
+    print(f"  Noisy: {noisy:.4f} (error: {abs(noisy-ideal):.4f})")
+    print(f"  PEC:   {pec:.4f} (error: {abs(pec-ideal):.4f})")
+```
+
+## 4. Sampling Overhead Analysis
+
+Analyze how overhead scales with circuit depth and noise.
+
+```python
+def analyze_pec_overhead(depths, noise_probs):
+    """
+    Analyze total PEC overhead for different circuits.
+    """
+    results = []
+
+    for depth in depths:
+        for p in noise_probs:
+            quasi_probs = depolarizing_inverse(p)
+            gamma_per_gate = sampling_overhead(quasi_probs)
+
+            # Total overhead is product: γ_total = γ^depth
+            total_overhead = gamma_per_gate ** depth
+
+            results.append({
+                'depth': depth,
+                'noise': p,
+                'gamma_per_gate': np.sqrt(gamma_per_gate),
+                'total_overhead': total_overhead
+            })
+
+    return results
+
+depths = [1, 5, 10, 20, 50]
+noise_probs = [0.01, 0.02, 0.05]
+
+results = analyze_pec_overhead(depths, noise_probs)
+
+print("\nPEC Sampling Overhead Analysis:")
+print("=" * 60)
+print(f"{'Depth':<10} {'Noise':<10} {'γ/gate':<12} {'Total γ²':<15}")
+print("-" * 60)
+
+for r in results:
+    overhead_str = f"{r['total_overhead']:.2e}" if r['total_overhead'] > 1000 else f"{r['total_overhead']:.2f}"
+    print(f"{r['depth']:<10} {r['noise']:<10.2%} {r['gamma_per_gate']:<12.4f} {overhead_str:<15}")
+```
+
+<Warning>
+PEC overhead grows exponentially with circuit depth: γ_total² = (γ_per_gate²)^depth. This limits PEC to shallow circuits with low noise.
+</Warning>
+
+## 5. Learned PEC
+
+Learn noise model from calibration data to construct PEC.
+
+```python
+class LearnedPEC:
+    """
+    Learn noise model from data for PEC.
+    """
+
+    def __init__(self):
+        self.noise_model = None
+
+    def estimate_noise_from_data(self, ideal_states, measured_states):
+        """
+        Estimate noise channel from input-output pairs.
+
+        Simplified: estimate depolarizing probability.
+        """
+        fidelities = []
+
+        for ideal, measured in zip(ideal_states, measured_states):
+            # Fidelity between ideal and measured
+            fid = np.abs(np.trace(ideal @ measured))
+            fidelities.append(fid)
+
+        avg_fidelity = np.mean(fidelities)
+
+        # For depolarizing channel: F = 1 - 2p/3
+        # So p = 3(1 - F)/2
+        p_estimate = 3 * (1 - avg_fidelity) / 2
+        p_estimate = np.clip(p_estimate, 0, 0.5)
+
+        return p_estimate
+
+    def calibrate(self, gate, n_calibration=100):
+        """
+        Calibrate noise model for a gate.
+
+        Uses random input states to estimate noise.
+        """
+        ideal_outputs = []
+        noisy_outputs = []
+
+        for _ in range(n_calibration):
+            # Random input state
+            theta, phi = np.random.rand() * np.pi, np.random.rand() * 2 * np.pi
+            psi = np.array([np.cos(theta/2), np.exp(1j*phi)*np.sin(theta/2)])
+            rho_in = np.outer(psi, psi.conj())
+
+            # Ideal output
+            rho_ideal = gate @ rho_in @ gate.conj().T
+            ideal_outputs.append(rho_ideal)
+
+            # Simulated noisy output (in practice, from hardware)
+            # Here we simulate with known noise
+            p_true = 0.05
+            X = np.array([[0, 1], [1, 0]], dtype=complex)
+            Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+            Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+            rho_noisy = gate @ rho_in @ gate.conj().T
+            rho_noisy = (1-p_true) * rho_noisy + \
+                        (p_true/3) * (X@rho_noisy@X + Y@rho_noisy@Y + Z@rho_noisy@Z)
+            noisy_outputs.append(rho_noisy)
+
+        # Estimate noise
+        p_estimate = self.estimate_noise_from_data(ideal_outputs, noisy_outputs)
+        self.noise_model = {'depolarizing_prob': p_estimate}
+
+        return p_estimate
+
+    def get_pec_coefficients(self):
+        """Get quasi-probability coefficients from learned noise."""
+        if self.noise_model is None:
+            raise ValueError("Must calibrate first")
+
+        p = self.noise_model['depolarizing_prob']
+        return depolarizing_inverse(p)
+
+# Demonstrate learned PEC
+print("\nLearned PEC from Calibration:")
+print("=" * 50)
+
+H = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+
+learned_pec = LearnedPEC()
+p_estimated = learned_pec.calibrate(H, n_calibration=100)
+
+print(f"True noise: 5.00%")
+print(f"Estimated noise: {p_estimated*100:.2f}%")
+
+quasi_probs = learned_pec.get_pec_coefficients()
+gamma = sum(abs(q) for q in quasi_probs.values())
+print(f"Computed γ = {gamma:.4f}")
+```
+
+## 6. Combining PEC with Other Techniques
+
+PEC can be combined with ZNE for enhanced mitigation.
+
+```python
+class HybridMitigation:
+    """
+    Combine PEC and ZNE for enhanced error mitigation.
+    """
+
+    def __init__(self, noise_prob=0.03):
+        self.noise_prob = noise_prob
+        self.pec_runner = PECCircuitRunner(noise_prob)
+
+    def pec_only(self, gates, observable, n_samples=1000):
+        """PEC mitigation only."""
+        return self.pec_runner.run_with_pec(gates, observable, n_samples)
+
+    def zne_only(self, gates, observable, noise_factors=[1, 2, 3]):
+        """ZNE mitigation only."""
+        measurements = []
+
+        for factor in noise_factors:
+            # Simulate scaled noise
+            scaled_runner = PECCircuitRunner(self.noise_prob * factor)
+            exp_val = scaled_runner.run_noisy(gates, observable)
+            measurements.append(exp_val)
+
+        # Richardson extrapolation
+        coeffs = np.polyfit(noise_factors, measurements, len(noise_factors)-1)
+        return coeffs[-1]
+
+    def hybrid_pec_zne(self, gates, observable, n_samples=500,
+                       noise_factors=[1, 1.5, 2]):
+        """
+        Hybrid: Apply PEC at multiple noise levels, then extrapolate.
+        """
+        pec_estimates = []
+
+        for factor in noise_factors:
+            # Run PEC at scaled noise
+            scaled_runner = PECCircuitRunner(self.noise_prob * factor)
+            estimate = scaled_runner.run_with_pec(gates, observable, n_samples)
+            pec_estimates.append(estimate)
+
+        # Extrapolate PEC estimates
+        coeffs = np.polyfit(noise_factors, pec_estimates, len(noise_factors)-1)
+        return coeffs[-1]
+
+# Compare mitigation strategies
+print("\nHybrid Mitigation Comparison:")
+print("=" * 50)
+
+np.random.seed(42)
+
+circuit = [H, RY(0.3), RY(0.5)]
+
+hybrid = HybridMitigation(noise_prob=0.03)
+
+ideal = hybrid.pec_runner.run_ideal(circuit, Z)
+noisy = hybrid.pec_runner.run_noisy(circuit, Z)
+
+pec_result = hybrid.pec_only(circuit, Z, n_samples=2000)
+zne_result = hybrid.zne_only(circuit, Z)
+hybrid_result = hybrid.hybrid_pec_zne(circuit, Z, n_samples=500)
+
+print(f"Ideal: {ideal:.4f}")
+print(f"Noisy: {noisy:.4f}")
+print(f"\nPEC only: {pec_result:.4f} (error: {abs(pec_result-ideal):.4f})")
+print(f"ZNE only: {zne_result:.4f} (error: {abs(zne_result-ideal):.4f})")
+print(f"Hybrid:   {hybrid_result:.4f} (error: {abs(hybrid_result-ideal):.4f})")
+```
+
+<Tip>
+Hybrid PEC+ZNE can outperform either technique alone by combining PEC's exact noise inversion with ZNE's extrapolation capabilities.
+</Tip>
+
+## Summary
+
+In this lesson, you learned:
+
+- **PEC principle**: Invert noise using quasi-probability decomposition
+- **Quasi-probabilities**: Can be negative, sample using |qᵢ| with sign tracking
+- **Sampling overhead**: γ² = (Σ|qᵢ|)² determines sample cost
+- **Circuit application**: Apply PEC after each noisy gate
+- **Exponential scaling**: Overhead grows as γ^(2·depth)
+- **Learned PEC**: Calibrate from hardware data
+- **Hybrid methods**: Combine PEC with ZNE
+
+PEC provides exact noise cancellation but requires careful consideration of sampling overhead.
+
+## Next Steps
+
+In the next lesson, we'll explore measurement error mitigation, which specifically addresses readout errors in quantum measurements.

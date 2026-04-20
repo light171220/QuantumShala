@@ -1,0 +1,671 @@
+---
+title: "Cloud Quantum Computing Cost Optimization"
+description: "Strategies for minimizing costs in cloud quantum computing."
+duration: 50
+difficulty: "intermediate"
+---
+
+## 1. Understanding Quantum Cloud Pricing
+
+Different providers use different pricing models that significantly impact total costs.
+
+```
+Quantum Cloud Pricing Models
+════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    IBM QUANTUM PRICING                          │
+├─────────────────────────────────────────────────────────────────┤
+│  Model: Time-based                                              │
+│                                                                 │
+│  Free Tier:    10 min/month on select systems                  │
+│  Pay-as-you-go: $1.60/second of quantum time                   │
+│  Premium:      Reserved capacity (contract)                     │
+│                                                                 │
+│  Cost = Execution Time (seconds) × $1.60                       │
+│                                                                 │
+│  Note: Queue time is FREE, only execution is charged           │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                  AMAZON BRAKET PRICING                          │
+├─────────────────────────────────────────────────────────────────┤
+│  Model: Per-shot + Per-task                                     │
+│                                                                 │
+│  IonQ Aria:     $0.03/shot + $0.30/task                        │
+│  Rigetti:       $0.00035/shot + $0.30/task                     │
+│  IQM:           $0.00145/shot + $0.30/task                     │
+│  QuEra:         $0.01/shot + $0.30/task                        │
+│  Simulators:    $0.00075/minute (SV1)                          │
+│                                                                 │
+│  Cost = (Shots × Shot_Price) + Task_Price                      │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                 AZURE QUANTUM PRICING                           │
+├─────────────────────────────────────────────────────────────────┤
+│  Model: Varies by provider                                      │
+│                                                                 │
+│  IonQ:          Per-gate pricing                               │
+│  Quantinuum:    HQC (Quantinuum Credits) system                │
+│  Rigetti:       Per-shot pricing                               │
+│                                                                 │
+│  Free Credits:  $500 for new accounts                          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## 2. Cost Calculation Engine
+
+```python
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+from enum import Enum
+import math
+
+class PricingModel(Enum):
+    TIME_BASED = "time_based"
+    PER_SHOT = "per_shot"
+    PER_GATE = "per_gate"
+    HYBRID = "hybrid"
+
+@dataclass
+class ProviderPricing:
+    """Pricing configuration for a provider."""
+    provider: str
+    model: PricingModel
+    base_task_cost: float
+    per_shot_cost: float
+    per_second_cost: float
+    per_gate_cost: Dict[str, float]  # gate_type -> cost
+    free_tier_limit: float  # in appropriate units
+    minimum_charge: float
+
+# Provider pricing configurations
+PRICING_CONFIGS = {
+    "ibm_quantum": ProviderPricing(
+        provider="IBM Quantum",
+        model=PricingModel.TIME_BASED,
+        base_task_cost=0.0,
+        per_shot_cost=0.0,
+        per_second_cost=1.60,
+        per_gate_cost={},
+        free_tier_limit=600,  # 10 minutes = 600 seconds
+        minimum_charge=0.0
+    ),
+    "braket_ionq": ProviderPricing(
+        provider="Amazon Braket - IonQ",
+        model=PricingModel.PER_SHOT,
+        base_task_cost=0.30,
+        per_shot_cost=0.03,
+        per_second_cost=0.0,
+        per_gate_cost={},
+        free_tier_limit=0,
+        minimum_charge=0.30
+    ),
+    "braket_rigetti": ProviderPricing(
+        provider="Amazon Braket - Rigetti",
+        model=PricingModel.PER_SHOT,
+        base_task_cost=0.30,
+        per_shot_cost=0.00035,
+        per_second_cost=0.0,
+        per_gate_cost={},
+        free_tier_limit=0,
+        minimum_charge=0.30
+    ),
+    "azure_ionq": ProviderPricing(
+        provider="Azure Quantum - IonQ",
+        model=PricingModel.PER_GATE,
+        base_task_cost=0.0,
+        per_shot_cost=0.0,
+        per_second_cost=0.0,
+        per_gate_cost={
+            "single_qubit": 0.00003,
+            "two_qubit": 0.0003
+        },
+        free_tier_limit=500,  # $500 credits
+        minimum_charge=0.0
+    )
+}
+
+@dataclass
+class CircuitCost:
+    """Breakdown of circuit execution cost."""
+    provider: str
+    base_cost: float
+    shot_cost: float
+    time_cost: float
+    gate_cost: float
+    total_cost: float
+    free_tier_applied: float
+    final_cost: float
+
+class CostCalculator:
+    """Calculate quantum computing costs across providers."""
+
+    def __init__(self):
+        self.pricing = PRICING_CONFIGS
+        self._usage_tracking: Dict[str, float] = {}
+
+    def calculate_cost(self,
+                       provider_key: str,
+                       shots: int,
+                       circuit_depth: int,
+                       num_qubits: int,
+                       single_qubit_gates: int,
+                       two_qubit_gates: int,
+                       estimated_time_seconds: Optional[float] = None) -> CircuitCost:
+        """Calculate total cost for circuit execution."""
+        config = self.pricing.get(provider_key)
+        if not config:
+            raise ValueError(f"Unknown provider: {provider_key}")
+
+        base_cost = config.base_task_cost
+        shot_cost = 0.0
+        time_cost = 0.0
+        gate_cost = 0.0
+
+        if config.model == PricingModel.TIME_BASED:
+            # Estimate execution time if not provided
+            if estimated_time_seconds is None:
+                estimated_time_seconds = self._estimate_execution_time(
+                    shots, circuit_depth, num_qubits
+                )
+            time_cost = estimated_time_seconds * config.per_second_cost
+
+        elif config.model == PricingModel.PER_SHOT:
+            shot_cost = shots * config.per_shot_cost
+
+        elif config.model == PricingModel.PER_GATE:
+            gate_cost = (
+                single_qubit_gates * config.per_gate_cost.get("single_qubit", 0) +
+                two_qubit_gates * config.per_gate_cost.get("two_qubit", 0)
+            ) * shots
+
+        total_cost = base_cost + shot_cost + time_cost + gate_cost
+
+        # Apply free tier
+        free_applied = 0.0
+        remaining_free = config.free_tier_limit - self._usage_tracking.get(provider_key, 0)
+        if remaining_free > 0:
+            free_applied = min(total_cost, remaining_free)
+
+        final_cost = max(total_cost - free_applied, config.minimum_charge)
+
+        return CircuitCost(
+            provider=config.provider,
+            base_cost=base_cost,
+            shot_cost=shot_cost,
+            time_cost=time_cost,
+            gate_cost=gate_cost,
+            total_cost=total_cost,
+            free_tier_applied=free_applied,
+            final_cost=final_cost
+        )
+
+    def _estimate_execution_time(self, shots: int,
+                                  depth: int, num_qubits: int) -> float:
+        """Estimate circuit execution time in seconds."""
+        # Rough estimate: each layer takes ~1ms, plus overhead
+        gate_time_ms = depth * 0.5  # 0.5ms per layer
+        measurement_time_ms = num_qubits * 0.1  # 0.1ms per qubit
+        overhead_ms = 100  # Job setup overhead
+
+        per_shot_ms = gate_time_ms + measurement_time_ms
+        total_ms = (per_shot_ms * shots) + overhead_ms
+
+        return total_ms / 1000
+
+    def compare_providers(self, shots: int, circuit_depth: int,
+                          num_qubits: int, single_qubit_gates: int,
+                          two_qubit_gates: int) -> Dict[str, CircuitCost]:
+        """Compare costs across all providers."""
+        results = {}
+        for provider_key in self.pricing:
+            try:
+                results[provider_key] = self.calculate_cost(
+                    provider_key, shots, circuit_depth, num_qubits,
+                    single_qubit_gates, two_qubit_gates
+                )
+            except Exception as e:
+                print(f"Error calculating for {provider_key}: {e}")
+        return results
+
+# Example cost comparison
+calculator = CostCalculator()
+
+print("Cost Comparison (1000 shots, 10 depth, 5 qubits, 20 1Q gates, 10 2Q gates):")
+costs = calculator.compare_providers(
+    shots=1000, circuit_depth=10, num_qubits=5,
+    single_qubit_gates=20, two_qubit_gates=10
+)
+
+for provider, cost in sorted(costs.items(), key=lambda x: x[1].final_cost):
+    print(f"  {cost.provider}: ${cost.final_cost:.4f}")
+```
+
+## 3. Shot Optimization
+
+Minimize shots while maintaining statistical precision.
+
+```python
+class ShotOptimizer:
+    """Optimize shot counts for cost vs precision tradeoffs."""
+
+    def __init__(self, cost_calculator: CostCalculator):
+        self.calculator = cost_calculator
+
+    def minimum_shots_for_precision(self,
+                                    target_precision: float,
+                                    confidence: float = 0.95,
+                                    probability: float = 0.5) -> int:
+        """Calculate minimum shots for target precision."""
+        # Using normal approximation to binomial
+        from scipy import stats
+        z = stats.norm.ppf((1 + confidence) / 2)
+
+        # Standard error = sqrt(p(1-p)/n)
+        # precision = z * SE
+        # n = z^2 * p * (1-p) / precision^2
+
+        n = (z ** 2 * probability * (1 - probability)) / (target_precision ** 2)
+        return int(math.ceil(n))
+
+    def optimize_shots_for_budget(self,
+                                   provider_key: str,
+                                   budget: float,
+                                   circuit_depth: int,
+                                   num_qubits: int,
+                                   single_qubit_gates: int,
+                                   two_qubit_gates: int) -> Dict:
+        """Find maximum shots within budget."""
+        config = PRICING_CONFIGS.get(provider_key)
+        if not config:
+            raise ValueError(f"Unknown provider: {provider_key}")
+
+        if config.model == PricingModel.PER_SHOT:
+            # Calculate max shots from budget
+            available = budget - config.base_task_cost
+            if available <= 0:
+                return {"max_shots": 0, "precision": None}
+
+            max_shots = int(available / config.per_shot_cost)
+            precision = self._precision_for_shots(max_shots)
+
+            return {
+                "max_shots": max_shots,
+                "precision": precision,
+                "estimated_cost": self.calculator.calculate_cost(
+                    provider_key, max_shots, circuit_depth, num_qubits,
+                    single_qubit_gates, two_qubit_gates
+                ).final_cost
+            }
+
+        # For other models, use binary search
+        return self._binary_search_shots(
+            provider_key, budget, circuit_depth, num_qubits,
+            single_qubit_gates, two_qubit_gates
+        )
+
+    def _precision_for_shots(self, shots: int,
+                             confidence: float = 0.95) -> float:
+        """Calculate precision achievable with given shots."""
+        from scipy import stats
+        z = stats.norm.ppf((1 + confidence) / 2)
+        # Worst case: p = 0.5
+        return z * math.sqrt(0.25 / shots)
+
+    def _binary_search_shots(self, provider_key: str, budget: float,
+                             circuit_depth: int, num_qubits: int,
+                             single_qubit_gates: int,
+                             two_qubit_gates: int) -> Dict:
+        """Binary search for max shots within budget."""
+        low, high = 1, 1000000
+
+        while low < high:
+            mid = (low + high + 1) // 2
+            cost = self.calculator.calculate_cost(
+                provider_key, mid, circuit_depth, num_qubits,
+                single_qubit_gates, two_qubit_gates
+            ).final_cost
+
+            if cost <= budget:
+                low = mid
+            else:
+                high = mid - 1
+
+        return {
+            "max_shots": low,
+            "precision": self._precision_for_shots(low),
+            "estimated_cost": self.calculator.calculate_cost(
+                provider_key, low, circuit_depth, num_qubits,
+                single_qubit_gates, two_qubit_gates
+            ).final_cost
+        }
+
+    def adaptive_shot_allocation(self,
+                                  circuits: List[Dict],
+                                  total_budget: float,
+                                  provider_key: str) -> List[Dict]:
+        """Allocate shots across circuits based on importance."""
+        total_weight = sum(c.get("weight", 1.0) for c in circuits)
+
+        allocations = []
+        for circuit in circuits:
+            weight = circuit.get("weight", 1.0)
+            budget_share = (weight / total_weight) * total_budget
+
+            optimal = self.optimize_shots_for_budget(
+                provider_key, budget_share,
+                circuit["depth"], circuit["num_qubits"],
+                circuit["single_qubit_gates"], circuit["two_qubit_gates"]
+            )
+
+            allocations.append({
+                "circuit_id": circuit.get("id"),
+                "allocated_shots": optimal["max_shots"],
+                "precision": optimal["precision"],
+                "cost": optimal["estimated_cost"]
+            })
+
+        return allocations
+
+optimizer = ShotOptimizer(calculator)
+
+# Example: minimum shots for 1% precision
+min_shots = optimizer.minimum_shots_for_precision(0.01)
+print(f"\nMinimum shots for 1% precision: {min_shots}")
+
+# Example: max shots within $5 budget
+result = optimizer.optimize_shots_for_budget(
+    "braket_rigetti", budget=5.0,
+    circuit_depth=10, num_qubits=5,
+    single_qubit_gates=20, two_qubit_gates=10
+)
+print(f"Max shots for $5 budget: {result['max_shots']}")
+```
+
+## 4. Circuit Optimization for Cost
+
+```python
+class CircuitCostOptimizer:
+    """Optimize circuits to reduce execution costs."""
+
+    def analyze_cost_drivers(self, circuit: Dict) -> Dict:
+        """Identify main cost drivers in circuit."""
+        return {
+            "two_qubit_gates": circuit["two_qubit_gates"],
+            "depth": circuit["depth"],
+            "width": circuit["num_qubits"],
+            "recommendations": self._get_recommendations(circuit)
+        }
+
+    def _get_recommendations(self, circuit: Dict) -> List[str]:
+        """Generate cost reduction recommendations."""
+        recommendations = []
+
+        # Two-qubit gate reduction
+        if circuit["two_qubit_gates"] > circuit["num_qubits"] * 5:
+            recommendations.append(
+                f"High 2Q gate count ({circuit['two_qubit_gates']}). "
+                "Consider gate cancellation or resynthesis."
+            )
+
+        # Depth reduction
+        if circuit["depth"] > 100:
+            recommendations.append(
+                f"Deep circuit (depth={circuit['depth']}). "
+                "Parallelize independent gates."
+            )
+
+        # Qubit reduction
+        if circuit["num_qubits"] > 20:
+            recommendations.append(
+                f"Wide circuit ({circuit['num_qubits']} qubits). "
+                "Check for unused ancilla qubits."
+            )
+
+        return recommendations
+
+    def estimate_optimization_savings(self,
+                                       original: Dict,
+                                       optimized: Dict,
+                                       provider_key: str,
+                                       shots: int) -> Dict:
+        """Estimate cost savings from circuit optimization."""
+        calc = CostCalculator()
+
+        original_cost = calc.calculate_cost(
+            provider_key, shots,
+            original["depth"], original["num_qubits"],
+            original["single_qubit_gates"], original["two_qubit_gates"]
+        )
+
+        optimized_cost = calc.calculate_cost(
+            provider_key, shots,
+            optimized["depth"], optimized["num_qubits"],
+            optimized["single_qubit_gates"], optimized["two_qubit_gates"]
+        )
+
+        savings = original_cost.final_cost - optimized_cost.final_cost
+
+        return {
+            "original_cost": original_cost.final_cost,
+            "optimized_cost": optimized_cost.final_cost,
+            "savings": savings,
+            "savings_percent": (savings / original_cost.final_cost * 100)
+                              if original_cost.final_cost > 0 else 0,
+            "gate_reduction": {
+                "1q": original["single_qubit_gates"] - optimized["single_qubit_gates"],
+                "2q": original["two_qubit_gates"] - optimized["two_qubit_gates"]
+            },
+            "depth_reduction": original["depth"] - optimized["depth"]
+        }
+
+circuit_optimizer = CircuitCostOptimizer()
+print("\nCircuit cost analysis ready")
+```
+
+## 5. Budget Management
+
+```python
+from datetime import datetime, timedelta
+import threading
+
+@dataclass
+class BudgetAlert:
+    """Budget alert configuration."""
+    threshold_percent: float
+    callback: Optional[callable] = None
+    triggered: bool = False
+
+class BudgetManager:
+    """Track and manage quantum computing budget."""
+
+    def __init__(self, monthly_budget: float):
+        self.monthly_budget = monthly_budget
+        self.current_month_usage = 0.0
+        self.usage_history: List[Dict] = []
+        self.alerts: List[BudgetAlert] = []
+        self._lock = threading.Lock()
+
+    def record_usage(self, provider: str, cost: float,
+                     job_id: str, metadata: Optional[Dict] = None) -> None:
+        """Record usage and check budgets."""
+        with self._lock:
+            self.current_month_usage += cost
+            self.usage_history.append({
+                "timestamp": datetime.now(),
+                "provider": provider,
+                "cost": cost,
+                "job_id": job_id,
+                "metadata": metadata or {}
+            })
+
+            # Check alerts
+            self._check_alerts()
+
+    def get_remaining_budget(self) -> float:
+        """Get remaining budget for current month."""
+        return max(0, self.monthly_budget - self.current_month_usage)
+
+    def get_usage_by_provider(self) -> Dict[str, float]:
+        """Get usage breakdown by provider."""
+        usage = {}
+        for record in self.usage_history:
+            provider = record["provider"]
+            usage[provider] = usage.get(provider, 0) + record["cost"]
+        return usage
+
+    def add_alert(self, threshold_percent: float,
+                  callback: Optional[callable] = None) -> None:
+        """Add budget threshold alert."""
+        self.alerts.append(BudgetAlert(
+            threshold_percent=threshold_percent,
+            callback=callback
+        ))
+
+    def _check_alerts(self) -> None:
+        """Check and trigger budget alerts."""
+        usage_percent = (self.current_month_usage / self.monthly_budget) * 100
+
+        for alert in self.alerts:
+            if not alert.triggered and usage_percent >= alert.threshold_percent:
+                alert.triggered = True
+                print(f"ALERT: Budget threshold {alert.threshold_percent}% reached!")
+                if alert.callback:
+                    alert.callback(usage_percent, self.get_remaining_budget())
+
+    def project_monthly_cost(self) -> Dict:
+        """Project end-of-month cost based on current usage."""
+        now = datetime.now()
+        days_elapsed = now.day
+        days_in_month = 30  # Simplified
+
+        if days_elapsed == 0:
+            return {"projected": 0, "confidence": "low"}
+
+        daily_rate = self.current_month_usage / days_elapsed
+        projected = daily_rate * days_in_month
+
+        return {
+            "projected_total": projected,
+            "daily_rate": daily_rate,
+            "days_remaining": days_in_month - days_elapsed,
+            "projected_remaining": daily_rate * (days_in_month - days_elapsed),
+            "over_budget": projected > self.monthly_budget,
+            "confidence": "high" if days_elapsed > 7 else "medium"
+        }
+
+    def generate_report(self) -> str:
+        """Generate usage report."""
+        by_provider = self.get_usage_by_provider()
+        projection = self.project_monthly_cost()
+
+        report = [
+            "=" * 50,
+            "QUANTUM COMPUTING USAGE REPORT",
+            "=" * 50,
+            f"Monthly Budget: ${self.monthly_budget:.2f}",
+            f"Current Usage:  ${self.current_month_usage:.2f}",
+            f"Remaining:      ${self.get_remaining_budget():.2f}",
+            "",
+            "Usage by Provider:",
+        ]
+
+        for provider, cost in sorted(by_provider.items(),
+                                      key=lambda x: x[1], reverse=True):
+            pct = (cost / self.current_month_usage * 100) if self.current_month_usage > 0 else 0
+            report.append(f"  {provider}: ${cost:.2f} ({pct:.1f}%)")
+
+        report.extend([
+            "",
+            "Projection:",
+            f"  Projected Total: ${projection['projected_total']:.2f}",
+            f"  Status: {'OVER BUDGET' if projection['over_budget'] else 'On Track'}",
+            "=" * 50
+        ])
+
+        return "\n".join(report)
+
+# Example budget management
+budget_mgr = BudgetManager(monthly_budget=100.0)
+budget_mgr.add_alert(50, lambda pct, rem: print(f"50% alert! Remaining: ${rem:.2f}"))
+budget_mgr.add_alert(80, lambda pct, rem: print(f"80% alert! Remaining: ${rem:.2f}"))
+
+# Simulate usage
+budget_mgr.record_usage("ibm_quantum", 15.0, "job_1")
+budget_mgr.record_usage("braket_ionq", 25.0, "job_2")
+
+print("\n" + budget_mgr.generate_report())
+```
+
+## 6. Cost-Aware Job Scheduling
+
+```python
+class CostAwareScheduler:
+    """Schedule jobs to minimize costs while meeting requirements."""
+
+    def __init__(self, calculator: CostCalculator, budget_mgr: BudgetManager):
+        self.calculator = calculator
+        self.budget = budget_mgr
+
+    def schedule_job(self, circuit: Dict, shots: int,
+                     deadline: Optional[datetime] = None,
+                     max_cost: Optional[float] = None) -> Dict:
+        """Schedule job on most cost-effective backend."""
+        candidates = []
+
+        for provider_key in PRICING_CONFIGS:
+            cost = self.calculator.calculate_cost(
+                provider_key, shots,
+                circuit["depth"], circuit["num_qubits"],
+                circuit["single_qubit_gates"], circuit["two_qubit_gates"]
+            )
+
+            # Check budget constraints
+            if max_cost and cost.final_cost > max_cost:
+                continue
+
+            if cost.final_cost > self.budget.get_remaining_budget():
+                continue
+
+            candidates.append({
+                "provider": provider_key,
+                "cost": cost.final_cost,
+                "recommendation": "cost_optimal" if cost.final_cost == min(
+                    c.final_cost for c in [
+                        self.calculator.calculate_cost(
+                            pk, shots, circuit["depth"], circuit["num_qubits"],
+                            circuit["single_qubit_gates"], circuit["two_qubit_gates"]
+                        ) for pk in PRICING_CONFIGS
+                    ]
+                ) else "alternative"
+            })
+
+        if not candidates:
+            return {"error": "No affordable backend available"}
+
+        # Sort by cost
+        candidates.sort(key=lambda x: x["cost"])
+
+        return {
+            "recommended": candidates[0],
+            "alternatives": candidates[1:],
+            "remaining_budget": self.budget.get_remaining_budget()
+        }
+
+scheduler = CostAwareScheduler(calculator, budget_mgr)
+print("\nCost-aware scheduler ready")
+```
+
+## Summary
+
+Effective cost optimization requires:
+
+1. **Understanding Pricing**: Know each provider's model (time, shot, gate-based)
+2. **Shot Optimization**: Balance statistical precision against cost
+3. **Circuit Optimization**: Reduce gates and depth before submission
+4. **Budget Management**: Track usage, set alerts, project costs
+5. **Smart Scheduling**: Select backends based on cost and constraints
+
+These strategies can reduce quantum computing costs by 50-80% without sacrificing result quality.

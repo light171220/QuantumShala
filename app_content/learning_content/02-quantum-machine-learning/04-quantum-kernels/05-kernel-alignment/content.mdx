@@ -1,0 +1,646 @@
+---
+title: "Kernel Alignment and Optimization"
+description: "Learn how to measure and optimize quantum kernels for specific learning tasks using kernel alignment techniques."
+---
+
+# Kernel Alignment and Optimization
+
+Kernel alignment measures how well a kernel matches a learning task, enabling principled optimization of quantum kernel parameters.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Define and compute kernel alignment
+- Understand kernel-target alignment
+- Optimize quantum kernel parameters
+- Apply gradient-based kernel training
+- Evaluate kernel quality for classification
+
+## 1. Kernel Alignment Fundamentals
+
+Kernel alignment quantifies the similarity between two kernels or between a kernel and an ideal target.
+
+<Definition term="Kernel Alignment">
+The alignment between two kernels K₁ and K₂ is the normalized Frobenius inner product: A(K₁, K₂) = ⟨K₁, K₂⟩_F / (||K₁||_F ||K₂||_F), where ⟨K₁, K₂⟩_F = Σᵢⱼ K₁[i,j]K₂[i,j].
+</Definition>
+
+```python
+import numpy as np
+
+def kernel_alignment_basics():
+    """
+    Introduction to kernel alignment concepts.
+    """
+    print("Kernel Alignment Fundamentals:")
+    print("=" * 50)
+
+    def frobenius_inner_product(K1, K2):
+        """Compute Frobenius inner product."""
+        return np.sum(K1 * K2)
+
+    def frobenius_norm(K):
+        """Compute Frobenius norm."""
+        return np.sqrt(np.sum(K * K))
+
+    def kernel_alignment(K1, K2):
+        """Compute alignment between two kernels."""
+        numerator = frobenius_inner_product(K1, K2)
+        denominator = frobenius_norm(K1) * frobenius_norm(K2)
+        return numerator / denominator
+
+    # Example: Compare two simple kernels
+    np.random.seed(42)
+    n = 5
+    X = np.random.randn(n, 2)
+
+    # Linear kernel
+    K_linear = X @ X.T
+
+    # RBF kernel
+    K_rbf = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            K_rbf[i, j] = np.exp(-np.sum((X[i] - X[j])**2))
+
+    print("\n1. Kernel-Kernel Alignment:")
+    print("-" * 40)
+    print(f"  Linear kernel shape: {K_linear.shape}")
+    print(f"  RBF kernel shape: {K_rbf.shape}")
+
+    align_self_linear = kernel_alignment(K_linear, K_linear)
+    align_self_rbf = kernel_alignment(K_rbf, K_rbf)
+    align_cross = kernel_alignment(K_linear, K_rbf)
+
+    print(f"\n  A(K_linear, K_linear) = {align_self_linear:.4f}")
+    print(f"  A(K_rbf, K_rbf) = {align_self_rbf:.4f}")
+    print(f"  A(K_linear, K_rbf) = {align_cross:.4f}")
+
+    print("\n\n2. Properties:")
+    print("-" * 40)
+    print("  • A(K, K) = 1 (self-alignment)")
+    print("  • -1 ≤ A(K₁, K₂) ≤ 1")
+    print("  • Higher alignment → more similar kernels")
+
+kernel_alignment_basics()
+```
+
+<Tip>
+Kernel alignment is invariant to kernel scaling. A kernel that's 10x larger has the same alignment as the original.
+</Tip>
+
+## 2. Kernel-Target Alignment
+
+The most useful form of alignment compares a kernel to the ideal target kernel.
+
+```python
+import numpy as np
+
+def kernel_target_alignment():
+    """
+    Compute alignment between kernel and target labels.
+    """
+    print("Kernel-Target Alignment:")
+    print("=" * 50)
+
+    def compute_target_kernel(y):
+        """Compute ideal target kernel from labels."""
+        y = np.array(y).reshape(-1, 1)
+        return y @ y.T
+
+    def kernel_target_alignment(K, y):
+        """Compute alignment between kernel K and labels y."""
+        K_target = compute_target_kernel(y)
+
+        # Center kernels (optional but recommended)
+        n = len(y)
+        H = np.eye(n) - np.ones((n, n)) / n
+        K_centered = H @ K @ H
+        K_target_centered = H @ K_target @ H
+
+        numerator = np.sum(K_centered * K_target_centered)
+        denominator = np.sqrt(np.sum(K_centered**2) * np.sum(K_target_centered**2))
+
+        return numerator / (denominator + 1e-10)
+
+    # Example with classification data
+    np.random.seed(42)
+    n = 20
+
+    # Generate labeled data
+    X_pos = np.random.randn(n//2, 2) + [2, 0]
+    X_neg = np.random.randn(n//2, 2) + [-2, 0]
+    X = np.vstack([X_pos, X_neg])
+    y = np.array([1] * (n//2) + [-1] * (n//2))
+
+    print("\n1. Target Kernel (Ideal):")
+    print("-" * 40)
+    K_target = compute_target_kernel(y)
+    print(f"  K_target[i,j] = yᵢ × yⱼ")
+    print(f"  Same class: K = +1")
+    print(f"  Different class: K = -1")
+
+    # Compare different kernels
+    print("\n\n2. Alignment Comparison:")
+    print("-" * 40)
+
+    kernels = {}
+
+    # Linear kernel
+    kernels['Linear'] = X @ X.T
+
+    # RBF with different gammas
+    for gamma in [0.1, 1.0, 10.0]:
+        K = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                K[i, j] = np.exp(-gamma * np.sum((X[i] - X[j])**2))
+        kernels[f'RBF(γ={gamma})'] = K
+
+    # Polynomial kernels
+    for d in [2, 3]:
+        K = (1 + X @ X.T) ** d
+        kernels[f'Poly(d={d})'] = K
+
+    print(f"\n  {'Kernel':<15} {'KTA Score':<12}")
+    print("  " + "-" * 27)
+
+    for name, K in kernels.items():
+        kta = kernel_target_alignment(K, y)
+        print(f"  {name:<15} {kta:+.4f}")
+
+kernel_target_alignment()
+```
+
+<Formula>
+Kernel-Target Alignment:
+$$\text{KTA}(K, y) = \frac{\langle K, yy^T \rangle_F}{\|K\|_F \|yy^T\|_F}$$
+Higher KTA indicates the kernel better separates the classes.
+</Formula>
+
+## 3. Optimizing Quantum Kernels
+
+Using kernel alignment to optimize quantum kernel parameters.
+
+```python
+import numpy as np
+
+def optimize_quantum_kernel():
+    """
+    Optimize quantum kernel parameters using KTA.
+    """
+    print("Quantum Kernel Optimization:")
+    print("=" * 50)
+
+    def parameterized_quantum_kernel(x, y, theta):
+        """
+        Quantum kernel with trainable parameters.
+
+        Args:
+            x, y: Data points
+            theta: [gamma, rotation_scale]
+        """
+        gamma = theta[0]
+        scale = theta[1]
+
+        # Feature map parameters
+        diff_sq = np.sum((x - y)**2)
+        dot = np.dot(x, y)
+        cross = np.sum(np.outer(x, y))
+
+        # Quantum-inspired kernel
+        phase = scale * (dot + 0.5 * cross)
+        return np.exp(-gamma * diff_sq) * (1 + np.cos(phase)) / 2
+
+    def compute_kernel_matrix(X, theta):
+        n = len(X)
+        K = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                K[i, j] = parameterized_quantum_kernel(X[i], X[j], theta)
+        return K
+
+    def kta_objective(theta, X, y):
+        """Compute negative KTA (for minimization)."""
+        K = compute_kernel_matrix(X, theta)
+
+        # Target kernel
+        y_col = y.reshape(-1, 1)
+        K_target = y_col @ y_col.T
+
+        # Centered alignment
+        n = len(y)
+        H = np.eye(n) - np.ones((n, n)) / n
+        K_c = H @ K @ H
+        Kt_c = H @ K_target @ H
+
+        kta = np.sum(K_c * Kt_c) / (np.sqrt(np.sum(K_c**2) * np.sum(Kt_c**2)) + 1e-10)
+        return -kta  # Negative for minimization
+
+    # Generate data
+    np.random.seed(42)
+    n = 30
+    X = np.vstack([
+        np.random.randn(n//2, 2) + [1.5, 0],
+        np.random.randn(n//2, 2) + [-1.5, 0]
+    ])
+    y = np.array([1] * (n//2) + [-1] * (n//2))
+
+    print("\n1. Grid Search Optimization:")
+    print("-" * 40)
+
+    best_kta = -1
+    best_theta = None
+
+    gammas = [0.1, 0.5, 1.0, 2.0, 5.0]
+    scales = [0.1, 0.5, 1.0, 2.0]
+
+    for gamma in gammas:
+        for scale in scales:
+            theta = np.array([gamma, scale])
+            kta = -kta_objective(theta, X, y)
+            if kta > best_kta:
+                best_kta = kta
+                best_theta = theta.copy()
+
+    print(f"  Best parameters: γ={best_theta[0]:.2f}, scale={best_theta[1]:.2f}")
+    print(f"  Best KTA: {best_kta:.4f}")
+
+    # Show improvement
+    print("\n\n2. Optimization Trajectory:")
+    print("-" * 40)
+
+    theta_init = np.array([0.1, 0.1])
+    kta_init = -kta_objective(theta_init, X, y)
+
+    theta_mid = np.array([1.0, 1.0])
+    kta_mid = -kta_objective(theta_mid, X, y)
+
+    print(f"  Initial (γ=0.1, s=0.1): KTA = {kta_init:.4f}")
+    print(f"  Middle (γ=1.0, s=1.0): KTA = {kta_mid:.4f}")
+    print(f"  Optimal: KTA = {best_kta:.4f}")
+    print(f"  Improvement: {(best_kta - kta_init) / abs(kta_init) * 100:.1f}%")
+
+optimize_quantum_kernel()
+```
+
+## 4. Gradient-Based Kernel Training
+
+Computing gradients of KTA for efficient optimization.
+
+```python
+import numpy as np
+
+def gradient_based_kernel_training():
+    """
+    Train quantum kernels using gradient descent on KTA.
+    """
+    print("Gradient-Based Kernel Training:")
+    print("=" * 50)
+
+    def quantum_kernel(x, y, theta):
+        """Parameterized quantum kernel."""
+        gamma, scale = theta
+        diff_sq = np.sum((x - y)**2)
+        phase = scale * np.dot(x, y)
+        return np.exp(-gamma * diff_sq) * (1 + np.cos(phase)) / 2
+
+    def compute_kernel_and_gradient(X, theta):
+        """Compute kernel matrix and its gradient w.r.t. theta."""
+        n = len(X)
+        gamma, scale = theta
+
+        K = np.zeros((n, n))
+        dK_dgamma = np.zeros((n, n))
+        dK_dscale = np.zeros((n, n))
+
+        for i in range(n):
+            for j in range(n):
+                diff_sq = np.sum((X[i] - X[j])**2)
+                phase = scale * np.dot(X[i], X[j])
+
+                exp_term = np.exp(-gamma * diff_sq)
+                cos_term = (1 + np.cos(phase)) / 2
+
+                K[i, j] = exp_term * cos_term
+
+                # Gradients
+                dK_dgamma[i, j] = -diff_sq * K[i, j]
+                dK_dscale[i, j] = -exp_term * np.sin(phase) * np.dot(X[i], X[j]) / 2
+
+        return K, np.array([dK_dgamma, dK_dscale])
+
+    def kta_with_gradient(X, y, theta):
+        """Compute KTA and its gradient."""
+        K, dK = compute_kernel_and_gradient(X, theta)
+
+        # Target kernel
+        y_col = y.reshape(-1, 1)
+        K_target = y_col @ y_col.T
+
+        # Frobenius products
+        num = np.sum(K * K_target)
+        norm_K = np.sqrt(np.sum(K * K))
+        norm_T = np.sqrt(np.sum(K_target * K_target))
+
+        kta = num / (norm_K * norm_T + 1e-10)
+
+        # Gradient of KTA
+        grad = np.zeros(2)
+        for p in range(2):
+            d_num = np.sum(dK[p] * K_target)
+            d_norm_K = np.sum(K * dK[p]) / (norm_K + 1e-10)
+
+            grad[p] = (d_num * norm_K - num * d_norm_K) / (norm_K**2 * norm_T + 1e-10)
+
+        return kta, grad
+
+    # Generate data
+    np.random.seed(42)
+    n = 40
+    X = np.vstack([
+        np.random.randn(n//2, 2) + [1.5, 0],
+        np.random.randn(n//2, 2) + [-1.5, 0]
+    ])
+    y = np.array([1.0] * (n//2) + [-1.0] * (n//2))
+
+    # Gradient descent
+    print("\n1. Training with Gradient Descent:")
+    print("-" * 40)
+
+    theta = np.array([0.5, 0.5])  # Initial parameters
+    learning_rate = 0.5
+    n_iterations = 30
+
+    history = []
+    for i in range(n_iterations):
+        kta, grad = kta_with_gradient(X, y, theta)
+        history.append(kta)
+
+        # Gradient ascent (maximize KTA)
+        theta = theta + learning_rate * grad
+
+        # Keep parameters positive
+        theta = np.maximum(theta, 0.01)
+
+        if i % 10 == 0:
+            print(f"  Iter {i:3d}: KTA = {kta:.4f}, θ = [{theta[0]:.3f}, {theta[1]:.3f}]")
+
+    print(f"  Final: KTA = {history[-1]:.4f}")
+    print(f"  Improvement: {(history[-1] - history[0]) / abs(history[0]) * 100:.1f}%")
+
+    print("\n\n2. Convergence Analysis:")
+    print("-" * 40)
+    print(f"  Initial KTA: {history[0]:.4f}")
+    print(f"  Final KTA: {history[-1]:.4f}")
+    print(f"  Final parameters: γ={theta[0]:.3f}, scale={theta[1]:.3f}")
+
+gradient_based_kernel_training()
+```
+
+<Warning>
+Gradient-based optimization of quantum kernels requires differentiable kernel functions. Hardware noise can affect gradient estimates.
+</Warning>
+
+## 5. Centered Kernel Alignment
+
+Centering improves kernel alignment for classification tasks.
+
+```python
+import numpy as np
+
+def centered_kernel_alignment():
+    """
+    Compare centered vs uncentered kernel alignment.
+    """
+    print("Centered Kernel Alignment:")
+    print("=" * 50)
+
+    def center_kernel(K):
+        """Center a kernel matrix."""
+        n = K.shape[0]
+        H = np.eye(n) - np.ones((n, n)) / n
+        return H @ K @ H
+
+    def uncentered_kta(K, y):
+        """Compute uncentered KTA."""
+        y_col = y.reshape(-1, 1)
+        K_target = y_col @ y_col.T
+
+        num = np.sum(K * K_target)
+        denom = np.sqrt(np.sum(K**2) * np.sum(K_target**2))
+        return num / (denom + 1e-10)
+
+    def centered_kta(K, y):
+        """Compute centered KTA."""
+        K_c = center_kernel(K)
+
+        y_col = y.reshape(-1, 1)
+        K_target = center_kernel(y_col @ y_col.T)
+
+        num = np.sum(K_c * K_target)
+        denom = np.sqrt(np.sum(K_c**2) * np.sum(K_target**2))
+        return num / (denom + 1e-10)
+
+    # Generate imbalanced data
+    np.random.seed(42)
+    n_pos, n_neg = 10, 30  # Imbalanced
+
+    X_pos = np.random.randn(n_pos, 2) + [2, 0]
+    X_neg = np.random.randn(n_neg, 2) + [-2, 0]
+    X = np.vstack([X_pos, X_neg])
+    y = np.array([1] * n_pos + [-1] * n_neg)
+
+    print("\n1. Effect of Centering:")
+    print("-" * 40)
+    print(f"  Class distribution: {n_pos} positive, {n_neg} negative")
+
+    # RBF kernel
+    K = np.zeros((len(X), len(X)))
+    for i in range(len(X)):
+        for j in range(len(X)):
+            K[i, j] = np.exp(-np.sum((X[i] - X[j])**2))
+
+    kta_uc = uncentered_kta(K, y)
+    kta_c = centered_kta(K, y)
+
+    print(f"\n  RBF Kernel:")
+    print(f"    Uncentered KTA: {kta_uc:+.4f}")
+    print(f"    Centered KTA: {kta_c:+.4f}")
+
+    print("\n\n2. Why Centering Matters:")
+    print("-" * 40)
+    print("  • Removes mean from kernel space")
+    print("  • Invariant to label distribution imbalance")
+    print("  • Better reflects true class separation")
+    print("  • Standard in kernel learning literature")
+
+    # Compare on balanced data
+    print("\n\n3. Balanced vs Imbalanced:")
+    print("-" * 40)
+
+    # Balanced version
+    X_bal = np.vstack([
+        np.random.randn(20, 2) + [2, 0],
+        np.random.randn(20, 2) + [-2, 0]
+    ])
+    y_bal = np.array([1] * 20 + [-1] * 20)
+
+    K_bal = np.zeros((40, 40))
+    for i in range(40):
+        for j in range(40):
+            K_bal[i, j] = np.exp(-np.sum((X_bal[i] - X_bal[j])**2))
+
+    print(f"  Balanced (20:20):")
+    print(f"    Centered KTA: {centered_kta(K_bal, y_bal):+.4f}")
+    print(f"  Imbalanced ({n_pos}:{n_neg}):")
+    print(f"    Centered KTA: {centered_kta(K, y):+.4f}")
+
+centered_kernel_alignment()
+```
+
+## 6. Kernel Quality Evaluation
+
+Comprehensive evaluation of quantum kernel quality.
+
+```python
+import numpy as np
+
+def kernel_quality_evaluation():
+    """
+    Evaluate quantum kernel quality with multiple metrics.
+    """
+    print("Kernel Quality Evaluation:")
+    print("=" * 50)
+
+    class KernelEvaluator:
+        def __init__(self, kernel_fn):
+            self.kernel = kernel_fn
+
+        def compute_kernel_matrix(self, X):
+            n = len(X)
+            K = np.zeros((n, n))
+            for i in range(n):
+                for j in range(n):
+                    K[i, j] = self.kernel(X[i], X[j])
+            return K
+
+        def kernel_target_alignment(self, K, y):
+            """Centered KTA."""
+            n = len(y)
+            H = np.eye(n) - np.ones((n, n)) / n
+
+            K_c = H @ K @ H
+            y_col = y.reshape(-1, 1)
+            Kt_c = H @ (y_col @ y_col.T) @ H
+
+            num = np.sum(K_c * Kt_c)
+            denom = np.sqrt(np.sum(K_c**2) * np.sum(Kt_c**2))
+            return num / (denom + 1e-10)
+
+        def class_separability(self, K, y):
+            """Ratio of between-class to within-class similarity."""
+            pos_idx = y == 1
+            neg_idx = y == -1
+
+            # Within-class similarity
+            within_pos = np.mean(K[np.ix_(pos_idx, pos_idx)])
+            within_neg = np.mean(K[np.ix_(neg_idx, neg_idx)])
+            within = (within_pos + within_neg) / 2
+
+            # Between-class similarity
+            between = np.mean(K[np.ix_(pos_idx, neg_idx)])
+
+            return within / (between + 1e-10)
+
+        def geometric_difference(self, K, y):
+            """Geometric difference between classes."""
+            pos_idx = y == 1
+            neg_idx = y == -1
+
+            # Mean kernel values
+            mean_pos = np.mean(K[pos_idx][:, pos_idx])
+            mean_neg = np.mean(K[neg_idx][:, neg_idx])
+            mean_cross = np.mean(K[pos_idx][:, neg_idx])
+
+            return (mean_pos + mean_neg) / 2 - mean_cross
+
+        def effective_dimension(self, K, threshold=0.99):
+            """Number of eigenvalues explaining threshold variance."""
+            eigenvalues = np.linalg.eigvalsh(K)
+            eigenvalues = np.maximum(eigenvalues, 0)  # Numerical stability
+            eigenvalues = np.sort(eigenvalues)[::-1]
+
+            total = np.sum(eigenvalues)
+            cumsum = np.cumsum(eigenvalues) / (total + 1e-10)
+
+            return np.searchsorted(cumsum, threshold) + 1
+
+        def full_evaluation(self, X, y):
+            """Run all evaluations."""
+            K = self.compute_kernel_matrix(X)
+
+            return {
+                'kta': self.kernel_target_alignment(K, y),
+                'separability': self.class_separability(K, y),
+                'geometric_diff': self.geometric_difference(K, y),
+                'effective_dim': self.effective_dimension(K),
+                'condition_number': np.linalg.cond(K + 1e-6 * np.eye(len(K)))
+            }
+
+    # Compare different quantum kernels
+    np.random.seed(42)
+    n = 40
+    X = np.vstack([
+        np.random.randn(n//2, 2) + [1.5, 0],
+        np.random.randn(n//2, 2) + [-1.5, 0]
+    ])
+    y = np.array([1] * (n//2) + [-1] * (n//2))
+
+    kernels = {
+        'Linear': lambda x, y: np.dot(x, y),
+        'RBF': lambda x, y: np.exp(-np.sum((x-y)**2)),
+        'Quantum ZZ': lambda x, y: np.exp(-0.5*np.sum((x-y)**2)) * (1 + np.cos(np.dot(x, y)))/2,
+        'Quantum IQP': lambda x, y: np.cos(np.dot(x, y) + 0.5*np.sum(x*y))**2
+    }
+
+    print("\n  Quality Metrics Comparison:")
+    print("-" * 60)
+    print(f"  {'Kernel':<12} {'KTA':<8} {'Sep.':<8} {'GeoDiff':<8} {'EffDim':<8}")
+    print("  " + "-" * 44)
+
+    for name, kernel_fn in kernels.items():
+        evaluator = KernelEvaluator(kernel_fn)
+        metrics = evaluator.full_evaluation(X, y)
+
+        print(f"  {name:<12} {metrics['kta']:+.3f}   "
+              f"{metrics['separability']:.3f}   "
+              f"{metrics['geometric_diff']:+.3f}   "
+              f"{metrics['effective_dim']:<8d}")
+
+    print("\n\n  Interpretation:")
+    print("-" * 40)
+    print("  • KTA: Higher = better class alignment")
+    print("  • Separability: Higher = better within/between ratio")
+    print("  • GeoDiff: Higher = more class separation")
+    print("  • EffDim: Lower = more efficient representation")
+
+kernel_quality_evaluation()
+```
+
+## Summary
+
+Kernel alignment provides a principled approach to quantum kernel optimization:
+
+1. **Kernel Alignment**: Measures similarity between kernels
+2. **Kernel-Target Alignment**: Compares kernel to ideal classification target
+3. **Optimization**: Use gradient descent to maximize KTA
+4. **Centering**: Improves alignment for imbalanced data
+5. **Evaluation**: Multiple metrics assess kernel quality
+6. **Application**: Guide quantum feature map design
+
+Optimized quantum kernels can significantly improve classification performance.
+
+## Next Steps
+
+In the next lesson, we'll explore real-world applications of quantum kernels in various machine learning tasks.

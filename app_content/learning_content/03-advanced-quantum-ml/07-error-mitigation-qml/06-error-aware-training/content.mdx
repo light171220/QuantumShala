@@ -1,0 +1,702 @@
+---
+title: "Error-Aware Training"
+description: "Train quantum machine learning models that are robust to noise by incorporating error awareness into the training process"
+---
+
+# Error-Aware Training
+
+Instead of mitigating errors after training, error-aware training builds noise resilience directly into the learning process. This lesson covers techniques to train QML models that perform well despite hardware noise.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Train variational circuits with noise awareness
+- Implement noise-resilient loss functions
+- Use regularization for noise robustness
+- Design error-tolerant ansatz structures
+- Apply noise injection during training
+- Combine training and mitigation strategies
+
+## 1. Noise-Aware Loss Functions
+
+Modify loss functions to account for expected noise effects.
+
+<Definition term="Noise-Aware Loss">
+A noise-aware loss function incorporates knowledge of noise to train models that remain accurate under noisy execution:
+
+L_aware(θ) = L(f_noisy(θ), y) + λ·R(θ)
+
+where R(θ) penalizes noise-sensitive parameters.
+</Definition>
+
+```python
+import numpy as np
+
+class NoiseAwareLoss:
+    """
+    Loss functions that account for noise.
+    """
+
+    def __init__(self, noise_level=0.1):
+        self.noise_level = noise_level
+
+    def standard_mse(self, predictions, targets):
+        """Standard mean squared error."""
+        return np.mean((predictions - targets) ** 2)
+
+    def noise_weighted_mse(self, predictions, targets, uncertainties):
+        """
+        MSE weighted by prediction uncertainties.
+
+        Predictions with high uncertainty contribute less to the loss.
+        """
+        weights = 1.0 / (uncertainties ** 2 + 1e-6)
+        weights /= np.sum(weights)
+        return np.sum(weights * (predictions - targets) ** 2)
+
+    def robust_huber_loss(self, predictions, targets, delta=0.5):
+        """
+        Huber loss: robust to outliers from noise.
+
+        Quadratic for small errors, linear for large errors.
+        """
+        errors = np.abs(predictions - targets)
+        quadratic = 0.5 * errors ** 2
+        linear = delta * errors - 0.5 * delta ** 2
+        return np.mean(np.where(errors <= delta, quadratic, linear))
+
+    def noise_margin_loss(self, predictions, targets, margin=0.1):
+        """
+        Only penalize errors beyond noise margin.
+
+        Accepts predictions within expected noise range.
+        """
+        errors = np.abs(predictions - targets)
+        # No penalty within margin
+        penalized = np.maximum(errors - margin, 0)
+        return np.mean(penalized ** 2)
+
+# Demonstrate different loss functions
+print("Noise-Aware Loss Functions:")
+print("=" * 50)
+
+loss = NoiseAwareLoss(noise_level=0.1)
+
+# Predictions with outlier from noise
+predictions = np.array([0.1, 0.45, 0.8, 0.3])  # Third is noisy outlier
+targets = np.array([0.1, 0.5, 0.5, 0.3])
+uncertainties = np.array([0.05, 0.05, 0.3, 0.05])  # High uncertainty for outlier
+
+print(f"Predictions: {predictions}")
+print(f"Targets: {targets}")
+print(f"Uncertainties: {uncertainties}")
+
+print(f"\nStandard MSE: {loss.standard_mse(predictions, targets):.4f}")
+print(f"Weighted MSE: {loss.noise_weighted_mse(predictions, targets, uncertainties):.4f}")
+print(f"Huber Loss: {loss.robust_huber_loss(predictions, targets):.4f}")
+print(f"Margin Loss: {loss.noise_margin_loss(predictions, targets, margin=0.1):.4f}")
+```
+
+## 2. Gradient Regularization
+
+Regularize gradients to improve noise robustness.
+
+<Formula>
+Gradient regularization adds a penalty on gradient magnitudes:
+
+L_reg(θ) = L(θ) + λ·||∇θL||²
+
+Large gradients indicate noise sensitivity, so penalizing them improves robustness.
+</Formula>
+
+```python
+class GradientRegularizedTrainer:
+    """
+    Training with gradient regularization for noise robustness.
+    """
+
+    def __init__(self, circuit_fn, grad_reg=0.1, param_reg=0.01):
+        self.circuit_fn = circuit_fn
+        self.grad_reg = grad_reg      # Gradient regularization strength
+        self.param_reg = param_reg    # L2 parameter regularization
+
+    def compute_loss(self, params, x, y):
+        """Compute prediction loss."""
+        pred = self.circuit_fn(params, x)
+        return (pred - y) ** 2
+
+    def compute_gradient(self, params, x, y, epsilon=0.01):
+        """Compute gradient using parameter shift."""
+        grad = np.zeros_like(params)
+
+        for i in range(len(params)):
+            params_plus = params.copy()
+            params_minus = params.copy()
+            params_plus[i] += epsilon
+            params_minus[i] -= epsilon
+
+            loss_plus = self.compute_loss(params_plus, x, y)
+            loss_minus = self.compute_loss(params_minus, x, y)
+
+            grad[i] = (loss_plus - loss_minus) / (2 * epsilon)
+
+        return grad
+
+    def regularized_loss(self, params, x, y):
+        """Loss with gradient and parameter regularization."""
+        # Base loss
+        base_loss = self.compute_loss(params, x, y)
+
+        # Gradient regularization
+        grad = self.compute_gradient(params, x, y)
+        grad_penalty = self.grad_reg * np.sum(grad ** 2)
+
+        # Parameter regularization (L2)
+        param_penalty = self.param_reg * np.sum(params ** 2)
+
+        return base_loss + grad_penalty + param_penalty
+
+    def train_step(self, params, x, y, lr=0.1):
+        """Single training step with regularization."""
+        # Compute gradient of regularized loss
+        grad = np.zeros_like(params)
+        epsilon = 0.01
+
+        for i in range(len(params)):
+            params_plus = params.copy()
+            params_minus = params.copy()
+            params_plus[i] += epsilon
+            params_minus[i] -= epsilon
+
+            loss_plus = self.regularized_loss(params_plus, x, y)
+            loss_minus = self.regularized_loss(params_minus, x, y)
+
+            grad[i] = (loss_plus - loss_minus) / (2 * epsilon)
+
+        # Update
+        new_params = params - lr * grad
+        return new_params
+
+# Simple circuit function
+def simple_circuit(params, x):
+    """Simulated quantum circuit output."""
+    return np.sin(params[0] * x + params[1]) * np.exp(-0.1 * params[0]**2)
+
+# Compare training with and without regularization
+print("\nGradient Regularization Training:")
+print("=" * 50)
+
+np.random.seed(42)
+
+# Training data
+x_train = np.linspace(0, 2*np.pi, 10)
+y_train = np.sin(x_train) + 0.1 * np.random.randn(10)
+
+# Train without regularization
+trainer_noreg = GradientRegularizedTrainer(simple_circuit, grad_reg=0, param_reg=0)
+params_noreg = np.array([1.0, 0.0])
+
+for _ in range(50):
+    for x, y in zip(x_train, y_train):
+        params_noreg = trainer_noreg.train_step(params_noreg, x, y, lr=0.05)
+
+# Train with regularization
+trainer_reg = GradientRegularizedTrainer(simple_circuit, grad_reg=0.1, param_reg=0.01)
+params_reg = np.array([1.0, 0.0])
+
+for _ in range(50):
+    for x, y in zip(x_train, y_train):
+        params_reg = trainer_reg.train_step(params_reg, x, y, lr=0.05)
+
+print(f"Without regularization: params = {params_noreg}")
+print(f"With regularization: params = {params_reg}")
+```
+
+<Tip>
+Gradient regularization is particularly effective when gradients are estimated with finite shots, as it reduces sensitivity to statistical fluctuations.
+</Tip>
+
+## 3. Noise Injection Training
+
+Train with intentionally added noise for robustness.
+
+```python
+class NoiseInjectionTrainer:
+    """
+    Training with noise injection for robustness.
+    """
+
+    def __init__(self, circuit_fn, noise_types=None):
+        self.circuit_fn = circuit_fn
+        self.noise_types = noise_types or ['parameter', 'output']
+
+    def add_parameter_noise(self, params, scale=0.1):
+        """Add noise to parameters during training."""
+        return params + scale * np.random.randn(len(params))
+
+    def add_output_noise(self, output, scale=0.1):
+        """Add noise to circuit output (simulates measurement noise)."""
+        return output + scale * np.random.randn()
+
+    def noisy_forward(self, params, x, param_noise=0.05, output_noise=0.1):
+        """Forward pass with noise injection."""
+        # Parameter noise
+        noisy_params = self.add_parameter_noise(params, param_noise)
+
+        # Circuit execution
+        output = self.circuit_fn(noisy_params, x)
+
+        # Output noise
+        noisy_output = self.add_output_noise(output, output_noise)
+
+        return noisy_output
+
+    def train_with_noise(self, params, x_train, y_train, epochs=100,
+                         lr=0.1, n_noise_samples=5):
+        """
+        Train with noise injection.
+
+        Average over multiple noisy evaluations for stable gradients.
+        """
+        for epoch in range(epochs):
+            total_loss = 0
+
+            for x, y in zip(x_train, y_train):
+                # Average gradient over noise samples
+                avg_grad = np.zeros_like(params)
+
+                for _ in range(n_noise_samples):
+                    # Compute noisy gradient
+                    grad = self._noisy_gradient(params, x, y)
+                    avg_grad += grad
+
+                avg_grad /= n_noise_samples
+
+                # Update
+                params = params - lr * avg_grad
+
+                # Track loss
+                pred = self.circuit_fn(params, x)
+                total_loss += (pred - y) ** 2
+
+            if epoch % 20 == 0:
+                print(f"Epoch {epoch}: Loss = {total_loss/len(x_train):.4f}")
+
+        return params
+
+    def _noisy_gradient(self, params, x, y, epsilon=0.01):
+        """Gradient with noise injection."""
+        grad = np.zeros_like(params)
+
+        for i in range(len(params)):
+            params_plus = params.copy()
+            params_minus = params.copy()
+            params_plus[i] += epsilon
+            params_minus[i] -= epsilon
+
+            # Noisy evaluations
+            out_plus = self.noisy_forward(params_plus, x)
+            out_minus = self.noisy_forward(params_minus, x)
+
+            loss_plus = (out_plus - y) ** 2
+            loss_minus = (out_minus - y) ** 2
+
+            grad[i] = (loss_plus - loss_minus) / (2 * epsilon)
+
+        return grad
+
+# Demonstrate noise injection training
+print("\nNoise Injection Training:")
+print("=" * 50)
+
+def target_circuit(params, x):
+    return np.tanh(params[0] * x + params[1])
+
+np.random.seed(42)
+x_train = np.linspace(-2, 2, 15)
+y_train = np.tanh(0.8 * x_train + 0.3)
+
+trainer = NoiseInjectionTrainer(target_circuit)
+initial_params = np.array([0.5, 0.0])
+
+final_params = trainer.train_with_noise(
+    initial_params, x_train, y_train,
+    epochs=60, lr=0.1, n_noise_samples=3
+)
+
+print(f"\nFinal params: {final_params}")
+print(f"Target params: [0.8, 0.3]")
+```
+
+## 4. Error-Tolerant Ansatz Design
+
+Design circuit structures that are inherently robust to noise.
+
+```python
+class ErrorTolerantAnsatz:
+    """
+    Ansatz design principles for noise robustness.
+    """
+
+    def __init__(self, n_qubits):
+        self.n_qubits = n_qubits
+
+    def shallow_depth_ansatz(self, n_layers):
+        """
+        Shallow circuits: less noise accumulation.
+
+        Fewer layers = less decoherence.
+        """
+        gates = []
+        for layer in range(n_layers):
+            # Single layer: rotation + entanglement
+            for q in range(self.n_qubits):
+                gates.append(('RY', q, f'theta_{layer}_{q}'))
+
+            # Nearest-neighbor entanglement only
+            for q in range(self.n_qubits - 1):
+                gates.append(('CNOT', q, q+1))
+
+        return gates
+
+    def hardware_efficient_ansatz(self, n_layers, native_gates=None):
+        """
+        Use native gate set to minimize decomposition errors.
+        """
+        native_gates = native_gates or ['RZ', 'SX', 'CNOT']
+        gates = []
+
+        for layer in range(n_layers):
+            for q in range(self.n_qubits):
+                # Native single-qubit gates
+                gates.append(('RZ', q, f'phi_{layer}_{q}'))
+                gates.append(('SX', q, None))  # Fixed gate
+                gates.append(('RZ', q, f'psi_{layer}_{q}'))
+
+            # Hardware-native entanglement
+            for q in range(0, self.n_qubits - 1, 2):
+                gates.append(('CNOT', q, q+1))
+
+        return gates
+
+    def symmetry_preserving_ansatz(self, n_layers):
+        """
+        Preserve symmetries for error cancellation.
+
+        Symmetric errors may cancel in expectation values.
+        """
+        gates = []
+
+        for layer in range(n_layers):
+            # Symmetric rotation layer
+            for q in range(self.n_qubits):
+                mirror_q = self.n_qubits - 1 - q
+                # Same parameter for symmetric qubits
+                param = f'theta_{layer}_{min(q, mirror_q)}'
+                gates.append(('RY', q, param))
+
+            # Symmetric entanglement
+            for q in range(self.n_qubits // 2):
+                gates.append(('CNOT', q, self.n_qubits - 1 - q))
+
+        return gates
+
+    def count_parameters(self, gates):
+        """Count unique parameters in ansatz."""
+        params = set()
+        for gate in gates:
+            if gate[2] is not None and gate[2].startswith('theta') or \
+               gate[2] is not None and gate[2].startswith('phi') or \
+               gate[2] is not None and gate[2].startswith('psi'):
+                params.add(gate[2])
+        return len(params)
+
+    def estimate_depth(self, gates):
+        """Estimate circuit depth."""
+        # Simplified: count entangling layers
+        return sum(1 for g in gates if g[0] == 'CNOT') // max(1, self.n_qubits - 1)
+
+# Compare ansatz designs
+print("\nError-Tolerant Ansatz Comparison:")
+print("=" * 50)
+
+ansatz = ErrorTolerantAnsatz(n_qubits=4)
+
+designs = {
+    'Shallow': ansatz.shallow_depth_ansatz(n_layers=2),
+    'Hardware-Efficient': ansatz.hardware_efficient_ansatz(n_layers=2),
+    'Symmetry-Preserving': ansatz.symmetry_preserving_ansatz(n_layers=2)
+}
+
+for name, gates in designs.items():
+    n_params = ansatz.count_parameters(gates)
+    depth = ansatz.estimate_depth(gates)
+    print(f"\n{name} Ansatz:")
+    print(f"  Total gates: {len(gates)}")
+    print(f"  Parameters: {n_params}")
+    print(f"  Est. depth: {depth}")
+```
+
+<Warning>
+Deeper circuits are more expressive but accumulate more errors. Balance expressibility with noise tolerance based on hardware coherence times.
+</Warning>
+
+## 5. Variance-Aware Training
+
+Account for shot noise variance in training.
+
+```python
+class VarianceAwareTrainer:
+    """
+    Training that accounts for measurement variance.
+    """
+
+    def __init__(self, circuit_fn, n_shots=1000):
+        self.circuit_fn = circuit_fn
+        self.n_shots = n_shots
+
+    def estimate_with_variance(self, params, x):
+        """
+        Estimate expectation value and variance.
+
+        Simulates finite shot measurements.
+        """
+        true_value = self.circuit_fn(params, x)
+
+        # Simulate shot noise (binomial statistics)
+        variance = (1 - true_value**2) / self.n_shots
+        estimated = true_value + np.sqrt(variance) * np.random.randn()
+
+        return estimated, variance
+
+    def variance_weighted_gradient(self, params, x, y, epsilon=0.01):
+        """
+        Compute gradient weighted by inverse variance.
+
+        More certain estimates contribute more to gradient.
+        """
+        grad = np.zeros_like(params)
+        weights = np.zeros_like(params)
+
+        for i in range(len(params)):
+            params_plus = params.copy()
+            params_minus = params.copy()
+            params_plus[i] += epsilon
+            params_minus[i] -= epsilon
+
+            # Estimate with variance
+            est_plus, var_plus = self.estimate_with_variance(params_plus, x)
+            est_minus, var_minus = self.estimate_with_variance(params_minus, x)
+
+            # Loss estimates
+            loss_plus = (est_plus - y) ** 2
+            loss_minus = (est_minus - y) ** 2
+
+            # Gradient estimate
+            grad[i] = (loss_plus - loss_minus) / (2 * epsilon)
+
+            # Weight by inverse variance
+            total_var = var_plus + var_minus
+            weights[i] = 1.0 / (total_var + 1e-6)
+
+        # Normalize weights
+        weights /= np.sum(weights)
+
+        return grad * weights * len(params)
+
+    def adaptive_learning_rate(self, grad_history, base_lr=0.1):
+        """
+        Adapt learning rate based on gradient variance.
+
+        Reduce LR when gradients are noisy.
+        """
+        if len(grad_history) < 2:
+            return base_lr
+
+        recent_grads = np.array(grad_history[-10:])
+        grad_var = np.var(recent_grads, axis=0).mean()
+
+        # Reduce LR for high variance
+        adaptive_lr = base_lr / (1 + grad_var)
+        return adaptive_lr
+
+    def train(self, params, x_train, y_train, epochs=50, base_lr=0.1):
+        """Train with variance awareness."""
+        grad_history = []
+
+        for epoch in range(epochs):
+            total_loss = 0
+
+            for x, y in zip(x_train, y_train):
+                # Variance-weighted gradient
+                grad = self.variance_weighted_gradient(params, x, y)
+                grad_history.append(grad.copy())
+
+                # Adaptive learning rate
+                lr = self.adaptive_learning_rate(grad_history, base_lr)
+
+                # Update
+                params = params - lr * grad
+
+                # Track loss
+                est, _ = self.estimate_with_variance(params, x)
+                total_loss += (est - y) ** 2
+
+            if epoch % 10 == 0:
+                current_lr = self.adaptive_learning_rate(grad_history, base_lr)
+                print(f"Epoch {epoch}: Loss = {total_loss/len(x_train):.4f}, LR = {current_lr:.4f}")
+
+        return params
+
+# Demonstrate variance-aware training
+print("\nVariance-Aware Training:")
+print("=" * 50)
+
+def noisy_circuit(params, x):
+    return np.sin(params[0] * x) * np.cos(params[1])
+
+np.random.seed(42)
+trainer = VarianceAwareTrainer(noisy_circuit, n_shots=100)
+
+x_train = np.linspace(0, np.pi, 8)
+y_train = np.sin(x_train) * np.cos(0.5)
+
+params = np.array([1.0, 0.5])
+final_params = trainer.train(params, x_train, y_train, epochs=30)
+
+print(f"\nFinal params: {final_params}")
+```
+
+## 6. Combined Training and Mitigation
+
+Integrate error mitigation into the training loop.
+
+```python
+class IntegratedTrainer:
+    """
+    Training with integrated error mitigation.
+    """
+
+    def __init__(self, circuit_fn, mitigation_method='zne'):
+        self.circuit_fn = circuit_fn
+        self.mitigation_method = mitigation_method
+
+    def zne_mitigated_value(self, params, x, noise_factors=[1.0, 1.5, 2.0]):
+        """
+        ZNE-mitigated expectation value.
+        """
+        values = []
+        for factor in noise_factors:
+            # Simulate noise scaling
+            noisy_value = self.circuit_fn(params, x) * np.exp(-0.1 * (factor - 1))
+            noisy_value += 0.05 * factor * np.random.randn()
+            values.append(noisy_value)
+
+        # Linear extrapolation to zero noise
+        coeffs = np.polyfit(noise_factors, values, 1)
+        mitigated = np.polyval(coeffs, 0)
+
+        return mitigated
+
+    def mitigated_gradient(self, params, x, y, epsilon=0.01):
+        """
+        Compute gradient using mitigated values.
+        """
+        grad = np.zeros_like(params)
+
+        for i in range(len(params)):
+            params_plus = params.copy()
+            params_minus = params.copy()
+            params_plus[i] += epsilon
+            params_minus[i] -= epsilon
+
+            # Use mitigated values for gradient
+            val_plus = self.zne_mitigated_value(params_plus, x)
+            val_minus = self.zne_mitigated_value(params_minus, x)
+
+            loss_plus = (val_plus - y) ** 2
+            loss_minus = (val_minus - y) ** 2
+
+            grad[i] = (loss_plus - loss_minus) / (2 * epsilon)
+
+        return grad
+
+    def train_with_mitigation(self, params, x_train, y_train, epochs=50, lr=0.1):
+        """
+        Training loop with integrated mitigation.
+        """
+        losses = []
+
+        for epoch in range(epochs):
+            epoch_loss = 0
+
+            for x, y in zip(x_train, y_train):
+                # Mitigated gradient
+                grad = self.mitigated_gradient(params, x, y)
+
+                # Update parameters
+                params = params - lr * grad
+
+                # Track mitigated loss
+                mitigated_pred = self.zne_mitigated_value(params, x)
+                epoch_loss += (mitigated_pred - y) ** 2
+
+            avg_loss = epoch_loss / len(x_train)
+            losses.append(avg_loss)
+
+            if epoch % 10 == 0:
+                print(f"Epoch {epoch}: Mitigated Loss = {avg_loss:.4f}")
+
+        return params, losses
+
+# Complete training example
+print("\nIntegrated Training with Error Mitigation:")
+print("=" * 50)
+
+def quantum_model(params, x):
+    """Simulated quantum model output."""
+    return np.sin(params[0] * x + params[1])
+
+np.random.seed(42)
+
+# Training data
+x_train = np.linspace(0, 2*np.pi, 12)
+y_train = np.sin(x_train)
+
+# Initialize
+trainer = IntegratedTrainer(quantum_model, mitigation_method='zne')
+initial_params = np.array([0.5, 0.0])
+
+# Train
+final_params, losses = trainer.train_with_mitigation(
+    initial_params, x_train, y_train,
+    epochs=40, lr=0.15
+)
+
+print(f"\nInitial params: [0.5, 0.0]")
+print(f"Final params: {final_params}")
+print(f"Target params: [1.0, 0.0]")
+print(f"Final loss: {losses[-1]:.4f}")
+```
+
+<Tip>
+Integrating mitigation into training is more expensive per iteration but often converges to better solutions than training without mitigation.
+</Tip>
+
+## Summary
+
+In this lesson, you learned:
+
+- **Noise-aware loss**: Weight samples by uncertainty, use robust losses
+- **Gradient regularization**: Penalize large gradients for stability
+- **Noise injection**: Train with added noise for robustness
+- **Error-tolerant ansatz**: Shallow, hardware-efficient designs
+- **Variance-aware training**: Account for shot noise in updates
+- **Integrated mitigation**: Apply error mitigation during training
+
+Error-aware training complements post-hoc mitigation for best NISQ performance.
+
+## Next Steps
+
+In the next chapter, we'll explore quantum transfer learning techniques for leveraging pre-trained quantum models.

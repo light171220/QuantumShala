@@ -1,0 +1,392 @@
+# Syndrome Measurement
+
+## Introduction
+
+Syndrome measurement is the cornerstone of quantum error correction. It allows us to detect errors without measuring (and destroying) the encoded quantum information. This lesson covers the theory and practice of syndrome extraction using ancilla qubits.
+
+## The Syndrome Concept
+
+```
+Syndrome: The Error Fingerprint
+═══════════════════════════════
+
+For a stabilizer code with generators g₁, g₂, ..., gᵣ:
+
+SYNDROME = vector of eigenvalues for each generator
+
+No error: All generators have eigenvalue +1
+          Syndrome = (0, 0, ..., 0)
+
+Error E: Some generators may have eigenvalue -1
+         Syndrome = (s₁, s₂, ..., sᵣ) where sᵢ ∈ {0, 1}
+
+The syndrome reveals:
+┌─────────────────────────────────────────────────────────────────┐
+│ sᵢ = 0  ⟺  E commutes with gᵢ    (no sign flip)               │
+│ sᵢ = 1  ⟺  E anticommutes with gᵢ (sign flip detected)        │
+└─────────────────────────────────────────────────────────────────┘
+
+Key insight:
+    Syndrome depends on ERROR, not on ENCODED DATA
+    Different errors give different syndromes (if correctable)
+    Same syndrome from different data states
+```
+
+## Measuring Stabilizers with Ancillas
+
+```python
+import numpy as np
+from typing import List, Tuple
+
+class SyndromeMeasurement:
+    """
+    Syndrome extraction using ancilla qubits.
+    """
+
+    def __init__(self):
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+        self.H = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+
+    def show_measurement_circuit(self):
+        """Display the basic syndrome measurement circuit."""
+        print("""
+Syndrome Measurement Circuit
+════════════════════════════
+
+To measure stabilizer g without disturbing data:
+
+1. Prepare ancilla in |+⟩ = H|0⟩
+2. Apply controlled-g (ancilla controls g on data)
+3. Apply H to ancilla
+4. Measure ancilla in Z basis
+
+Circuit for g = ZIZI:
+
+Data:    ─────●─────────●─────────  (unchanged)
+              │         │
+         ─────│─────────│─────────
+              │         │
+         ─────●─────────│─────────
+              │         │
+         ─────│─────────●─────────
+              │         │
+Ancilla: ─H───Z─────────Z─────H───M  → syndrome bit
+
+
+Why this works:
+┌─────────────────────────────────────────────────────────────────┐
+│ |ψ⟩|+⟩ → |ψ⟩|+⟩        if g|ψ⟩ = +|ψ⟩  (eigenvalue +1)        │
+│        → |ψ⟩|-⟩        if g|ψ⟩ = -|ψ⟩  (eigenvalue -1)        │
+│                                                                 │
+│ After H on ancilla:                                            │
+│        → |ψ⟩|0⟩        for +1 eigenvalue (measure 0)           │
+│        → |ψ⟩|1⟩        for -1 eigenvalue (measure 1)           │
+└─────────────────────────────────────────────────────────────────┘
+        """)
+
+    def explain_controlled_pauli(self):
+        """Explain how to implement controlled Pauli gates."""
+        print("""
+Implementing Controlled Stabilizer Measurements
+═══════════════════════════════════════════════
+
+For each Pauli in the stabilizer, we need:
+    Controlled-I: Do nothing
+    Controlled-X: CNOT (ancilla = control, data = target)
+    Controlled-Z: CZ gate
+    Controlled-Y: CNOT followed by S†, then CZ
+
+Example: Measure g = XZIY
+
+Data qubit 0: ────╳───────────────  (controlled-X = CNOT)
+                  │
+Data qubit 1: ────│───●───────────  (controlled-Z = CZ)
+                  │   │
+Data qubit 2: ────│───│───────────  (I = do nothing)
+                  │   │
+Data qubit 3: ────│───│───S†──●───  (Y = controlled-XZ)
+                  │   │       │
+Ancilla:      ─H──●───●───────●──H──M
+
+Note: For CSS codes, X-type and Z-type stabilizers have
+simpler measurement circuits (only CNOTs or only CZs).
+        """)
+
+
+syndrome = SyndromeMeasurement()
+syndrome.show_measurement_circuit()
+syndrome.explain_controlled_pauli()
+```
+
+## Syndrome Patterns
+
+```python
+class SyndromePatterns:
+    """
+    Analyze syndrome patterns for error identification.
+    """
+
+    def __init__(self, generators: List[str]):
+        self.generators = generators
+        self.n = len(generators[0])
+        self.r = len(generators)
+
+    def get_syndrome(self, error: str) -> Tuple[int, ...]:
+        """
+        Compute syndrome for a given error.
+
+        sᵢ = 1 if error anticommutes with generator i, else 0
+        """
+        syndrome = []
+        for g in self.generators:
+            anticommuting = 0
+            for e, gen in zip(error, g):
+                if e != 'I' and gen != 'I' and e != gen:
+                    anticommuting += 1
+            syndrome.append(anticommuting % 2)
+        return tuple(syndrome)
+
+    def build_syndrome_table(self) -> dict:
+        """Build complete syndrome table for single errors."""
+        table = {(0,) * self.r: "No error"}
+
+        # Single-qubit errors
+        for i in range(self.n):
+            for pauli in ['X', 'Y', 'Z']:
+                error = 'I' * i + pauli + 'I' * (self.n - i - 1)
+                syndrome = self.get_syndrome(error)
+
+                if syndrome not in table:
+                    table[syndrome] = error
+                else:
+                    table[syndrome] += f" or {error}"
+
+        return table
+
+    def display_syndrome_table(self):
+        """Display the syndrome table."""
+        print(f"\nSyndrome Table for {self.r} generators on {self.n} qubits")
+        print("=" * 60)
+
+        table = self.build_syndrome_table()
+
+        print(f"\n{'Syndrome':<{self.r * 2 + 5}} │ Error")
+        print("─" * 60)
+
+        for syndrome, error in sorted(table.items()):
+            syn_str = ''.join(map(str, syndrome))
+            print(f"{syn_str:<{self.r * 2 + 5}} │ {error}")
+
+
+# Example: 5-qubit code
+five_qubit_gens = ["XZZXI", "IXZZX", "XIXZZ", "ZXIXZ"]
+patterns = SyndromePatterns(five_qubit_gens)
+patterns.display_syndrome_table()
+```
+
+## The Measurement Doesn't Disturb Data
+
+```python
+class MeasurementPreservesData:
+    """
+    Demonstrate that syndrome measurement preserves encoded information.
+    """
+
+    def show_why_data_preserved(self):
+        """Explain why syndrome measurement is non-destructive."""
+        print("""
+Why Syndrome Measurement Preserves Quantum Data
+════════════════════════════════════════════════
+
+Key insight: Stabilizers act as IDENTITY on the code space!
+
+For any code state |ψ⟩_L and stabilizer g:
+    g|ψ⟩_L = |ψ⟩_L    (by definition of code space)
+
+Syndrome measurement projects onto ±1 eigenspaces of g.
+Since |ψ⟩_L is always in the +1 eigenspace:
+    Measurement of g always gives +1 (no error case)
+    State remains |ψ⟩_L unchanged!
+
+With an error E:
+    E|ψ⟩_L may not be in code space
+    Measurement reveals syndrome
+    But the RELATIVE amplitudes α, β are preserved!
+
+Example:
+┌─────────────────────────────────────────────────────────────────┐
+│ Encoded: |ψ̄⟩ = α|0̄⟩ + β|1̄⟩                                    │
+│                                                                 │
+│ After X₁ error: X₁|ψ̄⟩ = α·X₁|0̄⟩ + β·X₁|1̄⟩                     │
+│                                                                 │
+│ Syndrome measurement projects onto error subspace:             │
+│ State becomes: α·X₁|0̄⟩ + β·X₁|1̄⟩ (still superposition!)        │
+│                                                                 │
+│ After X₁ correction: α|0̄⟩ + β|1̄⟩ = |ψ̄⟩ (recovered!)            │
+└─────────────────────────────────────────────────────────────────┘
+
+The syndrome tells us the error, not the encoded α and β!
+        """)
+
+    def demonstrate_numerically(self):
+        """Numerical demonstration of data preservation."""
+        print("\nNumerical Demonstration (Steane code)")
+        print("─" * 50)
+
+        print("""
+For the Steane [[7,1,3]] code:
+
+Syndrome measurement of ZIZIZIZ on state |ψ̄⟩ = α|0̄⟩ + β|1̄⟩:
+
+    ZIZIZIZ |0̄⟩ = +|0̄⟩  (|0̄⟩ is +1 eigenstate)
+    ZIZIZIZ |1̄⟩ = +|1̄⟩  (|1̄⟩ is also +1 eigenstate)
+
+Therefore:
+    ZIZIZIZ (α|0̄⟩ + β|1̄⟩) = α|0̄⟩ + β|1̄⟩
+
+The state is unchanged! Measurement always gives syndrome 0.
+
+With X error on qubit 2:
+    State: X₂(α|0̄⟩ + β|1̄⟩) = α·X₂|0̄⟩ + β·X₂|1̄⟩
+
+    ZIZIZIZ X₂|0̄⟩ = -X₂|0̄⟩  (X₂ anticommutes with ZIZIZIZ)
+    ZIZIZIZ X₂|1̄⟩ = -X₂|1̄⟩
+
+Syndrome = 1, but amplitudes α, β still intact!
+        """)
+
+
+preservation = MeasurementPreservesData()
+preservation.show_why_data_preserved()
+preservation.demonstrate_numerically()
+```
+
+## Complete Syndrome Extraction
+
+```
+Complete Syndrome Extraction Circuit (Steane Code)
+══════════════════════════════════════════════════
+
+Measure all 6 stabilizers in parallel using 6 ancillas:
+
+DATA:
+q₀ ────●────●────────●────────────●────●────────●────────────
+       │    │        │            │    │        │
+q₁ ────│────│──●─────│──●─────────│────│──Z─────│──Z─────────
+       │    │  │     │  │         │    │  │     │  │
+q₂ ────●────│──●─────│──│──●──────●────│──Z─────│──│──Z──────
+       │    │  │     │  │  │      │    │  │     │  │  │
+q₃ ────│────●──│─────●──│──│──●───│────●──│─────Z──│──│──Z───
+       │    │  │     │  │  │  │   │    │  │     │  │  │  │
+q₄ ────●────●──│─────│──│──●──●───●────●──│─────│──│──Z──Z───
+       │    │  │     │  │  │  │   │    │  │     │  │  │  │
+q₅ ────│────│──●─────│──●──│──●───│────│──Z─────│──Z──│──Z───
+       │    │  │     │  │  │  │   │    │  │     │  │  │  │
+q₆ ────●────●──●─────●──●──●──●───●────●──Z─────Z──Z──Z──Z───
+       │    │  │     │  │  │  │   │    │  │     │  │  │  │
+ANCILLAS:                          │    │  │     │  │  │  │
+a₁ ─H──●────│──│─────│──│──│──│───H─M  │  │     │  │  │  │  (g₁: XIXIXIX)
+            │  │     │  │  │  │        │  │     │  │  │  │
+a₂ ─H───────●──│─────│──│──│──│────────H─M│     │  │  │  │  (g₂: IXXIIXX)
+               │     │  │  │  │           │     │  │  │  │
+a₃ ─H──────────●─────│──│──│──│───────────H─M   │  │  │  │  (g₃: IIIXXXX)
+                     │  │  │  │              │  │  │  │  │
+a₄ ─H────────────────●──│──│──│──────────────H─M│  │  │  │  (g₄: ZIZIZIZ)
+                        │  │  │                 │  │  │  │
+a₅ ─H───────────────────●──│──│─────────────────H─M│  │  │  (g₅: IZZIIZZ)
+                           │  │                    │  │  │
+a₆ ─H──────────────────────●──│────────────────────H─M│  │  (g₆: IIIZZZZ)
+
+
+Syndrome = (s₁, s₂, s₃, s₄, s₅, s₆)
+
+Decoding: Use syndrome table to identify error
+```
+
+## Syndrome Decoding
+
+```python
+class SyndromeDecoder:
+    """
+    Decode syndromes to identify and correct errors.
+    """
+
+    def __init__(self, generators: List[str]):
+        self.generators = generators
+        self.n = len(generators[0])
+        self.lookup_table = self._build_lookup_table()
+
+    def _build_lookup_table(self) -> dict:
+        """Build syndrome → correction mapping."""
+        table = {}
+        zero_syndrome = (0,) * len(self.generators)
+        table[zero_syndrome] = None  # No error
+
+        # Add single-qubit errors
+        for i in range(self.n):
+            for pauli in ['X', 'Y', 'Z']:
+                error = 'I' * i + pauli + 'I' * (self.n - i - 1)
+                syndrome = self._get_syndrome(error)
+
+                if syndrome not in table:
+                    table[syndrome] = (i, pauli)
+
+        return table
+
+    def _get_syndrome(self, error: str) -> Tuple[int, ...]:
+        """Compute syndrome for error."""
+        syndrome = []
+        for g in self.generators:
+            anticommuting = 0
+            for e, gen in zip(error, g):
+                if e != 'I' and gen != 'I' and e != gen:
+                    anticommuting += 1
+            syndrome.append(anticommuting % 2)
+        return tuple(syndrome)
+
+    def decode(self, syndrome: Tuple[int, ...]) -> str:
+        """Decode syndrome to correction."""
+        if syndrome in self.lookup_table:
+            correction = self.lookup_table[syndrome]
+            if correction is None:
+                return "No error detected"
+            qubit, pauli = correction
+            return f"Apply {pauli} to qubit {qubit}"
+        else:
+            return "Uncorrectable error pattern"
+
+    def show_decoding_process(self):
+        """Demonstrate the decoding process."""
+        print("\nSyndrome Decoding Process")
+        print("=" * 50)
+
+        test_syndromes = [
+            (0, 0, 0, 0),
+            (1, 0, 0, 0),
+            (1, 1, 0, 0),
+            (0, 1, 1, 1),
+        ]
+
+        for s in test_syndromes:
+            correction = self.decode(s)
+            print(f"Syndrome {s}: {correction}")
+
+
+# Example with 5-qubit code
+decoder = SyndromeDecoder(["XZZXI", "IXZZX", "XIXZZ", "ZXIXZ"])
+decoder.show_decoding_process()
+```
+
+## Summary
+
+Syndrome measurement is the key technique enabling quantum error correction:
+
+1. **Non-destructive**: Measures error information without measuring data
+2. **Ancilla-based**: Uses auxiliary qubits for indirect measurement
+3. **Syndrome patterns**: Different errors produce different syndrome strings
+4. **Efficient decoding**: Lookup tables map syndromes to corrections
+5. **Parallel measurement**: All stabilizers can be measured simultaneously
+
+The syndrome reveals what error occurred, allowing correction without knowing the encoded quantum state.

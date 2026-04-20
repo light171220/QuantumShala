@@ -1,0 +1,283 @@
+---
+title: "Initial Qubit Mapping Strategies"
+description: "Mapping logical qubits to physical qubits."
+duration: 55
+difficulty: "advanced"
+---
+
+## 1. The Mapping Problem
+
+Initial qubit placement significantly affects SWAP count.
+
+```python
+from typing import Dict, List, Tuple, Set
+from dataclasses import dataclass
+import random
+
+@dataclass
+class CouplingMap:
+    num_qubits: int
+    edges: Set[Tuple[int, int]]
+
+    def distance(self, q1: int, q2: int) -> int:
+        """BFS distance between qubits."""
+        if q1 == q2:
+            return 0
+        visited = {q1}
+        queue = [(q1, 0)]
+        while queue:
+            current, dist = queue.pop(0)
+            for a, b in self.edges:
+                neighbor = b if a == current else (a if b == current else None)
+                if neighbor is not None and neighbor not in visited:
+                    if neighbor == q2:
+                        return dist + 1
+                    visited.add(neighbor)
+                    queue.append((neighbor, dist + 1))
+        return float('inf')
+
+@dataclass
+class Gate:
+    name: str
+    qubits: Tuple[int, ...]
+
+def extract_interactions(gates: List[Gate]) -> Dict[Tuple[int, int], int]:
+    """Count two-qubit interactions between logical qubits."""
+    interactions = {}
+    for gate in gates:
+        if len(gate.qubits) == 2:
+            pair = tuple(sorted(gate.qubits))
+            interactions[pair] = interactions.get(pair, 0) + 1
+    return interactions
+```
+
+## 2. Basic Mapping Strategies
+
+```python
+class TrivialMapping:
+    """Map logical qubit i to physical qubit i."""
+
+    def map(self, n_logical: int, n_physical: int) -> Dict[int, int]:
+        return {i: i for i in range(n_logical)}
+
+class RandomMapping:
+    """Random assignment of logical to physical qubits."""
+
+    def map(self, n_logical: int, n_physical: int) -> Dict[int, int]:
+        physical = list(range(n_physical))
+        random.shuffle(physical)
+        return {i: physical[i] for i in range(n_logical)}
+
+# Example
+trivial = TrivialMapping()
+random_mapper = RandomMapping()
+
+print(f"Trivial: {trivial.map(4, 5)}")
+print(f"Random: {random_mapper.map(4, 5)}")
+```
+
+## 3. Interaction-Aware Mapping
+
+Place frequently interacting qubits close together.
+
+```python
+class InteractionMapping:
+    """Map based on qubit interaction frequency."""
+
+    def __init__(self, coupling_map: CouplingMap):
+        self.coupling = coupling_map
+
+    def map(self, gates: List[Gate]) -> Dict[int, int]:
+        """Map logical qubits considering interaction frequency."""
+        interactions = extract_interactions(gates)
+
+        if not interactions:
+            return TrivialMapping().map(
+                self._count_logical_qubits(gates),
+                self.coupling.num_qubits
+            )
+
+        # Sort interactions by frequency (descending)
+        sorted_pairs = sorted(interactions.items(), key=lambda x: -x[1])
+
+        # Greedy assignment
+        logical_to_physical = {}
+        used_physical = set()
+
+        for (log_q0, log_q1), count in sorted_pairs:
+            if log_q0 in logical_to_physical and log_q1 in logical_to_physical:
+                continue
+
+            if log_q0 not in logical_to_physical and log_q1 not in logical_to_physical:
+                # Assign both to adjacent physical qubits
+                phys_pair = self._find_best_adjacent_pair(used_physical)
+                if phys_pair:
+                    logical_to_physical[log_q0] = phys_pair[0]
+                    logical_to_physical[log_q1] = phys_pair[1]
+                    used_physical.update(phys_pair)
+
+            elif log_q0 in logical_to_physical:
+                # Assign log_q1 near log_q0
+                anchor = logical_to_physical[log_q0]
+                phys = self._find_nearest_free(anchor, used_physical)
+                logical_to_physical[log_q1] = phys
+                used_physical.add(phys)
+
+            else:  # log_q1 in logical_to_physical
+                anchor = logical_to_physical[log_q1]
+                phys = self._find_nearest_free(anchor, used_physical)
+                logical_to_physical[log_q0] = phys
+                used_physical.add(phys)
+
+        # Assign remaining logical qubits
+        all_logical = self._get_all_logical(gates)
+        for log_q in all_logical:
+            if log_q not in logical_to_physical:
+                for phys in range(self.coupling.num_qubits):
+                    if phys not in used_physical:
+                        logical_to_physical[log_q] = phys
+                        used_physical.add(phys)
+                        break
+
+        return logical_to_physical
+
+    def _find_best_adjacent_pair(self, used: Set[int]) -> Tuple[int, int]:
+        """Find adjacent physical qubits not in use."""
+        for a, b in self.coupling.edges:
+            if a not in used and b not in used:
+                return (a, b)
+        return None
+
+    def _find_nearest_free(self, anchor: int, used: Set[int]) -> int:
+        """Find nearest free physical qubit to anchor."""
+        for dist in range(1, self.coupling.num_qubits):
+            for phys in range(self.coupling.num_qubits):
+                if phys not in used and self.coupling.distance(anchor, phys) == dist:
+                    return phys
+        return None
+
+    def _count_logical_qubits(self, gates: List[Gate]) -> int:
+        return len(self._get_all_logical(gates))
+
+    def _get_all_logical(self, gates: List[Gate]) -> Set[int]:
+        all_q = set()
+        for g in gates:
+            all_q.update(g.qubits)
+        return all_q
+```
+
+## 4. Graph-Based Mapping
+
+Model as subgraph isomorphism problem.
+
+```python
+class GraphMapping:
+    """Map using interaction graph analysis."""
+
+    def __init__(self, coupling_map: CouplingMap):
+        self.coupling = coupling_map
+
+    def build_interaction_graph(self, gates: List[Gate]) -> Dict[int, Set[int]]:
+        """Build graph of logical qubit interactions."""
+        graph = {}
+        for gate in gates:
+            if len(gate.qubits) == 2:
+                q0, q1 = gate.qubits
+                if q0 not in graph:
+                    graph[q0] = set()
+                if q1 not in graph:
+                    graph[q1] = set()
+                graph[q0].add(q1)
+                graph[q1].add(q0)
+        return graph
+
+    def map(self, gates: List[Gate]) -> Dict[int, int]:
+        """Map using degree-based heuristic."""
+        interaction_graph = self.build_interaction_graph(gates)
+
+        # Sort logical qubits by degree (descending)
+        logical_by_degree = sorted(
+            interaction_graph.keys(),
+            key=lambda q: len(interaction_graph.get(q, set())),
+            reverse=True
+        )
+
+        # Sort physical qubits by connectivity (descending)
+        physical_connectivity = {}
+        for q in range(self.coupling.num_qubits):
+            physical_connectivity[q] = sum(
+                1 for a, b in self.coupling.edges if a == q or b == q
+            )
+
+        physical_by_degree = sorted(
+            physical_connectivity.keys(),
+            key=lambda q: physical_connectivity[q],
+            reverse=True
+        )
+
+        # Match high-degree logical to high-connectivity physical
+        mapping = {}
+        used = set()
+
+        for log_q in logical_by_degree:
+            for phys_q in physical_by_degree:
+                if phys_q not in used:
+                    mapping[log_q] = phys_q
+                    used.add(phys_q)
+                    break
+
+        return mapping
+```
+
+## 5. Mapping Quality Metrics
+
+```python
+def evaluate_mapping(mapping: Dict[int, int],
+                     gates: List[Gate],
+                     coupling: CouplingMap) -> Dict[str, float]:
+    """Evaluate quality of a mapping."""
+    interactions = extract_interactions(gates)
+
+    total_distance = 0
+    satisfied = 0
+
+    for (log_q0, log_q1), count in interactions.items():
+        phys_q0 = mapping[log_q0]
+        phys_q1 = mapping[log_q1]
+        dist = coupling.distance(phys_q0, phys_q1)
+
+        total_distance += dist * count
+        if dist == 1:
+            satisfied += count
+
+    total_interactions = sum(interactions.values())
+
+    return {
+        'total_distance': total_distance,
+        'average_distance': total_distance / total_interactions if total_interactions else 0,
+        'satisfied_ratio': satisfied / total_interactions if total_interactions else 1.0,
+    }
+
+# Compare mappings
+def compare_mappings(gates: List[Gate], coupling: CouplingMap):
+    """Compare different mapping strategies."""
+    trivial = TrivialMapping().map(4, coupling.num_qubits)
+    interaction = InteractionMapping(coupling).map(gates)
+    graph = GraphMapping(coupling).map(gates)
+
+    print("Mapping comparison:")
+    for name, mapping in [('Trivial', trivial),
+                          ('Interaction', interaction),
+                          ('Graph', graph)]:
+        metrics = evaluate_mapping(mapping, gates, coupling)
+        print(f"  {name}: avg_dist={metrics['average_distance']:.2f}, "
+              f"satisfied={metrics['satisfied_ratio']:.2%}")
+```
+
+## Summary
+
+Good initial mapping reduces routing overhead:
+1. **Trivial mapping**: Simple but often suboptimal
+2. **Random mapping**: Baseline for comparison
+3. **Interaction-aware**: Place frequent interactions adjacently
+4. **Graph-based**: Match interaction graph to coupling map

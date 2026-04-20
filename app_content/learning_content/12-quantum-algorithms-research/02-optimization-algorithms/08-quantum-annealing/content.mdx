@@ -1,0 +1,655 @@
+---
+title: "Quantum Annealing: Physics-Inspired Optimization"
+description: "Explore quantum annealing as an alternative paradigm for solving optimization problems. Learn the adiabatic theorem, Ising model formulation, and compare with gate-based approaches like QAOA."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the principles of quantum annealing and adiabatic quantum computation
+- Formulate optimization problems as Ising models and QUBO
+- Analyze the adiabatic theorem and its implications for optimization
+- Compare quantum annealing with gate-based quantum optimization
+- Explore practical considerations for quantum annealing hardware
+- Apply quantum annealing concepts to real-world optimization problems
+
+## 1. Introduction to Quantum Annealing
+
+Quantum annealing is an optimization metaheuristic that exploits quantum mechanical effects to find low-energy configurations of a physical system, which correspond to optimal or near-optimal solutions of computational problems.
+
+<Definition term="Quantum Annealing">
+Quantum annealing is a quantum computing paradigm that solves optimization problems by slowly evolving a quantum system from an initial easy-to-prepare ground state to the ground state of a problem Hamiltonian encoding the optimization objective.
+</Definition>
+
+### Classical vs Quantum Annealing
+
+| Aspect | Classical (Simulated) Annealing | Quantum Annealing |
+|--------|----------------------------------|-------------------|
+| Mechanism | Thermal fluctuations | Quantum tunneling |
+| Barriers | Must go over | Can tunnel through |
+| Exploration | Stochastic hopping | Superposition |
+| Hardware | Classical computer | Quantum processor |
+
+<Tip>
+While classical simulated annealing relies on thermal fluctuations to escape local minima, quantum annealing exploits quantum tunneling to traverse energy barriers more efficiently. This can provide advantages for problems with tall, thin barriers.
+</Tip>
+
+## 2. The Adiabatic Theorem
+
+The theoretical foundation of quantum annealing is the adiabatic theorem of quantum mechanics.
+
+### Statement of the Theorem
+
+<Definition term="Adiabatic Theorem">
+If a quantum system starts in the ground state of an initial Hamiltonian and the Hamiltonian changes sufficiently slowly, the system will remain in the instantaneous ground state throughout the evolution.
+</Definition>
+
+Mathematically, for a time-dependent Hamiltonian:
+
+<Formula>
+$$H(t) = \left(1 - \frac{t}{T}\right) H_i + \frac{t}{T} H_f, \quad t \in [0, T]$$
+</Formula>
+
+The system stays in the ground state if the evolution time $T$ satisfies:
+
+<Formula>
+$$T \gg \frac{\hbar \max_t |\langle E_1(t)| \dot{H}(t) |E_0(t)\rangle|}{\min_t (E_1(t) - E_0(t))^2}$$
+</Formula>
+
+where $E_0(t)$ and $E_1(t)$ are the ground and first excited state energies.
+
+### The Minimum Gap
+
+The critical factor is the **minimum spectral gap**:
+
+<Formula>
+$$\Delta_{\min} = \min_{t \in [0,T]} (E_1(t) - E_0(t))$$
+</Formula>
+
+The required evolution time scales as:
+
+<Formula>
+$$T = O\left(\frac{1}{\Delta_{\min}^2}\right)$$
+</Formula>
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def compute_spectrum(H_initial: np.ndarray, H_final: np.ndarray,
+                     num_points: int = 100) -> dict:
+    """
+    Compute energy spectrum during adiabatic evolution.
+
+    Args:
+        H_initial: Initial Hamiltonian
+        H_final: Final (problem) Hamiltonian
+        num_points: Number of interpolation points
+
+    Returns:
+        Dictionary with s values, energies, and minimum gap
+    """
+    s_values = np.linspace(0, 1, num_points)
+    dim = H_initial.shape[0]
+    energies = np.zeros((num_points, dim))
+
+    for i, s in enumerate(s_values):
+        H = (1 - s) * H_initial + s * H_final
+        eigenvalues = np.linalg.eigvalsh(H)
+        energies[i, :] = sorted(eigenvalues)
+
+    # Find minimum gap
+    gaps = energies[:, 1] - energies[:, 0]
+    min_gap_idx = np.argmin(gaps)
+
+    return {
+        's': s_values,
+        'energies': energies,
+        'gaps': gaps,
+        'min_gap': gaps[min_gap_idx],
+        'min_gap_s': s_values[min_gap_idx]
+    }
+
+# Example: Simple 2-qubit system
+# Initial: transverse field Hamiltonian
+H_i = -np.array([[0, 1, 1, 0],
+                  [1, 0, 0, 1],
+                  [1, 0, 0, 1],
+                  [0, 1, 1, 0]])
+
+# Final: Ising Hamiltonian
+H_f = np.diag([-1, 1, 1, -1])  # Ground states: |00> and |11>
+
+spectrum = compute_spectrum(H_i, H_f)
+print(f"Minimum gap: {spectrum['min_gap']:.4f} at s = {spectrum['min_gap_s']:.2f}")
+```
+
+## 3. The Ising Model
+
+Quantum annealing solves problems encoded in the **Ising model**, which describes interacting binary spins.
+
+### Classical Ising Hamiltonian
+
+<Formula>
+$$H = -\sum_{i<j} J_{ij} s_i s_j - \sum_i h_i s_i$$
+</Formula>
+
+where:
+- $s_i \in \{-1, +1\}$ are spin variables
+- $J_{ij}$ are coupling strengths between spins $i$ and $j$
+- $h_i$ are local fields (biases) on spin $i$
+
+### Quantum Ising Hamiltonian
+
+The quantum version adds a transverse field that creates superpositions:
+
+<Formula>
+$$H(s) = -A(s) \sum_i \sigma_i^x + B(s) \left(\sum_{i<j} J_{ij} \sigma_i^z \sigma_j^z + \sum_i h_i \sigma_i^z\right)$$
+</Formula>
+
+where:
+- $A(s)$ decreases from large to small (transverse field strength)
+- $B(s)$ increases from small to large (problem Hamiltonian strength)
+- $s \in [0, 1]$ is the annealing parameter
+
+```python
+def create_ising_hamiltonian(J: dict, h: dict, num_spins: int) -> np.ndarray:
+    """
+    Create classical Ising Hamiltonian matrix.
+
+    Args:
+        J: Coupling dictionary {(i, j): J_ij}
+        h: Bias dictionary {i: h_i}
+        num_spins: Number of spins
+
+    Returns:
+        Diagonal Hamiltonian matrix (2^n x 2^n)
+    """
+    dim = 2 ** num_spins
+    H = np.zeros(dim)
+
+    for state in range(dim):
+        # Convert state to spin values
+        spins = [1 - 2 * ((state >> i) & 1) for i in range(num_spins)]
+
+        # Compute energy
+        energy = 0
+
+        # Coupling terms
+        for (i, j), Jij in J.items():
+            energy -= Jij * spins[i] * spins[j]
+
+        # Bias terms
+        for i, hi in h.items():
+            energy -= hi * spins[i]
+
+        H[state] = energy
+
+    return np.diag(H)
+
+def create_transverse_field(num_spins: int) -> np.ndarray:
+    """
+    Create transverse field Hamiltonian (sum of sigma_x).
+    """
+    dim = 2 ** num_spins
+    H = np.zeros((dim, dim))
+
+    sigma_x = np.array([[0, 1], [1, 0]])
+    I = np.eye(2)
+
+    for i in range(num_spins):
+        # Build tensor product: I x I x ... x sigma_x x ... x I
+        op = np.array([[1.0]])
+        for j in range(num_spins):
+            if j == i:
+                op = np.kron(op, sigma_x)
+            else:
+                op = np.kron(op, I)
+        H += op
+
+    return -H  # Negative for ground state at +x direction
+
+# Example: 3-spin MaxCut
+J = {(0, 1): 1, (1, 2): 1, (0, 2): 1}  # Triangle
+h = {}
+
+H_problem = create_ising_hamiltonian(J, h, 3)
+H_transverse = create_transverse_field(3)
+
+print("Ground state energy:", np.min(np.diag(H_problem)))
+print("All energies:", sorted(np.diag(H_problem)))
+```
+
+## 4. QUBO Formulation
+
+Many optimization problems are naturally expressed as **Quadratic Unconstrained Binary Optimization (QUBO)**.
+
+<Definition term="QUBO">
+QUBO is an optimization framework that minimizes a quadratic function of binary variables:
+$$\min_{x \in \{0,1\}^n} x^T Q x$$
+where $Q$ is a square matrix (often upper triangular).
+</Definition>
+
+### QUBO to Ising Conversion
+
+The transformation between QUBO (binary) and Ising (spin) variables:
+
+<Formula>
+$$x_i = \frac{1 + s_i}{2} \quad \Leftrightarrow \quad s_i = 2x_i - 1$$
+</Formula>
+
+```python
+def qubo_to_ising(Q: np.ndarray) -> tuple:
+    """
+    Convert QUBO matrix to Ising model parameters.
+
+    Args:
+        Q: QUBO matrix (n x n)
+
+    Returns:
+        J: Coupling dictionary
+        h: Bias dictionary
+        offset: Constant energy offset
+    """
+    n = Q.shape[0]
+    J = {}
+    h = {}
+    offset = 0
+
+    for i in range(n):
+        for j in range(i, n):
+            if i == j:
+                # Diagonal terms contribute to bias and offset
+                # Q_ii * x_i = Q_ii * (1 + s_i)/2
+                h[i] = h.get(i, 0) + Q[i, i] / 2
+                offset += Q[i, i] / 2
+            else:
+                # Off-diagonal terms contribute to coupling, bias, and offset
+                # Q_ij * x_i * x_j = Q_ij * (1+s_i)(1+s_j)/4
+                q = Q[i, j] + Q[j, i]  # Handle non-symmetric Q
+                J[(i, j)] = q / 4
+                h[i] = h.get(i, 0) + q / 4
+                h[j] = h.get(j, 0) + q / 4
+                offset += q / 4
+
+    return J, h, offset
+
+def ising_to_qubo(J: dict, h: dict) -> np.ndarray:
+    """
+    Convert Ising model to QUBO matrix.
+    """
+    # Find number of variables
+    variables = set()
+    for (i, j) in J.keys():
+        variables.add(i)
+        variables.add(j)
+    for i in h.keys():
+        variables.add(i)
+
+    n = max(variables) + 1
+    Q = np.zeros((n, n))
+
+    # Bias terms: h_i * s_i = h_i * (2x_i - 1) = 2h_i * x_i - h_i
+    # -> Q_ii += 2 * h_i
+    for i, hi in h.items():
+        Q[i, i] += 2 * hi
+
+    # Coupling terms: J_ij * s_i * s_j = J_ij * (2x_i-1)(2x_j-1)
+    # = 4 J_ij x_i x_j - 2 J_ij x_i - 2 J_ij x_j + J_ij
+    # -> Q_ii -= 2 J_ij, Q_jj -= 2 J_ij, Q_ij += 4 J_ij
+    for (i, j), Jij in J.items():
+        Q[i, i] -= 2 * Jij
+        Q[j, j] -= 2 * Jij
+        Q[i, j] += 4 * Jij
+
+    return Q
+
+# Example: MaxCut as QUBO
+# Maximize sum of (x_i + x_j - 2 x_i x_j) for edges
+# Equivalent to minimizing -sum(x_i + x_j - 2 x_i x_j)
+def maxcut_qubo(edges: list, num_vertices: int) -> np.ndarray:
+    """Create QUBO matrix for MaxCut."""
+    Q = np.zeros((num_vertices, num_vertices))
+
+    for (i, j) in edges:
+        Q[i, i] -= 1
+        Q[j, j] -= 1
+        Q[i, j] += 2
+
+    return Q
+
+edges = [(0, 1), (1, 2), (0, 2)]
+Q = maxcut_qubo(edges, 3)
+print("MaxCut QUBO matrix:")
+print(Q)
+
+J, h, offset = qubo_to_ising(Q)
+print(f"\nIsing J: {J}")
+print(f"Ising h: {h}")
+print(f"Offset: {offset}")
+```
+
+## 5. Simulating Quantum Annealing
+
+We can simulate the annealing process to understand its behavior.
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+def simulate_annealing(H_initial: np.ndarray, H_final: np.ndarray,
+                       total_time: float, num_steps: int) -> dict:
+    """
+    Simulate quantum annealing using time evolution.
+
+    Args:
+        H_initial: Initial (transverse field) Hamiltonian
+        H_final: Final (problem) Hamiltonian
+        total_time: Total annealing time
+        num_steps: Number of time steps
+
+    Returns:
+        Dictionary with final state and success probability
+    """
+    dim = H_initial.shape[0]
+    dt = total_time / num_steps
+
+    # Initial state: ground state of H_initial
+    eigenvalues, eigenvectors = np.linalg.eigh(H_initial)
+    state = eigenvectors[:, 0]  # Ground state
+
+    # Schedule function (linear)
+    def schedule(t):
+        s = t / total_time
+        return (1 - s) * H_initial + s * H_final
+
+    # Time evolution
+    for step in range(num_steps):
+        t = step * dt
+        H = schedule(t)
+
+        # Trotter step
+        U = expm(-1j * dt * H)
+        state = U @ state
+
+    # Final measurement probabilities
+    probs = np.abs(state) ** 2
+
+    # Ground state of final Hamiltonian
+    final_eigenvalues, final_eigenvectors = np.linalg.eigh(H_final)
+    ground_state = final_eigenvectors[:, 0]
+
+    # Success probability (overlap with ground state)
+    success_prob = np.abs(np.vdot(ground_state, state)) ** 2
+
+    return {
+        'final_state': state,
+        'probabilities': probs,
+        'success_probability': success_prob,
+        'final_energy': np.real(np.vdot(state, H_final @ state)),
+        'ground_energy': final_eigenvalues[0]
+    }
+
+# Example: Annealing for 2-qubit MaxCut
+num_qubits = 2
+H_i = create_transverse_field(num_qubits)
+J = {(0, 1): 1}
+H_f = create_ising_hamiltonian(J, {}, num_qubits)
+
+# Try different annealing times
+print("Annealing time vs success probability:")
+for T in [0.1, 1.0, 5.0, 10.0, 50.0]:
+    result = simulate_annealing(H_i, H_f, T, num_steps=100)
+    print(f"  T = {T:5.1f}: P(success) = {result['success_probability']:.4f}")
+```
+
+## 6. Annealing Schedules
+
+The annealing schedule $A(s), B(s)$ significantly impacts performance.
+
+### Common Schedules
+
+| Schedule | Form | Properties |
+|----------|------|------------|
+| Linear | $A(s) = 1-s$, $B(s) = s$ | Simple, standard |
+| Quadratic | $A(s) = (1-s)^2$, $B(s) = s^2$ | Slower near endpoints |
+| Exponential | $A(s) = e^{-\alpha s}$ | Fast initial, slow final |
+| Pause | $s(t) = $ piecewise | Extra time at critical point |
+
+```python
+def anneal_with_schedule(H_i: np.ndarray, H_f: np.ndarray,
+                         schedule_type: str, total_time: float,
+                         num_steps: int = 200) -> dict:
+    """
+    Anneal with different schedule types.
+    """
+    dt = total_time / num_steps
+
+    # Define schedules
+    def linear_schedule(t, T):
+        s = t / T
+        return 1 - s, s
+
+    def quadratic_schedule(t, T):
+        s = t / T
+        return (1 - s) ** 2, s ** 2
+
+    def pause_schedule(t, T, pause_point=0.5, pause_duration=0.3):
+        # Pause around the minimum gap
+        progress = t / T
+        if progress < pause_point - pause_duration / 2:
+            s = progress / (pause_point - pause_duration / 2) * pause_point
+        elif progress < pause_point + pause_duration / 2:
+            s = pause_point
+        else:
+            remaining = progress - (pause_point + pause_duration / 2)
+            total_remaining = 1 - (pause_point + pause_duration / 2)
+            s = pause_point + remaining / total_remaining * (1 - pause_point)
+        return 1 - s, s
+
+    schedules = {
+        'linear': linear_schedule,
+        'quadratic': quadratic_schedule,
+        'pause': pause_schedule
+    }
+
+    schedule_fn = schedules.get(schedule_type, linear_schedule)
+
+    # Initial state
+    eigenvalues, eigenvectors = np.linalg.eigh(H_i)
+    state = eigenvectors[:, 0]
+
+    # Evolution
+    for step in range(num_steps):
+        t = step * dt
+        A, B = schedule_fn(t, total_time)
+        H = A * H_i + B * H_f
+        U = expm(-1j * dt * H)
+        state = U @ state
+
+    # Result
+    probs = np.abs(state) ** 2
+    final_eigenvalues, final_eigenvectors = np.linalg.eigh(H_f)
+    success_prob = np.abs(np.vdot(final_eigenvectors[:, 0], state)) ** 2
+
+    return {
+        'success_probability': success_prob,
+        'final_energy': np.real(np.vdot(state, H_f @ state))
+    }
+
+# Compare schedules
+print("Schedule comparison (T=5.0):")
+for sched in ['linear', 'quadratic', 'pause']:
+    result = anneal_with_schedule(H_i, H_f, sched, 5.0)
+    print(f"  {sched:10s}: P(success) = {result['success_probability']:.4f}")
+```
+
+## 7. QAOA vs Quantum Annealing
+
+Both QAOA and quantum annealing tackle optimization, but differ fundamentally.
+
+### Key Differences
+
+| Aspect | QAOA | Quantum Annealing |
+|--------|------|-------------------|
+| Hardware | Gate-based (universal) | Purpose-built annealers |
+| Control | Discrete gates | Continuous evolution |
+| Parameters | Variational ($\gamma, \beta$) | Schedule $A(t), B(t)$ |
+| Optimization | Classical outer loop | Built into physics |
+| Flexibility | Any gate sequence | Limited to Ising model |
+| Noise | Gate errors | Thermal excitation |
+
+### The QAOA-Annealing Connection
+
+QAOA can be viewed as a Trotterized version of quantum annealing:
+
+<Formula>
+$$\text{Annealing}: \quad U = \mathcal{T}\exp\left(-i\int_0^T H(t) dt\right)$$
+$$\text{QAOA}: \quad U = \prod_{l=1}^{p} e^{-i\beta_l H_B} e^{-i\gamma_l H_C}$$
+</Formula>
+
+As QAOA depth $p \to \infty$ with appropriate parameters, it converges to adiabatic evolution.
+
+```python
+def compare_qaoa_annealing(edges: list, num_vertices: int,
+                           qaoa_p: int, anneal_time: float) -> dict:
+    """
+    Compare QAOA and simulated annealing on the same problem.
+    """
+    # Build Hamiltonians
+    J = {edge: 1 for edge in edges}
+    H_problem = create_ising_hamiltonian(J, {}, num_vertices)
+    H_mixer = create_transverse_field(num_vertices)
+
+    # Find optimal cut (exact)
+    energies = np.diag(H_problem)
+    optimal_energy = np.min(energies)
+    optimal_state = np.argmin(energies)
+
+    # Quantum annealing simulation
+    anneal_result = simulate_annealing(H_mixer, H_problem, anneal_time, 200)
+
+    # QAOA simulation (simplified)
+    # Use adiabatic-inspired parameters
+    gammas = [np.pi / 4 * (l + 1) / (qaoa_p + 1) for l in range(qaoa_p)]
+    betas = [np.pi / 4 * (qaoa_p - l) / (qaoa_p + 1) for l in range(qaoa_p)]
+
+    # Initial state
+    dim = 2 ** num_vertices
+    state = np.ones(dim) / np.sqrt(dim)
+
+    # QAOA layers
+    for l in range(qaoa_p):
+        # Problem unitary
+        phases = np.exp(-1j * gammas[l] * energies)
+        state = phases * state
+
+        # Mixer unitary (approximate)
+        U_mixer = expm(-1j * betas[l] * H_mixer)
+        state = U_mixer @ state
+
+    qaoa_probs = np.abs(state) ** 2
+    qaoa_success = qaoa_probs[optimal_state]
+
+    return {
+        'annealing_success': anneal_result['success_probability'],
+        'qaoa_success': qaoa_success,
+        'optimal_energy': optimal_energy
+    }
+
+# Compare on triangle
+edges = [(0, 1), (1, 2), (0, 2)]
+comparison = compare_qaoa_annealing(edges, 3, qaoa_p=3, anneal_time=10.0)
+print(f"Annealing success: {comparison['annealing_success']:.4f}")
+print(f"QAOA success: {comparison['qaoa_success']:.4f}")
+```
+
+## 8. Practical Considerations
+
+### Hardware Limitations
+
+Current quantum annealing hardware (e.g., D-Wave) has specific constraints:
+
+1. **Limited connectivity**: Not all qubits are connected; requires embedding
+2. **Noise**: Thermal fluctuations can cause errors
+3. **Precision**: Limited precision for coupling strengths
+4. **Size**: Thousands of qubits, but effective size reduced by embedding
+
+### Problem Embedding
+
+<Definition term="Minor Embedding">
+The process of mapping a problem graph onto the hardware graph by chaining multiple physical qubits to represent a single logical variable.
+</Definition>
+
+```python
+def simple_embedding_cost(problem_graph: dict, hardware_graph: dict) -> dict:
+    """
+    Estimate embedding complexity (simplified).
+
+    Args:
+        problem_graph: Adjacency dict for problem
+        hardware_graph: Adjacency dict for hardware
+
+    Returns:
+        Embedding statistics
+    """
+    # Count problem edges and vertices
+    problem_vertices = set()
+    problem_edges = set()
+    for v, neighbors in problem_graph.items():
+        problem_vertices.add(v)
+        for n in neighbors:
+            problem_vertices.add(n)
+            edge = tuple(sorted([v, n]))
+            problem_edges.add(edge)
+
+    # Hardware properties
+    hardware_vertices = set()
+    hardware_edges = set()
+    for v, neighbors in hardware_graph.items():
+        hardware_vertices.add(v)
+        for n in neighbors:
+            hardware_vertices.add(n)
+            hardware_edges.add(tuple(sorted([v, n])))
+
+    # Estimate chain length (very rough)
+    max_problem_degree = max(len(n) for n in problem_graph.values())
+    max_hardware_degree = max(len(n) for n in hardware_graph.values())
+
+    estimated_chain_length = max(1, max_problem_degree // max_hardware_degree + 1)
+
+    return {
+        'problem_vertices': len(problem_vertices),
+        'problem_edges': len(problem_edges),
+        'hardware_vertices': len(hardware_vertices),
+        'estimated_physical_qubits': len(problem_vertices) * estimated_chain_length,
+        'embeddable': len(problem_vertices) * estimated_chain_length <= len(hardware_vertices)
+    }
+```
+
+## Summary
+
+In this lesson, you explored quantum annealing as an optimization paradigm:
+
+1. **Adiabatic Theorem**: Ground state tracking under slow Hamiltonian changes
+2. **Ising Model**: Natural formulation for optimization with binary spins
+3. **QUBO**: Quadratic unconstrained binary optimization as problem specification
+4. **Spectral Gap**: Critical factor determining required annealing time
+5. **Schedules**: Different annealing schedules affect performance
+6. **QAOA Connection**: QAOA as discretized annealing with variational parameters
+7. **Hardware**: Purpose-built annealers with specific constraints
+
+Quantum annealing provides an alternative approach to optimization that leverages quantum tunneling and is implemented in specialized hardware.
+
+<Tip>
+Choose quantum annealing when your problem naturally maps to Ising/QUBO form and you need to solve many instances quickly. Choose QAOA when you need more flexibility or want to run on gate-based quantum computers.
+</Tip>
+
+## Further Reading
+
+- Previous: Recursive QAOA (divide and conquer)
+- Related: QAOA Fundamentals (gate-based alternative)
+- Application: Real-world optimization problems (logistics, finance, ML)

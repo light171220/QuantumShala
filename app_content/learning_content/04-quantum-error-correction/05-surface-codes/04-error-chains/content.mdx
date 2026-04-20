@@ -1,0 +1,628 @@
+# Error Chains and Syndromes
+
+## Introduction
+
+Understanding how errors manifest as syndromes is fundamental to surface code operation. Each error creates a pair of syndrome defects, and the pattern of defects tells us about the underlying errors. This lesson explores the structure of error chains and their corresponding syndrome patterns.
+
+## Single Qubit Errors and Syndromes
+
+```
+Error to Syndrome Mapping
+═════════════════════════
+
+Each single-qubit error creates exactly TWO syndrome defects:
+
+X ERROR (bit flip):
+    Detected by adjacent Z-stabilizers
+    Creates defects at the two Z-plaquettes sharing that edge
+
+       Z₁            Z₁ (defect!)
+      ╱  ╲          ╱  ╲
+     ●    ●    →   ●  X  ●
+      ╲  ╱          ╲  ╱
+       Z₂            Z₂ (defect!)
+
+    X error on edge → -1 eigenvalue on both adjacent Z-stabilizers
+
+Z ERROR (phase flip):
+    Detected by adjacent X-stabilizers
+    Creates defects at the two X-vertices sharing that edge
+
+     X₁───●───X₂        X₁───●───X₂
+           │         →    ↓    Z    ↓
+           ●              ●    │    ●
+                         (defect on X₁ and X₂)
+
+Y ERROR = X × Z:
+    Creates FOUR defects (two X-type, two Z-type)
+
+    Y = iXZ, so Y error triggers both X and Z syndromes!
+```
+
+## Error Chains
+
+```python
+import numpy as np
+from typing import List, Tuple, Set, Dict
+
+class ErrorChain:
+    """
+    Represent and analyze error chains on the surface code.
+    """
+
+    def __init__(self, distance: int):
+        self.d = distance
+        self.errors = set()  # Set of (row, col) edge positions
+
+    def add_error(self, position: Tuple[int, int], error_type: str = 'X'):
+        """Add an error at given position."""
+        self.errors.add((position, error_type))
+
+    def get_syndrome(self, error_type: str = 'X') -> Set[Tuple[int, int]]:
+        """
+        Compute syndrome from error chain.
+
+        For X errors: syndrome at Z-stabilizer locations
+        For Z errors: syndrome at X-stabilizer locations
+
+        Syndrome = boundary of error chain (endpoints of edges)
+        """
+        syndrome = set()
+
+        for (pos, etype) in self.errors:
+            if etype != error_type:
+                continue
+
+            row, col = pos
+
+            # Each edge has two adjacent stabilizers
+            # For X errors on horizontal edge (row, col) - (row, col+1)
+            # Z-stabilizers are above and below
+
+            if error_type == 'X':
+                # Adjacent Z-plaquette centers
+                stabilizers = [(row - 0.5, col + 0.5), (row + 0.5, col + 0.5)]
+            else:  # Z error
+                # Adjacent X-vertices
+                stabilizers = [(row, col), (row, col + 1)]
+
+            for stab in stabilizers:
+                if stab in syndrome:
+                    syndrome.remove(stab)  # XOR: even cancels
+                else:
+                    syndrome.add(stab)
+
+        return syndrome
+
+    def visualize(self):
+        """Visualize error chain and syndrome."""
+        print(f"\nError Chain Visualization (d={self.d})")
+        print("=" * 50)
+
+        # Count defects
+        x_errors = [(p, t) for (p, t) in self.errors if t == 'X']
+        z_errors = [(p, t) for (p, t) in self.errors if t == 'Z']
+
+        print(f"X errors: {len(x_errors)} → create Z-syndrome defects")
+        print(f"Z errors: {len(z_errors)} → create X-syndrome defects")
+
+
+# Example
+chain = ErrorChain(5)
+chain.add_error((2, 2), 'X')
+chain.add_error((2, 3), 'X')
+chain.add_error((2, 4), 'X')
+chain.visualize()
+
+x_syndrome = chain.get_syndrome('X')
+print(f"\nX-error syndrome (Z defects): {len(x_syndrome)} defects")
+```
+
+## The Defect Pair Principle
+
+```
+Why Errors Create Pairs
+═══════════════════════
+
+Every error chain has an EVEN number of syndrome defects.
+This is because syndromes are the BOUNDARY of error chains.
+
+Single error (open chain, length 1):
+    ●══X══●
+    ↑     ↑
+  defect defect
+    2 defects
+
+Two adjacent errors (chain extends):
+    ●══X══X══X══●
+    ↑           ↑
+  defect     defect
+    Still 2 defects (middle cancels)!
+
+Closed loop (stabilizer):
+    ●══X══●
+    ║     ║
+    X     X
+    ║     ║
+    ●══X══●
+
+    0 defects (all boundaries cancel)
+    This IS a stabilizer - undetectable!
+
+Key insight:
+┌─────────────────────────────────────────────────────────────────┐
+│  Syndrome defects come in PAIRS                                 │
+│  Each pair is connected by an error chain                       │
+│  The decoder's job: match pairs and infer chains                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Syndrome Patterns
+
+```python
+class SyndromePatterns:
+    """
+    Analyze and classify syndrome patterns.
+    """
+
+    def __init__(self, distance: int):
+        self.d = distance
+
+    def show_patterns(self):
+        """Show common syndrome patterns."""
+        print("""
+Common Syndrome Patterns
+════════════════════════
+
+PATTERN 1: Isolated pair (single error)
+─────────────────────────────────────────
+    ○   ○   ○   ○   ○
+      ╲   ╲   ╲   ╲
+    ○   ★───★   ○   ○    Two adjacent defects
+      ╱   ╱   ╱   ╱       Clearly a single X error
+    ○   ○   ○   ○   ○
+
+PATTERN 2: Extended pair (error chain)
+─────────────────────────────────────────
+    ○   ○   ○   ○   ○
+      ╲   ╲   ╲   ╲
+    ★───────────────★    Separated defects
+      ╱   ╱   ╱   ╱       Multiple X errors form chain
+    ○   ○   ○   ○   ○
+
+PATTERN 3: Multiple pairs (independent errors)
+─────────────────────────────────────────
+    ★───★   ○   ★───★    Two separate pairs
+      ╲   ╲   ╲   ╲       Two independent error chains
+    ○   ○   ○   ○   ○
+
+PATTERN 4: Y error (four defects)
+─────────────────────────────────────────
+        ★             X-defect
+       ╱ ╲
+      ★ Y ★           Z-defects (pair)
+       ╲ ╱
+        ★             X-defect
+
+    Y = XZ creates both X and Z syndrome!
+
+PATTERN 5: Boundary defect (single defect visible)
+─────────────────────────────────────────
+    BOUNDARY
+    ═══════════
+         ★───────X────   One defect connects to boundary
+                         (Partner "absorbed" by boundary)
+        """)
+
+    def generate_random_syndrome(self, num_errors: int) -> List[Tuple[int, int]]:
+        """Generate syndrome for random errors."""
+        import random
+
+        # Randomly place errors
+        defects = []
+        for _ in range(num_errors):
+            # Random edge position
+            row = random.randint(0, self.d - 1)
+            col = random.randint(0, self.d - 2)
+
+            # Two defects per error (simplified)
+            d1 = (row, col)
+            d2 = (row, col + 1)
+
+            # XOR logic
+            if d1 in defects:
+                defects.remove(d1)
+            else:
+                defects.append(d1)
+
+            if d2 in defects:
+                defects.remove(d2)
+            else:
+                defects.append(d2)
+
+        return defects
+
+    def classify_syndrome(self, defects: List[Tuple[int, int]]) -> str:
+        """Classify syndrome pattern."""
+        num_defects = len(defects)
+
+        if num_defects == 0:
+            return "No errors (or stabilizer pattern)"
+        elif num_defects == 2:
+            return "Single error chain"
+        elif num_defects % 2 == 0:
+            return f"Multiple chains ({num_defects // 2} pairs)"
+        else:
+            return f"Boundary-terminated chain ({num_defects} visible defects)"
+
+
+patterns = SyndromePatterns(5)
+patterns.show_patterns()
+```
+
+## Chains Across the Code
+
+```
+Error Chain Classification
+══════════════════════════
+
+Error chains fall into three categories:
+
+1. TRIVIAL CHAINS (Correctable)
+   ─────────────────────────────
+   Short chains connecting nearby defect pairs.
+   Decoder can find and correct these.
+
+       ★═══★
+       Short chain, easy to match
+
+2. NON-TRIVIAL CHAINS (Logical errors)
+   ────────────────────────────────────
+   Chains spanning the entire code.
+   These implement logical operators!
+
+   BOUNDARY ═════════════════════════ BOUNDARY
+       ↑                                  ↑
+    defect                              defect
+    (might be                          (might be
+     at boundary)                       at boundary)
+
+   If decoder chooses wrong pairing, it creates
+   the WRONG chain → Logical error!
+
+3. STABILIZER CHAINS (Undetectable)
+   ───────────────────────────────────
+   Closed loops with no defects.
+   These ARE stabilizers - they don't matter!
+
+       ●═══●
+       ║   ║
+       ●═══●
+       No defects, no effect on logical state.
+
+The decoder's challenge:
+┌─────────────────────────────────────────────────────────────────┐
+│  Given syndrome defects, find the MOST LIKELY pairing          │
+│  Wrong pairing that creates spanning chain = Logical error      │
+│  Probability of this decreases with distance d                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Syndrome Matching Problem
+
+```python
+class SyndromeMatching:
+    """
+    Illustrate the syndrome matching problem.
+    """
+
+    def __init__(self, distance: int):
+        self.d = distance
+
+    def explain_matching(self):
+        """Explain why matching matters."""
+        print("""
+The Matching Problem
+════════════════════
+
+Given syndrome defects, we must PAIR them to infer error chains.
+
+Example: Four defects
+
+    ★ ─ ─ ─ ─ ★
+    │         │
+    │         │
+    │         │
+    ★ ─ ─ ─ ─ ★
+
+Two possible matchings:
+
+    MATCHING A:          MATCHING B:
+    ★═════════★          ★         ★
+                         ║         ║
+                         ║         ║
+                         ║         ║
+    ★═════════★          ★         ★
+
+    Horizontal chains    Vertical chains
+    Total weight: 2×4=8  Total weight: 2×4=8
+
+Both have same weight! But they differ by a LOOP:
+
+    A ⊕ B = ★═════════★
+            ║         ║
+            ║         ║
+            ║         ║
+            ★═════════★
+
+If this loop is non-trivial (spans the code),
+choosing A vs B gives different logical states!
+
+Minimum Weight Matching:
+━━━━━━━━━━━━━━━━━━━━━━━
+    Find pairing that minimizes total edge weight.
+    This is the most likely error pattern.
+    Can be solved efficiently with Blossom algorithm.
+        """)
+
+    def demonstrate_ambiguity(self):
+        """Show ambiguous syndrome cases."""
+        print("""
+Ambiguous Syndromes
+═══════════════════
+
+Case 1: Separated pair (ambiguous direction)
+
+    ★                 ★
+                    OR
+            ?
+
+    ★                 ★
+
+    Which way did errors go?
+    Answer: Choose shorter path!
+
+Case 2: Multiple pairs (ambiguous pairing)
+
+    ★   ★             ★───★
+
+
+    ★   ★             ★───★
+
+       vs
+
+    ★   ★             ★   ★
+    |   |             |   |
+    |   |             |   |
+    ★   ★             ★   ★
+
+    Which pairs match?
+    Answer: Minimum total weight!
+
+Case 3: Boundary interaction
+
+    BOUNDARY
+    ═══════════════════
+         ★
+         |
+         |
+         ★
+
+    Does chain go to boundary or pair with other defect?
+    Boundary counts as a valid endpoint!
+        """)
+
+
+matching = SyndromeMatching(5)
+matching.explain_matching()
+matching.demonstrate_ambiguity()
+```
+
+## Time Evolution of Syndromes
+
+```python
+class SyndromeEvolution:
+    """
+    Track syndrome evolution over multiple measurement rounds.
+    """
+
+    def __init__(self, distance: int, num_rounds: int):
+        self.d = distance
+        self.rounds = num_rounds
+        self.syndromes = []
+
+    def add_round(self, syndrome: Set[Tuple[int, int]]):
+        """Add syndrome from one measurement round."""
+        self.syndromes.append(syndrome)
+
+    def compute_changes(self) -> List[Set[Tuple[int, int]]]:
+        """Compute syndrome changes between rounds."""
+        changes = []
+        for t in range(1, len(self.syndromes)):
+            prev = self.syndromes[t-1]
+            curr = self.syndromes[t]
+            change = prev.symmetric_difference(curr)
+            changes.append(change)
+        return changes
+
+    def explain_3d_structure(self):
+        """Explain the 3D syndrome structure."""
+        print("""
+3D Syndrome Structure
+═════════════════════
+
+Syndromes form a 3D object: 2D lattice × time
+
+         t=0     t=1     t=2     t=3
+         ────    ────    ────    ────
+    y=0   ○●○    ○○○    ○○○    ○○○
+    y=1   ○○○    ○○○    ○●○    ○○○
+    y=2   ○●○    ○●○    ○●○    ○○○
+
+Interpreting patterns:
+
+    SPATIAL DEFECT PAIR (data error):
+    ●═══●    Same time slice
+             Two defects connected in space
+             → Data qubit error between rounds
+
+    TEMPORAL DEFECT PAIR (measurement error):
+    ●         Same spatial position
+    │         Different time slices
+    ●         → Measurement error (transient)
+
+    The decoder must match in 3D!
+
+Measurement error signature:
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+    t=0: ○○○
+    t=1: ○●○   ← Defect appears
+    t=2: ○○○   ← Defect disappears
+
+    This is a pair in TIME, not space.
+    The decoder should NOT apply a data correction!
+
+Data error signature:
+━━━━━━━━━━━━━━━━━━━━━━
+    t=0: ○○○
+    t=1: ●○●   ← Pair appears
+    t=2: ●○●   ← Pair persists
+    t=3: ●○●   ← Pair persists
+
+    Persistent pair indicates real data error.
+    Decoder should correct data qubits.
+        """)
+
+
+evolution = SyndromeEvolution(3, 4)
+evolution.explain_3d_structure()
+```
+
+## Boundary Effects
+
+```
+Syndromes at Boundaries
+═══════════════════════
+
+At boundaries, error chains can terminate, creating single defects:
+
+ROUGH BOUNDARY (top/bottom):
+    Error chain connecting to rough boundary:
+
+    BOUNDARY ═══════════════════════
+         ╲
+          ★          Single visible defect!
+           ╲         (Partner at boundary)
+            X
+             ╲
+              ●
+
+    Z logical operators can terminate at rough boundaries.
+
+SMOOTH BOUNDARY (left/right):
+    Error chain connecting to smooth boundary:
+
+    B │
+    O │  ★ ─ ─ X ─ ─ ●
+    U │
+    N │  Single visible defect
+    D │  X logical terminates at smooth boundary
+
+Corner regions:
+    Near corners, both boundary types are close.
+    Error chains have more options for termination.
+
+Decoding near boundaries:
+┌─────────────────────────────────────────────────────────────────┐
+│  • Single defects can match to boundary (virtual defects)      │
+│  • Boundary type determines which error types can terminate    │
+│  • Weight to boundary = Manhattan distance to edge             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Complete Example
+
+```python
+class SurfaceCodeSyndromeAnalyzer:
+    """
+    Complete syndrome analysis for surface code.
+    """
+
+    def __init__(self, distance: int):
+        self.d = distance
+
+    def analyze_scenario(self, x_errors: List[Tuple[int, int]],
+                         z_errors: List[Tuple[int, int]]):
+        """Analyze a complete error scenario."""
+        print(f"\nSyndrome Analysis (d={self.d})")
+        print("=" * 60)
+
+        # X errors create Z-syndrome defects
+        z_defects = self._compute_syndrome(x_errors, 'X')
+        # Z errors create X-syndrome defects
+        x_defects = self._compute_syndrome(z_errors, 'Z')
+
+        print(f"\nX Errors: {len(x_errors)} at positions {x_errors}")
+        print(f"  → Z-syndrome defects: {len(z_defects)} at {list(z_defects)}")
+
+        print(f"\nZ Errors: {len(z_errors)} at positions {z_errors}")
+        print(f"  → X-syndrome defects: {len(x_defects)} at {list(x_defects)}")
+
+        # Classification
+        print(f"\nClassification:")
+        self._classify_errors(z_defects, 'Z')
+        self._classify_errors(x_defects, 'X')
+
+    def _compute_syndrome(self, errors: List[Tuple[int, int]],
+                          error_type: str) -> Set[Tuple[int, int]]:
+        """Compute syndrome for given errors."""
+        syndrome = set()
+        for pos in errors:
+            row, col = pos
+            # Simplified: adjacent stabilizers
+            if error_type == 'X':
+                neighbors = [(row-1, col), (row+1, col)]
+            else:
+                neighbors = [(row, col-1), (row, col+1)]
+
+            for n in neighbors:
+                if 0 <= n[0] < self.d and 0 <= n[1] < self.d:
+                    if n in syndrome:
+                        syndrome.remove(n)
+                    else:
+                        syndrome.add(n)
+
+        return syndrome
+
+    def _classify_errors(self, defects: Set[Tuple[int, int]], defect_type: str):
+        """Classify error pattern."""
+        n = len(defects)
+        if n == 0:
+            print(f"  {defect_type}: No defects (no errors or closed loop)")
+        elif n == 2:
+            print(f"  {defect_type}: Single chain (2 defects)")
+        elif n % 2 == 0:
+            print(f"  {defect_type}: Multiple chains ({n//2} pairs)")
+        else:
+            print(f"  {defect_type}: Boundary-terminated ({n} defects)")
+
+
+# Example analysis
+analyzer = SurfaceCodeSyndromeAnalyzer(5)
+analyzer.analyze_scenario(
+    x_errors=[(1, 2), (1, 3)],  # Two adjacent X errors
+    z_errors=[(3, 1)]           # One Z error
+)
+```
+
+## Summary
+
+Error chains and syndromes form the foundation of surface code decoding:
+
+1. **Single errors**: Create pairs of syndrome defects at adjacent stabilizers
+2. **Error chains**: Connected sequences where interior defects cancel
+3. **Defect pairs**: Syndromes always come in even numbers (or terminate at boundaries)
+4. **Matching problem**: Decoder must pair defects to infer error chains
+5. **3D structure**: Time adds a third dimension for handling measurement errors
+
+Understanding these patterns is essential for designing and analyzing decoders.

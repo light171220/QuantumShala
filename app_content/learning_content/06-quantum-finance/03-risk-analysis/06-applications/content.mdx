@@ -1,0 +1,711 @@
+---
+title: "Real-World Risk Applications"
+description: "Apply risk analysis techniques to real-world scenarios including regulatory capital, risk budgeting, tail risk hedging, and integrated risk management systems."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Apply VaR and CVaR to regulatory capital calculations
+- Implement risk budgeting and risk parity strategies
+- Design tail risk hedging approaches
+- Build integrated risk management dashboards
+- Understand the role of quantum computing in future risk systems
+
+## 1. Regulatory Capital Requirements
+
+Financial institutions must hold capital against potential losses.
+
+<Definition term="Regulatory Capital">
+Capital that banks must hold as a buffer against unexpected losses, calculated using standardized or internal model approaches under Basel III/IV frameworks.
+</Definition>
+
+```python
+import numpy as np
+from scipy import stats
+
+class RegulatoryCapitalCalculator:
+    """
+    Calculate regulatory capital requirements.
+
+    Based on Basel III/IV framework concepts.
+    """
+
+    def __init__(self, confidence_level=0.99, holding_period=10):
+        """
+        Args:
+            confidence_level: Typically 99% for regulatory VaR
+            holding_period: Days (typically 10 for trading book)
+        """
+        self.confidence = confidence_level
+        self.holding_period = holding_period
+
+    def calculate_market_risk_capital(self, portfolio_returns,
+                                       current_value,
+                                       multiplier=3.0):
+        """
+        Calculate market risk capital using Internal Models Approach.
+
+        Capital = max(VaR_yesterday, multiplier × avg_VaR_60d) + sVaR
+
+        Args:
+            portfolio_returns: Historical daily returns
+            current_value: Current portfolio value
+            multiplier: Regulatory multiplier (3-4 based on backtesting)
+
+        Returns:
+            Capital requirement in dollars
+        """
+        returns = np.array(portfolio_returns)
+
+        # Scale to holding period
+        period_vol = np.std(returns) * np.sqrt(self.holding_period)
+        period_returns = returns * np.sqrt(self.holding_period)
+
+        # Calculate VaR at confidence level
+        var_pct = -np.percentile(period_returns, (1 - self.confidence) * 100)
+        var_dollar = var_pct * current_value
+
+        # Stressed VaR (use worst historical period)
+        # Simplified: use 2x normal VaR
+        stressed_var = var_dollar * 2.0
+
+        # Capital charge
+        capital = multiplier * var_dollar + stressed_var
+
+        return {
+            'var_10d_99': var_dollar,
+            'stressed_var': stressed_var,
+            'multiplier': multiplier,
+            'capital_requirement': capital,
+            'capital_ratio': capital / current_value
+        }
+
+    def calculate_expected_shortfall_capital(self, portfolio_returns,
+                                             current_value):
+        """
+        Calculate capital using Expected Shortfall (FRTB approach).
+
+        Basel IV/FRTB uses ES at 97.5% instead of VaR at 99%.
+        """
+        returns = np.array(portfolio_returns)
+        period_returns = returns * np.sqrt(self.holding_period)
+
+        # ES at 97.5%
+        threshold = np.percentile(period_returns, 2.5)
+        tail_returns = period_returns[period_returns < threshold]
+        es = -np.mean(tail_returns) if len(tail_returns) > 0 else -threshold
+
+        es_dollar = es * current_value
+
+        return {
+            'es_10d_97.5': es_dollar,
+            'capital_ratio': es_dollar / current_value
+        }
+
+# Example
+np.random.seed(42)
+returns = np.random.normal(0.0005, 0.02, 504)  # 2 years daily
+portfolio_value = 100_000_000  # $100M
+
+calc = RegulatoryCapitalCalculator()
+market_capital = calc.calculate_market_risk_capital(returns, portfolio_value)
+es_capital = calc.calculate_expected_shortfall_capital(returns, portfolio_value)
+
+print("Regulatory Capital Requirements:")
+print(f"\nVaR-based (Basel III):")
+for k, v in market_capital.items():
+    if isinstance(v, float):
+        print(f"  {k}: ${v:,.0f}" if v > 100 else f"  {k}: {v:.2%}")
+    else:
+        print(f"  {k}: {v}")
+
+print(f"\nES-based (Basel IV/FRTB):")
+for k, v in es_capital.items():
+    if isinstance(v, float):
+        print(f"  {k}: ${v:,.0f}" if v > 100 else f"  {k}: {v:.2%}")
+```
+
+## 2. Risk Budgeting
+
+Allocate risk across assets or strategies systematically.
+
+<Formula>
+Risk Parity: Each asset contributes equally to portfolio risk.
+$$RC_i = w_i \cdot \frac{\partial \sigma_p}{\partial w_i} = \frac{\sigma_p}{n}$$
+where $RC_i$ is the risk contribution of asset $i$.
+</Formula>
+
+```python
+from scipy.optimize import minimize
+
+class RiskBudgeting:
+    """
+    Risk budgeting and risk parity portfolio construction.
+    """
+
+    def __init__(self, expected_returns, covariance_matrix):
+        self.mu = np.array(expected_returns)
+        self.cov = np.array(covariance_matrix)
+        self.n = len(self.mu)
+
+    def portfolio_risk(self, weights):
+        """Calculate portfolio volatility."""
+        return np.sqrt(weights @ self.cov @ weights)
+
+    def risk_contribution(self, weights):
+        """Calculate risk contribution of each asset."""
+        portfolio_vol = self.portfolio_risk(weights)
+        marginal_contrib = self.cov @ weights / portfolio_vol
+        risk_contrib = weights * marginal_contrib
+        return risk_contrib
+
+    def risk_parity_weights(self):
+        """
+        Find weights where each asset contributes equally to risk.
+        """
+        def objective(w):
+            rc = self.risk_contribution(w)
+            target_rc = self.portfolio_risk(w) / self.n
+            # Minimize deviation from equal risk contribution
+            return np.sum((rc - target_rc)**2)
+
+        # Constraints
+        constraints = [
+            {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}  # Weights sum to 1
+        ]
+        bounds = [(0.01, 1) for _ in range(self.n)]
+
+        # Initial guess: equal weight
+        w0 = np.ones(self.n) / self.n
+
+        result = minimize(objective, w0, method='SLSQP',
+                         bounds=bounds, constraints=constraints)
+
+        return result.x
+
+    def risk_budget_weights(self, risk_budgets):
+        """
+        Find weights matching specified risk budgets.
+
+        Args:
+            risk_budgets: Target risk contribution fractions (sum to 1)
+        """
+        risk_budgets = np.array(risk_budgets)
+
+        def objective(w):
+            rc = self.risk_contribution(w)
+            portfolio_vol = self.portfolio_risk(w)
+            # Target: rc_i = budget_i * portfolio_vol
+            target_rc = risk_budgets * portfolio_vol
+            return np.sum((rc - target_rc)**2)
+
+        constraints = [
+            {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}
+        ]
+        bounds = [(0.01, 1) for _ in range(self.n)]
+        w0 = risk_budgets  # Start from budget
+
+        result = minimize(objective, w0, method='SLSQP',
+                         bounds=bounds, constraints=constraints)
+
+        return result.x
+
+    def analyze_portfolio(self, weights):
+        """Analyze risk characteristics of a portfolio."""
+        vol = self.portfolio_risk(weights)
+        rc = self.risk_contribution(weights)
+        rc_pct = rc / vol
+
+        expected_return = weights @ self.mu
+        sharpe = expected_return / vol
+
+        return {
+            'weights': weights,
+            'volatility': vol,
+            'expected_return': expected_return,
+            'sharpe_ratio': sharpe,
+            'risk_contributions': rc,
+            'risk_contribution_pct': rc_pct
+        }
+
+# Example: 4-asset portfolio
+np.random.seed(42)
+mu = np.array([0.08, 0.06, 0.10, 0.04])  # Expected returns
+vols = np.array([0.20, 0.12, 0.25, 0.05])  # Volatilities
+
+# Create correlation matrix
+corr = np.array([
+    [1.0, 0.3, 0.5, -0.1],
+    [0.3, 1.0, 0.4, 0.2],
+    [0.5, 0.4, 1.0, 0.1],
+    [-0.1, 0.2, 0.1, 1.0]
+])
+cov = corr * np.outer(vols, vols)
+
+rb = RiskBudgeting(mu, cov)
+
+# Equal weight portfolio
+equal_weights = np.ones(4) / 4
+equal_analysis = rb.analyze_portfolio(equal_weights)
+
+# Risk parity portfolio
+rp_weights = rb.risk_parity_weights()
+rp_analysis = rb.analyze_portfolio(rp_weights)
+
+print("Portfolio Comparison:")
+print("\nEqual Weight:")
+print(f"  Weights: {equal_weights.round(3)}")
+print(f"  Risk Contributions: {(equal_analysis['risk_contribution_pct']*100).round(1)}%")
+print(f"  Volatility: {equal_analysis['volatility']:.2%}")
+
+print("\nRisk Parity:")
+print(f"  Weights: {rp_weights.round(3)}")
+print(f"  Risk Contributions: {(rp_analysis['risk_contribution_pct']*100).round(1)}%")
+print(f"  Volatility: {rp_analysis['volatility']:.2%}")
+```
+
+<Tip>
+Risk parity typically results in higher allocations to low-volatility assets (like bonds) compared to traditional approaches, often leading to more stable portfolios.
+</Tip>
+
+## 3. Tail Risk Hedging
+
+Protect portfolios from extreme losses.
+
+```python
+class TailRiskHedger:
+    """
+    Strategies for hedging tail risk.
+    """
+
+    def __init__(self, portfolio_value, portfolio_returns):
+        self.portfolio_value = portfolio_value
+        self.returns = np.array(portfolio_returns)
+
+    def put_option_hedge(self, protection_level=0.95,
+                         time_to_expiry=0.25,
+                         risk_free_rate=0.05,
+                         implied_vol=0.20):
+        """
+        Calculate put option hedge parameters.
+
+        Args:
+            protection_level: Fraction of portfolio to protect (0.95 = 5% loss max)
+            time_to_expiry: Time in years
+            risk_free_rate: Annual risk-free rate
+            implied_vol: Implied volatility for options
+
+        Returns:
+            Hedge parameters and estimated cost
+        """
+        from scipy.stats import norm
+
+        strike_pct = protection_level
+        S = 1.0  # Normalize to 1
+        K = strike_pct
+        T = time_to_expiry
+        r = risk_free_rate
+        sigma = implied_vol
+
+        # Black-Scholes put price
+        d1 = (np.log(S/K) + (r + sigma**2/2)*T) / (sigma*np.sqrt(T))
+        d2 = d1 - sigma*np.sqrt(T)
+
+        put_price = K * np.exp(-r*T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+
+        # Annualized cost as percentage of portfolio
+        annual_cost = put_price / T
+
+        return {
+            'strike_pct': strike_pct,
+            'put_price_pct': put_price,
+            'annual_cost_pct': annual_cost,
+            'annual_cost_dollar': annual_cost * self.portfolio_value,
+            'max_loss': (1 - protection_level) * self.portfolio_value
+        }
+
+    def variance_swap_hedge(self, var_budget):
+        """
+        Size a variance swap hedge.
+
+        Pays (realized_var - strike_var) × notional
+
+        Args:
+            var_budget: Maximum variance exposure in dollars
+        """
+        realized_vol = np.std(self.returns) * np.sqrt(252)
+        realized_var = realized_vol ** 2
+
+        # Variance swap typically struck at implied var
+        # Assume 10% premium
+        strike_var = realized_var * 1.10
+
+        # Vega notional sizing
+        vega_notional = var_budget / (2 * realized_vol)
+
+        return {
+            'realized_vol': realized_vol,
+            'strike_var': strike_var,
+            'strike_vol': np.sqrt(strike_var),
+            'vega_notional': vega_notional,
+            'var_notional': vega_notional / (2 * np.sqrt(strike_var))
+        }
+
+    def tail_risk_budget(self, cvar_limit, confidence=0.95):
+        """
+        Calculate position size given CVaR budget.
+
+        Args:
+            cvar_limit: Maximum acceptable CVaR in dollars
+            confidence: CVaR confidence level
+        """
+        # Calculate current CVaR
+        threshold = np.percentile(self.returns, (1-confidence)*100)
+        tail_returns = self.returns[self.returns < threshold]
+        cvar_pct = -np.mean(tail_returns) if len(tail_returns) > 0 else -threshold
+
+        current_cvar = cvar_pct * self.portfolio_value
+
+        # Maximum position size given budget
+        max_position = cvar_limit / cvar_pct if cvar_pct > 0 else float('inf')
+
+        return {
+            'current_cvar_pct': cvar_pct,
+            'current_cvar_dollar': current_cvar,
+            'cvar_limit': cvar_limit,
+            'max_position_size': max_position,
+            'utilization': current_cvar / cvar_limit if cvar_limit > 0 else 0
+        }
+
+# Example
+np.random.seed(42)
+returns = np.random.normal(0.0004, 0.015, 252)
+hedger = TailRiskHedger(100_000_000, returns)
+
+# Put option hedge analysis
+put_hedge = hedger.put_option_hedge(protection_level=0.90)
+print("Put Option Hedge (90% protection):")
+for k, v in put_hedge.items():
+    if 'dollar' in k:
+        print(f"  {k}: ${v:,.0f}")
+    elif 'pct' in k:
+        print(f"  {k}: {v:.2%}")
+    else:
+        print(f"  {k}: ${v:,.0f}")
+
+# CVaR budget analysis
+cvar_analysis = hedger.tail_risk_budget(5_000_000)
+print("\nCVaR Budget Analysis:")
+for k, v in cvar_analysis.items():
+    if isinstance(v, float):
+        if v > 1000:
+            print(f"  {k}: ${v:,.0f}")
+        else:
+            print(f"  {k}: {v:.2%}")
+```
+
+## 4. Integrated Risk Management System
+
+Build a comprehensive risk dashboard.
+
+```python
+class IntegratedRiskSystem:
+    """
+    Comprehensive risk management system.
+    """
+
+    def __init__(self, portfolio_positions, market_data):
+        """
+        Args:
+            portfolio_positions: Dict of {asset: (quantity, price)}
+            market_data: Dict of {asset: returns_array}
+        """
+        self.positions = portfolio_positions
+        self.market_data = market_data
+        self.assets = list(portfolio_positions.keys())
+
+    def calculate_portfolio_value(self):
+        """Current portfolio value."""
+        total = 0
+        for asset, (qty, price) in self.positions.items():
+            total += qty * price
+        return total
+
+    def calculate_portfolio_returns(self):
+        """Historical portfolio returns based on current weights."""
+        weights = self.get_weights()
+
+        # Align return series
+        n_days = min(len(self.market_data[a]) for a in self.assets)
+
+        portfolio_returns = np.zeros(n_days)
+        for asset, weight in zip(self.assets, weights):
+            portfolio_returns += weight * self.market_data[asset][:n_days]
+
+        return portfolio_returns
+
+    def get_weights(self):
+        """Current portfolio weights."""
+        total = self.calculate_portfolio_value()
+        weights = []
+        for asset, (qty, price) in self.positions.items():
+            weights.append(qty * price / total)
+        return np.array(weights)
+
+    def generate_risk_report(self):
+        """Generate comprehensive risk report."""
+        portfolio_value = self.calculate_portfolio_value()
+        portfolio_returns = self.calculate_portfolio_returns()
+        weights = self.get_weights()
+
+        # Basic statistics
+        daily_vol = np.std(portfolio_returns)
+        annual_vol = daily_vol * np.sqrt(252)
+
+        # VaR and CVaR
+        var_95 = -np.percentile(portfolio_returns, 5)
+        var_99 = -np.percentile(portfolio_returns, 1)
+
+        threshold_95 = np.percentile(portfolio_returns, 5)
+        tail_95 = portfolio_returns[portfolio_returns < threshold_95]
+        cvar_95 = -np.mean(tail_95) if len(tail_95) > 0 else var_95
+
+        # Maximum drawdown
+        cumulative = np.cumprod(1 + portfolio_returns)
+        running_max = np.maximum.accumulate(cumulative)
+        drawdowns = (cumulative - running_max) / running_max
+        max_drawdown = np.min(drawdowns)
+
+        # Concentration metrics
+        hhi = np.sum(weights ** 2)  # Herfindahl index
+        effective_n = 1 / hhi  # Effective number of assets
+
+        # Correlation structure
+        n_assets = len(self.assets)
+        returns_matrix = np.column_stack([self.market_data[a][:len(portfolio_returns)]
+                                          for a in self.assets])
+        corr_matrix = np.corrcoef(returns_matrix, rowvar=False)
+        avg_corr = (np.sum(corr_matrix) - n_assets) / (n_assets**2 - n_assets)
+
+        return {
+            'portfolio_value': portfolio_value,
+            'weights': dict(zip(self.assets, weights)),
+            'volatility': {
+                'daily': daily_vol,
+                'annual': annual_vol
+            },
+            'var': {
+                '95%': var_95 * portfolio_value,
+                '99%': var_99 * portfolio_value
+            },
+            'cvar': {
+                '95%': cvar_95 * portfolio_value
+            },
+            'max_drawdown': max_drawdown,
+            'concentration': {
+                'hhi': hhi,
+                'effective_n': effective_n
+            },
+            'correlation': {
+                'average': avg_corr,
+                'matrix': corr_matrix
+            }
+        }
+
+    def stress_test(self, scenarios):
+        """
+        Run stress tests on portfolio.
+
+        Args:
+            scenarios: Dict of {name: {asset: shock}}
+        """
+        portfolio_value = self.calculate_portfolio_value()
+        results = {}
+
+        for name, shocks in scenarios.items():
+            pnl = 0
+            for asset, (qty, price) in self.positions.items():
+                shock = shocks.get(asset, 0)
+                position_value = qty * price
+                pnl += position_value * shock
+
+            results[name] = {
+                'pnl': pnl,
+                'pnl_pct': pnl / portfolio_value
+            }
+
+        return results
+
+# Example
+np.random.seed(42)
+n_days = 504
+
+# Create market data
+market_data = {
+    'Equities': np.random.normal(0.0004, 0.015, n_days),
+    'Bonds': np.random.normal(0.0001, 0.003, n_days),
+    'Commodities': np.random.normal(0.0002, 0.018, n_days),
+    'Real Estate': np.random.normal(0.0003, 0.010, n_days)
+}
+
+# Create positions
+positions = {
+    'Equities': (1000, 50000),      # 1000 units × $50,000 = $50M
+    'Bonds': (2000, 10000),          # 2000 units × $10,000 = $20M
+    'Commodities': (500, 30000),     # 500 units × $30,000 = $15M
+    'Real Estate': (100, 150000)     # 100 units × $150,000 = $15M
+}
+
+risk_system = IntegratedRiskSystem(positions, market_data)
+
+# Generate report
+report = risk_system.generate_risk_report()
+
+print("=" * 50)
+print("INTEGRATED RISK REPORT")
+print("=" * 50)
+print(f"\nPortfolio Value: ${report['portfolio_value']:,.0f}")
+print(f"\nAsset Weights:")
+for asset, weight in report['weights'].items():
+    print(f"  {asset}: {weight:.1%}")
+
+print(f"\nVolatility:")
+print(f"  Daily: {report['volatility']['daily']:.2%}")
+print(f"  Annual: {report['volatility']['annual']:.2%}")
+
+print(f"\nValue at Risk:")
+print(f"  VaR 95%: ${report['var']['95%']:,.0f}")
+print(f"  VaR 99%: ${report['var']['99%']:,.0f}")
+print(f"  CVaR 95%: ${report['cvar']['95%']:,.0f}")
+
+print(f"\nMax Drawdown: {report['max_drawdown']:.2%}")
+print(f"\nConcentration:")
+print(f"  Effective # of assets: {report['concentration']['effective_n']:.1f}")
+print(f"  Average correlation: {report['correlation']['average']:.3f}")
+
+# Stress tests
+stress_scenarios = {
+    '2008 Crisis': {'Equities': -0.40, 'Bonds': 0.10, 'Commodities': -0.30, 'Real Estate': -0.25},
+    'Rate Shock': {'Equities': -0.10, 'Bonds': -0.15, 'Commodities': 0.05, 'Real Estate': -0.20},
+    'Inflation Spike': {'Equities': -0.15, 'Bonds': -0.20, 'Commodities': 0.30, 'Real Estate': 0.05}
+}
+
+stress_results = risk_system.stress_test(stress_scenarios)
+print("\nStress Test Results:")
+for scenario, result in stress_results.items():
+    print(f"  {scenario}: ${result['pnl']:,.0f} ({result['pnl_pct']:.1%})")
+```
+
+## 5. Quantum Computing for Future Risk Systems
+
+<Warning>
+Quantum computers are not yet practical for production risk systems, but research shows significant potential for future applications.
+</Warning>
+
+```python
+class QuantumRiskPotential:
+    """
+    Analysis of quantum computing potential for risk management.
+    """
+
+    @staticmethod
+    def estimate_speedup(n_scenarios, target_accuracy):
+        """
+        Estimate quantum speedup for Monte Carlo-based risk.
+
+        Classical: O(1/ε²) samples needed
+        Quantum: O(1/ε) queries needed
+        """
+        classical_samples = 1 / target_accuracy**2
+        quantum_queries = 1 / target_accuracy
+
+        speedup = classical_samples / quantum_queries
+
+        return {
+            'classical_samples': int(classical_samples),
+            'quantum_queries': int(quantum_queries),
+            'theoretical_speedup': speedup,
+            'practical_note': 'Requires fault-tolerant quantum computer'
+        }
+
+    @staticmethod
+    def quantum_advantage_timeline():
+        """
+        Estimated timeline for quantum advantage in risk.
+        """
+        return {
+            'near_term_2024_2026': {
+                'capability': 'NISQ devices with 100-1000 qubits',
+                'applications': 'Research, proof-of-concept',
+                'practical_advantage': 'None for production risk'
+            },
+            'medium_term_2027_2030': {
+                'capability': 'Early error-corrected systems',
+                'applications': 'Small-scale portfolio optimization',
+                'practical_advantage': 'Possible for specific use cases'
+            },
+            'long_term_2030_plus': {
+                'capability': 'Fault-tolerant quantum computers',
+                'applications': 'Full VaR/CVaR acceleration, real-time risk',
+                'practical_advantage': '10-100x speedup for complex calculations'
+            }
+        }
+
+    @staticmethod
+    def hybrid_classical_quantum():
+        """
+        Hybrid approach: combine classical and quantum.
+        """
+        return {
+            'classical_preprocessing': [
+                'Data preparation and cleaning',
+                'Dimension reduction (PCA)',
+                'Simple calculations'
+            ],
+            'quantum_core': [
+                'Monte Carlo sampling (QAE)',
+                'Optimization (QAOA/VQE)',
+                'Correlation estimation'
+            ],
+            'classical_postprocessing': [
+                'Result interpretation',
+                'Report generation',
+                'Visualization'
+            ]
+        }
+
+# Analyze potential
+potential = QuantumRiskPotential()
+
+speedup = potential.estimate_speedup(1_000_000, 0.001)
+print("Quantum Speedup Analysis:")
+for k, v in speedup.items():
+    print(f"  {k}: {v}")
+
+print("\nQuantum Advantage Timeline:")
+timeline = potential.quantum_advantage_timeline()
+for period, info in timeline.items():
+    print(f"\n{period}:")
+    for k, v in info.items():
+        print(f"  {k}: {v}")
+```
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Regulatory capital** calculations use VaR and ES under Basel frameworks
+2. **Risk budgeting** and risk parity allocate risk systematically across assets
+3. **Tail risk hedging** protects against extreme losses using options and swaps
+4. **Integrated risk systems** combine multiple risk measures in dashboards
+5. **Quantum computing** offers future potential for accelerating risk calculations
+
+## Further Reading
+
+- Next module: Option Pricing
+- Related: Factor Models for Risk Attribution
+- Application: Enterprise Risk Management Systems

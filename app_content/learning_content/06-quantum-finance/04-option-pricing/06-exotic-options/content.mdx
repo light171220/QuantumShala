@@ -1,0 +1,752 @@
+---
+title: "Exotic Options"
+description: "Explore exotic options including barrier, Asian, lookback, and digital options, with pricing methods and quantum computing applications."
+keywords: ["exotic options", "barrier options", "asian options", "lookback options", "path-dependent options", "digital options"]
+---
+
+# Exotic Options
+
+While vanilla European and American options dominate trading volumes, exotic options provide customized payoff structures for specific hedging needs and investment strategies.
+
+<Definition term="Exotic Option">
+An exotic option has features making it more complex than vanilla options, including path-dependency, multiple underlyings, or non-standard exercise conditions. These options often lack closed-form solutions and require numerical pricing methods.
+</Definition>
+
+## Path-Dependent Options
+
+Path-dependent options have payoffs that depend not just on the final price, but on the entire price path.
+
+### Why Path Dependency Matters
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import norm
+
+def simulate_gbm_paths(S0, r, sigma, T, n_steps, n_paths, seed=42):
+    """Generate GBM price paths."""
+    np.random.seed(seed)
+    dt = T / n_steps
+
+    # Generate random increments
+    Z = np.random.standard_normal((n_paths, n_steps))
+
+    # Build paths
+    paths = np.zeros((n_paths, n_steps + 1))
+    paths[:, 0] = S0
+
+    for t in range(n_steps):
+        paths[:, t + 1] = paths[:, t] * np.exp(
+            (r - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z[:, t]
+        )
+
+    return paths
+
+# Parameters
+S0 = 100
+r = 0.05
+sigma = 0.2
+T = 1.0
+n_steps = 252
+n_paths = 5
+
+paths = simulate_gbm_paths(S0, r, sigma, T, n_steps, n_paths)
+
+# Two paths with same final price but different histories
+print("Path analysis:")
+for i in range(n_paths):
+    final = paths[i, -1]
+    avg = np.mean(paths[i, :])
+    max_val = np.max(paths[i, :])
+    min_val = np.min(paths[i, :])
+    print(f"Path {i+1}: Final={final:.2f}, Avg={avg:.2f}, Max={max_val:.2f}, Min={min_val:.2f}")
+```
+
+## Barrier Options
+
+Barrier options are activated (knock-in) or extinguished (knock-out) when the underlying crosses a barrier level.
+
+<Formula expression="\\text{Types: } \\begin{cases} \\text{Up-and-Out} \\\\ \\text{Up-and-In} \\\\ \\text{Down-and-Out} \\\\ \\text{Down-and-In} \\end{cases}" description="Barrier option classification by direction and activation type" />
+
+### Barrier Option Pricing
+
+```python
+class BarrierOption:
+    """Price barrier options using Monte Carlo simulation."""
+
+    def __init__(self, S0, K, r, sigma, T, barrier, option_type='call',
+                 barrier_type='down-and-out'):
+        self.S0 = S0
+        self.K = K
+        self.r = r
+        self.sigma = sigma
+        self.T = T
+        self.barrier = barrier
+        self.option_type = option_type
+        self.barrier_type = barrier_type
+
+    def check_barrier(self, paths):
+        """Check if barrier was hit for each path."""
+        if 'down' in self.barrier_type:
+            barrier_hit = np.min(paths, axis=1) <= self.barrier
+        else:  # up barrier
+            barrier_hit = np.max(paths, axis=1) >= self.barrier
+
+        return barrier_hit
+
+    def payoff(self, S_T):
+        """Calculate option payoff."""
+        if self.option_type == 'call':
+            return np.maximum(S_T - self.K, 0)
+        else:
+            return np.maximum(self.K - S_T, 0)
+
+    def price_mc(self, n_paths=100000, n_steps=252, seed=42):
+        """Price using Monte Carlo simulation."""
+        np.random.seed(seed)
+        dt = self.T / n_steps
+
+        # Generate paths
+        Z = np.random.standard_normal((n_paths, n_steps))
+        paths = np.zeros((n_paths, n_steps + 1))
+        paths[:, 0] = self.S0
+
+        for t in range(n_steps):
+            paths[:, t + 1] = paths[:, t] * np.exp(
+                (self.r - 0.5 * self.sigma**2) * dt +
+                self.sigma * np.sqrt(dt) * Z[:, t]
+            )
+
+        # Check barrier conditions
+        barrier_hit = self.check_barrier(paths)
+        S_T = paths[:, -1]
+        payoffs = self.payoff(S_T)
+
+        # Apply barrier logic
+        if 'out' in self.barrier_type:
+            # Knock-out: payoff is 0 if barrier hit
+            payoffs[barrier_hit] = 0
+        else:
+            # Knock-in: payoff is 0 if barrier NOT hit
+            payoffs[~barrier_hit] = 0
+
+        price = np.exp(-self.r * self.T) * np.mean(payoffs)
+        std_err = np.exp(-self.r * self.T) * np.std(payoffs) / np.sqrt(n_paths)
+
+        return price, std_err
+
+# Example: Down-and-out call
+barrier_call = BarrierOption(
+    S0=100, K=100, r=0.05, sigma=0.2, T=1.0,
+    barrier=80, option_type='call', barrier_type='down-and-out'
+)
+
+price, std_err = barrier_call.price_mc()
+print(f"Down-and-Out Call Price: ${price:.4f} ± ${1.96*std_err:.4f}")
+
+# Compare with vanilla option
+from scipy.stats import norm
+
+def black_scholes_call(S, K, r, sigma, T):
+    d1 = (np.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
+    d2 = d1 - sigma*np.sqrt(T)
+    return S * norm.cdf(d1) - K * np.exp(-r*T) * norm.cdf(d2)
+
+vanilla_price = black_scholes_call(100, 100, 0.05, 0.2, 1.0)
+print(f"Vanilla Call Price: ${vanilla_price:.4f}")
+print(f"Barrier discount: {(1 - price/vanilla_price)*100:.1f}%")
+```
+
+<Tip>
+Barrier options are cheaper than vanilla options because they have additional conditions that can reduce the payoff. The closer the barrier to the current price and the higher the volatility, the larger the discount.
+</Tip>
+
+### Analytical Barrier Formulas
+
+For continuous monitoring, closed-form solutions exist:
+
+```python
+def down_and_out_call_analytical(S, K, r, sigma, T, H):
+    """Analytical price for down-and-out call (H < S, H < K)."""
+
+    def bs_call(S, K, r, sigma, T):
+        d1 = (np.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
+        d2 = d1 - sigma*np.sqrt(T)
+        return S * norm.cdf(d1) - K * np.exp(-r*T) * norm.cdf(d2)
+
+    # Lambda parameter
+    lam = (r - 0.5*sigma**2) / sigma**2
+
+    # Vanilla call
+    C = bs_call(S, K, r, sigma, T)
+
+    # Adjustment for barrier
+    C_adj = (H/S)**(2*lam) * bs_call(H**2/S, K, r, sigma, T)
+
+    return C - C_adj
+
+# Compare analytical vs MC
+analytical_price = down_and_out_call_analytical(100, 100, 0.05, 0.2, 1.0, 80)
+print(f"Analytical Down-and-Out Call: ${analytical_price:.4f}")
+```
+
+## Asian Options
+
+Asian options have payoffs based on the average price over the option's life, reducing manipulation risk and volatility.
+
+<Definition term="Asian Option">
+An option whose payoff depends on the average price of the underlying over a specified period. Average-price (fixed strike) options compare the average to a strike, while average-strike (floating strike) options use the average as the strike.
+</Definition>
+
+### Arithmetic vs Geometric Average
+
+```python
+class AsianOption:
+    """Price Asian options with arithmetic and geometric averaging."""
+
+    def __init__(self, S0, K, r, sigma, T, option_type='call',
+                 average_type='arithmetic', strike_type='fixed'):
+        self.S0 = S0
+        self.K = K
+        self.r = r
+        self.sigma = sigma
+        self.T = T
+        self.option_type = option_type
+        self.average_type = average_type
+        self.strike_type = strike_type
+
+    def calculate_average(self, paths):
+        """Calculate average price based on averaging type."""
+        if self.average_type == 'arithmetic':
+            return np.mean(paths, axis=1)
+        else:  # geometric
+            return np.exp(np.mean(np.log(paths), axis=1))
+
+    def payoff(self, S_T, S_avg):
+        """Calculate payoff based on strike type."""
+        if self.strike_type == 'fixed':
+            # Fixed strike: compare average to strike
+            if self.option_type == 'call':
+                return np.maximum(S_avg - self.K, 0)
+            else:
+                return np.maximum(self.K - S_avg, 0)
+        else:
+            # Floating strike: use average as strike
+            if self.option_type == 'call':
+                return np.maximum(S_T - S_avg, 0)
+            else:
+                return np.maximum(S_avg - S_T, 0)
+
+    def price_mc(self, n_paths=100000, n_steps=252, seed=42):
+        """Price using Monte Carlo simulation."""
+        np.random.seed(seed)
+        dt = self.T / n_steps
+
+        # Generate paths
+        Z = np.random.standard_normal((n_paths, n_steps))
+        paths = np.zeros((n_paths, n_steps + 1))
+        paths[:, 0] = self.S0
+
+        for t in range(n_steps):
+            paths[:, t + 1] = paths[:, t] * np.exp(
+                (self.r - 0.5 * self.sigma**2) * dt +
+                self.sigma * np.sqrt(dt) * Z[:, t]
+            )
+
+        S_T = paths[:, -1]
+        S_avg = self.calculate_average(paths)
+        payoffs = self.payoff(S_T, S_avg)
+
+        price = np.exp(-self.r * self.T) * np.mean(payoffs)
+        std_err = np.exp(-self.r * self.T) * np.std(payoffs) / np.sqrt(n_paths)
+
+        return price, std_err, np.mean(S_avg)
+
+# Fixed-strike arithmetic Asian call
+asian_arith = AsianOption(
+    S0=100, K=100, r=0.05, sigma=0.2, T=1.0,
+    average_type='arithmetic', strike_type='fixed'
+)
+
+price_arith, std_err, avg = asian_arith.price_mc()
+print(f"Arithmetic Asian Call: ${price_arith:.4f} ± ${1.96*std_err:.4f}")
+print(f"Average expected price: ${avg:.2f}")
+
+# Geometric Asian (has closed-form solution)
+asian_geom = AsianOption(
+    S0=100, K=100, r=0.05, sigma=0.2, T=1.0,
+    average_type='geometric', strike_type='fixed'
+)
+
+price_geom, std_err, _ = asian_geom.price_mc()
+print(f"Geometric Asian Call: ${price_geom:.4f} ± ${1.96*std_err:.4f}")
+
+# Compare to vanilla
+print(f"Vanilla Call: ${vanilla_price:.4f}")
+print(f"Asian discount: {(1 - price_arith/vanilla_price)*100:.1f}%")
+```
+
+### Geometric Asian Closed-Form
+
+```python
+def geometric_asian_call(S, K, r, sigma, T, n):
+    """
+    Closed-form solution for continuous geometric Asian option.
+
+    The geometric average of a GBM is lognormal, enabling analytical pricing.
+    """
+    # Adjusted volatility for geometric average
+    sigma_adj = sigma / np.sqrt(3)
+
+    # Adjusted drift
+    r_adj = 0.5 * (r - 0.5*sigma**2 + (r + sigma**2/6))
+
+    # Use Black-Scholes with adjusted parameters
+    d1 = (np.log(S/K) + (r_adj + 0.5*sigma_adj**2)*T) / (sigma_adj*np.sqrt(T))
+    d2 = d1 - sigma_adj*np.sqrt(T)
+
+    # Discount at original risk-free rate
+    price = np.exp(-r*T) * (S * np.exp(r_adj*T) * norm.cdf(d1) - K * norm.cdf(d2))
+
+    return price
+
+geom_analytical = geometric_asian_call(100, 100, 0.05, 0.2, 1.0, 252)
+print(f"Geometric Asian (analytical): ${geom_analytical:.4f}")
+```
+
+<Warning>
+Arithmetic Asian options have no closed-form solution because the sum of lognormal variables is not lognormal. Monte Carlo or moment-matching approximations are required.
+</Warning>
+
+## Lookback Options
+
+Lookback options allow the holder to "look back" over the option's life and choose the optimal price.
+
+<Formula expression="\\text{Floating Strike Call Payoff} = S_T - S_{\\min}" description="Lookback call with floating strike equals final price minus minimum price" />
+
+```python
+class LookbackOption:
+    """Price lookback options using Monte Carlo simulation."""
+
+    def __init__(self, S0, K, r, sigma, T, option_type='call',
+                 strike_type='floating'):
+        self.S0 = S0
+        self.K = K  # Only used for fixed strike
+        self.r = r
+        self.sigma = sigma
+        self.T = T
+        self.option_type = option_type
+        self.strike_type = strike_type
+
+    def payoff(self, paths):
+        """Calculate lookback payoff."""
+        S_T = paths[:, -1]
+        S_max = np.max(paths, axis=1)
+        S_min = np.min(paths, axis=1)
+
+        if self.strike_type == 'floating':
+            if self.option_type == 'call':
+                # Buy at minimum, sell at final
+                return S_T - S_min
+            else:
+                # Sell at maximum, buy at final
+                return S_max - S_T
+        else:  # fixed strike
+            if self.option_type == 'call':
+                # Maximum price minus strike
+                return np.maximum(S_max - self.K, 0)
+            else:
+                # Strike minus minimum price
+                return np.maximum(self.K - S_min, 0)
+
+    def price_mc(self, n_paths=100000, n_steps=252, seed=42):
+        """Price using Monte Carlo simulation."""
+        np.random.seed(seed)
+        dt = self.T / n_steps
+
+        # Generate paths
+        Z = np.random.standard_normal((n_paths, n_steps))
+        paths = np.zeros((n_paths, n_steps + 1))
+        paths[:, 0] = self.S0
+
+        for t in range(n_steps):
+            paths[:, t + 1] = paths[:, t] * np.exp(
+                (self.r - 0.5 * self.sigma**2) * dt +
+                self.sigma * np.sqrt(dt) * Z[:, t]
+            )
+
+        payoffs = self.payoff(paths)
+
+        price = np.exp(-self.r * self.T) * np.mean(payoffs)
+        std_err = np.exp(-self.r * self.T) * np.std(payoffs) / np.sqrt(n_paths)
+
+        return price, std_err
+
+# Floating strike lookback call
+lookback_float = LookbackOption(
+    S0=100, K=100, r=0.05, sigma=0.2, T=1.0,
+    option_type='call', strike_type='floating'
+)
+
+price_float, std_err = lookback_float.price_mc()
+print(f"Floating Strike Lookback Call: ${price_float:.4f} ± ${1.96*std_err:.4f}")
+
+# Fixed strike lookback call
+lookback_fixed = LookbackOption(
+    S0=100, K=100, r=0.05, sigma=0.2, T=1.0,
+    option_type='call', strike_type='fixed'
+)
+
+price_fixed, std_err = lookback_fixed.price_mc()
+print(f"Fixed Strike Lookback Call: ${price_fixed:.4f} ± ${1.96*std_err:.4f}")
+
+print(f"Vanilla Call: ${vanilla_price:.4f}")
+print(f"Lookback premium: {(price_float/vanilla_price - 1)*100:.0f}% more expensive")
+```
+
+## Digital (Binary) Options
+
+Digital options have discontinuous payoffs - paying a fixed amount if a condition is met.
+
+```python
+class DigitalOption:
+    """Price digital (binary) options."""
+
+    def __init__(self, S0, K, r, sigma, T, payout=1.0, option_type='call'):
+        self.S0 = S0
+        self.K = K
+        self.r = r
+        self.sigma = sigma
+        self.T = T
+        self.payout = payout
+        self.option_type = option_type
+
+    def price_analytical(self):
+        """Analytical price using Black-Scholes."""
+        d2 = (np.log(self.S0/self.K) + (self.r - 0.5*self.sigma**2)*self.T) / \
+             (self.sigma*np.sqrt(self.T))
+
+        if self.option_type == 'call':
+            return np.exp(-self.r*self.T) * self.payout * norm.cdf(d2)
+        else:
+            return np.exp(-self.r*self.T) * self.payout * norm.cdf(-d2)
+
+    def price_mc(self, n_paths=100000, seed=42):
+        """Price using Monte Carlo simulation."""
+        np.random.seed(seed)
+
+        # Generate terminal prices
+        Z = np.random.standard_normal(n_paths)
+        S_T = self.S0 * np.exp(
+            (self.r - 0.5*self.sigma**2)*self.T +
+            self.sigma*np.sqrt(self.T)*Z
+        )
+
+        # Digital payoff
+        if self.option_type == 'call':
+            payoffs = np.where(S_T > self.K, self.payout, 0)
+        else:
+            payoffs = np.where(S_T < self.K, self.payout, 0)
+
+        price = np.exp(-self.r*self.T) * np.mean(payoffs)
+        std_err = np.exp(-self.r*self.T) * np.std(payoffs) / np.sqrt(n_paths)
+
+        return price, std_err
+
+# Digital call paying $1 if S_T > K
+digital = DigitalOption(S0=100, K=100, r=0.05, sigma=0.2, T=1.0, payout=1.0)
+
+analytical = digital.price_analytical()
+mc_price, std_err = digital.price_mc()
+
+print(f"Digital Call (analytical): ${analytical:.4f}")
+print(f"Digital Call (MC): ${mc_price:.4f} ± ${1.96*std_err:.4f}")
+print(f"Probability of finishing ITM: {analytical/np.exp(-0.05)*100:.1f}%")
+```
+
+<Tip>
+Digital options can be hedged using call spreads. A digital call with payout P is approximately equal to (P/ε) × [C(K-ε/2) - C(K+ε/2)] for small ε, where C(K) is a vanilla call with strike K.
+</Tip>
+
+## Compound Options
+
+Options on options add another layer of complexity.
+
+```python
+def compound_option_price(S, K1, K2, r, sigma, T1, T2,
+                          outer_type='call', inner_type='call'):
+    """
+    Price a compound option (option on an option).
+
+    T1: Time to expiration of outer option
+    T2: Time to expiration of inner option (T2 > T1)
+    K1: Strike of outer option (premium threshold)
+    K2: Strike of inner option
+    """
+    from scipy.stats import mvn
+    from scipy.optimize import brentq
+
+    def black_scholes_call(S, K, r, sigma, T):
+        d1 = (np.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
+        d2 = d1 - sigma*np.sqrt(T)
+        return S * norm.cdf(d1) - K * np.exp(-r*T) * norm.cdf(d2)
+
+    # Find critical stock price S* where inner option value equals K1
+    def inner_value(S_star):
+        if inner_type == 'call':
+            return black_scholes_call(S_star, K2, r, sigma, T2-T1) - K1
+        else:
+            d1 = (np.log(S_star/K2) + (r + 0.5*sigma**2)*(T2-T1)) / (sigma*np.sqrt(T2-T1))
+            d2 = d1 - sigma*np.sqrt(T2-T1)
+            return K2*np.exp(-r*(T2-T1))*norm.cdf(-d2) - S_star*norm.cdf(-d1) - K1
+
+    try:
+        S_star = brentq(inner_value, 0.01, 10*S)
+    except ValueError:
+        return 0.0  # No solution - compound option worthless
+
+    # Calculate auxiliary variables
+    a1 = (np.log(S/S_star) + (r + 0.5*sigma**2)*T1) / (sigma*np.sqrt(T1))
+    a2 = a1 - sigma*np.sqrt(T1)
+    b1 = (np.log(S/K2) + (r + 0.5*sigma**2)*T2) / (sigma*np.sqrt(T2))
+    b2 = b1 - sigma*np.sqrt(T2)
+
+    rho = np.sqrt(T1/T2)
+
+    # Compound option value (simplified for call-on-call)
+    if outer_type == 'call' and inner_type == 'call':
+        # This requires bivariate normal CDF
+        # Simplified approximation
+        price = black_scholes_call(S, K2, r, sigma, T2) * norm.cdf(a1) - \
+                K1 * np.exp(-r*T1) * norm.cdf(a2)
+        return max(price, 0)
+
+    return 0.0  # Other types not implemented
+
+# Example: Call on Call
+compound_price = compound_option_price(
+    S=100, K1=5, K2=100, r=0.05, sigma=0.2, T1=0.5, T2=1.0
+)
+print(f"Call-on-Call compound option: ${compound_price:.4f}")
+```
+
+## Quantum Computing for Exotic Options
+
+Exotic options are prime candidates for quantum advantage due to their computational complexity.
+
+```python
+def quantum_exotic_opportunity_analysis():
+    """Analyze quantum advantage potential for different exotic options."""
+
+    analysis = {
+        'barrier': {
+            'classical_challenge': 'Many paths for barrier monitoring',
+            'quantum_advantage': 'Amplitude estimation for barrier probability',
+            'speedup_factor': 'Quadratic',
+            'qubits_needed': '~50-100 for practical pricing'
+        },
+        'asian': {
+            'classical_challenge': 'Path averaging over many steps',
+            'quantum_advantage': 'Quantum summation for averages',
+            'speedup_factor': 'Quadratic for arithmetic average',
+            'qubits_needed': '~30-60 for distribution loading'
+        },
+        'lookback': {
+            'classical_challenge': 'Tracking extrema across paths',
+            'quantum_advantage': 'Quantum minimum/maximum finding',
+            'speedup_factor': 'Quadratic',
+            'qubits_needed': '~40-80 for extremum computation'
+        },
+        'basket': {
+            'classical_challenge': 'High-dimensional integration',
+            'quantum_advantage': 'Quantum parallelism for multivariate',
+            'speedup_factor': 'Potentially super-polynomial',
+            'qubits_needed': '~100+ for multiple underlyings'
+        }
+    }
+
+    print("Quantum Computing Opportunities for Exotic Options")
+    print("=" * 55)
+
+    for option_type, details in analysis.items():
+        print(f"\n{option_type.upper()} OPTIONS:")
+        print(f"  Classical Challenge: {details['classical_challenge']}")
+        print(f"  Quantum Advantage: {details['quantum_advantage']}")
+        print(f"  Speedup: {details['speedup_factor']}")
+        print(f"  Qubits Needed: {details['qubits_needed']}")
+
+    return analysis
+
+analysis = quantum_exotic_opportunity_analysis()
+```
+
+### Practical Quantum Exotic Pricing
+
+```python
+def hybrid_exotic_pricing_framework(option_type, params):
+    """
+    Framework for hybrid classical-quantum exotic option pricing.
+
+    Classical preprocessing:
+    - Importance sampling region identification
+    - Variance reduction parameter estimation
+
+    Quantum core:
+    - Amplitude estimation for expectation values
+    - Grover-based path selection
+
+    Classical postprocessing:
+    - Bias correction
+    - Confidence interval construction
+    """
+
+    framework = {
+        'barrier': {
+            'preprocessing': [
+                'Identify high-probability barrier regions',
+                'Calculate barrier crossing probability bounds',
+                'Design importance sampling distribution'
+            ],
+            'quantum_core': [
+                'Prepare superposition of price paths',
+                'Apply barrier checking oracle',
+                'Estimate surviving path amplitude'
+            ],
+            'postprocessing': [
+                'Correct for discretization bias',
+                'Apply continuity correction',
+                'Construct confidence interval'
+            ]
+        },
+        'asian': {
+            'preprocessing': [
+                'Estimate arithmetic mean distribution parameters',
+                'Calculate geometric mean as control variate',
+                'Identify optimal averaging frequency'
+            ],
+            'quantum_core': [
+                'Load price distribution at averaging points',
+                'Quantum arithmetic for sum computation',
+                'Amplitude estimation for expected payoff'
+            ],
+            'postprocessing': [
+                'Apply control variate adjustment',
+                'Correct for discretization',
+                'Extract price and error bounds'
+            ]
+        }
+    }
+
+    print(f"Hybrid Quantum Pricing Framework: {option_type.upper()}")
+    print("-" * 45)
+
+    if option_type in framework:
+        for stage, steps in framework[option_type].items():
+            print(f"\n{stage.upper()}:")
+            for i, step in enumerate(steps, 1):
+                print(f"  {i}. {step}")
+
+    return framework.get(option_type, {})
+
+# Example framework for barrier option
+framework = hybrid_exotic_pricing_framework('barrier', None)
+```
+
+## Comprehensive Exotic Option Pricer
+
+```python
+class ExoticOptionPricer:
+    """Unified pricer for multiple exotic option types."""
+
+    def __init__(self, S0, r, sigma, T, n_paths=100000, n_steps=252):
+        self.S0 = S0
+        self.r = r
+        self.sigma = sigma
+        self.T = T
+        self.n_paths = n_paths
+        self.n_steps = n_steps
+        self.paths = None
+
+    def generate_paths(self, seed=42):
+        """Generate Monte Carlo paths."""
+        np.random.seed(seed)
+        dt = self.T / self.n_steps
+
+        Z = np.random.standard_normal((self.n_paths, self.n_steps))
+        self.paths = np.zeros((self.n_paths, self.n_steps + 1))
+        self.paths[:, 0] = self.S0
+
+        for t in range(self.n_steps):
+            self.paths[:, t + 1] = self.paths[:, t] * np.exp(
+                (self.r - 0.5 * self.sigma**2) * dt +
+                self.sigma * np.sqrt(dt) * Z[:, t]
+            )
+
+    def price_all(self, K, barrier=None, seed=42):
+        """Price multiple exotic options simultaneously."""
+        self.generate_paths(seed)
+
+        S_T = self.paths[:, -1]
+        S_avg = np.mean(self.paths, axis=1)
+        S_max = np.max(self.paths, axis=1)
+        S_min = np.min(self.paths, axis=1)
+
+        discount = np.exp(-self.r * self.T)
+
+        results = {}
+
+        # Vanilla call
+        vanilla_payoff = np.maximum(S_T - K, 0)
+        results['vanilla_call'] = discount * np.mean(vanilla_payoff)
+
+        # Asian call (arithmetic)
+        asian_payoff = np.maximum(S_avg - K, 0)
+        results['asian_call'] = discount * np.mean(asian_payoff)
+
+        # Lookback call (floating strike)
+        lookback_payoff = S_T - S_min
+        results['lookback_call'] = discount * np.mean(lookback_payoff)
+
+        # Barrier call (down-and-out)
+        if barrier:
+            barrier_hit = S_min <= barrier
+            barrier_payoff = vanilla_payoff.copy()
+            barrier_payoff[barrier_hit] = 0
+            results['barrier_call'] = discount * np.mean(barrier_payoff)
+
+        # Digital call
+        digital_payoff = np.where(S_T > K, 1.0, 0.0)
+        results['digital_call'] = discount * np.mean(digital_payoff)
+
+        return results
+
+# Price all exotics
+pricer = ExoticOptionPricer(S0=100, r=0.05, sigma=0.2, T=1.0)
+results = pricer.price_all(K=100, barrier=80)
+
+print("\nExotic Option Prices Summary")
+print("=" * 35)
+for option, price in results.items():
+    print(f"{option:20s}: ${price:.4f}")
+```
+
+## Summary
+
+Exotic options extend vanilla options with customized payoff structures:
+
+| Option Type | Key Feature | Pricing Method | Quantum Potential |
+|-------------|-------------|----------------|-------------------|
+| Barrier | Path-dependent activation | MC + analytical | High |
+| Asian | Average price dependency | MC (analytical for geometric) | High |
+| Lookback | Optimal path value | MC | Medium-High |
+| Digital | Discontinuous payoff | Analytical | Low |
+| Compound | Option on option | Numerical methods | Medium |
+
+Key takeaways:
+- Path-dependent options require tracking entire price histories
+- Monte Carlo is the workhorse method for exotic option pricing
+- Variance reduction techniques are essential for efficiency
+- Quantum computing offers quadratic speedups for many exotic types
+- Hybrid classical-quantum approaches will likely dominate initially
+
+The complexity of exotic options makes them prime candidates for quantum advantage, but practical implementation requires careful consideration of current hardware limitations.

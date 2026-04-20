@@ -1,0 +1,481 @@
+---
+title: "Layer VQE: Structured Variational Ansatz Design"
+description: "Learn how Layer VQE organizes variational circuits into structured layers, enabling systematic depth control and improved optimization landscapes for quantum chemistry applications."
+duration: 70
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the layer-based approach to VQE ansatz construction
+- Design hardware-efficient layered circuits
+- Implement layer growth strategies for systematic accuracy improvement
+- Analyze the trade-off between circuit depth and expressibility
+- Compare Layer VQE with ADAPT-VQE and UCCSD approaches
+- Apply Layer VQE to molecular ground state problems
+
+## 1. Introduction to Layered Ansatze
+
+While ADAPT-VQE grows circuits operator-by-operator, **Layer VQE** takes a different approach: organizing the variational circuit into repeating structural layers that can be systematically added or modified.
+
+<Definition term="Layer VQE">
+Layer VQE is a variational quantum eigensolver approach where the ansatz is constructed from repeated layers of parameterized gates, with each layer following a fixed structural pattern. The circuit depth grows by adding more layers rather than individual operators.
+</Definition>
+
+### Why Layers?
+
+Layered structures offer several advantages:
+
+1. **Predictable scaling**: Circuit depth grows linearly with layer count
+2. **Hardware alignment**: Layers can be designed to match device connectivity
+3. **Expressibility control**: More layers = more expressible ansatz
+4. **Optimization structure**: Regular patterns can have better trainability
+
+<Formula>
+$$|\psi(\vec{\theta})\rangle = \prod_{l=1}^{L} U_l(\vec{\theta}_l) |\psi_0\rangle$$
+</Formula>
+
+where $U_l(\vec{\theta}_l)$ represents the $l$-th layer with parameters $\vec{\theta}_l$.
+
+## 2. Layer Architecture Design
+
+### Basic Layer Structure
+
+A typical layer consists of two components:
+
+1. **Single-qubit rotations**: Parameterized rotations on each qubit
+2. **Entangling gates**: Two-qubit gates creating correlations
+
+```python
+import numpy as np
+
+def create_layer_circuit(n_qubits, layer_params, entangling='linear'):
+    """
+    Create a single layer of a Layer VQE ansatz.
+
+    Args:
+        n_qubits: Number of qubits
+        layer_params: Parameters for this layer [rotation_params, ...]
+        entangling: Entangling pattern ('linear', 'circular', 'full')
+
+    Returns:
+        Unitary matrix for this layer
+    """
+    from scipy.linalg import expm
+
+    # Pauli matrices
+    I = np.eye(2, dtype=complex)
+    X = np.array([[0, 1], [1, 0]], dtype=complex)
+    Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+    Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    def Rx(theta):
+        return np.cos(theta/2)*I - 1j*np.sin(theta/2)*X
+
+    def Ry(theta):
+        return np.cos(theta/2)*I - 1j*np.sin(theta/2)*Y
+
+    def Rz(theta):
+        return np.cos(theta/2)*I - 1j*np.sin(theta/2)*Z
+
+    # Apply single-qubit rotations
+    dim = 2**n_qubits
+    U = np.eye(dim, dtype=complex)
+
+    param_idx = 0
+    for q in range(n_qubits):
+        # Ry-Rz rotation on each qubit
+        ry = Ry(layer_params[param_idx])
+        rz = Rz(layer_params[param_idx + 1])
+
+        # Build full operator
+        ops = [I] * n_qubits
+        ops[q] = rz @ ry
+
+        full_op = ops[0]
+        for op in ops[1:]:
+            full_op = np.kron(full_op, op)
+
+        U = full_op @ U
+        param_idx += 2
+
+    return U
+
+# Example: Create a 3-qubit layer
+n_qubits = 3
+params = np.random.randn(2 * n_qubits)  # 2 params per qubit
+U_layer = create_layer_circuit(n_qubits, params)
+print(f"Layer unitary shape: {U_layer.shape}")
+```
+
+### Entangling Patterns
+
+<Definition term="Entangling Layer">
+An entangling layer is a portion of the circuit consisting of two-qubit gates that create quantum correlations between qubits. The pattern of connections is called the entangling topology.
+</Definition>
+
+Common entangling patterns:
+
+| Pattern | Description | Connectivity |
+|---------|-------------|--------------|
+| Linear | Nearest-neighbor chain | O(n) gates |
+| Circular | Ring topology | O(n) gates |
+| Full | All-to-all | O(n²) gates |
+| Brick | Alternating pairs | O(n) gates |
+
+```python
+def get_entangling_pairs(n_qubits, pattern='linear'):
+    """Return qubit pairs for entangling gates."""
+    if pattern == 'linear':
+        return [(i, i+1) for i in range(n_qubits-1)]
+    elif pattern == 'circular':
+        pairs = [(i, i+1) for i in range(n_qubits-1)]
+        pairs.append((n_qubits-1, 0))
+        return pairs
+    elif pattern == 'brick':
+        # Even layer: (0,1), (2,3), ...
+        # Odd layer: (1,2), (3,4), ...
+        even = [(i, i+1) for i in range(0, n_qubits-1, 2)]
+        odd = [(i, i+1) for i in range(1, n_qubits-1, 2)]
+        return even + odd
+    elif pattern == 'full':
+        from itertools import combinations
+        return list(combinations(range(n_qubits), 2))
+
+# Example
+for pattern in ['linear', 'circular', 'brick', 'full']:
+    pairs = get_entangling_pairs(4, pattern)
+    print(f"{pattern}: {pairs}")
+```
+
+## 3. Hardware-Efficient Ansatz
+
+The **Hardware-Efficient Ansatz (HEA)** is a popular Layer VQE design that prioritizes native gate implementation.
+
+<Definition term="Hardware-Efficient Ansatz">
+A hardware-efficient ansatz uses only gates native to the target quantum hardware and respects the device's qubit connectivity, minimizing the need for SWAP operations and reducing circuit depth overhead.
+</Definition>
+
+### Standard HEA Structure
+
+Each layer typically contains:
+
+1. **Rotation block**: $R_Y(\theta) R_Z(\phi)$ on each qubit
+2. **Entangling block**: CNOT or CZ gates following device connectivity
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+class HardwareEfficientAnsatz:
+    """Hardware-Efficient Ansatz implementation."""
+
+    def __init__(self, n_qubits, n_layers, entangling='linear'):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.entangling = entangling
+
+        # Calculate total parameters
+        # 2 rotations per qubit per layer, plus initial layer
+        self.n_params = 2 * n_qubits * (n_layers + 1)
+
+    def get_circuit_depth(self):
+        """Estimate circuit depth."""
+        # Each layer: 1 rotation depth + 1 entangling depth
+        return 2 * self.n_layers + 1
+
+    def build_unitary(self, params):
+        """Build the full ansatz unitary."""
+        dim = 2**self.n_qubits
+        U = np.eye(dim, dtype=complex)
+
+        param_idx = 0
+
+        for layer in range(self.n_layers + 1):
+            # Rotation block
+            U_rot = self._rotation_block(
+                params[param_idx:param_idx + 2*self.n_qubits]
+            )
+            U = U_rot @ U
+            param_idx += 2 * self.n_qubits
+
+            # Entangling block (skip for last layer)
+            if layer < self.n_layers:
+                U_ent = self._entangling_block()
+                U = U_ent @ U
+
+        return U
+
+    def _rotation_block(self, params):
+        """Build rotation block."""
+        # Implementation details...
+        pass
+
+    def _entangling_block(self):
+        """Build entangling block."""
+        # Implementation details...
+        pass
+
+# Usage
+hea = HardwareEfficientAnsatz(n_qubits=4, n_layers=3)
+print(f"Total parameters: {hea.n_params}")
+print(f"Estimated depth: {hea.get_circuit_depth()}")
+```
+
+<Tip>
+When designing for real hardware, check the device's native gate set and connectivity map. For IBM devices, use CX (CNOT) gates with the heavy-hex topology. For Google devices, use the √iSWAP gate.
+</Tip>
+
+## 4. Layer Growth Strategy
+
+Layer VQE can systematically improve accuracy by adding layers:
+
+### Iterative Layer Addition
+
+```
+1. Start with L=1 layer
+2. Optimize all parameters via VQE
+3. Check convergence: |E_L - E_{L-1}| < ε?
+4. If not converged, add layer L+1
+5. Re-initialize and re-optimize
+6. Repeat until converged or max layers reached
+```
+
+### Parameter Initialization Strategies
+
+<Definition term="Identity Initialization">
+Setting initial parameters such that each layer acts as the identity operation, ensuring the initial state is the reference state and optimization can smoothly explore the landscape.
+</Definition>
+
+```python
+def identity_initialization(n_qubits, n_layers):
+    """
+    Initialize parameters so each layer is approximately identity.
+
+    For Ry(θ)Rz(φ), identity requires θ=0, φ=0.
+    Add small noise for symmetry breaking.
+    """
+    n_params = 2 * n_qubits * (n_layers + 1)
+    params = np.zeros(n_params)
+
+    # Add small noise for symmetry breaking
+    params += np.random.randn(n_params) * 0.01
+
+    return params
+
+def warm_start_initialization(old_params, n_qubits):
+    """
+    When adding a new layer, initialize new parameters to zero
+    and keep old optimized parameters.
+    """
+    new_layer_params = np.zeros(2 * n_qubits)
+    return np.concatenate([old_params, new_layer_params])
+```
+
+<Warning>
+Poor initialization can lead to barren plateaus where gradients vanish exponentially. Always use structured initialization strategies rather than random uniform initialization for deep circuits.
+</Warning>
+
+## 5. Expressibility Analysis
+
+### Measuring Expressibility
+
+Expressibility quantifies how well an ansatz can explore the Hilbert space:
+
+<Formula>
+$$\text{Expr} = D_{KL}\left(P_{U(\theta)}(F) \| P_{\text{Haar}}(F)\right)$$
+</Formula>
+
+where $F$ is the fidelity between random states and $P_{\text{Haar}}$ is the distribution from Haar-random unitaries.
+
+```python
+import numpy as np
+from scipy.stats import entropy
+
+def estimate_expressibility(ansatz_class, n_samples=1000):
+    """
+    Estimate expressibility by comparing fidelity distributions.
+
+    Lower values = more expressible (closer to Haar random)
+    """
+    fidelities = []
+
+    for _ in range(n_samples):
+        # Generate two random parameter sets
+        params1 = np.random.randn(ansatz_class.n_params) * np.pi
+        params2 = np.random.randn(ansatz_class.n_params) * np.pi
+
+        # Build states
+        U1 = ansatz_class.build_unitary(params1)
+        U2 = ansatz_class.build_unitary(params2)
+
+        # Reference state
+        psi0 = np.zeros(2**ansatz_class.n_qubits)
+        psi0[0] = 1
+
+        psi1 = U1 @ psi0
+        psi2 = U2 @ psi0
+
+        # Compute fidelity
+        fidelity = np.abs(psi1.conj() @ psi2)**2
+        fidelities.append(fidelity)
+
+    # Compare to Haar distribution (uniform for pure states)
+    # Haar fidelity follows beta distribution
+    # Simplified: compute histogram and compare
+    hist, bins = np.histogram(fidelities, bins=50, density=True)
+
+    return np.mean(fidelities), np.std(fidelities)
+
+# More layers generally = more expressible
+```
+
+### Depth vs. Expressibility Trade-off
+
+| Layers | Parameters | Expressibility | Trainability |
+|--------|------------|----------------|--------------|
+| 1-2 | Low | Limited | Good |
+| 3-5 | Medium | Moderate | Good |
+| 6-10 | High | High | Challenging |
+| >10 | Very High | Near-Haar | Barren plateaus |
+
+<Tip>
+For NISQ applications, 2-5 layers typically provide a good balance between expressibility and trainability. Start shallow and add layers only if needed for accuracy.
+</Tip>
+
+## 6. Comparison with Other Ansatze
+
+### Layer VQE vs. ADAPT-VQE
+
+| Aspect | Layer VQE | ADAPT-VQE |
+|--------|-----------|-----------|
+| Construction | Fixed structure, add layers | Dynamic, operator-by-operator |
+| Parameters | Regular, predictable | Problem-dependent |
+| Initialization | Identity start works well | Requires gradient evaluation |
+| Hardware fit | Designed for hardware | May need compilation |
+| Convergence | Layer-by-layer | Gradient threshold |
+
+### Layer VQE vs. UCCSD
+
+| Aspect | Layer VQE | UCCSD |
+|--------|-----------|-------|
+| Physical basis | Hardware gates | Fermionic excitations |
+| Depth | Controllable | Fixed, often deep |
+| Chemical accuracy | With enough layers | By construction |
+| Gate overhead | Minimal | High (Trotterization) |
+
+## 7. Implementation Example
+
+Complete Layer VQE for a molecular system:
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+
+class LayerVQE:
+    """Complete Layer VQE implementation."""
+
+    def __init__(self, hamiltonian, n_qubits, max_layers=10):
+        self.H = hamiltonian
+        self.n_qubits = n_qubits
+        self.max_layers = max_layers
+        self.dim = 2**n_qubits
+
+        # Reference state (computational basis |0...0⟩)
+        self.psi0 = np.zeros(self.dim, dtype=complex)
+        self.psi0[0] = 1
+
+    def build_layer(self, params, include_entangling=True):
+        """Build a single layer unitary."""
+        # Simplified: create rotation layer
+        U = np.eye(self.dim, dtype=complex)
+
+        # Add parameterized rotations
+        # (Full implementation would include proper gate construction)
+
+        return U
+
+    def build_ansatz(self, params, n_layers):
+        """Build full ansatz with given number of layers."""
+        params_per_layer = 2 * self.n_qubits
+        U = np.eye(self.dim, dtype=complex)
+
+        for l in range(n_layers + 1):
+            start = l * params_per_layer
+            end = start + params_per_layer
+            layer_params = params[start:end]
+
+            U_layer = self.build_layer(layer_params, l < n_layers)
+            U = U_layer @ U
+
+        return U
+
+    def energy(self, params, n_layers):
+        """Compute energy expectation value."""
+        U = self.build_ansatz(params, n_layers)
+        psi = U @ self.psi0
+        E = np.real(psi.conj().T @ self.H @ psi)
+        return E
+
+    def run(self, convergence_threshold=1e-5):
+        """Run Layer VQE with iterative layer addition."""
+        params_per_layer = 2 * self.n_qubits
+        best_energy = float('inf')
+        best_params = None
+
+        for n_layers in range(self.max_layers):
+            n_params = params_per_layer * (n_layers + 1)
+
+            # Initialize parameters
+            if best_params is None:
+                init_params = np.random.randn(n_params) * 0.01
+            else:
+                # Warm start from previous optimization
+                new_params = np.zeros(params_per_layer)
+                init_params = np.concatenate([best_params, new_params])
+
+            # Optimize
+            result = minimize(
+                lambda p: self.energy(p, n_layers),
+                init_params,
+                method='BFGS'
+            )
+
+            current_energy = result.fun
+
+            print(f"Layers: {n_layers + 1}, "
+                  f"Energy: {current_energy:.8f}, "
+                  f"Parameters: {n_params}")
+
+            # Check convergence
+            if abs(current_energy - best_energy) < convergence_threshold:
+                print(f"Converged at {n_layers + 1} layers!")
+                break
+
+            if current_energy < best_energy:
+                best_energy = current_energy
+                best_params = result.x
+
+        return best_energy, best_params
+```
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Layer VQE organizes** circuits into repeating structural layers for systematic depth control
+2. **Hardware-efficient ansatze** use native gates and respect device connectivity
+3. **Layer growth strategies** iteratively add layers until convergence
+4. **Expressibility increases** with depth but trainability may decrease
+5. **Initialization matters**: identity initialization prevents barren plateaus
+6. **Trade-offs exist** between Layer VQE, ADAPT-VQE, and UCCSD approaches
+
+Layer VQE provides a structured, hardware-friendly approach to variational quantum chemistry, offering a good balance between flexibility and practical implementability on near-term devices.
+
+## Further Reading
+
+- Next lesson: Symmetry-Preserving Ansatze
+- Related: Hardware-Efficient Ansatz Design
+- Application: Molecular Simulation with Layer VQE

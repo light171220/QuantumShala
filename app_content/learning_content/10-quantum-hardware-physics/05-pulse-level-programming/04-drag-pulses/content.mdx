@@ -1,0 +1,452 @@
+---
+title: "DRAG Pulses: Derivative Removal by Adiabatic Gate"
+description: "Master DRAG pulse techniques for suppressing leakage to non-computational states."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Explain the physics of leakage errors in transmon qubits
+- Derive the DRAG correction from the three-level Hamiltonian
+- Implement DRAG pulses with proper amplitude and phase relationships
+- Design calibration experiments for DRAG coefficient optimization
+- Analyze the tradeoffs between leakage suppression and other error sources
+
+## 1. The Leakage Problem
+
+Transmon qubits are not true two-level systems - they are weakly anharmonic oscillators with many energy levels. While we use only |0⟩ and |1⟩ for computation, higher levels can be inadvertently populated during gate operations.
+
+<Definition term="Leakage Error">
+Leakage error occurs when the qubit population leaves the computational subspace {|0⟩, |1⟩} and enters higher energy states (primarily |2⟩). This is a coherent error that cannot be corrected by standard quantum error correction codes designed for computational errors.
+</Definition>
+
+### Why Leakage Happens
+
+Consider a transmon with energy levels:
+- |0⟩ → |1⟩ transition at frequency ω₀₁
+- |1⟩ → |2⟩ transition at frequency ω₁₂ = ω₀₁ + α
+
+where α ≈ -200 to -300 MHz is the anharmonicity.
+
+When driving at ω₀₁, spectral components of the pulse at ω₁₂ = ω₀₁ + α can excite the 1-2 transition:
+
+<Formula>
+$$P_{leak} \propto \left|\tilde{\Omega}(\omega_{12})\right|^2 \propto \left|\tilde{\Omega}(\omega_{01} + \alpha)\right|^2$$
+</Formula>
+
+### The Leakage Rate
+
+For a Gaussian pulse with Rabi frequency Ω and duration T, the leakage probability scales as:
+
+<Formula>
+$$P_{leak} \sim \left(\frac{\Omega}{|\alpha|}\right)^2$$
+</Formula>
+
+For fast gates where ΩT ~ π and Ω approaches |α|, leakage becomes significant.
+
+<Warning>
+Leakage is particularly problematic because it accumulates over multiple gates. Even 0.1% leakage per gate leads to ~10% after 100 gates, severely limiting circuit depth.
+</Warning>
+
+## 2. Three-Level Qubit Model
+
+To understand and correct leakage, we must consider the qubit as a three-level system.
+
+### Hamiltonian
+
+In the rotating frame at the drive frequency ωd:
+
+<Formula>
+$$\hat{H} = \begin{pmatrix}
+0 & \Omega(t)/2 & 0 \\
+\Omega^*(t)/2 & \Delta & \sqrt{2}\Omega(t)/2 \\
+0 & \sqrt{2}\Omega^*(t)/2 & 2\Delta + \alpha
+\end{pmatrix}$$
+</Formula>
+
+where:
+- Δ = ω₀₁ - ωd is the detuning (zero for resonant drive)
+- The √2 factor comes from the ladder operator matrix elements in the transmon
+
+### On Resonance (Δ = 0)
+
+When driving resonantly:
+
+<Formula>
+$$\hat{H} = \frac{\Omega(t)}{2}\begin{pmatrix}
+0 & 1 & 0 \\
+1 & 0 & \sqrt{2} \\
+0 & \sqrt{2} & 2\alpha/\Omega
+\end{pmatrix}$$
+</Formula>
+
+The |1⟩ state is coupled to both |0⟩ (the desired transition) and |2⟩ (leakage).
+
+## 3. The DRAG Correction
+
+DRAG (Derivative Removal by Adiabatic Gate) was developed by Motzoi et al. (2009) to suppress leakage using a simple pulse modification.
+
+<Definition term="DRAG Pulse">
+A DRAG pulse consists of two quadrature components: the original pulse envelope Ω(t) on the I (in-phase) channel, and its derivative scaled by the DRAG coefficient on the Q (quadrature) channel. This correction destructively interferes with the leakage pathway.
+</Definition>
+
+### DRAG Derivation
+
+Starting from the three-level Schrödinger equation, we seek a unitary transformation that eliminates the coupling to |2⟩ to first order. The key insight is that adding a derivative term creates a counter-rotating contribution that cancels the leakage.
+
+The DRAG pulse is:
+
+<Formula>
+$$\Omega_{DRAG}(t) = \Omega_I(t) + i\Omega_Q(t)$$
+</Formula>
+
+where:
+
+<Formula>
+$$\Omega_I(t) = \Omega(t) \quad \text{(original envelope)}$$
+$$\Omega_Q(t) = -\frac{\dot{\Omega}(t)}{\alpha} \quad \text{(derivative correction)}$$
+</Formula>
+
+### Physical Interpretation
+
+The DRAG correction can be understood in two complementary ways:
+
+1. **Frequency domain**: The derivative term shifts the spectrum away from ω₁₂
+2. **Adiabatic elimination**: The correction maintains the qubit in an instantaneous eigenstate that has no |2⟩ component
+
+<Tip>
+The DRAG coefficient β = -1/α depends only on the anharmonicity. In practice, this theoretical value needs calibration due to higher-order effects and pulse distortions.
+</Tip>
+
+## 4. DRAG Pulse Implementation
+
+### Basic DRAG Pulse
+
+For a Gaussian envelope:
+
+<Formula>
+$$\Omega(t) = A \exp\left(-\frac{(t-t_0)^2}{2\sigma^2}\right)$$
+</Formula>
+
+The derivative is:
+
+<Formula>
+$$\dot{\Omega}(t) = -\frac{(t-t_0)}{\sigma^2}\Omega(t)$$
+</Formula>
+
+So the DRAG pulse becomes:
+
+<Formula>
+$$\Omega_{DRAG}(t) = \Omega(t) + i\beta\frac{(t-t_0)}{\sigma^2}\Omega(t)$$
+</Formula>
+
+where β = -1/α is the DRAG coefficient.
+
+<Example>
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def gaussian_drag_pulse(t, amp, sigma, center, drag_coef, alpha_MHz=-250):
+    """
+    Generate a Gaussian DRAG pulse.
+
+    Args:
+        t: Time array
+        amp: Peak amplitude
+        sigma: Gaussian width
+        center: Pulse center time
+        drag_coef: DRAG coefficient (theoretical: -1/alpha)
+        alpha_MHz: Anharmonicity in MHz
+
+    Returns:
+        Complex pulse envelope (I + iQ)
+    """
+    # Gaussian envelope
+    gaussian = amp * np.exp(-0.5 * ((t - center) / sigma)**2)
+
+    # Derivative
+    derivative = -(t - center) / sigma**2 * gaussian
+
+    # DRAG correction
+    # Theoretical: beta = -1/alpha, but often scaled by a calibrated factor
+    drag_correction = drag_coef * derivative
+
+    # Complex envelope
+    pulse = gaussian + 1j * drag_correction
+
+    return pulse
+
+# Create pulse
+t = np.linspace(0, 30, 300)  # ns
+amp = 0.5
+sigma = 5.0  # ns
+center = 15.0
+
+# Compare with and without DRAG
+pulse_no_drag = gaussian_drag_pulse(t, amp, sigma, center, drag_coef=0)
+pulse_with_drag = gaussian_drag_pulse(t, amp, sigma, center, drag_coef=0.5)
+
+# Plot
+fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+
+# Time domain
+axes[0, 0].plot(t, pulse_no_drag.real, 'b-', label='I (no DRAG)', linewidth=2)
+axes[0, 0].plot(t, pulse_no_drag.imag, 'b--', label='Q (no DRAG)', linewidth=2)
+axes[0, 0].set_xlabel('Time (ns)')
+axes[0, 0].set_ylabel('Amplitude')
+axes[0, 0].set_title('Standard Gaussian Pulse')
+axes[0, 0].legend()
+axes[0, 0].grid(True, alpha=0.3)
+
+axes[0, 1].plot(t, pulse_with_drag.real, 'r-', label='I (DRAG)', linewidth=2)
+axes[0, 1].plot(t, pulse_with_drag.imag, 'r--', label='Q (DRAG)', linewidth=2)
+axes[0, 1].set_xlabel('Time (ns)')
+axes[0, 1].set_ylabel('Amplitude')
+axes[0, 1].set_title('DRAG Pulse (β = 0.5)')
+axes[0, 1].legend()
+axes[0, 1].grid(True, alpha=0.3)
+
+# IQ plot
+axes[1, 0].plot(pulse_no_drag.real, pulse_no_drag.imag, 'b-', linewidth=2)
+axes[1, 0].plot(pulse_with_drag.real, pulse_with_drag.imag, 'r-', linewidth=2)
+axes[1, 0].set_xlabel('I')
+axes[1, 0].set_ylabel('Q')
+axes[1, 0].set_title('IQ Trajectory')
+axes[1, 0].axis('equal')
+axes[1, 0].grid(True, alpha=0.3)
+axes[1, 0].legend(['No DRAG', 'With DRAG'])
+
+# Frequency spectrum comparison
+dt = t[1] - t[0]
+freq = np.fft.fftfreq(len(t), dt * 1e-9) / 1e6  # MHz
+spec_no_drag = np.abs(np.fft.fft(pulse_no_drag))
+spec_drag = np.abs(np.fft.fft(pulse_with_drag))
+
+pos = freq > 0
+axes[1, 1].semilogy(freq[pos], spec_no_drag[pos], 'b-', label='No DRAG')
+axes[1, 1].semilogy(freq[pos], spec_drag[pos], 'r-', label='DRAG')
+axes[1, 1].axvline(250, color='k', linestyle='--', alpha=0.5, label='|α| = 250 MHz')
+axes[1, 1].set_xlabel('Frequency (MHz)')
+axes[1, 1].set_ylabel('Spectral amplitude')
+axes[1, 1].set_title('Frequency Spectrum')
+axes[1, 1].set_xlim(0, 500)
+axes[1, 1].legend()
+axes[1, 1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+</Example>
+
+## 5. Higher-Order DRAG
+
+The first-order DRAG correction eliminates leakage to O(1/α). For even higher fidelity, second-order corrections can be applied.
+
+### Second-Order DRAG
+
+<Formula>
+$$\Omega_Q(t) = -\frac{\dot{\Omega}(t)}{\alpha} - \frac{\Omega(t)\dot{\Omega}(t)}{4\alpha^2}$$
+</Formula>
+
+### Amplitude Correction
+
+DRAG also introduces a small phase error that can be corrected by modifying the I-channel amplitude:
+
+<Formula>
+$$\Omega_I(t) = \Omega(t)\left(1 - \frac{\dot{\Omega}^2(t)}{4\alpha^2\Omega^2(t)}\right)$$
+</Formula>
+
+<Tip>
+In practice, these higher-order corrections are often absorbed into an empirically calibrated DRAG coefficient. The theoretical value serves as a starting point for calibration.
+</Tip>
+
+## 6. DRAG Calibration
+
+The theoretical DRAG coefficient β = -1/α needs experimental calibration due to:
+- Pulse distortions from electronics
+- Higher-order transmon nonlinearities
+- Frequency-dependent coupling
+
+### Calibration Methods
+
+#### Method 1: Error Amplification
+
+Apply many repetitions of a gate and look for accumulated errors:
+
+1. Prepare |0⟩
+2. Apply (X, X⁻¹)ⁿ sequence (should return to |0⟩)
+3. Vary DRAG coefficient
+4. Minimize |1⟩ population
+
+<Example>
+```python
+def simulate_drag_calibration(drag_coefficients, n_repetitions=21,
+                               alpha_MHz=-250, Omega_MHz=50):
+    """
+    Simulate DRAG calibration by error amplification.
+
+    Args:
+        drag_coefficients: Array of DRAG coefficients to test
+        n_repetitions: Number of X, X⁻¹ pairs
+        alpha_MHz: Anharmonicity
+        Omega_MHz: Rabi frequency
+
+    Returns:
+        Simulated |1⟩ population for each coefficient
+    """
+    # Simplified model: leakage per gate depends on DRAG mismatch
+    beta_optimal = -1000 / alpha_MHz  # Theoretical optimal (convert to ns^-1 units)
+
+    P1_final = []
+
+    for beta in drag_coefficients:
+        # Error per gate from DRAG mismatch
+        mismatch = (beta - beta_optimal) / beta_optimal
+
+        # Leakage error (quadratic in mismatch)
+        leakage_per_gate = 0.001 * mismatch**2
+
+        # Phase error (linear in mismatch)
+        phase_error_per_gate = 0.02 * mismatch
+
+        # Accumulated error after n_repetitions pairs
+        total_error = n_repetitions * np.sqrt(leakage_per_gate**2 + phase_error_per_gate**2)
+
+        # Final P1 (should be 0 for perfect calibration)
+        P1_final.append(min(0.5, total_error + 0.01))  # Add noise floor
+
+    return np.array(P1_final)
+
+# Calibration sweep
+drag_coeffs = np.linspace(-8, 8, 41)  # Typical range in ns
+alpha = -250  # MHz
+beta_theory = -1000 / alpha  # = 4 ns
+
+P1 = simulate_drag_calibration(drag_coeffs, n_repetitions=21, alpha_MHz=alpha)
+
+# Find optimal
+optimal_idx = np.argmin(P1)
+beta_optimal = drag_coeffs[optimal_idx]
+
+plt.figure(figsize=(10, 5))
+plt.plot(drag_coeffs, P1, 'bo-', markersize=4)
+plt.axvline(beta_theory, color='r', linestyle='--', label=f'Theory: β = {beta_theory:.1f}')
+plt.axvline(beta_optimal, color='g', linestyle='--', label=f'Optimal: β = {beta_optimal:.1f}')
+plt.xlabel('DRAG Coefficient β')
+plt.ylabel('Final P(|1⟩)')
+plt.title(f'DRAG Calibration (α = {alpha} MHz)')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+
+print(f"Theoretical β: {beta_theory:.2f}")
+print(f"Calibrated β: {beta_optimal:.2f}")
+```
+</Example>
+
+#### Method 2: AllXY Sequence
+
+The AllXY sequence tests gate calibration using specific pulse combinations:
+
+| Sequence | Ideal Result |
+|----------|-------------|
+| I, I | |0⟩ |
+| X, X | |0⟩ |
+| Y, Y | |0⟩ |
+| X, Y | |1⟩ |
+| Y, X | |1⟩ |
+| X/2, I | |+⟩ |
+| Y/2, I | |+⟩ |
+| X/2, Y/2 | |+⟩ |
+| Y/2, X/2 | |+⟩ |
+| ... | ... |
+
+Deviations from ideal indicate calibration errors, including DRAG mismatch.
+
+## 7. DRAG Limitations and Extensions
+
+### Limitations
+
+1. **Bandwidth constraint**: DRAG adds high-frequency content, potentially violating RWA
+2. **Multi-level effects**: Only addresses 1→2 leakage, not higher transitions
+3. **Crosstalk**: DRAG-optimized pulses for one qubit may not be optimal for neighbors
+
+### Extensions
+
+#### Generalized DRAG
+
+For qubits with nearby defects or coupled systems:
+
+<Formula>
+$$\Omega_Q(t) = \sum_k \beta_k \frac{d^k\Omega}{dt^k}$$
+</Formula>
+
+#### Frequency-Modulated DRAG
+
+Add frequency chirp to further suppress leakage:
+
+<Formula>
+$$\phi(t) = \int_0^t \delta\omega(t') dt'$$
+</Formula>
+
+## 8. DRAG in Practice
+
+### Qiskit Pulse Implementation
+
+```python
+from qiskit import pulse
+from qiskit.pulse import library as pulse_lib
+
+# Create a DRAG pulse
+drag_pulse = pulse_lib.Drag(
+    duration=160,           # samples
+    amp=0.1,                # normalized amplitude
+    sigma=40,               # Gaussian width
+    beta=2.0,               # DRAG coefficient
+    name='drag_x90'
+)
+
+# Build a schedule
+with pulse.build(name='x_gate') as x_gate_schedule:
+    pulse.play(drag_pulse, pulse.drive_channel(0))
+```
+
+### Typical DRAG Parameters
+
+| Parameter | Typical Range | Notes |
+|-----------|---------------|-------|
+| β | 0.5 - 4.0 | Depends on α and σ |
+| σ | 5-15 ns | Pulse width |
+| Amplitude | 0.05 - 0.2 | Normalized |
+| Duration | 20-50 ns | Total gate time |
+
+<Warning>
+DRAG calibration must be redone when changing pulse amplitude or duration, as the optimal coefficient depends on these parameters.
+</Warning>
+
+## 9. Summary
+
+DRAG pulses are essential for achieving high-fidelity single-qubit gates:
+
+1. **Leakage problem**: Fast pulses excite the |2⟩ state via spectral content at ω₁₂
+2. **DRAG solution**: Add derivative-proportional quadrature component
+3. **Theoretical coefficient**: β = -1/α ≈ 4 ns for typical transmons
+4. **Calibration**: Required due to real-world imperfections
+5. **Error amplification**: Standard calibration method using repeated gates
+6. **Extensions**: Higher-order DRAG, frequency modulation
+
+Modern superconducting quantum processors rely on DRAG pulses to achieve single-qubit gate fidelities exceeding 99.9%.
+
+<Tip>
+DRAG is just one component of high-fidelity gate design. Combining DRAG with optimal control techniques (covered in Lesson 6) can achieve even better performance.
+</Tip>
+
+## Further Reading
+
+- Motzoi et al., "Simple Pulses for Elimination of Leakage in Weakly Nonlinear Qubits" (2009)
+- Gambetta et al., "Analytic control methods for high-fidelity unitary operations" (2011)
+- Next lesson: Cross-Resonance Gates - implementing two-qubit operations

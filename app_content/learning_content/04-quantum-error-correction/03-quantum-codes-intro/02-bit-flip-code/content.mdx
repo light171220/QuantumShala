@@ -1,0 +1,553 @@
+# The Three-Qubit Bit-Flip Code
+
+## Introduction
+
+The three-qubit bit-flip code is the simplest quantum error-correcting code. It protects a single logical qubit against bit-flip (X) errors by encoding it into three physical qubits. While it cannot correct phase errors, it beautifully illustrates the core principles of quantum error correction.
+
+## The Classical Inspiration
+
+```
+Classical Repetition Code [3,1,3]
+═════════════════════════════════
+
+Encoding:       0 → 000        1 → 111
+
+Error Model:    Each bit flips with probability p
+
+Detection:      If bits disagree, an error occurred
+
+Correction:     Use majority vote
+
+Example:
+    Sent:       000
+    Error on bit 2: 010
+    Majority:   0, 1, 0 → majority is 0
+    Decoded:    0  ✓
+
+    ┌─────────────────────────────────────────┐
+    │  Works because we can COPY classical    │
+    │  bits and use majority voting           │
+    └─────────────────────────────────────────┘
+```
+
+## Quantum Bit-Flip Code
+
+```python
+import numpy as np
+from typing import Tuple, List, Optional
+
+class BitFlipCode:
+    """
+    The 3-qubit bit-flip code [[3,1,1]] for X errors.
+
+    Encoding:
+        |0⟩_L = |000⟩
+        |1⟩_L = |111⟩
+
+    General state:
+        |ψ⟩_L = α|0⟩_L + β|1⟩_L = α|000⟩ + β|111⟩
+
+    Correctable errors: Single X (bit-flip) on any qubit
+    """
+
+    def __init__(self):
+        # Basis states
+        self.ket_0 = np.array([1, 0], dtype=complex)
+        self.ket_1 = np.array([0, 1], dtype=complex)
+
+        # Pauli operators
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        # Logical basis states (3 qubits)
+        self.ket_000 = self._tensor([self.ket_0, self.ket_0, self.ket_0])
+        self.ket_111 = self._tensor([self.ket_1, self.ket_1, self.ket_1])
+
+    def _tensor(self, states: list) -> np.ndarray:
+        """Tensor product of states."""
+        result = states[0]
+        for s in states[1:]:
+            result = np.kron(result, s)
+        return result
+
+    def _tensor_ops(self, ops: list) -> np.ndarray:
+        """Tensor product of operators."""
+        result = ops[0]
+        for op in ops[1:]:
+            result = np.kron(result, op)
+        return result
+
+    def encode(self, alpha: complex, beta: complex) -> np.ndarray:
+        """
+        Encode logical qubit |ψ⟩ = α|0⟩ + β|1⟩ into three physical qubits.
+
+        |ψ⟩_L = α|000⟩ + β|111⟩
+        """
+        # Normalize
+        norm = np.sqrt(abs(alpha)**2 + abs(beta)**2)
+        alpha, beta = alpha/norm, beta/norm
+
+        return alpha * self.ket_000 + beta * self.ket_111
+
+    def encode_circuit_description(self):
+        """Show the encoding circuit."""
+        print("""
+        Bit-Flip Code Encoding Circuit
+        ═══════════════════════════════
+
+        Input: |ψ⟩|0⟩|0⟩ where |ψ⟩ = α|0⟩ + β|1⟩
+
+        |ψ⟩ ───●───●───  →  α|000⟩ + β|111⟩
+               │   │
+        |0⟩ ───⊕───│───  (CNOT: flip if control is |1⟩)
+                   │
+        |0⟩ ───────⊕───
+
+        Step by step:
+        1. Start: (α|0⟩ + β|1⟩) ⊗ |0⟩ ⊗ |0⟩ = α|000⟩ + β|100⟩
+        2. CNOT₁₂: α|000⟩ + β|110⟩  (second qubit flipped when first is |1⟩)
+        3. CNOT₁₃: α|000⟩ + β|111⟩  (third qubit flipped when first is |1⟩)
+
+        Result: |ψ⟩_L = α|000⟩ + β|111⟩  ✓
+        """)
+
+    def apply_error(self, state: np.ndarray, qubit: int) -> np.ndarray:
+        """Apply X error to specified qubit (0, 1, or 2)."""
+        ops = [self.I, self.I, self.I]
+        ops[qubit] = self.X
+        error_op = self._tensor_ops(ops)
+        return error_op @ state
+
+    def measure_syndrome(self, state: np.ndarray) -> Tuple[int, int]:
+        """
+        Measure error syndrome using stabilizer operators.
+
+        Stabilizers:
+            Z₁Z₂ = Z⊗Z⊗I  (compares qubits 1 and 2)
+            Z₂Z₃ = I⊗Z⊗Z  (compares qubits 2 and 3)
+
+        Syndrome interpretation:
+            (0, 0) → No error
+            (1, 0) → Error on qubit 1
+            (1, 1) → Error on qubit 2
+            (0, 1) → Error on qubit 3
+        """
+        # Build stabilizer operators
+        Z1Z2 = self._tensor_ops([self.Z, self.Z, self.I])
+        Z2Z3 = self._tensor_ops([self.I, self.Z, self.Z])
+
+        # Measure eigenvalues (±1)
+        s1 = int((1 - np.real(np.vdot(state, Z1Z2 @ state))) / 2)
+        s2 = int((1 - np.real(np.vdot(state, Z2Z3 @ state))) / 2)
+
+        return (s1, s2)
+
+    def syndrome_to_error(self, syndrome: Tuple[int, int]) -> Optional[int]:
+        """Map syndrome to error location."""
+        syndrome_table = {
+            (0, 0): None,   # No error
+            (1, 0): 0,      # Error on qubit 0
+            (1, 1): 1,      # Error on qubit 1
+            (0, 1): 2       # Error on qubit 2
+        }
+        return syndrome_table.get(syndrome)
+
+    def correct(self, state: np.ndarray, syndrome: Tuple[int, int]) -> np.ndarray:
+        """Apply correction based on syndrome."""
+        error_loc = self.syndrome_to_error(syndrome)
+        if error_loc is None:
+            return state
+        return self.apply_error(state, error_loc)  # X² = I, so apply X again
+
+    def decode(self, state: np.ndarray) -> Tuple[complex, complex]:
+        """
+        Decode back to single qubit (extract α and β).
+        """
+        # Project onto logical basis
+        alpha = np.vdot(self.ket_000, state)
+        beta = np.vdot(self.ket_111, state)
+        return (alpha, beta)
+
+    def demonstrate_error_correction(self):
+        """Full demonstration of encode → error → syndrome → correct."""
+        print("Bit-Flip Code Error Correction Demonstration")
+        print("=" * 55)
+
+        # Encode |+⟩ = (|0⟩ + |1⟩)/√2
+        alpha, beta = 1/np.sqrt(2), 1/np.sqrt(2)
+        encoded = self.encode(alpha, beta)
+
+        print(f"\nOriginal state: |+⟩ = (|0⟩ + |1⟩)/√2")
+        print(f"Encoded state: (|000⟩ + |111⟩)/√2")
+
+        for error_qubit in [None, 0, 1, 2]:
+            print(f"\n{'─' * 55}")
+            if error_qubit is None:
+                state = encoded.copy()
+                print(f"No error applied")
+            else:
+                state = self.apply_error(encoded, error_qubit)
+                print(f"X error on qubit {error_qubit}")
+
+            syndrome = self.measure_syndrome(state)
+            print(f"Syndrome: {syndrome}")
+
+            error_loc = self.syndrome_to_error(syndrome)
+            print(f"Detected error location: {error_loc}")
+
+            corrected = self.correct(state, syndrome)
+            alpha_out, beta_out = self.decode(corrected)
+
+            fidelity = abs(alpha * np.conj(alpha_out) +
+                          beta * np.conj(beta_out))**2
+
+            print(f"Recovery fidelity: {fidelity:.6f}")
+            print(f"Result: {'SUCCESS ✓' if fidelity > 0.999 else 'FAILED ✗'}")
+
+
+# Run demonstration
+code = BitFlipCode()
+code.encode_circuit_description()
+code.demonstrate_error_correction()
+```
+
+## Syndrome Measurement Circuit
+
+```
+Syndrome Measurement Without Destroying Data
+═══════════════════════════════════════════════
+
+The key trick: Use ANCILLA qubits to extract syndrome!
+
+Data qubits:    ─────●─────────────────●─────────  q₁
+                     │                 │
+                ─────│────●───────●────│─────────  q₂
+                     │    │       │    │
+                ─────│────│───────│────│────●────  q₃
+                     │    │       │    │    │
+Ancilla 1:      |0⟩──⊕────⊕───M───│────│────│────  → s₁ (parity of q₁, q₂)
+                                  │    │    │
+Ancilla 2:      |0⟩───────────────⊕────⊕────⊕──M─  → s₂ (parity of q₂, q₃)
+
+
+How it works:
+┌─────────────────────────────────────────────────────────────────┐
+│  Ancilla 1 measures Z₁Z₂ (do q₁ and q₂ have same parity?)      │
+│  Ancilla 2 measures Z₂Z₃ (do q₂ and q₃ have same parity?)      │
+│                                                                 │
+│  CNOT transfers parity information to ancilla without          │
+│  disturbing the superposition of the data!                     │
+└─────────────────────────────────────────────────────────────────┘
+
+Syndrome Table:
+┌──────────────┬──────────────────────────────────────────┐
+│ Syndrome     │ Interpretation                           │
+├──────────────┼──────────────────────────────────────────┤
+│ s₁=0, s₂=0   │ No error (all qubits agree)             │
+│ s₁=1, s₂=0   │ Qubit 1 differs from 2,3 → Error on q₁  │
+│ s₁=1, s₂=1   │ Qubit 2 differs from 1 and 3 → Error q₂ │
+│ s₁=0, s₂=1   │ Qubit 3 differs from 1,2 → Error on q₃  │
+└──────────────┴──────────────────────────────────────────┘
+```
+
+## Why Syndrome Measurement Preserves Data
+
+```python
+import numpy as np
+
+class SyndromePreservesData:
+    """
+    Demonstrate that syndrome measurement doesn't reveal or destroy data.
+    """
+
+    def __init__(self):
+        self.I = np.eye(2, dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    def show_preservation(self):
+        """Show that Z₁Z₂ measurement preserves superposition."""
+        print("Why Syndrome Measurement Preserves Quantum Data")
+        print("=" * 55)
+
+        print("""
+        Consider the state: |ψ⟩_L = α|000⟩ + β|111⟩
+
+        Stabilizer Z₁Z₂ acts as:
+            Z₁Z₂|000⟩ = (+1)(+1)|000⟩ = |000⟩
+            Z₁Z₂|111⟩ = (-1)(-1)|111⟩ = |111⟩
+
+        So: Z₁Z₂(α|000⟩ + β|111⟩) = α|000⟩ + β|111⟩
+
+        ╔═════════════════════════════════════════════════════════╗
+        ║  Both logical basis states have the SAME eigenvalue!   ║
+        ║  Measuring Z₁Z₂ gives +1 but doesn't distinguish them! ║
+        ╚═════════════════════════════════════════════════════════╝
+
+        With an X₁ error: X₁(α|000⟩ + β|111⟩) = α|100⟩ + β|011⟩
+
+            Z₁Z₂|100⟩ = (+1)(-1)|100⟩ = -|100⟩
+            Z₁Z₂|011⟩ = (-1)(+1)|011⟩ = -|011⟩
+
+        Measuring Z₁Z₂ gives -1 (syndrome s₁=1), but still:
+            - We learn an error occurred
+            - We DON'T learn whether α or β is larger
+            - The superposition is preserved!
+        """)
+
+    def verify_mathematically(self):
+        """Verify with actual calculations."""
+        print("\nMathematical Verification")
+        print("─" * 55)
+
+        # Create encoded states for various logical qubits
+        test_cases = [
+            ("α=1, β=0 (|0⟩_L)", 1, 0),
+            ("α=0, β=1 (|1⟩_L)", 0, 1),
+            ("α=β=1/√2 (|+⟩_L)", 1/np.sqrt(2), 1/np.sqrt(2)),
+            ("α=1/√2, β=i/√2", 1/np.sqrt(2), 1j/np.sqrt(2)),
+        ]
+
+        # Z₁Z₂ operator
+        Z1Z2 = np.kron(np.kron(self.Z, self.Z), self.I)
+
+        print("\nFor each logical state, Z₁Z₂ eigenvalue is +1:")
+        for name, alpha, beta in test_cases:
+            # Create encoded state
+            ket_000 = np.array([1,0,0,0,0,0,0,0], dtype=complex)
+            ket_111 = np.array([0,0,0,0,0,0,0,1], dtype=complex)
+            state = alpha * ket_000 + beta * ket_111
+
+            # Measure Z₁Z₂ expectation
+            eigenvalue = np.real(np.vdot(state, Z1Z2 @ state))
+            print(f"  {name}: ⟨Z₁Z₂⟩ = {eigenvalue:+.4f}")
+
+        print("\n  All give +1 regardless of α and β!")
+        print("  The syndrome reveals nothing about the encoded data.")
+
+
+demo = SyndromePreservesData()
+demo.show_preservation()
+demo.verify_mathematically()
+```
+
+## The Bit-Flip Code's Limitation
+
+```python
+import numpy as np
+
+class BitFlipLimitation:
+    """
+    Demonstrate that the bit-flip code CANNOT correct phase errors.
+    """
+
+    def __init__(self):
+        self.I = np.eye(2, dtype=complex)
+        self.X = np.array([[0, 1], [1, 0]], dtype=complex)
+        self.Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    def show_phase_error_problem(self):
+        """Show why Z errors are invisible to bit-flip code."""
+        print("The Bit-Flip Code's Fatal Weakness: Phase Errors")
+        print("=" * 55)
+
+        print("""
+        Consider the encoded state: |+⟩_L = (|000⟩ + |111⟩)/√2
+
+        Apply a Z error on qubit 1: Z₁|+⟩_L
+
+            Z₁|000⟩ = |000⟩    (Z|0⟩ = |0⟩)
+            Z₁|111⟩ = -|111⟩   (Z|1⟩ = -|1⟩)
+
+        Result: (|000⟩ - |111⟩)/√2 = |−⟩_L
+
+        ┌─────────────────────────────────────────────────────────┐
+        │  The state changed from |+⟩_L to |−⟩_L !               │
+        │  This is a LOGICAL ERROR (the encoded data is wrong)   │
+        └─────────────────────────────────────────────────────────┘
+
+        But what does the syndrome say?
+
+            Z₁Z₂|+⟩_L eigenvalue: +1
+            Z₁Z₂|−⟩_L eigenvalue: +1  (same!)
+
+            Z₂Z₃|+⟩_L eigenvalue: +1
+            Z₂Z₃|−⟩_L eigenvalue: +1  (same!)
+
+        ╔═════════════════════════════════════════════════════════╗
+        ║  SYNDROME IS (0,0) - NO ERROR DETECTED!                ║
+        ║  The phase error is INVISIBLE to the bit-flip code!   ║
+        ╚═════════════════════════════════════════════════════════╝
+        """)
+
+    def demonstrate_z_error(self):
+        """Numerically verify Z error goes undetected."""
+        print("\nNumerical Verification")
+        print("─" * 55)
+
+        # Encoded |+⟩_L
+        ket_000 = np.array([1,0,0,0,0,0,0,0], dtype=complex)
+        ket_111 = np.array([0,0,0,0,0,0,0,1], dtype=complex)
+        plus_L = (ket_000 + ket_111) / np.sqrt(2)
+
+        # Apply Z on qubit 1
+        Z1 = np.kron(np.kron(self.Z, self.I), self.I)
+        after_error = Z1 @ plus_L
+
+        # This should be |−⟩_L
+        minus_L = (ket_000 - ket_111) / np.sqrt(2)
+
+        # Check syndromes
+        Z1Z2 = np.kron(np.kron(self.Z, self.Z), self.I)
+        Z2Z3 = np.kron(np.kron(self.I, self.Z), self.Z)
+
+        s1_before = np.real(np.vdot(plus_L, Z1Z2 @ plus_L))
+        s2_before = np.real(np.vdot(plus_L, Z2Z3 @ plus_L))
+
+        s1_after = np.real(np.vdot(after_error, Z1Z2 @ after_error))
+        s2_after = np.real(np.vdot(after_error, Z2Z3 @ after_error))
+
+        print(f"Before Z₁ error: Syndrome = ({(1-s1_before)/2:.0f}, {(1-s2_before)/2:.0f})")
+        print(f"After Z₁ error:  Syndrome = ({(1-s1_after)/2:.0f}, {(1-s2_after)/2:.0f})")
+
+        # Check if state changed
+        fidelity = abs(np.vdot(plus_L, after_error))**2
+        print(f"\nFidelity with original: {fidelity:.4f}")
+        print(f"State changed? {'YES - LOGICAL ERROR!' if fidelity < 0.99 else 'No'}")
+
+        # Verify it became |−⟩_L
+        fidelity_minus = abs(np.vdot(minus_L, after_error))**2
+        print(f"Fidelity with |−⟩_L: {fidelity_minus:.4f}")
+
+
+limitation = BitFlipLimitation()
+limitation.show_phase_error_problem()
+limitation.demonstrate_z_error()
+```
+
+## Code Parameters and Distance
+
+```
+Bit-Flip Code Parameters
+════════════════════════
+
+Notation: [[n, k, d]] = [[3, 1, 1]] (for Z errors)
+                      = [[3, 1, 3]] (for X errors only)
+
+┌──────────────────────────────────────────────────────────┐
+│  n = 3: Number of physical qubits                        │
+│  k = 1: Number of logical qubits encoded                 │
+│  d = ?: Distance depends on error model!                 │
+├──────────────────────────────────────────────────────────┤
+│  For X errors only: d = 3                                │
+│    - Can detect 2 X errors                               │
+│    - Can correct 1 X error                               │
+│    - t = ⌊(d-1)/2⌋ = 1                                   │
+├──────────────────────────────────────────────────────────┤
+│  For Z errors: d = 1                                     │
+│    - Cannot detect ANY Z errors                          │
+│    - Z₁, Z₂, Z₃ each cause logical Z error              │
+│    - No protection at all!                               │
+├──────────────────────────────────────────────────────────┤
+│  For general Pauli errors: d = 1                         │
+│    - The code is NOT a true QECC                         │
+│    - Only protects against restricted error model        │
+└──────────────────────────────────────────────────────────┘
+
+The lesson: We need codes that protect against BOTH X and Z!
+This leads to → Phase-flip code, Shor code, CSS codes...
+```
+
+## Complete Bit-Flip Code Circuit
+
+```python
+class BitFlipCircuit:
+    """
+    Complete circuit implementation of the bit-flip code.
+    """
+
+    def full_circuit_diagram(self):
+        """Display the complete QEC circuit."""
+        print("""
+Complete Bit-Flip Code Error Correction Circuit
+══════════════════════════════════════════════════════════════════════
+
+    ┌─────────┐   ┌───────────────┐   ┌─────────┐   ┌────────┐
+    │ ENCODE  │   │  ERRORS MAY   │   │SYNDROME │   │CORRECT │
+    │         │   │  HAPPEN HERE  │   │MEASURE  │   │        │
+    └────┬────┘   └───────────────┘   └────┬────┘   └────┬───┘
+         │                                  │             │
+─────────┼──────────────────────────────────┼─────────────┼───────────
+
+|ψ⟩ ──●──●──────────[E?]──────────●─────────│─────●───────X^c₁────  |ψ⟩_out
+      │  │                        │         │     │       │
+|0⟩ ──⊕──│──────────[E?]──────────│──●──────│──●──│───────X^c₂────
+         │                        │  │      │  │  │       │
+|0⟩ ─────⊕──────────[E?]──────────│──│──●───│──│──│──●────X^c₃────
+                                  │  │  │   │  │  │  │    │
+|0⟩ ──────────────────────────────⊕──⊕──│───M  │  │  │    │
+                                        │   ↓  │  │  │    │
+|0⟩ ────────────────────────────────────⊕───│──⊕──⊕──⊕──M │
+                                            │  │         ↓
+                                            s₁ │         s₂
+                                               │
+                                       Classical decoder: (s₁,s₂) → correction
+
+Legend:
+    ● ─ Control qubit for CNOT
+    ⊕ ─ Target qubit for CNOT
+    M ─ Measurement
+    [E?] ─ Possible error location
+    X^cᵢ ─ Apply X to qubit i if decoder indicates
+
+Syndrome decoding:
+    s₁ s₂ │ Action
+    ──────┼────────────────
+    0  0  │ Do nothing
+    1  0  │ Apply X to q₁
+    1  1  │ Apply X to q₂
+    0  1  │ Apply X to q₃
+        """)
+
+    def timing_diagram(self):
+        """Show the timing/sequence of operations."""
+        print("""
+Timing Sequence
+═══════════════
+
+Time →  t₁      t₂        t₃       t₄        t₅
+        │       │         │        │         │
+        ▼       ▼         ▼        ▼         ▼
+     ┌──────┐  ┌────┐  ┌───────┐  ┌────┐  ┌──────┐
+     │Encode│──│Wait│──│Measure│──│Calc│──│Correct│
+     └──────┘  └────┘  │Syndrome│ │    │  └──────┘
+                       └───────┘  └────┘
+
+     Encode: Apply encoding circuit (2 CNOTs)
+     Wait:   Error may occur during computation/storage
+     Measure: Extract syndrome using ancillas
+     Calc:   Classical processing to determine correction
+     Correct: Apply X gates as needed
+
+     Total gate count:
+        - Encoding: 2 CNOTs
+        - Syndrome: 4 CNOTs, 2 ancilla measurements
+        - Correction: 0-1 X gates
+        """)
+
+
+circuit = BitFlipCircuit()
+circuit.full_circuit_diagram()
+circuit.timing_diagram()
+```
+
+## Summary
+
+The three-qubit bit-flip code teaches us the essential concepts of quantum error correction:
+
+1. **Encoding**: Map |ψ⟩ → |ψ⟩_L using entanglement, not copying
+2. **Syndrome measurement**: Extract error information without disturbing data
+3. **Error correction**: Apply Pauli operation to reverse the error
+4. **Limitations**: Protecting against one error type isn't enough
+
+The bit-flip code's inability to handle phase errors motivates the phase-flip code and ultimately the Shor code, which combines both protections.

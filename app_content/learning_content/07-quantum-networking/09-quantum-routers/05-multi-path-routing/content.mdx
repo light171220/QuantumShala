@@ -1,0 +1,531 @@
+# Multi-Path Routing
+
+## Introduction
+
+Multi-path routing uses multiple simultaneous paths between source and destination. For quantum networks, this provides reliability, enables purification across paths, and increases throughput.
+
+## Benefits of Multi-Path
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    MULTI-PATH ROUTING BENEFITS                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  1. RELIABILITY                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Single Path:    A ───────────── B  (if fails, no route)    │  │
+│  │  Multi-Path:     A ═══╦═══╦═══ B  (redundant paths)         │  │
+│  │                       ║   ║                                  │  │
+│  │                  (failure tolerant)                          │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  2. THROUGHPUT                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Aggregate capacity from multiple paths                      │  │
+│  │  Path 1: 100 pairs/sec ┐                                     │  │
+│  │  Path 2: 80 pairs/sec  ├─→ Total: 260 pairs/sec             │  │
+│  │  Path 3: 80 pairs/sec  ┘                                     │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  3. PURIFICATION                                                    │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Independent paths provide uncorrelated errors               │  │
+│  │  Multiple pairs can be purified to higher fidelity           │  │
+│  │  Disjoint paths: best for purification                      │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  4. LOAD BALANCING                                                  │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Spread load across network                                  │  │
+│  │  Avoid congestion on any single path                        │  │
+│  │  Better resource utilization                                │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Multi-Path Implementation
+
+```python
+import numpy as np
+from dataclasses import dataclass, field
+from typing import List, Dict, Set, Optional, Tuple
+from enum import Enum
+
+class PathType(Enum):
+    """Types of path relationships."""
+    DISJOINT = "node_disjoint"      # No shared nodes
+    LINK_DISJOINT = "link_disjoint"  # No shared links
+    OVERLAPPING = "overlapping"      # Some shared elements
+
+@dataclass
+class NetworkPath:
+    """Represents a path through the network."""
+    path_id: str
+    nodes: List[str]
+    fidelity: float
+    capacity: float  # Pairs per second
+    latency_ms: float
+    active: bool = True
+
+    def shares_node_with(self, other: 'NetworkPath') -> bool:
+        """Check if paths share intermediate nodes."""
+        my_intermediates = set(self.nodes[1:-1])
+        other_intermediates = set(other.nodes[1:-1])
+        return len(my_intermediates & other_intermediates) > 0
+
+    def shares_link_with(self, other: 'NetworkPath') -> bool:
+        """Check if paths share any links."""
+        my_links = set(zip(self.nodes[:-1], self.nodes[1:]))
+        other_links = set(zip(other.nodes[:-1], other.nodes[1:]))
+        return len(my_links & other_links) > 0
+
+class MultiPathRouter:
+    """
+    Multi-path routing for quantum networks.
+    """
+
+    def __init__(self):
+        self.paths: Dict[str, List[NetworkPath]] = {}  # (src,dst) -> paths
+        self.path_loads: Dict[str, float] = {}  # path_id -> current load
+
+    def add_path(self, source: str, destination: str, path: NetworkPath):
+        """Add a path between source and destination."""
+        key = f"{source}-{destination}"
+        if key not in self.paths:
+            self.paths[key] = []
+        self.paths[key].append(path)
+        self.path_loads[path.path_id] = 0.0
+
+    def get_paths(
+        self,
+        source: str,
+        destination: str,
+        min_count: int = 1,
+        require_disjoint: bool = False
+    ) -> List[NetworkPath]:
+        """Get available paths between endpoints."""
+        key = f"{source}-{destination}"
+        all_paths = [p for p in self.paths.get(key, []) if p.active]
+
+        if not require_disjoint:
+            return all_paths[:min_count]
+
+        # Select disjoint paths
+        selected = []
+        for path in sorted(all_paths, key=lambda p: p.fidelity, reverse=True):
+            if not any(path.shares_node_with(s) for s in selected):
+                selected.append(path)
+            if len(selected) >= min_count:
+                break
+
+        return selected
+
+    def classify_path_diversity(
+        self,
+        paths: List[NetworkPath]
+    ) -> PathType:
+        """Classify the diversity of a path set."""
+        if len(paths) < 2:
+            return PathType.OVERLAPPING
+
+        # Check for node disjointness
+        all_disjoint = True
+        link_disjoint = True
+
+        for i, p1 in enumerate(paths):
+            for p2 in paths[i+1:]:
+                if p1.shares_node_with(p2):
+                    all_disjoint = False
+                if p1.shares_link_with(p2):
+                    link_disjoint = False
+
+        if all_disjoint:
+            return PathType.DISJOINT
+        elif link_disjoint:
+            return PathType.LINK_DISJOINT
+        return PathType.OVERLAPPING
+
+    def aggregate_capacity(
+        self,
+        source: str,
+        destination: str
+    ) -> float:
+        """Calculate aggregate capacity across all paths."""
+        paths = self.get_paths(source, destination)
+        return sum(p.capacity for p in paths)
+
+    def best_fidelity_combination(
+        self,
+        source: str,
+        destination: str,
+        num_paths: int = 2
+    ) -> Tuple[List[NetworkPath], float]:
+        """
+        Find path combination that maximizes fidelity after purification.
+        """
+        paths = self.get_paths(source, destination, num_paths, require_disjoint=True)
+
+        if len(paths) < 2:
+            # No purification possible
+            if paths:
+                return paths, paths[0].fidelity
+            return [], 0.0
+
+        # Estimate purified fidelity (simplified)
+        # Multiple independent pairs can be purified
+        fidelities = [p.fidelity for p in paths]
+        avg_f = np.mean(fidelities)
+
+        # Purification improves fidelity
+        # Simplified: F_purified ≈ (F^2) / (F^2 + (1-F)^2)
+        f_purified = (avg_f**2) / (avg_f**2 + (1-avg_f)**2)
+
+        return paths, f_purified
+
+# Demonstrate multi-path routing
+print("Multi-Path Routing")
+print("=" * 50)
+
+router = MultiPathRouter()
+
+# Add paths between Alice and Bob
+router.add_path("Alice", "Bob", NetworkPath(
+    "p1", ["Alice", "R1", "R2", "Bob"],
+    fidelity=0.85, capacity=100, latency_ms=10
+))
+router.add_path("Alice", "Bob", NetworkPath(
+    "p2", ["Alice", "R3", "R4", "Bob"],
+    fidelity=0.82, capacity=80, latency_ms=12
+))
+router.add_path("Alice", "Bob", NetworkPath(
+    "p3", ["Alice", "R5", "Bob"],
+    fidelity=0.90, capacity=60, latency_ms=8
+))
+
+# Get paths
+paths = router.get_paths("Alice", "Bob")
+print(f"Available paths: {len(paths)}")
+for p in paths:
+    print(f"  {p.path_id}: {' → '.join(p.nodes)} (F={p.fidelity})")
+
+# Check diversity
+diversity = router.classify_path_diversity(paths)
+print(f"\nPath diversity: {diversity.value}")
+
+# Aggregate capacity
+capacity = router.aggregate_capacity("Alice", "Bob")
+print(f"Aggregate capacity: {capacity} pairs/sec")
+
+# Best purification combo
+best_paths, purified_f = router.best_fidelity_combination("Alice", "Bob", 2)
+print(f"\nPurification:")
+print(f"  Using paths: {[p.path_id for p in best_paths]}")
+print(f"  Estimated purified fidelity: {purified_f:.3f}")
+```
+
+## Load Balancing
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    LOAD BALANCING STRATEGIES                        │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ROUND ROBIN:                                                       │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Request 1 → Path A                                          │  │
+│  │  Request 2 → Path B                                          │  │
+│  │  Request 3 → Path C                                          │  │
+│  │  Request 4 → Path A  (cycle repeats)                        │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  WEIGHTED DISTRIBUTION:                                             │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Path A (capacity 100): 50% of requests                     │  │
+│  │  Path B (capacity 60):  30% of requests                     │  │
+│  │  Path C (capacity 40):  20% of requests                     │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  LEAST LOADED:                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Track current load on each path                            │  │
+│  │  Send new request to least loaded path                      │  │
+│  │  Dynamically adapts to changing conditions                  │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  FIDELITY-WEIGHTED:                                                 │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Weight by fidelity × capacity                              │  │
+│  │  High-fidelity paths get high-priority requests             │  │
+│  │  Quality-aware load distribution                            │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+```python
+class LoadBalancingPolicy(Enum):
+    """Load balancing policies."""
+    ROUND_ROBIN = "round_robin"
+    WEIGHTED = "weighted_by_capacity"
+    LEAST_LOADED = "least_loaded"
+    FIDELITY_WEIGHTED = "fidelity_weighted"
+
+class MultiPathLoadBalancer:
+    """
+    Load balancer for multi-path quantum routing.
+    """
+
+    def __init__(self, router: MultiPathRouter):
+        self.router = router
+        self.round_robin_idx: Dict[str, int] = {}
+        self.path_loads: Dict[str, float] = {}
+
+    def select_path(
+        self,
+        source: str,
+        destination: str,
+        policy: LoadBalancingPolicy = LoadBalancingPolicy.ROUND_ROBIN
+    ) -> Optional[NetworkPath]:
+        """Select path based on policy."""
+        paths = self.router.get_paths(source, destination)
+        if not paths:
+            return None
+
+        key = f"{source}-{destination}"
+
+        if policy == LoadBalancingPolicy.ROUND_ROBIN:
+            idx = self.round_robin_idx.get(key, 0)
+            selected = paths[idx % len(paths)]
+            self.round_robin_idx[key] = (idx + 1) % len(paths)
+            return selected
+
+        elif policy == LoadBalancingPolicy.WEIGHTED:
+            total_capacity = sum(p.capacity for p in paths)
+            r = np.random.random() * total_capacity
+            cumulative = 0
+            for path in paths:
+                cumulative += path.capacity
+                if r <= cumulative:
+                    return path
+            return paths[-1]
+
+        elif policy == LoadBalancingPolicy.LEAST_LOADED:
+            min_load = float('inf')
+            selected = paths[0]
+            for path in paths:
+                load = self.path_loads.get(path.path_id, 0)
+                utilization = load / path.capacity if path.capacity > 0 else 1.0
+                if utilization < min_load:
+                    min_load = utilization
+                    selected = path
+            return selected
+
+        elif policy == LoadBalancingPolicy.FIDELITY_WEIGHTED:
+            # Weight by fidelity × capacity
+            weights = [p.fidelity * p.capacity for p in paths]
+            total = sum(weights)
+            r = np.random.random() * total
+            cumulative = 0
+            for i, path in enumerate(paths):
+                cumulative += weights[i]
+                if r <= cumulative:
+                    return path
+            return paths[-1]
+
+        return paths[0]
+
+    def record_usage(self, path: NetworkPath, amount: float = 1.0):
+        """Record path usage for load tracking."""
+        self.path_loads[path.path_id] = self.path_loads.get(path.path_id, 0) + amount
+
+    def get_load_distribution(
+        self,
+        source: str,
+        destination: str
+    ) -> Dict[str, float]:
+        """Get current load distribution."""
+        paths = self.router.get_paths(source, destination)
+        return {
+            p.path_id: self.path_loads.get(p.path_id, 0)
+            for p in paths
+        }
+
+# Demonstrate load balancing
+print("\n\nLoad Balancing")
+print("=" * 50)
+
+balancer = MultiPathLoadBalancer(router)
+
+# Simulate requests with different policies
+for policy in [LoadBalancingPolicy.ROUND_ROBIN,
+               LoadBalancingPolicy.WEIGHTED,
+               LoadBalancingPolicy.FIDELITY_WEIGHTED]:
+
+    # Reset loads
+    balancer.path_loads = {}
+
+    # Send 100 requests
+    for _ in range(100):
+        path = balancer.select_path("Alice", "Bob", policy)
+        if path:
+            balancer.record_usage(path)
+
+    print(f"\n{policy.value}:")
+    dist = balancer.get_load_distribution("Alice", "Bob")
+    for path_id, load in dist.items():
+        print(f"  {path_id}: {load:.0f} requests")
+```
+
+## Fault Tolerance
+
+```python
+class FaultTolerantRouter:
+    """
+    Fault-tolerant multi-path routing.
+    """
+
+    def __init__(self):
+        self.router = MultiPathRouter()
+        self.path_status: Dict[str, bool] = {}  # path_id -> is_healthy
+        self.failure_counts: Dict[str, int] = {}
+        self.recovery_threshold = 3  # Successes needed to recover
+
+    def add_path(self, source: str, dest: str, path: NetworkPath):
+        """Add path with health tracking."""
+        self.router.add_path(source, dest, path)
+        self.path_status[path.path_id] = True
+        self.failure_counts[path.path_id] = 0
+
+    def report_failure(self, path_id: str):
+        """Report path failure."""
+        self.failure_counts[path_id] = self.failure_counts.get(path_id, 0) + 1
+
+        # Mark as unhealthy after threshold failures
+        if self.failure_counts[path_id] >= 3:
+            self.path_status[path_id] = False
+            print(f"  Path {path_id} marked UNHEALTHY")
+
+    def report_success(self, path_id: str):
+        """Report path success."""
+        if not self.path_status.get(path_id, True):
+            # Path was unhealthy, check for recovery
+            self.failure_counts[path_id] = max(0, self.failure_counts[path_id] - 1)
+            if self.failure_counts[path_id] < self.recovery_threshold:
+                self.path_status[path_id] = True
+                print(f"  Path {path_id} RECOVERED")
+
+    def get_healthy_paths(
+        self,
+        source: str,
+        destination: str
+    ) -> List[NetworkPath]:
+        """Get only healthy paths."""
+        all_paths = self.router.get_paths(source, destination)
+        return [p for p in all_paths if self.path_status.get(p.path_id, True)]
+
+    def route_with_fallback(
+        self,
+        source: str,
+        destination: str
+    ) -> Optional[NetworkPath]:
+        """Route with automatic fallback to backup paths."""
+        healthy = self.get_healthy_paths(source, destination)
+
+        if not healthy:
+            # Try to recover any path
+            all_paths = self.router.get_paths(source, destination)
+            if all_paths:
+                # Force first path back to service
+                path = all_paths[0]
+                self.path_status[path.path_id] = True
+                return path
+            return None
+
+        # Select best healthy path
+        return max(healthy, key=lambda p: p.fidelity)
+
+    def simulate_routing(
+        self,
+        source: str,
+        destination: str,
+        num_requests: int,
+        failure_rate: float = 0.1
+    ) -> Dict:
+        """Simulate routing with random failures."""
+        stats = {
+            "total": num_requests,
+            "succeeded": 0,
+            "failed": 0,
+            "fallbacks": 0
+        }
+
+        for i in range(num_requests):
+            path = self.route_with_fallback(source, destination)
+
+            if path is None:
+                stats["failed"] += 1
+                continue
+
+            # Simulate success/failure
+            if np.random.random() < failure_rate:
+                self.report_failure(path.path_id)
+                stats["failed"] += 1
+            else:
+                self.report_success(path.path_id)
+                stats["succeeded"] += 1
+
+        return stats
+
+# Demonstrate fault tolerance
+print("\n\nFault-Tolerant Routing")
+print("=" * 50)
+
+ft_router = FaultTolerantRouter()
+
+# Add paths
+ft_router.add_path("A", "B", NetworkPath("primary", ["A", "R1", "B"], 0.9, 100, 5))
+ft_router.add_path("A", "B", NetworkPath("backup1", ["A", "R2", "B"], 0.85, 80, 8))
+ft_router.add_path("A", "B", NetworkPath("backup2", ["A", "R3", "B"], 0.82, 60, 10))
+
+# Simulate with failures
+stats = ft_router.simulate_routing("A", "B", 50, failure_rate=0.15)
+print(f"\nRouting statistics:")
+print(f"  Total: {stats['total']}")
+print(f"  Succeeded: {stats['succeeded']}")
+print(f"  Failed: {stats['failed']}")
+```
+
+## Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    MULTI-PATH ROUTING SUMMARY                       │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Benefits:                                                          │
+│  • Reliability: Redundant paths survive failures                   │
+│  • Throughput: Aggregate capacity from multiple paths              │
+│  • Purification: Independent errors enable purification            │
+│  • Load balancing: Spread load across network                      │
+│                                                                     │
+│  Path Diversity:                                                    │
+│  • Node-disjoint: Best for fault tolerance                        │
+│  • Link-disjoint: Good for reliability                            │
+│  • Overlapping: Easier to find, less redundancy                   │
+│                                                                     │
+│  Load Balancing:                                                    │
+│  • Round-robin: Simple, equal distribution                        │
+│  • Weighted: Proportional to capacity                             │
+│  • Least-loaded: Dynamic adaptation                               │
+│  • Fidelity-weighted: Quality-aware                               │
+│                                                                     │
+│  Fault Tolerance:                                                   │
+│  • Monitor path health                                             │
+│  • Automatic fallback to backup paths                              │
+│  • Recovery detection and path reinstatement                       │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Multi-path routing is essential for reliable and high-performance quantum networks.

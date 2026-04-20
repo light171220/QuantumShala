@@ -1,0 +1,843 @@
+---
+title: "Error-Correcting Codes: The Foundation of Code-Based Cryptography"
+description: "Master the theory of error-correcting codes that underlies post-quantum code-based cryptography. Learn linear codes, generator and parity-check matrices, syndrome decoding, and the hardness of decoding random codes."
+duration: 75
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand linear codes and their algebraic structure
+- Construct generator and parity-check matrices
+- Implement syndrome decoding algorithms
+- Explain why decoding random linear codes is computationally hard
+- Compare different code families used in cryptography
+
+## 1. Introduction to Coding Theory
+
+<Definition term="Error-Correcting Code">
+A method of encoding data that adds redundancy, allowing detection and correction of errors introduced during transmission or storage. In cryptography, the difficulty of decoding without the secret structure provides security.
+</Definition>
+
+```python
+import numpy as np
+from typing import List, Tuple, Optional
+import secrets
+
+def introduction_to_codes():
+    """Introduction to error-correcting codes."""
+    print("ERROR-CORRECTING CODES IN CRYPTOGRAPHY")
+    print("=" * 70)
+    
+    overview = """
+    ORIGINAL PURPOSE: Reliable Communication
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Shannon (1948): Noisy Channel Coding Theorem
+    - Data can be transmitted reliably over noisy channels
+    - Add redundancy to detect and correct errors
+    
+    Example: Repetition Code
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  Message bit: 0  →  Encoded: 000                                   │
+    │  Message bit: 1  →  Encoded: 111                                   │
+    │                                                                     │
+    │  Received: 010 → Decode to 0 (majority vote)                       │
+    │  Can correct 1 error in 3 bits                                     │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    CRYPTOGRAPHIC INSIGHT (McEliece, 1978):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Decoding a RANDOM linear code is NP-hard!
+    
+    • Structured codes (Goppa, Reed-Solomon): Efficient decoding exists
+    • Random-looking codes: No efficient decoding known
+    
+    CRYPTOGRAPHIC CONSTRUCTION:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  1. Choose a code with efficient secret decoding algorithm         │
+    │  2. Disguise it as a random-looking code (public key)              │
+    │  3. Encrypt by encoding message + adding errors                    │
+    │  4. Only secret key holder can decode efficiently                  │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    QUANTUM RESISTANCE:
+    - No known quantum algorithm for efficient syndrome decoding
+    - Grover gives only quadratic speedup (like symmetric crypto)
+    - 40+ years of cryptanalysis with no practical breaks
+    """
+    print(overview)
+
+introduction_to_codes()
+```
+
+## 2. Linear Codes: Algebraic Structure
+
+<Definition term="Linear Code">
+An $[n, k, d]$ linear code $\mathcal{C}$ over $\mathbb{F}_q$ is a $k$-dimensional subspace of $\mathbb{F}_q^n$ with minimum distance $d$. 
+
+- $n$: code length (total symbols)
+- $k$: dimension (information symbols)  
+- $d$: minimum Hamming distance between codewords
+- Rate: $R = k/n$ (efficiency)
+</Definition>
+
+<Formula>
+$$\text{Hamming Distance: } d(x, y) = |\{i : x_i \neq y_i\}|$$
+$$\text{Hamming Weight: } wt(x) = |\{i : x_i \neq 0\}|$$
+$$\text{Minimum Distance: } d = \min_{c_1 \neq c_2 \in \mathcal{C}} d(c_1, c_2) = \min_{c \neq 0 \in \mathcal{C}} wt(c)$$
+$$\text{Error Correction Capability: } t = \lfloor (d-1)/2 \rfloor$$
+</Formula>
+
+```python
+class LinearCode:
+    """
+    Linear code over binary field F_2.
+    
+    A linear code is defined by:
+    - Generator matrix G: k × n matrix, rows form basis of code
+    - Parity-check matrix H: (n-k) × n matrix, Hc^T = 0 for all codewords c
+    
+    Relationship: G · H^T = 0
+    """
+    
+    def __init__(self, G: np.ndarray):
+        """
+        Initialize linear code from generator matrix.
+        
+        Args:
+            G: k × n generator matrix over F_2
+        """
+        self.G = G % 2
+        self.k, self.n = G.shape
+        self.r = self.n - self.k  # redundancy
+        
+        # Compute parity-check matrix
+        self.H = self._compute_parity_check()
+        
+        # Compute minimum distance (expensive for large codes)
+        self._min_distance = None
+    
+    def _compute_parity_check(self) -> np.ndarray:
+        """
+        Compute parity-check matrix H such that G·H^T = 0.
+        
+        For systematic form G = [I_k | P], H = [-P^T | I_{n-k}] = [P^T | I_{n-k}] (mod 2)
+        """
+        # Put G in systematic form [I_k | P] using Gaussian elimination
+        G_sys = self._to_systematic_form(self.G.copy())
+        
+        if G_sys is None:
+            # Fall back to general computation
+            return self._compute_H_general()
+        
+        # Extract P (the parity part)
+        P = G_sys[:, self.k:]
+        
+        # H = [P^T | I_{n-k}]
+        I_r = np.eye(self.r, dtype=int)
+        H = np.hstack([P.T, I_r]) % 2
+        
+        return H
+    
+    def _to_systematic_form(self, G: np.ndarray) -> Optional[np.ndarray]:
+        """Convert G to systematic form [I_k | P] using Gaussian elimination."""
+        G = G.copy() % 2
+        k, n = G.shape
+        
+        for col in range(k):
+            # Find pivot
+            pivot_row = None
+            for row in range(col, k):
+                if G[row, col] == 1:
+                    pivot_row = row
+                    break
+            
+            if pivot_row is None:
+                return None  # Not full rank
+            
+            # Swap rows
+            G[[col, pivot_row]] = G[[pivot_row, col]]
+            
+            # Eliminate
+            for row in range(k):
+                if row != col and G[row, col] == 1:
+                    G[row] = (G[row] + G[col]) % 2
+        
+        return G
+    
+    def _compute_H_general(self) -> np.ndarray:
+        """Compute H for non-systematic case using null space."""
+        # Find null space of G over F_2
+        # This is more complex; simplified version
+        return np.zeros((self.r, self.n), dtype=int)
+    
+    def encode(self, message: np.ndarray) -> np.ndarray:
+        """
+        Encode a message.
+        
+        Args:
+            message: k-bit message vector
+        
+        Returns:
+            n-bit codeword c = m · G
+        """
+        if len(message) != self.k:
+            raise ValueError(f"Message must be {self.k} bits")
+        
+        return (message @ self.G) % 2
+    
+    def syndrome(self, received: np.ndarray) -> np.ndarray:
+        """
+        Compute syndrome of received word.
+        
+        Args:
+            received: n-bit received vector (possibly with errors)
+        
+        Returns:
+            (n-k)-bit syndrome s = H · r^T
+        """
+        return (self.H @ received) % 2
+    
+    def is_codeword(self, word: np.ndarray) -> bool:
+        """Check if a word is a valid codeword."""
+        return np.all(self.syndrome(word) == 0)
+    
+    def hamming_distance(self, x: np.ndarray, y: np.ndarray) -> int:
+        """Compute Hamming distance between two vectors."""
+        return int(np.sum((x + y) % 2))
+    
+    def hamming_weight(self, x: np.ndarray) -> int:
+        """Compute Hamming weight of a vector."""
+        return int(np.sum(x))
+    
+    def minimum_distance(self) -> int:
+        """
+        Compute minimum distance of the code.
+        
+        Warning: Exponential in k for brute force!
+        """
+        if self._min_distance is not None:
+            return self._min_distance
+        
+        if self.k > 15:
+            return -1  # Too large for brute force
+        
+        min_weight = self.n + 1
+        
+        # Enumerate all non-zero codewords
+        for i in range(1, 2**self.k):
+            msg = np.array([(i >> j) & 1 for j in range(self.k)])
+            codeword = self.encode(msg)
+            weight = self.hamming_weight(codeword)
+            min_weight = min(min_weight, weight)
+        
+        self._min_distance = min_weight
+        return min_weight
+
+
+def demonstrate_linear_code():
+    """Demonstrate linear code properties."""
+    print("\nLINEAR CODE DEMONSTRATION")
+    print("=" * 65)
+    
+    # Hamming [7, 4, 3] code - can correct 1 error
+    G = np.array([
+        [1, 0, 0, 0, 1, 1, 0],
+        [0, 1, 0, 0, 1, 0, 1],
+        [0, 0, 1, 0, 0, 1, 1],
+        [0, 0, 0, 1, 1, 1, 1]
+    ])
+    
+    code = LinearCode(G)
+    
+    print(f"Hamming [7, 4, 3] Code:")
+    print(f"  Length n = {code.n}")
+    print(f"  Dimension k = {code.k}")
+    print(f"  Redundancy r = {code.r}")
+    print(f"  Rate R = {code.k/code.n:.3f}")
+    
+    print(f"\nGenerator Matrix G ({code.k}×{code.n}):")
+    print(code.G)
+    
+    print(f"\nParity-Check Matrix H ({code.r}×{code.n}):")
+    print(code.H)
+    
+    # Verify G·H^T = 0
+    product = (code.G @ code.H.T) % 2
+    print(f"\nG·H^T = 0: {np.all(product == 0)}")
+    
+    # Encode a message
+    message = np.array([1, 0, 1, 1])
+    codeword = code.encode(message)
+    print(f"\nMessage: {message}")
+    print(f"Codeword: {codeword}")
+    print(f"Is valid codeword: {code.is_codeword(codeword)}")
+    
+    # Minimum distance
+    d = code.minimum_distance()
+    t = (d - 1) // 2
+    print(f"\nMinimum distance d = {d}")
+    print(f"Error correction capability t = {t}")
+
+demonstrate_linear_code()
+```
+
+## 3. Syndrome Decoding
+
+<Definition term="Syndrome">
+For a received word $r = c + e$ (codeword plus error), the syndrome is $s = H \cdot r^T = H \cdot e^T$. The syndrome depends only on the error pattern, not the transmitted codeword.
+</Definition>
+
+```python
+class SyndromeDecoder:
+    """
+    Syndrome-based decoder for linear codes.
+    
+    Uses precomputed syndrome lookup table for small codes.
+    """
+    
+    def __init__(self, code: LinearCode, max_errors: int = None):
+        """
+        Initialize syndrome decoder.
+        
+        Args:
+            code: The linear code
+            max_errors: Maximum errors to correct (default: (d-1)/2)
+        """
+        self.code = code
+        
+        if max_errors is None:
+            d = code.minimum_distance()
+            max_errors = (d - 1) // 2 if d > 0 else 1
+        
+        self.max_errors = max_errors
+        
+        # Build syndrome lookup table
+        self.syndrome_table = self._build_syndrome_table()
+    
+    def _build_syndrome_table(self) -> dict:
+        """
+        Build syndrome → error pattern lookup table.
+        
+        For each syndrome, store the minimum weight error pattern.
+        """
+        table = {}
+        n = self.code.n
+        
+        # All-zero syndrome → no error
+        zero_syndrome = tuple([0] * self.code.r)
+        table[zero_syndrome] = np.zeros(n, dtype=int)
+        
+        # Generate all error patterns up to max_errors weight
+        for weight in range(1, self.max_errors + 1):
+            for positions in self._combinations(n, weight):
+                error = np.zeros(n, dtype=int)
+                for pos in positions:
+                    error[pos] = 1
+                
+                syndrome = tuple(self.code.syndrome(error))
+                
+                # Only store if this syndrome hasn't been seen
+                # (first seen = minimum weight)
+                if syndrome not in table:
+                    table[syndrome] = error.copy()
+        
+        return table
+    
+    def _combinations(self, n: int, r: int):
+        """Generate all r-combinations of range(n)."""
+        if r == 0:
+            yield []
+            return
+        
+        for i in range(n - r + 1):
+            for rest in self._combinations(n - i - 1, r - 1):
+                yield [i] + [i + 1 + x for x in rest]
+    
+    def decode(self, received: np.ndarray) -> Tuple[Optional[np.ndarray], np.ndarray]:
+        """
+        Decode received word.
+        
+        Args:
+            received: n-bit received word
+        
+        Returns:
+            (decoded_message, error_pattern) or (None, received) if decoding fails
+        """
+        syndrome = tuple(self.code.syndrome(received))
+        
+        if syndrome not in self.syndrome_table:
+            return None, received  # Decoding failure
+        
+        error = self.syndrome_table[syndrome]
+        codeword = (received + error) % 2
+        
+        # Extract message (first k bits for systematic code)
+        message = codeword[:self.code.k]
+        
+        return message, error
+    
+    def stats(self) -> dict:
+        """Return decoder statistics."""
+        return {
+            'max_errors': self.max_errors,
+            'table_size': len(self.syndrome_table),
+            'code_params': f'[{self.code.n}, {self.code.k}]'
+        }
+
+
+def demonstrate_syndrome_decoding():
+    """Demonstrate syndrome decoding."""
+    print("\nSYNDROME DECODING DEMONSTRATION")
+    print("=" * 65)
+    
+    # Hamming [7, 4, 3] code
+    G = np.array([
+        [1, 0, 0, 0, 1, 1, 0],
+        [0, 1, 0, 0, 1, 0, 1],
+        [0, 0, 1, 0, 0, 1, 1],
+        [0, 0, 0, 1, 1, 1, 1]
+    ])
+    
+    code = LinearCode(G)
+    decoder = SyndromeDecoder(code)
+    
+    print(f"Decoder stats: {decoder.stats()}")
+    
+    # Encode a message
+    message = np.array([1, 0, 1, 1])
+    codeword = code.encode(message)
+    print(f"\nOriginal message: {message}")
+    print(f"Transmitted codeword: {codeword}")
+    
+    # Simulate 1 error
+    error_pos = 3
+    received = codeword.copy()
+    received[error_pos] ^= 1
+    print(f"\nError at position {error_pos}")
+    print(f"Received word: {received}")
+    
+    # Decode
+    decoded_msg, detected_error = decoder.decode(received)
+    print(f"\nDecoded message: {decoded_msg}")
+    print(f"Detected error: {detected_error}")
+    print(f"Decoding correct: {np.array_equal(message, decoded_msg)}")
+    
+    # Try 2 errors (should fail for Hamming code)
+    print("\n--- Testing 2 errors (beyond correction capability) ---")
+    received_2err = codeword.copy()
+    received_2err[0] ^= 1
+    received_2err[1] ^= 1
+    print(f"Received with 2 errors: {received_2err}")
+    
+    decoded_msg_2, _ = decoder.decode(received_2err)
+    if decoded_msg_2 is not None:
+        print(f"Decoded (incorrectly): {decoded_msg_2}")
+        print(f"Correct: {np.array_equal(message, decoded_msg_2)}")
+    else:
+        print("Decoding failed (as expected for t=1 code with 2 errors)")
+
+demonstrate_syndrome_decoding()
+```
+
+## 4. The Hardness of Decoding Random Codes
+
+```python
+def explain_decoding_hardness():
+    """Explain why decoding random codes is hard."""
+    print("\nHARDNESS OF DECODING RANDOM CODES")
+    print("=" * 70)
+    
+    explanation = """
+    THE SYNDROME DECODING PROBLEM (SDP):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Given: Random matrix H ∈ F_2^{r×n}, syndrome s ∈ F_2^r, weight bound t
+    Find:  Error vector e ∈ F_2^n such that H·e^T = s and wt(e) ≤ t
+    
+    COMPLEXITY:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ • NP-complete (Berlekamp-McEliece-van Tilborg, 1978)               │
+    │ • No polynomial-time quantum algorithm known                       │
+    │ • Best classical: Information Set Decoding (ISD)                   │
+    │ • Best quantum: Grover-enhanced ISD (quadratic speedup only)       │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    INFORMATION SET DECODING (ISD):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Basic idea:
+    1. Guess k positions that are error-free (information set)
+    2. Solve linear system to find potential error vector
+    3. Check if solution has weight ≤ t
+    
+    Probability of correct guess: C(n-t, k) / C(n, k) ≈ ((n-t)/n)^k
+    
+    For typical parameters: Requires 2^λ operations for λ-bit security
+    
+    ISD VARIANTS:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Algorithm            │ Year │ Improvement                          │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ Prange               │ 1962 │ Basic ISD                            │
+    │ Lee-Brickell         │ 1988 │ Small weight in information set      │
+    │ Stern                │ 1989 │ Birthday attack on columns           │
+    │ Dumer                │ 1991 │ Split and combine                    │
+    │ MMT                  │ 2011 │ Improved representations             │
+    │ BJMM                 │ 2012 │ Near-optimal classical               │
+    │ Both-May             │ 2018 │ Quantum ISD improvements             │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    WHY STRUCTURED CODES HAVE EFFICIENT DECODING:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Goppa Codes (used in McEliece):
+    • Built from polynomials over finite fields
+    • Algebraic structure enables Patterson's algorithm: O(n²)
+    • When disguised: looks random, structure hidden
+    
+    CRYPTOGRAPHIC CONSTRUCTION:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  Secret: Goppa code with generator G and efficient decoder         │
+    │  Public: G' = S·G·P where S is scrambling, P is permutation        │
+    │                                                                     │
+    │  G' looks like random matrix → SDP is hard                         │
+    │  But holder of S, P can transform back and use efficient decoder   │
+    └─────────────────────────────────────────────────────────────────────┘
+    """
+    print(explanation)
+
+
+class InformationSetDecoding:
+    """
+    Basic Information Set Decoding (Prange's algorithm).
+    
+    This is a simplified demonstration of ISD.
+    Real implementations use advanced variants.
+    """
+    
+    def __init__(self, H: np.ndarray, max_iterations: int = 10000):
+        """
+        Args:
+            H: Parity-check matrix (r × n)
+            max_iterations: Maximum ISD iterations
+        """
+        self.H = H % 2
+        self.r, self.n = H.shape
+        self.k = self.n - self.r
+        self.max_iterations = max_iterations
+    
+    def decode(self, syndrome: np.ndarray, target_weight: int) -> Optional[np.ndarray]:
+        """
+        Attempt to find error vector e with H·e = s and wt(e) = target_weight.
+        
+        Basic Prange ISD:
+        1. Select random k columns as information set
+        2. Check if syndrome can be achieved with errors only in remaining r positions
+        """
+        s = syndrome % 2
+        
+        for iteration in range(self.max_iterations):
+            # Random permutation
+            perm = np.random.permutation(self.n)
+            H_perm = self.H[:, perm]
+            
+            # Try to solve with errors only in last r positions
+            # Extract first k columns and last r columns
+            H_k = H_perm[:, :self.k]
+            H_r = H_perm[:, self.k:]
+            
+            # Check if H_r is invertible
+            try:
+                # Gaussian elimination to invert H_r
+                H_r_inv = self._invert_binary_matrix(H_r)
+                if H_r_inv is None:
+                    continue
+                
+                # Error in last r positions: e_r = H_r^{-1} · s
+                e_r = (H_r_inv @ s) % 2
+                
+                # Check weight
+                if np.sum(e_r) == target_weight:
+                    # Found! Construct full error vector
+                    e_perm = np.zeros(self.n, dtype=int)
+                    e_perm[self.k:] = e_r
+                    
+                    # Unpermute
+                    e = np.zeros(self.n, dtype=int)
+                    for i, p in enumerate(perm):
+                        e[p] = e_perm[i]
+                    
+                    # Verify
+                    if np.array_equal((self.H @ e) % 2, s):
+                        return e
+            
+            except Exception:
+                continue
+        
+        return None  # Failed to decode
+    
+    def _invert_binary_matrix(self, M: np.ndarray) -> Optional[np.ndarray]:
+        """Invert a binary matrix using Gaussian elimination."""
+        n = M.shape[0]
+        if M.shape[0] != M.shape[1]:
+            return None
+        
+        # Augment with identity
+        aug = np.hstack([M.copy(), np.eye(n, dtype=int)]) % 2
+        
+        # Forward elimination
+        for col in range(n):
+            # Find pivot
+            pivot = None
+            for row in range(col, n):
+                if aug[row, col] == 1:
+                    pivot = row
+                    break
+            
+            if pivot is None:
+                return None  # Singular
+            
+            # Swap
+            aug[[col, pivot]] = aug[[pivot, col]]
+            
+            # Eliminate
+            for row in range(n):
+                if row != col and aug[row, col] == 1:
+                    aug[row] = (aug[row] + aug[col]) % 2
+        
+        return aug[:, n:]
+
+
+def demonstrate_isd():
+    """Demonstrate Information Set Decoding."""
+    print("\nINFORMATION SET DECODING DEMONSTRATION")
+    print("=" * 65)
+    
+    # Small random code for demonstration
+    np.random.seed(42)
+    n, k = 15, 7
+    r = n - k
+    
+    # Random parity-check matrix
+    H = np.random.randint(0, 2, size=(r, n))
+    
+    # Random error of weight 2
+    error = np.zeros(n, dtype=int)
+    error_positions = np.random.choice(n, 2, replace=False)
+    error[error_positions] = 1
+    
+    # Syndrome
+    syndrome = (H @ error) % 2
+    
+    print(f"Code parameters: [{n}, {k}]")
+    print(f"True error positions: {error_positions}")
+    print(f"Syndrome: {syndrome}")
+    
+    # Run ISD
+    isd = InformationSetDecoding(H, max_iterations=1000)
+    
+    import time
+    start = time.time()
+    found_error = isd.decode(syndrome, target_weight=2)
+    elapsed = time.time() - start
+    
+    if found_error is not None:
+        found_positions = np.where(found_error == 1)[0]
+        print(f"\nISD found error at positions: {found_positions}")
+        print(f"Correct: {set(found_positions) == set(error_positions)}")
+    else:
+        print("\nISD failed to find error")
+    
+    print(f"Time: {elapsed*1000:.1f} ms")
+
+explain_decoding_hardness()
+demonstrate_isd()
+```
+
+## 5. Code Families for Cryptography
+
+```python
+def code_families_overview():
+    """Overview of code families used in cryptography."""
+    print("\nCODE FAMILIES FOR CRYPTOGRAPHY")
+    print("=" * 70)
+    
+    families = """
+    GOPPA CODES (McEliece, Classic McEliece):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Definition:
+    • Defined by polynomial g(x) over F_{2^m} of degree t
+    • Code length n ≤ 2^m
+    • Can correct t errors
+    • Dimension k = n - mt
+    
+    Properties:
+    ✓ Efficient Patterson decoding algorithm: O(n²)
+    ✓ 40+ years of cryptanalysis, no structural attacks
+    ✓ Large public keys (hundreds of KB to MB)
+    ✗ Key size is main drawback
+    
+    
+    QUASI-CYCLIC CODES (BIKE, HQC):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Definition:
+    • Circulant matrix structure: each row is cyclic shift of previous
+    • Generator: G = [I | H_0^{-1}·H_1] where H_0, H_1 are circulants
+    
+    Properties:
+    ✓ Compact keys (few KB)
+    ✓ Efficient operations using polynomial arithmetic
+    ✓ Competitive performance
+    ✗ More recent, less cryptanalysis
+    ✗ Decoding failure rate (DFR) must be managed
+    
+    
+    REED-SOLOMON / REED-MULLER:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    • Well-understood algebraic structure
+    • Very efficient decoding
+    • Too much structure for direct cryptographic use
+    • Used as components in hybrid schemes
+    
+    
+    LOW-DENSITY PARITY-CHECK (LDPC):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    • Sparse parity-check matrix
+    • Iterative belief propagation decoding
+    • Used in BIKE (QC-LDPC variant)
+    • Moderate density needed for security
+    
+    
+    COMPARISON FOR CRYPTOGRAPHY:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Code Family  │ Key Size   │ Security     │ Decoding  │ Status      │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ Binary Goppa │ ~1 MB      │ Very strong  │ O(n²)     │ NIST Final. │
+    │ QC-MDPC     │ ~2-5 KB    │ Strong       │ O(n log n)│ NIST Alt.   │
+    │ QC-LDPC     │ ~1-3 KB    │ Moderate     │ O(n)      │ Research    │
+    │ Reed-Solomon│ Small      │ Weak alone   │ O(n²)     │ Component   │
+    └─────────────────────────────────────────────────────────────────────┘
+    """
+    print(families)
+
+
+class GoppaCodeSimplified:
+    """
+    Simplified Goppa code implementation for educational purposes.
+    
+    Real Goppa codes use polynomial arithmetic over extension fields.
+    This is a conceptual demonstration.
+    """
+    
+    def __init__(self, n: int, t: int, seed: int = None):
+        """
+        Initialize simplified Goppa-like code.
+        
+        Args:
+            n: Code length
+            t: Error correction capability
+            seed: Random seed for reproducibility
+        """
+        if seed is not None:
+            np.random.seed(seed)
+        
+        self.n = n
+        self.t = t
+        self.r = t * int(np.ceil(np.log2(n)))  # Approximate redundancy
+        self.k = n - self.r
+        
+        if self.k <= 0:
+            raise ValueError("Invalid parameters: k must be positive")
+        
+        # Generate "structured" parity-check matrix
+        # (Real Goppa codes have algebraic structure)
+        self.H_secret = self._generate_structured_H()
+        
+        # Secret permutation and scrambling
+        self.P = np.random.permutation(n)
+        self.S = self._random_invertible_matrix(self.r)
+        
+        # Public parity-check matrix
+        self.H_public = (self.S @ self.H_secret[:, self.P]) % 2
+    
+    def _generate_structured_H(self) -> np.ndarray:
+        """Generate parity-check matrix with hidden structure."""
+        # Simplified: just random for demonstration
+        # Real Goppa codes have algebraic structure from the Goppa polynomial
+        return np.random.randint(0, 2, size=(self.r, self.n))
+    
+    def _random_invertible_matrix(self, n: int) -> np.ndarray:
+        """Generate random invertible binary matrix."""
+        while True:
+            M = np.random.randint(0, 2, size=(n, n))
+            # Check if invertible by trying to compute inverse
+            try:
+                aug = np.hstack([M, np.eye(n, dtype=int)])
+                for col in range(n):
+                    pivot = None
+                    for row in range(col, n):
+                        if aug[row, col] == 1:
+                            pivot = row
+                            break
+                    if pivot is None:
+                        raise ValueError("Singular")
+                    aug[[col, pivot]] = aug[[pivot, col]]
+                    for row in range(n):
+                        if row != col and aug[row, col] == 1:
+                            aug[row] = (aug[row] + aug[col]) % 2
+                return M
+            except:
+                continue
+    
+    def error_correction_capability(self) -> int:
+        """Return error correction capability."""
+        return self.t
+    
+    def get_public_matrix(self) -> np.ndarray:
+        """Return public (disguised) parity-check matrix."""
+        return self.H_public
+    
+    def decode_with_secret(self, syndrome_public: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Decode using secret structure.
+        
+        1. Transform syndrome back to secret code
+        2. Use efficient decoding (simulated here)
+        3. Transform error back through permutation
+        """
+        # This would use Patterson's algorithm for real Goppa codes
+        # Simplified: just acknowledge we have efficient decoding
+        pass
+
+code_families_overview()
+```
+
+## Summary
+
+In this lesson, you learned the foundations of error-correcting codes:
+
+1. **Linear Codes**: k-dimensional subspaces of F_q^n with minimum distance d
+2. **Generator Matrix**: G encodes messages to codewords
+3. **Parity-Check Matrix**: H defines the code via H·c^T = 0
+4. **Syndrome**: s = H·e^T reveals error pattern, enables decoding
+5. **Syndrome Decoding**: Lookup table for small codes
+6. **Decoding Hardness**: Syndrome decoding is NP-complete for random codes
+7. **Information Set Decoding**: Best known attack, exponential complexity
+8. **Goppa Codes**: Algebraic structure enables efficient secret decoding
+
+These concepts form the security foundation of McEliece and other code-based cryptosystems.
+
+## Further Reading
+
+- Next lesson: The McEliece Cryptosystem
+- Related: Patterson's algorithm for Goppa codes
+- Advanced: ISD complexity analysis

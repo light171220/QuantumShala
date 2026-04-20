@@ -1,0 +1,410 @@
+---
+title: "Mean-Variance Optimization in Practice"
+description: "Implement mean-variance portfolio optimization using numerical methods and handle real-world data challenges."
+duration: 50
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Implement mean-variance optimization using quadratic programming
+- Estimate expected returns and covariance matrices from historical data
+- Understand estimation error and its impact on optimal portfolios
+- Apply shrinkage estimators to improve covariance estimation
+- Build a complete portfolio optimization pipeline
+
+## 1. Quadratic Programming Formulation
+
+Mean-variance optimization is a quadratic programming (QP) problem.
+
+<Definition term="Quadratic Programming">
+A quadratic program minimizes a quadratic objective subject to linear constraints:
+$$\min_x \frac{1}{2}x^T Q x + c^T x$$
+$$\text{s.t. } Ax \leq b, \quad A_{eq}x = b_{eq}$$
+</Definition>
+
+### Portfolio Optimization as QP
+
+<Formula>
+$$\min_{\mathbf{w}} \frac{1}{2} \mathbf{w}^T \boldsymbol{\Sigma} \mathbf{w} - \lambda \boldsymbol{\mu}^T \mathbf{w}$$
+$$\text{s.t. } \mathbf{1}^T \mathbf{w} = 1, \quad \mathbf{w} \geq 0$$
+</Formula>
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+import cvxpy as cp
+
+def optimize_portfolio_cvxpy(expected_returns, cov_matrix,
+                              risk_aversion=1.0, bounds=(0, 1)):
+    """
+    Solve portfolio optimization using CVXPY.
+
+    Args:
+        expected_returns: Expected returns vector
+        cov_matrix: Covariance matrix
+        risk_aversion: Risk aversion parameter (higher = more conservative)
+        bounds: Tuple of (min, max) weight per asset
+
+    Returns:
+        Optimal weights
+    """
+    n = len(expected_returns)
+
+    # Decision variable
+    w = cp.Variable(n)
+
+    # Objective: maximize return - (risk_aversion/2) * variance
+    portfolio_return = expected_returns @ w
+    portfolio_variance = cp.quad_form(w, cov_matrix)
+    objective = cp.Maximize(portfolio_return - (risk_aversion/2) * portfolio_variance)
+
+    # Constraints
+    constraints = [
+        cp.sum(w) == 1,          # Fully invested
+        w >= bounds[0],           # Minimum weight
+        w <= bounds[1]            # Maximum weight
+    ]
+
+    # Solve
+    problem = cp.Problem(objective, constraints)
+    problem.solve()
+
+    return w.value
+
+# Example
+np.random.seed(42)
+n_assets = 5
+expected_returns = np.array([0.12, 0.10, 0.08, 0.06, 0.04])
+cov_matrix = np.array([
+    [0.04, 0.02, 0.01, 0.005, 0.002],
+    [0.02, 0.03, 0.015, 0.008, 0.004],
+    [0.01, 0.015, 0.025, 0.01, 0.005],
+    [0.005, 0.008, 0.01, 0.02, 0.008],
+    [0.002, 0.004, 0.005, 0.008, 0.015]
+])
+
+weights = optimize_portfolio_cvxpy(expected_returns, cov_matrix, risk_aversion=2.0)
+print("Optimal weights:", weights.round(3))
+```
+
+## 2. Estimating Expected Returns
+
+The expected return is the most difficult input to estimate reliably.
+
+### Historical Mean
+
+The simplest approach uses historical average returns:
+
+```python
+def estimate_returns_historical(prices, annualization_factor=252):
+    """
+    Estimate expected returns from historical prices.
+
+    Args:
+        prices: DataFrame with asset prices (rows=dates, cols=assets)
+        annualization_factor: Trading days per year
+
+    Returns:
+        Annualized expected returns
+    """
+    # Calculate log returns
+    log_returns = np.log(prices / prices.shift(1)).dropna()
+
+    # Mean daily return, annualized
+    mean_returns = log_returns.mean() * annualization_factor
+
+    return mean_returns
+
+# Simulated price data
+import pandas as pd
+np.random.seed(42)
+n_days = 252 * 3  # 3 years
+n_assets = 5
+
+# Generate random returns
+daily_returns = np.random.multivariate_normal(
+    mean=[0.0004, 0.0003, 0.0002, 0.00015, 0.0001],
+    cov=cov_matrix / 252,
+    size=n_days
+)
+
+# Convert to prices
+prices = pd.DataFrame(100 * np.exp(np.cumsum(daily_returns, axis=0)),
+                     columns=[f'Asset_{i+1}' for i in range(n_assets)])
+
+expected_returns_est = estimate_returns_historical(prices)
+print("Estimated returns:", expected_returns_est.round(4).values)
+```
+
+### Shrinkage Estimators
+
+Historical means are noisy. Shrinkage pulls estimates toward a common value:
+
+<Formula>
+$$\hat{\mu}_{shrunk} = (1-\alpha) \hat{\mu}_{sample} + \alpha \cdot \bar{\mu}$$
+</Formula>
+
+```python
+def shrink_returns(sample_returns, shrinkage_target='grand_mean', intensity=0.5):
+    """
+    Apply shrinkage to expected return estimates.
+    """
+    if shrinkage_target == 'grand_mean':
+        target = np.mean(sample_returns)
+    elif shrinkage_target == 'zero':
+        target = 0
+    else:
+        target = shrinkage_target
+
+    return (1 - intensity) * sample_returns + intensity * target
+
+shrunk_returns = shrink_returns(expected_returns_est.values, intensity=0.3)
+print("Shrunk returns:", shrunk_returns.round(4))
+```
+
+<Warning>
+Expected return estimates are notoriously unreliable. Even 5+ years of data may not provide statistically significant estimates of true expected returns.
+</Warning>
+
+## 3. Estimating the Covariance Matrix
+
+The covariance matrix is more stable than expected returns but still requires care.
+
+### Sample Covariance
+
+```python
+def estimate_covariance(prices, annualization_factor=252):
+    """
+    Estimate covariance matrix from historical prices.
+    """
+    log_returns = np.log(prices / prices.shift(1)).dropna()
+
+    # Sample covariance, annualized
+    cov_matrix = log_returns.cov() * annualization_factor
+
+    return cov_matrix
+
+cov_est = estimate_covariance(prices)
+print("Estimated covariance matrix:")
+print(cov_est.round(4))
+```
+
+### Ledoit-Wolf Shrinkage
+
+The Ledoit-Wolf estimator shrinks toward a structured target:
+
+<Formula>
+$$\hat{\Sigma}_{LW} = (1-\delta) \hat{\Sigma}_{sample} + \delta \cdot F$$
+</Formula>
+
+where $F$ is a structured target (e.g., diagonal or single-factor).
+
+```python
+from sklearn.covariance import LedoitWolf
+
+def estimate_covariance_shrinkage(prices, annualization_factor=252):
+    """
+    Estimate covariance using Ledoit-Wolf shrinkage.
+    """
+    log_returns = np.log(prices / prices.shift(1)).dropna()
+
+    # Fit Ledoit-Wolf estimator
+    lw = LedoitWolf().fit(log_returns)
+
+    # Annualize
+    cov_shrunk = lw.covariance_ * annualization_factor
+    shrinkage = lw.shrinkage_
+
+    return cov_shrunk, shrinkage
+
+cov_shrunk, shrinkage = estimate_covariance_shrinkage(prices)
+print(f"Shrinkage intensity: {shrinkage:.3f}")
+print("Shrunk covariance matrix:")
+print(cov_shrunk.round(4))
+```
+
+<Tip>
+Ledoit-Wolf shrinkage typically improves out-of-sample performance, especially when the number of assets is large relative to the number of observations.
+</Tip>
+
+## 4. Estimation Error Impact
+
+Small changes in inputs can lead to large changes in optimal weights.
+
+```python
+def sensitivity_analysis(expected_returns, cov_matrix, perturbation=0.01):
+    """
+    Analyze sensitivity of optimal weights to input perturbations.
+    """
+    n = len(expected_returns)
+    base_weights = optimize_portfolio_cvxpy(expected_returns, cov_matrix)
+
+    sensitivities = []
+
+    for i in range(n):
+        # Perturb expected return of asset i
+        perturbed_returns = expected_returns.copy()
+        perturbed_returns[i] += perturbation
+
+        new_weights = optimize_portfolio_cvxpy(perturbed_returns, cov_matrix)
+
+        # Calculate weight changes
+        weight_change = np.abs(new_weights - base_weights).sum()
+        sensitivities.append(weight_change)
+
+    return np.array(sensitivities)
+
+sens = sensitivity_analysis(expected_returns, cov_matrix)
+print("Sensitivity to 1% return change:")
+for i, s in enumerate(sens):
+    print(f"  Asset {i+1}: {s:.3f} total weight change")
+```
+
+### Robust Optimization
+
+To handle estimation error, use robust optimization:
+
+```python
+def robust_portfolio(expected_returns, cov_matrix, uncertainty_radius=0.02):
+    """
+    Robust portfolio optimization accounting for return uncertainty.
+
+    Worst-case optimization over uncertainty set.
+    """
+    n = len(expected_returns)
+    w = cp.Variable(n)
+
+    # Worst-case return: mu'w - epsilon * ||w||
+    portfolio_return = expected_returns @ w - uncertainty_radius * cp.norm(w, 2)
+    portfolio_variance = cp.quad_form(w, cov_matrix)
+
+    objective = cp.Maximize(portfolio_return - 0.5 * portfolio_variance)
+    constraints = [cp.sum(w) == 1, w >= 0]
+
+    problem = cp.Problem(objective, constraints)
+    problem.solve()
+
+    return w.value
+
+robust_weights = robust_portfolio(expected_returns, cov_matrix)
+print("Robust weights:", robust_weights.round(3))
+```
+
+## 5. Complete Pipeline
+
+Here's a complete portfolio optimization pipeline:
+
+```python
+class PortfolioOptimizer:
+    """
+    Complete mean-variance portfolio optimization pipeline.
+    """
+
+    def __init__(self, risk_aversion=1.0, shrinkage_returns=0.3,
+                 use_ledoit_wolf=True):
+        self.risk_aversion = risk_aversion
+        self.shrinkage_returns = shrinkage_returns
+        self.use_ledoit_wolf = use_ledoit_wolf
+
+    def fit(self, prices):
+        """
+        Estimate expected returns and covariance from prices.
+        """
+        # Returns
+        log_returns = np.log(prices / prices.shift(1)).dropna()
+        self.expected_returns = log_returns.mean().values * 252
+
+        # Shrink returns
+        grand_mean = np.mean(self.expected_returns)
+        self.expected_returns = (
+            (1 - self.shrinkage_returns) * self.expected_returns +
+            self.shrinkage_returns * grand_mean
+        )
+
+        # Covariance
+        if self.use_ledoit_wolf:
+            lw = LedoitWolf().fit(log_returns)
+            self.cov_matrix = lw.covariance_ * 252
+        else:
+            self.cov_matrix = log_returns.cov().values * 252
+
+        self.n_assets = len(self.expected_returns)
+        self.asset_names = prices.columns.tolist()
+
+        return self
+
+    def optimize(self, constraints=None):
+        """
+        Find optimal portfolio weights.
+        """
+        n = self.n_assets
+        w = cp.Variable(n)
+
+        ret = self.expected_returns @ w
+        var = cp.quad_form(w, self.cov_matrix)
+
+        objective = cp.Maximize(ret - (self.risk_aversion/2) * var)
+
+        base_constraints = [cp.sum(w) == 1, w >= 0, w <= 0.4]
+
+        if constraints:
+            base_constraints.extend(constraints)
+
+        problem = cp.Problem(objective, base_constraints)
+        problem.solve()
+
+        self.weights = w.value
+        self.portfolio_return = self.expected_returns @ self.weights
+        self.portfolio_vol = np.sqrt(self.weights @ self.cov_matrix @ self.weights)
+
+        return self
+
+    def summary(self):
+        """Print portfolio summary."""
+        print("Portfolio Summary")
+        print("=" * 40)
+        print(f"Expected Return: {self.portfolio_return:.2%}")
+        print(f"Volatility: {self.portfolio_vol:.2%}")
+        print(f"Sharpe Ratio: {(self.portfolio_return - 0.02) / self.portfolio_vol:.3f}")
+        print("\nWeights:")
+        for name, weight in zip(self.asset_names, self.weights):
+            if weight > 0.001:
+                print(f"  {name}: {weight:.1%}")
+
+# Use the pipeline
+optimizer = PortfolioOptimizer(risk_aversion=2.0)
+optimizer.fit(prices)
+optimizer.optimize()
+optimizer.summary()
+```
+
+## 6. Quantum Computing Connection
+
+Mean-variance optimization maps to quantum algorithms when constraints make the problem hard:
+
+| Scenario | Classical | Quantum Potential |
+|----------|-----------|-------------------|
+| Continuous MVO | O(n³) - efficient | No advantage |
+| Cardinality constraint | NP-hard | QAOA |
+| Integer shares | NP-hard | VQE/QAOA |
+| Transaction costs | Non-convex | Variational |
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Quadratic programming** solves mean-variance optimization efficiently
+2. **Expected returns** are difficult to estimate reliably
+3. **Shrinkage estimators** improve both return and covariance estimates
+4. **Estimation error** can dramatically impact optimal weights
+5. **Robust optimization** accounts for parameter uncertainty
+6. **Complete pipelines** combine estimation, optimization, and validation
+
+## Further Reading
+
+- Next lesson: Constraints in Portfolio Optimization
+- Related: QUBO Formulation for Quantum Optimization
+- Application: Comparing Classical and Quantum Optimizers

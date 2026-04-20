@@ -1,0 +1,578 @@
+---
+title: "Hedging Strategies"
+duration: "45 minutes"
+---
+
+# Hedging Strategies
+
+Hedging neutralizes unwanted exposures in derivative portfolios. Effective hedging requires understanding the Greeks and implementing dynamic rebalancing strategies.
+
+## Delta Hedging
+
+Delta measures option sensitivity to underlying price changes. Delta hedging creates a portfolio neutral to small price moves.
+
+<QuizQuestion
+  question="What does delta hedging achieve?"
+  options={[
+    "Eliminates all risk",
+    "Neutralizes sensitivity to small price changes",
+    "Maximizes profit potential",
+    "Eliminates time decay"
+  ]}
+  correctAnswer={1}
+  explanation="Delta hedging neutralizes the portfolio's sensitivity to small changes in the underlying price. The hedged portfolio has delta ≈ 0, meaning small price moves don't change portfolio value."
+/>
+
+```python
+import numpy as np
+from scipy.stats import norm
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class OptionPosition:
+    """Option position with Greeks."""
+    strike: float
+    expiry: float
+    is_call: bool
+    quantity: int
+    spot: float
+    rate: float
+    volatility: float
+
+    def d1(self) -> float:
+        return (np.log(self.spot / self.strike) +
+                (self.rate + 0.5 * self.volatility**2) * self.expiry) / \
+               (self.volatility * np.sqrt(self.expiry))
+
+    def d2(self) -> float:
+        return self.d1() - self.volatility * np.sqrt(self.expiry)
+
+    def delta(self) -> float:
+        """Option delta."""
+        if self.is_call:
+            return norm.cdf(self.d1()) * self.quantity
+        else:
+            return (norm.cdf(self.d1()) - 1) * self.quantity
+
+    def gamma(self) -> float:
+        """Option gamma."""
+        return norm.pdf(self.d1()) / (self.spot * self.volatility *
+               np.sqrt(self.expiry)) * self.quantity
+
+    def vega(self) -> float:
+        """Option vega (per 1% vol change)."""
+        return self.spot * np.sqrt(self.expiry) * norm.pdf(self.d1()) * 0.01 * self.quantity
+
+    def theta(self) -> float:
+        """Option theta (daily)."""
+        term1 = -self.spot * norm.pdf(self.d1()) * self.volatility / (2 * np.sqrt(self.expiry))
+        if self.is_call:
+            term2 = -self.rate * self.strike * np.exp(-self.rate * self.expiry) * norm.cdf(self.d2())
+        else:
+            term2 = self.rate * self.strike * np.exp(-self.rate * self.expiry) * norm.cdf(-self.d2())
+        return (term1 + term2) / 365 * self.quantity
+
+
+class DeltaHedger:
+    """
+    Delta hedging strategy implementation.
+    """
+
+    def __init__(self, option: OptionPosition):
+        self.option = option
+        self.hedge_position = 0  # Shares of underlying
+        self.hedge_history = []
+
+    def calculate_hedge(self) -> float:
+        """
+        Calculate shares needed to delta hedge.
+
+        For a long call with delta 0.5 and quantity 100:
+        Need to short 50 shares to be delta neutral.
+        """
+        option_delta = self.option.delta()
+        hedge_shares = -option_delta  # Opposite sign
+        return hedge_shares
+
+    def rebalance(self, new_spot: float) -> dict:
+        """
+        Rebalance hedge for new spot price.
+
+        Returns trade required and new hedge position.
+        """
+        self.option.spot = new_spot
+        new_hedge = self.calculate_hedge()
+        trade = new_hedge - self.hedge_position
+
+        self.hedge_position = new_hedge
+        self.hedge_history.append({
+            'spot': new_spot,
+            'delta': self.option.delta(),
+            'hedge_position': self.hedge_position,
+            'trade': trade
+        })
+
+        return {
+            'trade': trade,
+            'new_hedge': new_hedge,
+            'portfolio_delta': self.option.delta() + new_hedge
+        }
+
+    def simulate_hedging(
+        self,
+        price_path: np.ndarray,
+        rebalance_frequency: int = 1
+    ) -> dict:
+        """
+        Simulate delta hedging along a price path.
+
+        Returns P&L breakdown.
+        """
+        n = len(price_path)
+        option_values = []
+        hedge_pnl = 0
+        transaction_costs = 0
+
+        initial_spot = price_path[0]
+        self.option.spot = initial_spot
+        initial_option_value = self._option_value()
+        self.hedge_position = self.calculate_hedge()
+
+        for i in range(1, n):
+            # Update spot
+            old_spot = self.option.spot
+            self.option.spot = price_path[i]
+            self.option.expiry -= 1/252  # Daily time decay
+
+            # Option P&L
+            new_option_value = self._option_value()
+
+            # Hedge P&L
+            hedge_pnl += self.hedge_position * (price_path[i] - old_spot)
+
+            # Rebalance if needed
+            if i % rebalance_frequency == 0 and self.option.expiry > 0:
+                result = self.rebalance(price_path[i])
+                transaction_costs += abs(result['trade']) * 0.01  # 1 cent per share
+
+            option_values.append(new_option_value)
+
+        final_option_value = self._option_value()
+
+        return {
+            'initial_option_value': initial_option_value,
+            'final_option_value': final_option_value,
+            'option_pnl': final_option_value - initial_option_value,
+            'hedge_pnl': hedge_pnl,
+            'transaction_costs': transaction_costs,
+            'total_pnl': (final_option_value - initial_option_value) + hedge_pnl - transaction_costs
+        }
+
+    def _option_value(self) -> float:
+        """Calculate current option value."""
+        d1 = self.option.d1()
+        d2 = self.option.d2()
+
+        if self.option.is_call:
+            price = (self.option.spot * norm.cdf(d1) -
+                    self.option.strike * np.exp(-self.option.rate * self.option.expiry) * norm.cdf(d2))
+        else:
+            price = (self.option.strike * np.exp(-self.option.rate * self.option.expiry) * norm.cdf(-d2) -
+                    self.option.spot * norm.cdf(-d1))
+
+        return price * self.option.quantity
+```
+
+## Gamma Hedging
+
+Gamma measures how delta changes with price. Gamma hedging uses options to neutralize gamma exposure.
+
+```python
+class GammaHedger:
+    """
+    Gamma hedging to reduce rebalancing needs.
+
+    Delta-gamma neutral portfolios are stable for larger moves.
+    """
+
+    def __init__(self, positions: list):
+        """Initialize with list of OptionPosition objects."""
+        self.positions = positions
+
+    def portfolio_greeks(self) -> dict:
+        """Calculate portfolio-level Greeks."""
+        total_delta = sum(p.delta() for p in self.positions)
+        total_gamma = sum(p.gamma() for p in self.positions)
+        total_vega = sum(p.vega() for p in self.positions)
+        total_theta = sum(p.theta() for p in self.positions)
+
+        return {
+            'delta': total_delta,
+            'gamma': total_gamma,
+            'vega': total_vega,
+            'theta': total_theta
+        }
+
+    def hedge_gamma(
+        self,
+        hedge_option: OptionPosition
+    ) -> dict:
+        """
+        Calculate quantity of hedge option to neutralize gamma.
+
+        To neutralize gamma:
+        portfolio_gamma + hedge_gamma * quantity = 0
+        quantity = -portfolio_gamma / hedge_gamma
+        """
+        portfolio = self.portfolio_greeks()
+        hedge_gamma_per_unit = hedge_option.gamma() / hedge_option.quantity
+
+        if abs(hedge_gamma_per_unit) < 1e-10:
+            return {'error': 'Hedge option has zero gamma'}
+
+        hedge_quantity = -portfolio['gamma'] / hedge_gamma_per_unit
+
+        return {
+            'hedge_quantity': hedge_quantity,
+            'residual_gamma': portfolio['gamma'] + hedge_gamma_per_unit * hedge_quantity,
+            'new_delta_exposure': portfolio['delta'] + hedge_option.delta() / hedge_option.quantity * hedge_quantity
+        }
+
+    def delta_gamma_neutral(
+        self,
+        hedge_option: OptionPosition,
+        spot: float
+    ) -> dict:
+        """
+        Create delta-gamma neutral portfolio.
+
+        Step 1: Use options to neutralize gamma
+        Step 2: Use underlying to neutralize remaining delta
+        """
+        # Gamma hedge
+        gamma_result = self.hedge_gamma(hedge_option)
+
+        if 'error' in gamma_result:
+            return gamma_result
+
+        # Adjust hedge option
+        hedge_option.quantity = gamma_result['hedge_quantity']
+
+        # Calculate new delta
+        portfolio = self.portfolio_greeks()
+        new_delta = portfolio['delta'] + hedge_option.delta()
+
+        # Underlying hedge
+        underlying_shares = -new_delta
+
+        return {
+            'option_hedge_quantity': gamma_result['hedge_quantity'],
+            'underlying_shares': underlying_shares,
+            'portfolio_delta': 0,  # By construction
+            'portfolio_gamma': gamma_result['residual_gamma']
+        }
+```
+
+<QuizQuestion
+  question="Why is gamma hedging beneficial?"
+  options={[
+    "It eliminates all Greeks",
+    "It reduces the frequency of delta hedge rebalancing",
+    "It guarantees profits",
+    "It removes time decay"
+  ]}
+  correctAnswer={1}
+  explanation="Gamma hedging makes delta more stable as the underlying moves. With lower gamma, delta changes less with price moves, reducing the need for frequent rebalancing and associated transaction costs."
+/>
+
+## Vega Hedging
+
+Vega hedging protects against volatility changes.
+
+```python
+class VegaHedger:
+    """
+    Vega hedging for volatility exposure management.
+    """
+
+    def __init__(self, positions: list):
+        self.positions = positions
+
+    def hedge_vega(
+        self,
+        hedge_option: OptionPosition
+    ) -> dict:
+        """
+        Calculate hedge to neutralize vega.
+
+        Useful when expecting volatility changes.
+        """
+        portfolio_vega = sum(p.vega() for p in self.positions)
+        hedge_vega_per_unit = hedge_option.vega() / hedge_option.quantity
+
+        if abs(hedge_vega_per_unit) < 1e-10:
+            return {'error': 'Hedge option has zero vega'}
+
+        hedge_quantity = -portfolio_vega / hedge_vega_per_unit
+
+        return {
+            'hedge_quantity': hedge_quantity,
+            'residual_vega': portfolio_vega + hedge_vega_per_unit * hedge_quantity
+        }
+
+    def multi_greek_hedge(
+        self,
+        hedge_options: list,
+        target_greeks: dict
+    ) -> dict:
+        """
+        Solve for hedge quantities to achieve target Greeks.
+
+        Uses multiple hedge instruments for multiple Greek targets.
+        """
+        n_hedges = len(hedge_options)
+        n_greeks = len(target_greeks)
+
+        if n_hedges < n_greeks:
+            return {'error': 'Need at least as many hedges as target Greeks'}
+
+        # Build matrix of hedge Greeks
+        greek_matrix = np.zeros((n_greeks, n_hedges))
+        greek_names = list(target_greeks.keys())
+
+        for j, hedge in enumerate(hedge_options):
+            for i, greek in enumerate(greek_names):
+                if greek == 'delta':
+                    greek_matrix[i, j] = hedge.delta() / hedge.quantity
+                elif greek == 'gamma':
+                    greek_matrix[i, j] = hedge.gamma() / hedge.quantity
+                elif greek == 'vega':
+                    greek_matrix[i, j] = hedge.vega() / hedge.quantity
+
+        # Current portfolio Greeks
+        current = {
+            'delta': sum(p.delta() for p in self.positions),
+            'gamma': sum(p.gamma() for p in self.positions),
+            'vega': sum(p.vega() for p in self.positions)
+        }
+
+        # Target adjustments needed
+        adjustments = np.array([
+            target_greeks[g] - current[g] for g in greek_names
+        ])
+
+        # Solve system
+        try:
+            quantities = np.linalg.lstsq(greek_matrix, adjustments, rcond=None)[0]
+        except np.linalg.LinAlgError:
+            return {'error': 'Could not solve hedge equations'}
+
+        return {
+            'hedge_quantities': dict(zip([f'hedge_{i}' for i in range(n_hedges)], quantities)),
+            'achieved_greeks': {
+                g: current[g] + np.dot(greek_matrix[i], quantities)
+                for i, g in enumerate(greek_names)
+            }
+        }
+```
+
+## Dynamic Hedging
+
+Dynamic hedging continuously adjusts positions as market conditions change.
+
+```python
+class DynamicHedgingSimulator:
+    """
+    Simulate dynamic hedging strategies.
+    """
+
+    def __init__(self, initial_option: OptionPosition):
+        self.option = initial_option
+
+    def simulate_discrete_hedging(
+        self,
+        price_path: np.ndarray,
+        vol_path: Optional[np.ndarray],
+        hedge_frequency: str = 'daily'
+    ) -> dict:
+        """
+        Simulate hedging with discrete rebalancing.
+
+        Hedge frequency options: 'daily', 'weekly', 'continuous'
+        """
+        n = len(price_path)
+        time_step = 1/252  # Daily
+
+        if hedge_frequency == 'daily':
+            rebal_freq = 1
+        elif hedge_frequency == 'weekly':
+            rebal_freq = 5
+        else:
+            rebal_freq = 1
+
+        # Track positions
+        hedge_shares = 0
+        cash = 0
+        hedge_pnl = []
+
+        initial_option_price = self._bs_price()
+
+        for i in range(1, n):
+            old_spot = self.option.spot
+            self.option.spot = price_path[i]
+
+            if vol_path is not None:
+                self.option.volatility = vol_path[i]
+
+            self.option.expiry -= time_step
+
+            # Hedge P&L
+            stock_pnl = hedge_shares * (price_path[i] - old_spot)
+            hedge_pnl.append(stock_pnl)
+
+            # Rebalance
+            if i % rebal_freq == 0 and self.option.expiry > 0:
+                new_delta = self.option.delta()
+                trade = -new_delta - hedge_shares
+                hedge_shares = -new_delta
+                cash -= trade * price_path[i] * 0.001  # Transaction cost
+
+        final_option_price = self._bs_price()
+
+        return {
+            'hedging_error': final_option_price - initial_option_price - sum(hedge_pnl) + cash,
+            'total_hedge_pnl': sum(hedge_pnl),
+            'transaction_costs': -cash,
+            'hedge_frequency': hedge_frequency
+        }
+
+    def analyze_hedge_error(
+        self,
+        num_simulations: int = 1000,
+        hedge_frequency: str = 'daily'
+    ) -> dict:
+        """
+        Analyze distribution of hedging errors.
+
+        Hedging error = Actual P&L - Theoretical P&L
+        """
+        errors = []
+        days = int(self.option.expiry * 252)
+
+        for _ in range(num_simulations):
+            # Generate GBM path
+            dt = 1/252
+            path = [self.option.spot]
+            for _ in range(days):
+                z = np.random.standard_normal()
+                drift = (self.option.rate - 0.5*self.option.volatility**2) * dt
+                diff = self.option.volatility * np.sqrt(dt) * z
+                path.append(path[-1] * np.exp(drift + diff))
+
+            # Reset option
+            self.option.spot = path[0]
+            self.option.expiry = days / 252
+
+            result = self.simulate_discrete_hedging(
+                np.array(path), None, hedge_frequency
+            )
+            errors.append(result['hedging_error'])
+
+        return {
+            'mean_error': np.mean(errors),
+            'std_error': np.std(errors),
+            'max_error': np.max(np.abs(errors)),
+            'percentile_95': np.percentile(np.abs(errors), 95)
+        }
+
+    def _bs_price(self) -> float:
+        """Black-Scholes price."""
+        d1 = self.option.d1()
+        d2 = self.option.d2()
+        if self.option.is_call:
+            return (self.option.spot * norm.cdf(d1) -
+                   self.option.strike * np.exp(-self.option.rate * self.option.expiry) * norm.cdf(d2)) * self.option.quantity
+        return (self.option.strike * np.exp(-self.option.rate * self.option.expiry) * norm.cdf(-d2) -
+               self.option.spot * norm.cdf(-d1)) * self.option.quantity
+```
+
+<QuizQuestion
+  question="What causes hedging errors in discrete delta hedging?"
+  options={[
+    "Incorrect volatility estimate",
+    "Gap between rebalancing and gamma exposure",
+    "Using too many options",
+    "Low interest rates"
+  ]}
+  correctAnswer={1}
+  explanation="Discrete hedging errors arise because the underlying can move significantly between rebalances. Gamma (change in delta) means the hedge becomes stale, and larger moves cause larger hedging errors."
+/>
+
+## Quantum Hedge Optimization
+
+Quantum computing can optimize multi-instrument hedge portfolios.
+
+```python
+class QuantumHedgeOptimizer:
+    """
+    Quantum-enhanced hedge portfolio optimization.
+    """
+
+    def __init__(self, positions: list, available_hedges: list):
+        self.positions = positions
+        self.hedges = available_hedges
+
+    def optimize_hedge_portfolio(
+        self,
+        target_greeks: dict,
+        cost_function: str = 'minimize_cost'
+    ) -> dict:
+        """
+        Find optimal hedge portfolio.
+
+        QAOA/VQE can solve this as combinatorial optimization.
+        """
+        from scipy.optimize import minimize
+
+        n = len(self.hedges)
+
+        # Objective: minimize hedging cost while meeting Greek targets
+        def objective(quantities):
+            # Cost (simplified as notional)
+            cost = sum(abs(q) * h.spot for q, h in zip(quantities, self.hedges))
+
+            # Greek penalties
+            achieved_delta = sum(p.delta() for p in self.positions) + \
+                           sum(q * h.delta()/h.quantity for q, h in zip(quantities, self.hedges))
+            achieved_gamma = sum(p.gamma() for p in self.positions) + \
+                           sum(q * h.gamma()/h.quantity for q, h in zip(quantities, self.hedges))
+
+            delta_penalty = 1000 * (achieved_delta - target_greeks.get('delta', 0))**2
+            gamma_penalty = 10000 * (achieved_gamma - target_greeks.get('gamma', 0))**2
+
+            return cost + delta_penalty + gamma_penalty
+
+        result = minimize(objective, np.zeros(n), method='SLSQP')
+
+        return {
+            'optimal_quantities': result.x,
+            'total_cost': result.fun,
+            'quantum_advantage': 'QAOA for discrete hedge selection'
+        }
+```
+
+## Summary
+
+Effective hedging requires:
+
+- **Delta hedging**: Neutralize price sensitivity
+- **Gamma hedging**: Reduce rebalancing frequency
+- **Vega hedging**: Manage volatility exposure
+- **Dynamic strategies**: Continuous adjustment
+
+Key considerations:
+- Transaction costs from frequent rebalancing
+- Discrete vs continuous hedging tradeoffs
+- Multi-Greek optimization complexity
+- Quantum algorithms for portfolio optimization

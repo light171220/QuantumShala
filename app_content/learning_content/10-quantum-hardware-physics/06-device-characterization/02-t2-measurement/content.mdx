@@ -1,0 +1,584 @@
+---
+title: "T2 Measurement: Dephasing and Echo Sequences"
+description: "Master the measurement of qubit dephasing times using Ramsey, spin echo, and CPMG sequences."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Distinguish between T2* (Ramsey) and T2 (echo) dephasing times
+- Implement Ramsey, Hahn echo, and CPMG pulse sequences
+- Analyze the relationship between T1, T2, and pure dephasing Tphi
+- Apply dynamical decoupling to extend coherence times
+- Extract noise spectral information from T2 measurements
+
+## 1. Introduction to Dephasing
+
+While T1 describes energy relaxation, T2 characterizes the loss of phase coherence. This is often the more stringent limit on quantum computation.
+
+<Definition term="T2 (Dephasing Time)">
+T2 is the characteristic time for loss of phase coherence in a superposition state. It determines how long quantum information encoded in the relative phase between |0> and |1> can be preserved.
+</Definition>
+
+### The Bloch Sphere Picture
+
+On the Bloch sphere:
+- **T1 processes**: Cause the Bloch vector to relax toward the +Z axis (ground state)
+- **T2 processes**: Cause the Bloch vector in the XY plane to shrink toward the Z axis
+
+<Formula>
+$$\vec{r}(t) = \begin{pmatrix} r_x(0) e^{-t/T_2} \cos(\Delta\omega \cdot t) \\ r_y(0) e^{-t/T_2} \sin(\Delta\omega \cdot t) \\ r_z^{eq} + (r_z(0) - r_z^{eq}) e^{-t/T_1} \end{pmatrix}$$
+</Formula>
+
+## 2. T2* vs T2: Understanding the Difference
+
+### T2* (Free Induction Decay / Ramsey)
+
+T2* measures dephasing including all noise sources:
+
+<Formula>
+$$\frac{1}{T_2^*} = \frac{1}{2T_1} + \frac{1}{T_\phi}$$
+</Formula>
+
+where $T_\phi$ is the pure dephasing time from low-frequency noise.
+
+<Warning>
+T2* is dominated by slow noise (quasi-static frequency fluctuations). Different measurements may yield different T2* values because the noise realization varies between experiments.
+</Warning>
+
+### T2 (Echo / Hahn Echo)
+
+T2 (or T2E for "echo") measures dephasing after refocusing slow noise:
+
+<Formula>
+$$\frac{1}{T_2} = \frac{1}{2T_1} + \frac{1}{T_\phi^{(echo)}}$$
+</Formula>
+
+The echo sequence removes the contribution of noise slower than 1/(2*tau), where tau is the echo time.
+
+### Key Relationship
+
+For qubits:
+<Formula>
+$$T_2^* \leq T_2 \leq 2T_1$$
+</Formula>
+
+The upper limit $T_2 = 2T_1$ is reached when pure dephasing is negligible.
+
+## 3. Ramsey Measurement (T2*)
+
+### The Ramsey Sequence
+
+```
+1. Initialize in |0>
+2. Apply X/2 gate (pi/2 pulse) - creates |+> = (|0> + |1>)/sqrt(2)
+3. Wait for time tau (free precession)
+4. Apply second X/2 gate
+5. Measure in Z basis
+```
+
+<Example>
+The Ramsey experiment in code:
+
+```python
+import numpy as np
+from scipy.optimize import curve_fit
+
+def ramsey_sequence(qubit, tau, detuning_Hz=0):
+    """
+    Perform a single Ramsey experiment.
+
+    Args:
+        qubit: Qubit object
+        tau: Free precession time in seconds
+        detuning_Hz: Intentional frequency detuning for fringe measurement
+    """
+    qubit.reset()
+
+    # First X/2 pulse
+    qubit.rx(np.pi/2)
+
+    # Free precession with optional detuning frame
+    qubit.delay(tau)
+    if detuning_Hz != 0:
+        # Virtual Z rotation to create artificial detuning
+        qubit.rz(2 * np.pi * detuning_Hz * tau)
+
+    # Second X/2 pulse
+    qubit.rx(np.pi/2)
+
+    # Measure
+    return qubit.measure()
+
+def ramsey_decay(t, A, T2_star, f, phi, B):
+    """
+    Ramsey fringe model with exponential decay.
+
+    P(t) = A * exp(-t/T2*) * cos(2*pi*f*t + phi) + B
+    """
+    return A * np.exp(-t / T2_star) * np.cos(2 * np.pi * f * t + phi) + B
+
+def measure_t2_star(qubit, delays, detuning_Hz=100e3, num_shots=1000):
+    """
+    Measure T2* using Ramsey fringes.
+
+    Args:
+        qubit: Qubit object
+        delays: Array of delay times
+        detuning_Hz: Artificial detuning to create visible fringes
+        num_shots: Shots per delay point
+
+    Returns:
+        Dictionary with T2*, fringe frequency, and fit quality
+    """
+    p_excited = []
+
+    for tau in delays:
+        counts = 0
+        for _ in range(num_shots):
+            result = ramsey_sequence(qubit, tau, detuning_Hz)
+            counts += result
+        p_excited.append(counts / num_shots)
+
+    p_excited = np.array(p_excited)
+
+    # Fit the data
+    p0 = [0.5, np.median(delays), detuning_Hz, 0, 0.5]
+    bounds = ([0, 0, 0, -np.pi, 0], [1, delays[-1]*10, detuning_Hz*2, np.pi, 1])
+
+    popt, pcov = curve_fit(ramsey_decay, delays, p_excited, p0=p0, bounds=bounds)
+
+    return {
+        'T2_star': popt[1],
+        'T2_star_error': np.sqrt(pcov[1,1]),
+        'frequency': popt[2],
+        'amplitude': popt[0],
+        'offset': popt[4],
+        'fit_curve': ramsey_decay(delays, *popt)
+    }
+```
+</Example>
+
+### Ramsey Fringe Analysis
+
+The oscillation frequency in Ramsey fringes reveals the qubit frequency detuning:
+
+<Formula>
+$$f_{Ramsey} = |f_{qubit} - f_{drive}|$$
+</Formula>
+
+<Tip>
+Ramsey measurements are used for precise frequency calibration. By measuring the fringe frequency at different drive frequencies, you can determine the exact qubit frequency.
+</Tip>
+
+### Gaussian vs Exponential Decay
+
+For quasi-static noise, Ramsey decay is often Gaussian:
+
+<Formula>
+$$P(t) = A \cdot e^{-(t/T_2^*)^2} \cdot \cos(2\pi f t + \phi) + B$$
+</Formula>
+
+The Gaussian form indicates low-frequency (1/f) noise dominance.
+
+## 4. Spin Echo (Hahn Echo) Measurement
+
+### The Echo Sequence
+
+The spin echo refocuses dephasing from slow frequency fluctuations:
+
+```
+1. Initialize in |0>
+2. X/2 gate (creates superposition)
+3. Wait for time tau
+4. X gate (pi pulse - refocusing pulse)
+5. Wait for time tau
+6. X/2 gate
+7. Measure
+```
+
+<Definition term="Spin Echo">
+A spin echo (or Hahn echo) is a refocusing technique where a pi pulse reverses the phase accumulation from slow noise, causing the dephased components to rephase at time 2*tau.
+</Definition>
+
+### How the Echo Works
+
+1. After the first X/2, the qubit is in |+>
+2. During the first tau, slow frequency fluctuations cause phase accumulation: $\phi_1 = \delta\omega \cdot \tau$
+3. The X gate flips the phase: $\phi \to -\phi$
+4. During the second tau, additional phase accumulates: $\phi_2 = \delta\omega \cdot \tau$
+5. Total phase: $-\phi_1 + \phi_2 = 0$ (for static $\delta\omega$)
+
+```python
+def echo_sequence(qubit, tau):
+    """
+    Perform a single Hahn echo experiment.
+
+    Args:
+        qubit: Qubit object
+        tau: Time before and after the pi pulse (total time = 2*tau)
+    """
+    qubit.reset()
+
+    # First X/2 pulse
+    qubit.rx(np.pi/2)
+
+    # First free precession
+    qubit.delay(tau)
+
+    # Refocusing pi pulse
+    qubit.rx(np.pi)
+
+    # Second free precession
+    qubit.delay(tau)
+
+    # Final X/2 pulse
+    qubit.rx(np.pi/2)
+
+    # Measure
+    return qubit.measure()
+
+def echo_decay(t, A, T2, B):
+    """Echo decay model: P(t) = A * exp(-t/T2) + B"""
+    return A * np.exp(-t / T2) + B
+
+def measure_t2_echo(qubit, total_times, num_shots=1000):
+    """
+    Measure T2 using Hahn echo.
+
+    Args:
+        qubit: Qubit object
+        total_times: Array of total delay times (2*tau values)
+        num_shots: Shots per delay point
+
+    Returns:
+        Dictionary with T2 and fit quality
+    """
+    p_excited = []
+
+    for total_time in total_times:
+        tau = total_time / 2
+        counts = 0
+        for _ in range(num_shots):
+            result = echo_sequence(qubit, tau)
+            counts += result
+        p_excited.append(counts / num_shots)
+
+    p_excited = np.array(p_excited)
+
+    # Fit exponential decay (no oscillations in ideal echo)
+    p0 = [0.5, np.median(total_times), 0.5]
+    bounds = ([0, 0, 0], [1, total_times[-1]*10, 1])
+
+    popt, pcov = curve_fit(echo_decay, total_times, p_excited, p0=p0, bounds=bounds)
+
+    return {
+        'T2': popt[1],
+        'T2_error': np.sqrt(pcov[1,1]),
+        'amplitude': popt[0],
+        'offset': popt[2]
+    }
+```
+
+## 5. CPMG Sequences (Multiple Echoes)
+
+### Carr-Purcell-Meiboom-Gill Sequence
+
+CPMG uses multiple refocusing pulses to better suppress noise:
+
+```
+X/2 - [tau - Y - tau]_N - X/2 - Measure
+
+Where N is the number of refocusing pulses
+```
+
+<Formula>
+$$T_2^{CPMG}(N) \geq T_2^{echo} \geq T_2^*$$
+</Formula>
+
+More refocusing pulses filter out higher frequency noise.
+
+```python
+def cpmg_sequence(qubit, tau, num_pulses):
+    """
+    Perform CPMG sequence with N refocusing pulses.
+
+    Args:
+        qubit: Qubit object
+        tau: Time between pulses (total time = 2*N*tau)
+        num_pulses: Number of refocusing pulses
+    """
+    qubit.reset()
+
+    # Initial X/2 pulse
+    qubit.rx(np.pi/2)
+
+    # CPMG block repeated N times
+    for i in range(num_pulses):
+        qubit.delay(tau)
+        qubit.ry(np.pi)  # Y refocusing pulse for CPMG
+        qubit.delay(tau)
+
+    # Final X/2 pulse
+    qubit.rx(np.pi/2)
+
+    return qubit.measure()
+
+def measure_cpmg(qubit, total_time, max_pulses=64, num_shots=1000):
+    """
+    Measure coherence vs number of CPMG pulses.
+
+    Args:
+        qubit: Qubit object
+        total_time: Fixed total sequence time
+        max_pulses: Maximum number of pulses to test
+        num_shots: Shots per configuration
+
+    Returns:
+        Dictionary with coherence vs pulse number
+    """
+    pulse_numbers = [1, 2, 4, 8, 16, 32, 64]
+    pulse_numbers = [n for n in pulse_numbers if n <= max_pulses]
+
+    coherence = []
+
+    for N in pulse_numbers:
+        tau = total_time / (2 * N)
+        counts = 0
+        for _ in range(num_shots):
+            result = cpmg_sequence(qubit, tau, N)
+            counts += result
+        coherence.append(counts / num_shots)
+
+    return {
+        'pulse_numbers': pulse_numbers,
+        'coherence': coherence
+    }
+```
+
+### Filter Function Interpretation
+
+Each dynamical decoupling sequence acts as a noise filter. The effective T2 depends on the overlap between the filter function and the noise spectrum:
+
+<Formula>
+$$\frac{1}{T_2^{DD}} \propto \int_0^\infty S(\omega) |F(\omega, \tau, N)|^2 d\omega$$
+</Formula>
+
+where $S(\omega)$ is the noise power spectral density and $F(\omega)$ is the filter function.
+
+| Sequence | Filter Function Peak | Best for |
+|----------|---------------------|----------|
+| Ramsey | DC (0 Hz) | High-frequency noise |
+| Echo | 1/(2*tau) | Quasi-static noise |
+| CPMG-N | N/(2*tau_total) | Intermediate noise |
+
+## 6. Extracting Pure Dephasing
+
+### The Dephasing Budget
+
+Total dephasing has contributions from relaxation and pure dephasing:
+
+<Formula>
+$$\frac{1}{T_2} = \frac{1}{2T_1} + \frac{1}{T_\phi}$$
+</Formula>
+
+Solving for pure dephasing:
+
+<Formula>
+$$\frac{1}{T_\phi} = \frac{1}{T_2} - \frac{1}{2T_1}$$
+</Formula>
+
+```python
+def calculate_pure_dephasing(T1, T2):
+    """
+    Calculate pure dephasing time from T1 and T2.
+
+    Args:
+        T1: Energy relaxation time
+        T2: Total dephasing time (from echo)
+
+    Returns:
+        T_phi: Pure dephasing time
+    """
+    # Check physical bounds
+    if T2 > 2 * T1:
+        raise ValueError(f"T2 ({T2}) cannot exceed 2*T1 ({2*T1})")
+
+    # Calculate pure dephasing rate
+    gamma_phi = 1/T2 - 1/(2*T1)
+
+    if gamma_phi <= 0:
+        return np.inf  # T2-limited by T1
+
+    T_phi = 1 / gamma_phi
+
+    return T_phi
+
+def coherence_analysis(T1, T2_star, T2_echo):
+    """
+    Complete coherence analysis.
+
+    Args:
+        T1: Energy relaxation time
+        T2_star: Ramsey dephasing time
+        T2_echo: Echo dephasing time
+
+    Returns:
+        Dictionary with all coherence metrics
+    """
+    # Pure dephasing from echo
+    T_phi_echo = calculate_pure_dephasing(T1, T2_echo)
+
+    # Pure dephasing from Ramsey (includes low-frequency noise)
+    gamma_phi_star = 1/T2_star - 1/(2*T1)
+    T_phi_star = 1/gamma_phi_star if gamma_phi_star > 0 else np.inf
+
+    # Ratio indicates how much slow noise affects coherence
+    slow_noise_contribution = T2_echo / T2_star if T2_star > 0 else np.inf
+
+    # T1-limited check
+    T2_limit = 2 * T1
+    is_t1_limited = T2_echo > 0.9 * T2_limit
+
+    return {
+        'T1': T1,
+        'T2_star': T2_star,
+        'T2_echo': T2_echo,
+        'T_phi_star': T_phi_star,
+        'T_phi_echo': T_phi_echo,
+        'T2_limit': T2_limit,
+        'is_T1_limited': is_t1_limited,
+        'slow_noise_factor': slow_noise_contribution
+    }
+
+# Example analysis
+T1 = 100e-6  # 100 us
+T2_star = 30e-6  # 30 us
+T2_echo = 80e-6  # 80 us
+
+analysis = coherence_analysis(T1, T2_star, T2_echo)
+
+print("Coherence Analysis")
+print("="*40)
+print(f"T1: {analysis['T1']*1e6:.1f} us")
+print(f"T2*: {analysis['T2_star']*1e6:.1f} us")
+print(f"T2 (echo): {analysis['T2_echo']*1e6:.1f} us")
+print(f"T2 limit (2*T1): {analysis['T2_limit']*1e6:.1f} us")
+print(f"T_phi (from echo): {analysis['T_phi_echo']*1e6:.1f} us")
+print(f"Echo improves T2 by: {analysis['slow_noise_factor']:.1f}x")
+print(f"T1-limited: {analysis['is_T1_limited']}")
+```
+
+## 7. Advanced Dynamical Decoupling
+
+### XY4 and XY8 Sequences
+
+These sequences are robust against pulse errors:
+
+```
+XY4: X - tau - Y - tau - X - tau - Y - tau
+XY8: X - Y - X - Y - Y - X - Y - X (with tau between each)
+```
+
+### Uhrig Dynamical Decoupling (UDD)
+
+Optimal pulse timing for specific noise spectra:
+
+<Formula>
+$$t_j = T \sin^2\left(\frac{\pi j}{2N + 2}\right)$$
+</Formula>
+
+where $t_j$ is the time of the j-th pulse in a sequence of N pulses over total time T.
+
+```python
+def udd_pulse_times(total_time, num_pulses):
+    """
+    Calculate Uhrig Dynamical Decoupling pulse times.
+
+    Args:
+        total_time: Total sequence duration
+        num_pulses: Number of pi pulses
+
+    Returns:
+        Array of pulse times
+    """
+    j = np.arange(1, num_pulses + 1)
+    times = total_time * np.sin(np.pi * j / (2 * num_pulses + 2))**2
+    return times
+
+# Compare CPMG vs UDD pulse timing
+total_time = 100e-6
+N = 4
+
+cpmg_times = np.linspace(total_time/(2*N), total_time - total_time/(2*N), N)
+udd_times = udd_pulse_times(total_time, N)
+
+print("Pulse timing comparison (4 pulses, 100 us total):")
+print(f"CPMG: {cpmg_times * 1e6} us")
+print(f"UDD:  {udd_times * 1e6} us")
+```
+
+## 8. Noise Spectroscopy from T2 Measurements
+
+By varying the number of refocusing pulses, you can extract the noise spectrum:
+
+<Formula>
+$$S(f) \propto -\frac{d}{df}\left[\frac{1}{T_2(f)}\right]$$
+</Formula>
+
+where $f = N/(2\tau_{total})$ is the filter frequency.
+
+```python
+def noise_spectroscopy(pulse_numbers, T2_values, total_time):
+    """
+    Extract noise spectrum from CPMG measurements.
+
+    Args:
+        pulse_numbers: Array of N values
+        T2_values: Corresponding T2 values
+        total_time: Fixed total sequence time
+
+    Returns:
+        Frequencies and noise power estimates
+    """
+    frequencies = np.array(pulse_numbers) / (2 * total_time)
+
+    # Relaxation rates
+    gamma = 1 / np.array(T2_values)
+
+    # Numerical derivative (noise spectrum estimate)
+    noise_power = []
+    for i in range(len(frequencies) - 1):
+        df = frequencies[i+1] - frequencies[i]
+        dgamma = gamma[i+1] - gamma[i]
+        noise_power.append(-dgamma / df)
+
+    return frequencies[:-1], np.array(noise_power)
+```
+
+## 9. Summary
+
+T2 measurements reveal dephasing processes critical for quantum computing:
+
+1. **Ramsey (T2*)**: Measures total dephasing including slow noise
+2. **Echo (T2)**: Refocuses slow noise, reveals faster dephasing
+3. **CPMG**: Multiple echoes for better noise filtering
+4. **Relationship**: $T_2^* \leq T_2 \leq 2T_1$
+
+Key insights:
+- Large T2*/T2 ratio indicates significant low-frequency noise
+- T2 approaching 2*T1 means qubit is relaxation-limited
+- CPMG improvement saturates when higher-frequency noise dominates
+
+<Tip>
+In practice, qubits are characterized by both T2* and T2. T2* is relevant for algorithms without dynamical decoupling, while T2 (or CPMG T2) represents performance achievable with error suppression.
+</Tip>
+
+## Further Reading
+
+- Slichter, "Principles of Magnetic Resonance" - Echo sequences
+- Bylander et al., "Noise spectroscopy through dynamical decoupling" (2011)
+- Next lesson: Randomized Benchmarking - measuring average gate fidelity

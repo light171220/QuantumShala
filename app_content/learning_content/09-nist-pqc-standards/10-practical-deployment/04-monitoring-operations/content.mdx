@@ -1,0 +1,886 @@
+---
+title: "Monitoring and Operations"
+description: "Monitoring PQC deployments, operational metrics, alerting, and maintaining cryptographic health"
+---
+
+# Monitoring and Operations for PQC
+
+Effective monitoring ensures PQC deployments remain healthy and allows early detection of issues.
+
+## Key Metrics for PQC Monitoring
+
+```
+PQC Monitoring Dashboard:
+═══════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    CRYPTOGRAPHIC HEALTH                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  TLS Handshake Success Rate    Key Exchange Distribution        │
+│  ┌────────────────────────┐    ┌────────────────────────────┐   │
+│  │ ████████████████ 99.2% │    │ X25519-ML-KEM  ████░ 45%   │   │
+│  │ Target: >99%           │    │ P384-ML-KEM    ███░░ 35%   │   │
+│  └────────────────────────┘    │ X25519 only    ██░░░ 20%   │   │
+│                                └────────────────────────────┘   │
+│                                                                  │
+│  Handshake Latency (p95)       Signature Algorithm Usage        │
+│  ┌────────────────────────┐    ┌────────────────────────────┐   │
+│  │ PQC Hybrid:  45ms      │    │ ML-DSA-65      ████░ 40%   │   │
+│  │ Classical:   32ms      │    │ Hybrid ECDSA   ███░░ 35%   │   │
+│  │ Delta:      +40%       │    │ ECDSA only     ██░░░ 25%   │   │
+│  └────────────────────────┘    └────────────────────────────┘   │
+│                                                                  │
+├─────────────────────────────────────────────────────────────────┤
+│                    MIGRATION PROGRESS                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Endpoints Migrated            Certificates Updated             │
+│  ┌────────────────────────┐    ┌────────────────────────────┐   │
+│  │ ████████░░░░ 67%       │    │ ██████████░░ 85%           │   │
+│  │ 134/200 services       │    │ 170/200 certs              │   │
+│  └────────────────────────┘    └────────────────────────────┘   │
+│                                                                  │
+│  Client Compatibility          Error Rate                       │
+│  ┌────────────────────────┐    ┌────────────────────────────┐   │
+│  │ PQC-capable:    78%    │    │ PQC errors:    0.05%       │   │
+│  │ Fallback:       22%    │    │ Classical:     0.01%       │   │
+│  └────────────────────────┘    └────────────────────────────┘   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+from datetime import datetime, timedelta
+from enum import Enum
+import statistics
+
+class MetricType(Enum):
+    COUNTER = "counter"
+    GAUGE = "gauge"
+    HISTOGRAM = "histogram"
+
+@dataclass
+class MetricPoint:
+    """Single metric data point."""
+    timestamp: datetime
+    value: float
+    labels: Dict[str, str] = field(default_factory=dict)
+
+@dataclass
+class PQCMetrics:
+    """PQC-specific metrics collection."""
+    # Handshake metrics
+    handshake_total: int = 0
+    handshake_success: int = 0
+    handshake_failure: int = 0
+    handshake_latency_ms: List[float] = field(default_factory=list)
+
+    # Algorithm usage
+    kex_algorithm_counts: Dict[str, int] = field(default_factory=dict)
+    sig_algorithm_counts: Dict[str, int] = field(default_factory=dict)
+
+    # Error tracking
+    error_counts: Dict[str, int] = field(default_factory=dict)
+
+class PQCMonitor:
+    """
+    Monitoring system for PQC deployment.
+    """
+
+    def __init__(self):
+        self.metrics = PQCMetrics()
+        self.alert_thresholds = {
+            "handshake_success_rate": 0.99,
+            "max_latency_p95_ms": 100,
+            "max_error_rate": 0.01,
+        }
+
+    def record_handshake(
+        self,
+        success: bool,
+        latency_ms: float,
+        kex_algorithm: str,
+        sig_algorithm: str,
+        error: Optional[str] = None
+    ):
+        """Record a TLS handshake event."""
+        self.metrics.handshake_total += 1
+
+        if success:
+            self.metrics.handshake_success += 1
+            self.metrics.handshake_latency_ms.append(latency_ms)
+        else:
+            self.metrics.handshake_failure += 1
+            if error:
+                self.metrics.error_counts[error] = \
+                    self.metrics.error_counts.get(error, 0) + 1
+
+        # Track algorithm usage
+        self.metrics.kex_algorithm_counts[kex_algorithm] = \
+            self.metrics.kex_algorithm_counts.get(kex_algorithm, 0) + 1
+        self.metrics.sig_algorithm_counts[sig_algorithm] = \
+            self.metrics.sig_algorithm_counts.get(sig_algorithm, 0) + 1
+
+    def get_success_rate(self) -> float:
+        """Calculate handshake success rate."""
+        if self.metrics.handshake_total == 0:
+            return 1.0
+        return self.metrics.handshake_success / self.metrics.handshake_total
+
+    def get_latency_percentile(self, percentile: float) -> float:
+        """Get latency at given percentile."""
+        if not self.metrics.handshake_latency_ms:
+            return 0.0
+        sorted_latencies = sorted(self.metrics.handshake_latency_ms)
+        index = int(len(sorted_latencies) * percentile / 100)
+        return sorted_latencies[min(index, len(sorted_latencies) - 1)]
+
+    def get_pqc_adoption_rate(self) -> float:
+        """Calculate PQC adoption rate from key exchange usage."""
+        total = sum(self.metrics.kex_algorithm_counts.values())
+        if total == 0:
+            return 0.0
+
+        pqc_algorithms = [
+            "mlkem768", "mlkem1024",
+            "x25519_mlkem768", "p384_mlkem768"
+        ]
+        pqc_count = sum(
+            self.metrics.kex_algorithm_counts.get(alg, 0)
+            for alg in pqc_algorithms
+        )
+        return pqc_count / total
+
+    def check_alerts(self) -> List[str]:
+        """Check metrics against alert thresholds."""
+        alerts = []
+
+        # Check success rate
+        success_rate = self.get_success_rate()
+        if success_rate < self.alert_thresholds["handshake_success_rate"]:
+            alerts.append(
+                f"ALERT: Handshake success rate {success_rate:.2%} "
+                f"below threshold {self.alert_thresholds['handshake_success_rate']:.2%}"
+            )
+
+        # Check latency
+        p95_latency = self.get_latency_percentile(95)
+        if p95_latency > self.alert_thresholds["max_latency_p95_ms"]:
+            alerts.append(
+                f"ALERT: P95 latency {p95_latency:.1f}ms "
+                f"exceeds threshold {self.alert_thresholds['max_latency_p95_ms']}ms"
+            )
+
+        # Check error rate
+        error_rate = self.metrics.handshake_failure / max(1, self.metrics.handshake_total)
+        if error_rate > self.alert_thresholds["max_error_rate"]:
+            alerts.append(
+                f"ALERT: Error rate {error_rate:.2%} "
+                f"exceeds threshold {self.alert_thresholds['max_error_rate']:.2%}"
+            )
+
+        return alerts
+
+    def generate_report(self) -> str:
+        """Generate monitoring report."""
+        lines = [
+            "PQC MONITORING REPORT",
+            "=" * 50,
+            f"Generated: {datetime.now().isoformat()}",
+            "",
+            "HANDSHAKE METRICS:",
+            f"  Total handshakes: {self.metrics.handshake_total}",
+            f"  Success rate: {self.get_success_rate():.2%}",
+            f"  P50 latency: {self.get_latency_percentile(50):.1f}ms",
+            f"  P95 latency: {self.get_latency_percentile(95):.1f}ms",
+            f"  P99 latency: {self.get_latency_percentile(99):.1f}ms",
+            "",
+            "KEY EXCHANGE ALGORITHMS:",
+        ]
+
+        for alg, count in sorted(
+            self.metrics.kex_algorithm_counts.items(),
+            key=lambda x: -x[1]
+        ):
+            pct = count / max(1, self.metrics.handshake_total) * 100
+            lines.append(f"  {alg}: {count} ({pct:.1f}%)")
+
+        lines.extend([
+            "",
+            f"PQC ADOPTION RATE: {self.get_pqc_adoption_rate():.1%}",
+            "",
+        ])
+
+        alerts = self.check_alerts()
+        if alerts:
+            lines.append("ALERTS:")
+            for alert in alerts:
+                lines.append(f"  {alert}")
+        else:
+            lines.append("STATUS: All metrics within thresholds")
+
+        return "\n".join(lines)
+
+# Example usage
+monitor = PQCMonitor()
+
+# Simulate some handshakes
+import random
+for _ in range(100):
+    kex = random.choice(["x25519_mlkem768", "p384_mlkem768", "x25519"])
+    sig = random.choice(["mldsa65", "ecdsa_p384"])
+    latency = random.gauss(40, 10)
+    success = random.random() > 0.005
+    monitor.record_handshake(success, latency, kex, sig)
+
+print(monitor.generate_report())
+```
+
+## Cryptographic Health Checks
+
+```
+Health Check Categories:
+═══════════════════════════════════════════════════════════════════
+
+Certificate Health:
+┌─────────────────────────────────────────────────────────────────┐
+│ Check                      │ Status  │ Details                 │
+├────────────────────────────┼─────────┼─────────────────────────┤
+│ Certificate validity       │ ✓ OK    │ Expires in 89 days      │
+│ Chain completeness         │ ✓ OK    │ Full chain present      │
+│ PQC algorithm present      │ ✓ OK    │ ML-DSA-65 signature     │
+│ Hybrid backup present      │ ✓ OK    │ ECDSA P-384 included    │
+│ Key size adequate          │ ✓ OK    │ ML-DSA-65 (level 3)     │
+└────────────────────────────┴─────────┴─────────────────────────┘
+
+Algorithm Health:
+┌─────────────────────────────────────────────────────────────────┐
+│ Check                      │ Status  │ Details                 │
+├────────────────────────────┼─────────┼─────────────────────────┤
+│ ML-KEM available           │ ✓ OK    │ 768 and 1024 supported  │
+│ ML-DSA available           │ ✓ OK    │ 65 and 87 supported     │
+│ Hybrid modes enabled       │ ✓ OK    │ X25519+ML-KEM active    │
+│ Deprecated algorithms      │ ⚠ WARN  │ RSA-2048 still in use   │
+│ Weak algorithms            │ ✓ OK    │ None detected           │
+└────────────────────────────┴─────────┴─────────────────────────┘
+
+Library Health:
+┌─────────────────────────────────────────────────────────────────┐
+│ Check                      │ Status  │ Details                 │
+├────────────────────────────┼─────────┼─────────────────────────┤
+│ OpenSSL version            │ ✓ OK    │ 3.2.0                   │
+│ OQS provider loaded        │ ✓ OK    │ Version 0.9.0           │
+│ FIPS mode                  │ ✓ OK    │ Enabled                 │
+│ Known vulnerabilities      │ ✓ OK    │ None pending            │
+│ Entropy source             │ ✓ OK    │ Hardware RNG active     │
+└────────────────────────────┴─────────┴─────────────────────────┘
+```
+
+```python
+from dataclasses import dataclass
+from typing import List, Optional
+from enum import Enum
+from datetime import datetime, timedelta
+
+class HealthStatus(Enum):
+    OK = "ok"
+    WARNING = "warning"
+    CRITICAL = "critical"
+    UNKNOWN = "unknown"
+
+@dataclass
+class HealthCheck:
+    """Individual health check result."""
+    name: str
+    category: str
+    status: HealthStatus
+    message: str
+    details: Optional[str] = None
+
+class CryptoHealthChecker:
+    """
+    Cryptographic health monitoring.
+    """
+
+    def __init__(self):
+        self.checks: List[HealthCheck] = []
+
+    def check_certificate_health(
+        self,
+        cert_path: str,
+        min_days_valid: int = 30
+    ) -> List[HealthCheck]:
+        """Check certificate health."""
+        checks = []
+
+        # Simulated certificate checks
+        expiry_days = 89  # Would parse from actual cert
+
+        # Check validity period
+        if expiry_days < 7:
+            status = HealthStatus.CRITICAL
+            msg = f"Certificate expires in {expiry_days} days"
+        elif expiry_days < min_days_valid:
+            status = HealthStatus.WARNING
+            msg = f"Certificate expires in {expiry_days} days"
+        else:
+            status = HealthStatus.OK
+            msg = f"Certificate valid for {expiry_days} days"
+
+        checks.append(HealthCheck(
+            name="certificate_validity",
+            category="certificate",
+            status=status,
+            message=msg
+        ))
+
+        # Check for PQC algorithm
+        has_pqc = True  # Would check actual cert
+        checks.append(HealthCheck(
+            name="pqc_algorithm_present",
+            category="certificate",
+            status=HealthStatus.OK if has_pqc else HealthStatus.WARNING,
+            message="PQC signature present" if has_pqc else "No PQC signature"
+        ))
+
+        # Check chain completeness
+        checks.append(HealthCheck(
+            name="chain_completeness",
+            category="certificate",
+            status=HealthStatus.OK,
+            message="Full certificate chain present"
+        ))
+
+        return checks
+
+    def check_algorithm_health(self) -> List[HealthCheck]:
+        """Check algorithm configuration health."""
+        checks = []
+
+        # Check ML-KEM availability
+        mlkem_available = True  # Would check actual config
+        checks.append(HealthCheck(
+            name="mlkem_available",
+            category="algorithm",
+            status=HealthStatus.OK if mlkem_available else HealthStatus.CRITICAL,
+            message="ML-KEM enabled" if mlkem_available else "ML-KEM not available"
+        ))
+
+        # Check for deprecated algorithms
+        deprecated_in_use = ["RSA-2048"]  # Would scan actual config
+        if deprecated_in_use:
+            checks.append(HealthCheck(
+                name="deprecated_algorithms",
+                category="algorithm",
+                status=HealthStatus.WARNING,
+                message=f"Deprecated algorithms in use: {', '.join(deprecated_in_use)}",
+                details="Plan migration to PQC alternatives"
+            ))
+        else:
+            checks.append(HealthCheck(
+                name="deprecated_algorithms",
+                category="algorithm",
+                status=HealthStatus.OK,
+                message="No deprecated algorithms in use"
+            ))
+
+        # Check hybrid mode
+        checks.append(HealthCheck(
+            name="hybrid_mode",
+            category="algorithm",
+            status=HealthStatus.OK,
+            message="Hybrid key exchange enabled"
+        ))
+
+        return checks
+
+    def check_library_health(self) -> List[HealthCheck]:
+        """Check cryptographic library health."""
+        checks = []
+
+        # OpenSSL version
+        openssl_version = "3.2.0"  # Would get actual version
+        checks.append(HealthCheck(
+            name="openssl_version",
+            category="library",
+            status=HealthStatus.OK,
+            message=f"OpenSSL {openssl_version}",
+            details="PQC-capable version"
+        ))
+
+        # OQS provider
+        oqs_loaded = True  # Would check actual provider
+        checks.append(HealthCheck(
+            name="oqs_provider",
+            category="library",
+            status=HealthStatus.OK if oqs_loaded else HealthStatus.WARNING,
+            message="OQS provider loaded" if oqs_loaded else "OQS provider not loaded"
+        ))
+
+        # Entropy source
+        checks.append(HealthCheck(
+            name="entropy_source",
+            category="library",
+            status=HealthStatus.OK,
+            message="Hardware RNG available"
+        ))
+
+        return checks
+
+    def run_all_checks(self) -> List[HealthCheck]:
+        """Run all health checks."""
+        all_checks = []
+        all_checks.extend(self.check_certificate_health("/path/to/cert"))
+        all_checks.extend(self.check_algorithm_health())
+        all_checks.extend(self.check_library_health())
+        return all_checks
+
+    def get_overall_status(self, checks: List[HealthCheck]) -> HealthStatus:
+        """Determine overall health status."""
+        if any(c.status == HealthStatus.CRITICAL for c in checks):
+            return HealthStatus.CRITICAL
+        if any(c.status == HealthStatus.WARNING for c in checks):
+            return HealthStatus.WARNING
+        if any(c.status == HealthStatus.UNKNOWN for c in checks):
+            return HealthStatus.UNKNOWN
+        return HealthStatus.OK
+
+    def generate_report(self, checks: List[HealthCheck]) -> str:
+        """Generate health check report."""
+        lines = [
+            "CRYPTOGRAPHIC HEALTH CHECK REPORT",
+            "=" * 50,
+            f"Timestamp: {datetime.now().isoformat()}",
+            f"Overall Status: {self.get_overall_status(checks).value.upper()}",
+            "",
+        ]
+
+        # Group by category
+        by_category = {}
+        for check in checks:
+            by_category.setdefault(check.category, []).append(check)
+
+        for category, cat_checks in by_category.items():
+            lines.append(f"\n{category.upper()}:")
+            for check in cat_checks:
+                status_icon = {
+                    HealthStatus.OK: "✓",
+                    HealthStatus.WARNING: "⚠",
+                    HealthStatus.CRITICAL: "✗",
+                    HealthStatus.UNKNOWN: "?"
+                }[check.status]
+                lines.append(f"  {status_icon} {check.name}: {check.message}")
+                if check.details:
+                    lines.append(f"      → {check.details}")
+
+        return "\n".join(lines)
+
+# Run health checks
+checker = CryptoHealthChecker()
+checks = checker.run_all_checks()
+print(checker.generate_report(checks))
+```
+
+## Alerting Configuration
+
+```
+Alert Priority Matrix:
+═══════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────┐
+│ Condition                    │ Severity │ Response Time        │
+├──────────────────────────────┼──────────┼──────────────────────┤
+│ Handshake success <95%       │ P1       │ Immediate (24/7)     │
+│ Certificate expires <7 days  │ P1       │ Immediate            │
+│ PQC provider not loaded      │ P1       │ Immediate            │
+│ Handshake success <99%       │ P2       │ 1 hour               │
+│ P95 latency >100ms           │ P2       │ 1 hour               │
+│ Certificate expires <30 days │ P2       │ Business hours       │
+│ PQC adoption <50% target     │ P3       │ Daily review         │
+│ Classical-only fallback >25% │ P3       │ Weekly review        │
+│ Algorithm deprecation notice │ P4       │ Monthly review       │
+└──────────────────────────────┴──────────┴──────────────────────┘
+
+Alert Routing:
+┌─────────────────────────────────────────────────────────────────┐
+│ P1 (Critical): PagerDuty → On-call engineer                    │
+│ P2 (High):     Slack #security-alerts + Email                  │
+│ P3 (Medium):   Slack #security-monitoring                      │
+│ P4 (Low):      Dashboard + Weekly report                       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+from dataclasses import dataclass
+from typing import List, Callable, Dict
+from enum import Enum
+from datetime import datetime
+
+class AlertSeverity(Enum):
+    P1_CRITICAL = 1
+    P2_HIGH = 2
+    P3_MEDIUM = 3
+    P4_LOW = 4
+
+@dataclass
+class AlertRule:
+    """Alert rule definition."""
+    name: str
+    condition: Callable[[], bool]
+    severity: AlertSeverity
+    message_template: str
+    cooldown_minutes: int = 15
+
+@dataclass
+class Alert:
+    """Fired alert instance."""
+    rule_name: str
+    severity: AlertSeverity
+    message: str
+    timestamp: datetime
+    acknowledged: bool = False
+
+class PQCAlertManager:
+    """
+    Alert management for PQC monitoring.
+    """
+
+    def __init__(self, monitor):
+        self.monitor = monitor
+        self.rules: List[AlertRule] = []
+        self.fired_alerts: List[Alert] = []
+        self.last_fired: Dict[str, datetime] = {}
+        self._register_default_rules()
+
+    def _register_default_rules(self):
+        """Register default PQC alert rules."""
+
+        # P1: Critical handshake failure
+        self.rules.append(AlertRule(
+            name="critical_handshake_failure",
+            condition=lambda: self.monitor.get_success_rate() < 0.95,
+            severity=AlertSeverity.P1_CRITICAL,
+            message_template="Handshake success rate critically low: {rate:.1%}",
+            cooldown_minutes=5
+        ))
+
+        # P2: Elevated handshake failure
+        self.rules.append(AlertRule(
+            name="elevated_handshake_failure",
+            condition=lambda: 0.95 <= self.monitor.get_success_rate() < 0.99,
+            severity=AlertSeverity.P2_HIGH,
+            message_template="Handshake success rate below target: {rate:.1%}",
+            cooldown_minutes=15
+        ))
+
+        # P2: High latency
+        self.rules.append(AlertRule(
+            name="high_latency",
+            condition=lambda: self.monitor.get_latency_percentile(95) > 100,
+            severity=AlertSeverity.P2_HIGH,
+            message_template="P95 latency exceeded: {latency:.1f}ms",
+            cooldown_minutes=15
+        ))
+
+        # P3: Low PQC adoption
+        self.rules.append(AlertRule(
+            name="low_pqc_adoption",
+            condition=lambda: self.monitor.get_pqc_adoption_rate() < 0.50,
+            severity=AlertSeverity.P3_MEDIUM,
+            message_template="PQC adoption below target: {rate:.1%}",
+            cooldown_minutes=60
+        ))
+
+    def evaluate_rules(self) -> List[Alert]:
+        """Evaluate all alert rules."""
+        new_alerts = []
+        now = datetime.now()
+
+        for rule in self.rules:
+            # Check cooldown
+            last = self.last_fired.get(rule.name)
+            if last:
+                elapsed = (now - last).total_seconds() / 60
+                if elapsed < rule.cooldown_minutes:
+                    continue
+
+            # Evaluate condition
+            if rule.condition():
+                # Format message
+                message = rule.message_template.format(
+                    rate=self.monitor.get_success_rate(),
+                    latency=self.monitor.get_latency_percentile(95)
+                )
+
+                alert = Alert(
+                    rule_name=rule.name,
+                    severity=rule.severity,
+                    message=message,
+                    timestamp=now
+                )
+                new_alerts.append(alert)
+                self.fired_alerts.append(alert)
+                self.last_fired[rule.name] = now
+
+        return new_alerts
+
+    def route_alerts(self, alerts: List[Alert]):
+        """Route alerts to appropriate channels."""
+        for alert in alerts:
+            if alert.severity == AlertSeverity.P1_CRITICAL:
+                self._send_pagerduty(alert)
+                self._send_slack(alert, "#security-critical")
+            elif alert.severity == AlertSeverity.P2_HIGH:
+                self._send_slack(alert, "#security-alerts")
+                self._send_email(alert)
+            elif alert.severity == AlertSeverity.P3_MEDIUM:
+                self._send_slack(alert, "#security-monitoring")
+            else:
+                # P4: Dashboard only
+                pass
+
+    def _send_pagerduty(self, alert: Alert):
+        """Send to PagerDuty."""
+        print(f"[PAGERDUTY] {alert.severity.name}: {alert.message}")
+
+    def _send_slack(self, alert: Alert, channel: str):
+        """Send to Slack channel."""
+        print(f"[SLACK {channel}] {alert.severity.name}: {alert.message}")
+
+    def _send_email(self, alert: Alert):
+        """Send email notification."""
+        print(f"[EMAIL] {alert.severity.name}: {alert.message}")
+
+    def get_active_alerts(self) -> List[Alert]:
+        """Get unacknowledged alerts."""
+        return [a for a in self.fired_alerts if not a.acknowledged]
+
+# Example usage
+alert_manager = PQCAlertManager(monitor)
+alerts = alert_manager.evaluate_rules()
+if alerts:
+    alert_manager.route_alerts(alerts)
+    print(f"\nFired {len(alerts)} alerts")
+else:
+    print("\nNo alerts triggered")
+```
+
+## Migration Progress Tracking
+
+```
+Migration Progress Dashboard:
+═══════════════════════════════════════════════════════════════════
+
+Overall Progress: ████████████░░░░ 75%
+
+By Category:
+┌─────────────────────────────────────────────────────────────────┐
+│ Infrastructure                                                   │
+│ ├─ Servers:        ████████████████░░░░ 80%   (160/200)        │
+│ ├─ Load Balancers: ██████████████████░░ 90%   (18/20)          │
+│ ├─ WAFs:           ████████████░░░░░░░░ 60%   (6/10)           │
+│ └─ VPN:            ████████░░░░░░░░░░░░ 40%   (4/10)           │
+│                                                                  │
+│ Applications                                                     │
+│ ├─ Tier 1 (Critical): ████████████████████ 100% (50/50)        │
+│ ├─ Tier 2 (Important):████████████████░░░░ 80%  (80/100)       │
+│ └─ Tier 3 (Standard): ████████░░░░░░░░░░░░ 40%  (200/500)      │
+│                                                                  │
+│ Certificates                                                     │
+│ ├─ Root CA:        ████████████████████ 100% (1/1)             │
+│ ├─ Intermediate:   ████████████████████ 100% (5/5)             │
+│ └─ End-entity:     ██████████████░░░░░░ 70%  (350/500)         │
+└─────────────────────────────────────────────────────────────────┘
+
+Timeline:
+┌─────────────────────────────────────────────────────────────────┐
+│ Q1: Infrastructure ████████████████████ Complete               │
+│ Q2: Tier 1 Apps    ████████████████████ Complete               │
+│ Q3: Tier 2 Apps    ████████████████░░░░ In Progress            │
+│ Q4: Tier 3 Apps    ░░░░░░░░░░░░░░░░░░░░ Planned                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+from dataclasses import dataclass, field
+from typing import Dict, List
+from enum import Enum
+
+class MigrationStatus(Enum):
+    NOT_STARTED = "not_started"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    BLOCKED = "blocked"
+
+@dataclass
+class MigrationItem:
+    """Individual item being migrated."""
+    id: str
+    name: str
+    category: str
+    tier: int
+    status: MigrationStatus
+    notes: str = ""
+
+@dataclass
+class MigrationCategory:
+    """Category of migration items."""
+    name: str
+    items: List[MigrationItem] = field(default_factory=list)
+
+class MigrationTracker:
+    """
+    Track PQC migration progress.
+    """
+
+    def __init__(self):
+        self.categories: Dict[str, MigrationCategory] = {}
+        self._initialize_categories()
+
+    def _initialize_categories(self):
+        """Initialize tracking categories."""
+        self.categories = {
+            "servers": MigrationCategory("Servers"),
+            "load_balancers": MigrationCategory("Load Balancers"),
+            "applications": MigrationCategory("Applications"),
+            "certificates": MigrationCategory("Certificates"),
+        }
+
+    def add_item(
+        self,
+        category: str,
+        item_id: str,
+        name: str,
+        tier: int = 1
+    ):
+        """Add item to track."""
+        if category not in self.categories:
+            self.categories[category] = MigrationCategory(category)
+
+        self.categories[category].items.append(MigrationItem(
+            id=item_id,
+            name=name,
+            category=category,
+            tier=tier,
+            status=MigrationStatus.NOT_STARTED
+        ))
+
+    def update_status(
+        self,
+        category: str,
+        item_id: str,
+        status: MigrationStatus,
+        notes: str = ""
+    ):
+        """Update item status."""
+        for item in self.categories.get(category, MigrationCategory("")).items:
+            if item.id == item_id:
+                item.status = status
+                item.notes = notes
+                return
+
+    def get_category_progress(self, category: str) -> Dict:
+        """Get progress for a category."""
+        items = self.categories.get(category, MigrationCategory("")).items
+        if not items:
+            return {"total": 0, "completed": 0, "percentage": 0}
+
+        completed = sum(1 for i in items if i.status == MigrationStatus.COMPLETED)
+        return {
+            "total": len(items),
+            "completed": completed,
+            "percentage": completed / len(items) * 100
+        }
+
+    def get_overall_progress(self) -> Dict:
+        """Get overall migration progress."""
+        total = 0
+        completed = 0
+        for category in self.categories.values():
+            for item in category.items:
+                total += 1
+                if item.status == MigrationStatus.COMPLETED:
+                    completed += 1
+
+        return {
+            "total": total,
+            "completed": completed,
+            "percentage": (completed / total * 100) if total > 0 else 0
+        }
+
+    def generate_progress_report(self) -> str:
+        """Generate progress report."""
+        overall = self.get_overall_progress()
+
+        lines = [
+            "PQC MIGRATION PROGRESS REPORT",
+            "=" * 50,
+            "",
+            f"Overall Progress: {overall['completed']}/{overall['total']} "
+            f"({overall['percentage']:.1f}%)",
+            self._progress_bar(overall['percentage']),
+            "",
+            "BY CATEGORY:",
+        ]
+
+        for cat_name, category in self.categories.items():
+            progress = self.get_category_progress(cat_name)
+            if progress['total'] > 0:
+                lines.append(
+                    f"  {category.name}: {progress['completed']}/{progress['total']} "
+                    f"({progress['percentage']:.1f}%)"
+                )
+                lines.append(f"    {self._progress_bar(progress['percentage'], width=30)}")
+
+        # Show blocked items
+        blocked = []
+        for category in self.categories.values():
+            for item in category.items:
+                if item.status == MigrationStatus.BLOCKED:
+                    blocked.append(f"{item.name}: {item.notes}")
+
+        if blocked:
+            lines.extend(["", "BLOCKED ITEMS:"])
+            for item in blocked:
+                lines.append(f"  ⚠ {item}")
+
+        return "\n".join(lines)
+
+    def _progress_bar(self, percentage: float, width: int = 40) -> str:
+        """Generate ASCII progress bar."""
+        filled = int(width * percentage / 100)
+        empty = width - filled
+        return f"[{'█' * filled}{'░' * empty}]"
+
+# Example usage
+tracker = MigrationTracker()
+
+# Add items
+for i in range(10):
+    tracker.add_item("servers", f"srv-{i}", f"Server {i}", tier=1)
+for i in range(5):
+    tracker.add_item("applications", f"app-{i}", f"Application {i}", tier=1)
+
+# Update some as completed
+for i in range(7):
+    tracker.update_status("servers", f"srv-{i}", MigrationStatus.COMPLETED)
+for i in range(3):
+    tracker.update_status("applications", f"app-{i}", MigrationStatus.COMPLETED)
+tracker.update_status("applications", "app-3", MigrationStatus.BLOCKED, "Waiting for vendor update")
+
+print(tracker.generate_progress_report())
+```
+
+## Summary
+
+Effective PQC monitoring and operations requires:
+
+1. **Key metrics**: Handshake success, latency, algorithm distribution
+2. **Health checks**: Certificate, algorithm, and library validation
+3. **Alerting**: Priority-based routing with appropriate response times
+4. **Progress tracking**: Migration visibility across all categories
+
+Continuous monitoring enables rapid detection and response to PQC deployment issues.

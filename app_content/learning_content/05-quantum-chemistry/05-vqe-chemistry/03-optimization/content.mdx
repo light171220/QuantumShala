@@ -1,0 +1,544 @@
+---
+title: "VQE Optimization"
+description: "Master classical optimization techniques for variational quantum eigensolvers including gradient methods and noise-resilient optimizers."
+duration: 50
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Apply gradient-based and gradient-free optimization methods
+- Compute exact gradients using the parameter-shift rule
+- Handle noisy cost function evaluations
+- Implement convergence strategies
+- Avoid common optimization pitfalls
+
+## 1. The VQE Optimization Problem
+
+<Definition term="VQE Optimization">
+The task of finding parameters θ* that minimize the energy expectation value: θ* = argmin_θ E(θ) = argmin_θ ⟨ψ(θ)|Ĥ|ψ(θ)⟩.
+</Definition>
+
+```python
+def optimization_overview():
+    """Overview of VQE optimization."""
+
+    print("VQE Optimization Problem")
+    print("=" * 60)
+
+    print("\nObjective:")
+    print("  min_θ E(θ) = ⟨ψ(θ)|H|ψ(θ)⟩")
+
+    print("\nChallenges:")
+    print("-" * 45)
+    challenges = [
+        ("Noisy evaluations", "Shot noise + hardware errors"),
+        ("Non-convex landscape", "Local minima, saddle points"),
+        ("Many parameters", "O(n²) to O(n⁴) for chemistry"),
+        ("Expensive evaluations", "Each requires quantum circuit"),
+        ("Barren plateaus", "Vanishing gradients"),
+    ]
+    for challenge, desc in challenges:
+        print(f"  {challenge}:")
+        print(f"    {desc}")
+        print()
+
+    print("Optimizer Categories:")
+    print("-" * 45)
+    print("  Gradient-free:")
+    print("    • COBYLA, Nelder-Mead, Powell")
+    print("    • SPSA, Simultaneous Perturbation")
+    print()
+    print("  Gradient-based:")
+    print("    • L-BFGS-B, Conjugate Gradient")
+    print("    • Adam, RMSprop (from ML)")
+    print()
+    print("  Quantum-aware:")
+    print("    • Parameter-shift gradients")
+    print("    • Natural gradient, Quantum Fisher")
+
+optimization_overview()
+```
+
+## 2. Gradient-Free Optimization
+
+```python
+def gradient_free_methods():
+    """Gradient-free optimization for VQE."""
+
+    print("Gradient-Free Optimization Methods")
+    print("=" * 60)
+
+    print("\nWhy Gradient-Free?")
+    print("  • No gradient computation needed (saves circuits)")
+    print("  • Robust to noise in cost function")
+    print("  • Work with any cost function")
+
+    print("\nCOBYLA (Constrained Optimization BY Linear Approx):")
+    print("-" * 45)
+    print("  • Builds linear approximation locally")
+    print("  • Supports constraints (box bounds)")
+    print("  • Good for initial exploration")
+    print()
+    print("  Usage:")
+    print("    from scipy.optimize import minimize")
+    print("    result = minimize(cost_fn, x0, method='COBYLA')")
+
+    print("\nNelder-Mead (Simplex Method):")
+    print("-" * 45)
+    print("  • Uses simplex of n+1 points in n dimensions")
+    print("  • Reflects, expands, contracts simplex")
+    print("  • No derivative information")
+    print()
+    print("  Pros: Simple, robust")
+    print("  Cons: Slow convergence, poor in high dimensions")
+
+    print("\nPowell's Method:")
+    print("-" * 45)
+    print("  • Direction set method")
+    print("  • Line search along each direction")
+    print("  • Updates search directions periodically")
+
+    print("\nComparison for VQE:")
+    print("-" * 45)
+    methods = [
+        ("COBYLA", "Fast start", "May not converge tightly"),
+        ("Nelder-Mead", "Noise tolerant", "Slow in high-d"),
+        ("Powell", "Good directions", "Many evaluations"),
+    ]
+    print(f"  {'Method':<15} {'Pros':<20} {'Cons'}")
+    print("  " + "-" * 50)
+    for m, pro, con in methods:
+        print(f"  {m:<15} {pro:<20} {con}")
+
+gradient_free_methods()
+```
+
+## 3. SPSA Optimizer
+
+<Formula>
+$$\theta_{k+1} = \theta_k - a_k \frac{E(\theta_k + c_k\Delta_k) - E(\theta_k - c_k\Delta_k)}{2c_k} \Delta_k$$
+</Formula>
+
+```python
+import numpy as np
+
+def spsa_optimizer():
+    """SPSA: Simultaneous Perturbation Stochastic Approximation."""
+
+    print("SPSA Optimizer")
+    print("=" * 60)
+
+    print("\nKey Idea:")
+    print("  Approximate gradient using only 2 function evaluations")
+    print("  regardless of parameter dimension!")
+
+    print("\nAlgorithm:")
+    print("-" * 45)
+    print("  1. Generate random perturbation Δₖ ∈ {±1}ⁿ")
+    print("  2. Evaluate E(θ + cΔ) and E(θ - cΔ)")
+    print("  3. Estimate gradient:")
+    print("     g ≈ [E(θ+cΔ) - E(θ-cΔ)]/(2c) × Δ")
+    print("  4. Update: θ ← θ - a × g")
+
+    print("\nParameter Schedules:")
+    print("-" * 45)
+    print("  Learning rate: aₖ = a / (k + A)^α")
+    print("  Perturbation:  cₖ = c / k^γ")
+    print()
+    print("  Typical values:")
+    print("    a = 0.1, A = 10, α = 0.602")
+    print("    c = 0.1, γ = 0.101")
+
+    print("\nExample Implementation:")
+    print("-" * 45)
+
+    def spsa_step(cost_fn, theta, k, a=0.1, c=0.1, A=10):
+        """One SPSA iteration."""
+        n = len(theta)
+
+        # Decaying parameters
+        ak = a / (k + A) ** 0.602
+        ck = c / (k + 1) ** 0.101
+
+        # Random perturbation
+        delta = 2 * np.random.randint(0, 2, n) - 1
+
+        # Two-sided evaluation
+        e_plus = cost_fn(theta + ck * delta)
+        e_minus = cost_fn(theta - ck * delta)
+
+        # Gradient estimate
+        grad = (e_plus - e_minus) / (2 * ck) * delta
+
+        # Update
+        theta_new = theta - ak * grad
+        return theta_new
+
+    print("  def spsa_step(cost_fn, theta, k):")
+    print("      delta = random ±1 vector")
+    print("      grad = (E(θ+cΔ) - E(θ-cΔ))/(2c) × Δ")
+    print("      return theta - a × grad")
+
+    print("\nAdvantages for VQE:")
+    print("  • Only 2 circuit evaluations per iteration")
+    print("  • Robust to noise (stochastic by design)")
+    print("  • Works well with shot noise")
+
+spsa_optimizer()
+```
+
+<Tip>
+SPSA is particularly well-suited for VQE on noisy hardware because it only requires two circuit evaluations per iteration and naturally handles noise through its stochastic gradient estimation.
+</Tip>
+
+## 4. Parameter-Shift Rule
+
+```python
+def parameter_shift_rule():
+    """Exact gradients via parameter-shift rule."""
+
+    print("Parameter-Shift Rule")
+    print("=" * 60)
+
+    print("\nThe Key Result:")
+    print("-" * 45)
+    print("  For gates of the form U(θ) = exp(-iθG/2):")
+    print()
+    print("  ∂E/∂θ = [E(θ + π/2) - E(θ - π/2)] / 2")
+    print()
+    print("  EXACT gradient from 2 circuit evaluations!")
+
+    print("\nWhy Does This Work?")
+    print("-" * 45)
+    print("  For Pauli rotations (Rx, Ry, Rz):")
+    print("  U(θ) = cos(θ/2)I - i sin(θ/2)P")
+    print()
+    print("  Energy is sinusoidal in θ:")
+    print("  E(θ) = A + B cos(θ) + C sin(θ)")
+    print()
+    print("  ∂E/∂θ = -B sin(θ) + C cos(θ)")
+    print("        = [E(θ+π/2) - E(θ-π/2)] / 2")
+
+    print("\nImplementation:")
+    print("-" * 45)
+
+    def compute_gradient(cost_fn, theta, idx):
+        """Compute gradient for parameter idx using parameter-shift."""
+        theta_plus = theta.copy()
+        theta_minus = theta.copy()
+
+        theta_plus[idx] += np.pi / 2
+        theta_minus[idx] -= np.pi / 2
+
+        grad = (cost_fn(theta_plus) - cost_fn(theta_minus)) / 2
+        return grad
+
+    print("  theta_plus = theta.copy()")
+    print("  theta_plus[i] += π/2")
+    print("  theta_minus = theta.copy()")
+    print("  theta_minus[i] -= π/2")
+    print("  grad_i = (E(theta_plus) - E(theta_minus)) / 2")
+
+    print("\nCost Analysis:")
+    print("-" * 45)
+    print("  n parameters → 2n circuit evaluations")
+    print("  More expensive than SPSA per iteration")
+    print("  But: exact gradients → better convergence")
+
+    print("\nGeneralized Parameter-Shift:")
+    print("-" * 45)
+    print("  For generators with eigenvalues ±r:")
+    print("  ∂E/∂θ = r[E(θ + π/4r) - E(θ - π/4r)]")
+
+parameter_shift_rule()
+```
+
+## 5. Gradient-Based Optimization
+
+```python
+def gradient_based_methods():
+    """Gradient-based optimization for VQE."""
+
+    print("Gradient-Based Optimization")
+    print("=" * 60)
+
+    print("\nGradient Descent:")
+    print("-" * 45)
+    print("  θₖ₊₁ = θₖ - η ∇E(θₖ)")
+    print()
+    print("  η = learning rate (step size)")
+    print("  Simple but can be slow")
+
+    print("\nL-BFGS-B:")
+    print("-" * 45)
+    print("  • Limited-memory BFGS with bounds")
+    print("  • Approximates Hessian from gradient history")
+    print("  • Fast convergence near minimum")
+    print()
+    print("  Usage:")
+    print("    minimize(cost, x0, method='L-BFGS-B', jac=grad_fn)")
+
+    print("\nAdam (Adaptive Moment Estimation):")
+    print("-" * 45)
+    print("  From deep learning, adapts learning rate")
+    print()
+    print("  mₖ = β₁ mₖ₋₁ + (1-β₁) gₖ     (momentum)")
+    print("  vₖ = β₂ vₖ₋₁ + (1-β₂) gₖ²    (velocity)")
+    print("  θₖ₊₁ = θₖ - η mₖ / (√vₖ + ε)")
+    print()
+    print("  Typical: β₁=0.9, β₂=0.999, η=0.001")
+
+    print("\nComparison:")
+    print("-" * 45)
+    methods = [
+        ("GD", "2n", "Simple", "Slow, sensitive to η"),
+        ("L-BFGS-B", "2n", "Fast convergence", "Memory, noise sensitive"),
+        ("Adam", "2n", "Adaptive η", "Hyperparameters"),
+    ]
+    print(f"  {'Method':<12} {'Evals/iter':<12} {'Pros':<18} {'Cons'}")
+    print("  " + "-" * 55)
+    for m, evals, pro, con in methods:
+        print(f"  {m:<12} {evals:<12} {pro:<18} {con}")
+
+gradient_based_methods()
+```
+
+## 6. Handling Noise in Optimization
+
+```python
+def noise_handling():
+    """Strategies for optimizing with noisy evaluations."""
+
+    print("Handling Noise in VQE Optimization")
+    print("=" * 60)
+
+    print("\nSources of Noise:")
+    print("-" * 45)
+    print("  1. Shot noise: σ ∝ 1/√N_shots")
+    print("  2. Gate errors: coherent and incoherent")
+    print("  3. Readout errors: bit-flip probabilities")
+
+    print("\nNoise Impact on Optimization:")
+    print("-" * 45)
+    print("  • Gradients become noisy: ∇E → ∇E + noise")
+    print("  • Optimization may oscillate near minimum")
+    print("  • May converge to wrong value")
+
+    print("\nStrategies:")
+    print("-" * 45)
+
+    print("\n  1. Increase Shots Adaptively:")
+    print("     • Start with few shots (fast exploration)")
+    print("     • Increase shots near convergence (precision)")
+    print("     • Example: N = N₀ × (1 + k/k_scale)")
+
+    print("\n  2. Running Averages:")
+    print("     • Average multiple evaluations at same θ")
+    print("     • Reduces variance by factor √n_avg")
+
+    print("\n  3. Noise-Resilient Optimizers:")
+    print("     • SPSA: designed for stochastic settings")
+    print("     • iCANS: noise-aware step sizes")
+    print("     • QNSPSA: quantum natural SPSA")
+
+    print("\n  4. Regularization:")
+    print("     • Add penalty term: E(θ) + λ||θ||²")
+    print("     • Smooths landscape, prevents overfitting to noise")
+
+    print("\nAdaptive Shot Example:")
+    print("-" * 45)
+
+    def adaptive_shots(iteration, base_shots=1000, max_shots=100000):
+        """Adaptive shot allocation."""
+        shots = min(base_shots * (1 + iteration // 10), max_shots)
+        return int(shots)
+
+    iters = [0, 10, 50, 100, 200]
+    print(f"  {'Iteration':<12} {'Shots'}")
+    for i in iters:
+        print(f"  {i:<12} {adaptive_shots(i)}")
+
+noise_handling()
+```
+
+<Warning>
+Never trust a VQE result without understanding the noise level. Always report error bars and validate convergence by restarting from different initial points.
+</Warning>
+
+## 7. Convergence Strategies
+
+```python
+def convergence_strategies():
+    """Strategies for reliable VQE convergence."""
+
+    print("VQE Convergence Strategies")
+    print("=" * 60)
+
+    print("\nConvergence Criteria:")
+    print("-" * 45)
+    print("  1. Energy change: |Eₖ - Eₖ₋₁| < ε_E")
+    print("  2. Parameter change: ||θₖ - θₖ₋₁|| < ε_θ")
+    print("  3. Gradient norm: ||∇E|| < ε_g")
+    print("  4. Maximum iterations reached")
+
+    print("\nInitialization Strategies:")
+    print("-" * 45)
+    strategies = [
+        ("Zero init", "Start from HF reference", "May hit saddle"),
+        ("Random init", "Sample from [-π, π]", "Barren plateaus"),
+        ("Small random", "θ ~ N(0, 0.1)", "Near HF, good start"),
+        ("Classical", "From classical solver", "Best if available"),
+    ]
+    print(f"  {'Strategy':<15} {'Description':<25} {'Note'}")
+    print("  " + "-" * 55)
+    for s, d, n in strategies:
+        print(f"  {s:<15} {d:<25} {n}")
+
+    print("\nMulti-Start Strategy:")
+    print("-" * 45)
+    print("  1. Run VQE from N random initial points")
+    print("  2. Take best (lowest energy) result")
+    print("  3. Optionally refine best with more shots")
+
+    print("\nWarm-Starting:")
+    print("-" * 45)
+    print("  • Use parameters from related calculation")
+    print("  • Examples:")
+    print("    - Previous geometry in PES scan")
+    print("    - Smaller basis set result")
+    print("    - Similar molecule")
+
+    print("\nLayer-wise Training:")
+    print("-" * 45)
+    print("  For deep circuits:")
+    print("  1. Optimize layer 1 only")
+    print("  2. Fix layer 1, add and optimize layer 2")
+    print("  3. Repeat until full depth")
+    print("  4. Final global optimization")
+
+    print("\nExample Convergence Check:")
+    print("-" * 45)
+
+    def check_convergence(energies, tol=1e-6, window=5):
+        """Check if optimization has converged."""
+        if len(energies) < window:
+            return False
+        recent = energies[-window:]
+        variance = np.var(recent)
+        return variance < tol
+
+    print("  def check_convergence(energies, tol=1e-6, window=5):")
+    print("      recent = energies[-window:]")
+    print("      return np.var(recent) < tol")
+
+convergence_strategies()
+```
+
+## 8. Practical VQE Optimization
+
+```python
+def practical_optimization():
+    """Practical VQE optimization workflow."""
+
+    print("Practical VQE Optimization Workflow")
+    print("=" * 60)
+
+    print("\nRecommended Workflow:")
+    print("-" * 45)
+    steps = [
+        "1. Initialize: θ = small random or zeros",
+        "2. Phase 1: COBYLA with ~1000 shots (exploration)",
+        "3. Phase 2: SPSA with increasing shots (refinement)",
+        "4. Phase 3: L-BFGS-B with many shots (polishing)",
+        "5. Validate: Repeat from different starts",
+    ]
+    for step in steps:
+        print(f"  {step}")
+
+    print("\nHyperparameter Guidelines:")
+    print("-" * 45)
+    params = [
+        ("Initial shots", "1000-10000", "Balance speed/accuracy"),
+        ("Final shots", "10000-1000000", "For chemical accuracy"),
+        ("SPSA a", "0.01-0.1", "Learning rate"),
+        ("SPSA c", "0.01-0.1", "Perturbation size"),
+        ("Max iterations", "100-1000", "Depends on size"),
+    ]
+    print(f"  {'Parameter':<18} {'Range':<15} {'Note'}")
+    print("  " + "-" * 50)
+    for p, r, n in params:
+        print(f"  {p:<18} {r:<15} {n}")
+
+    print("\nMonitoring During Optimization:")
+    print("-" * 45)
+    print("  Track and plot:")
+    print("    • Energy vs iteration")
+    print("    • Gradient norm vs iteration")
+    print("    • Parameter changes")
+    print("    • Shots used")
+
+    print("\nExample Optimization Loop:")
+    print("-" * 45)
+    print("""
+    # Phase 1: Exploration with COBYLA
+    result1 = minimize(cost_fn, theta0,
+                       method='COBYLA',
+                       options={'maxiter': 100})
+
+    # Phase 2: Refinement with SPSA
+    theta = result1.x
+    for k in range(200):
+        theta = spsa_step(cost_fn, theta, k)
+        shots = adaptive_shots(k)
+
+    # Phase 3: Polish with L-BFGS-B
+    result3 = minimize(cost_fn, theta,
+                       method='L-BFGS-B',
+                       jac=grad_fn)
+    """)
+
+    print("\nValidation Checklist:")
+    print("-" * 45)
+    checklist = [
+        "□ Energy below HF energy",
+        "□ Multiple random starts give same result",
+        "□ Gradient norm is small",
+        "□ Energy stable under increased shots",
+        "□ Results consistent with classical (if available)",
+    ]
+    for item in checklist:
+        print(f"  {item}")
+
+practical_optimization()
+```
+
+<Example title="VQE Optimization for H₂">
+For H₂ at equilibrium (0.74 Å):
+1. Initialize θ = 0 (HF state)
+2. Run COBYLA: Energy drops from -1.05 to -1.13 Eh (20 iterations)
+3. Run SPSA: Refines to -1.136 Eh (50 iterations)
+4. Final L-BFGS-B: Converges to -1.137 Eh
+5. Exact result: -1.137 Eh ✓
+</Example>
+
+## Summary
+
+In this lesson, you learned:
+
+1. **VQE optimization** is a noisy black-box problem
+2. **Gradient-free methods** (COBYLA, Nelder-Mead) for exploration
+3. **SPSA** uses only 2 evaluations per iteration
+4. **Parameter-shift rule** gives exact gradients
+5. **Gradient-based methods** (L-BFGS-B, Adam) for refinement
+6. **Noise handling** through adaptive shots and averaging
+7. **Convergence strategies** including multi-start and warm-starting
+8. **Practical workflow** combines multiple optimizers
+
+## Further Reading
+
+- Next lesson: Error Mitigation
+- Related: Quantum Natural Gradient
+- Advanced: Variational Optimization Theory

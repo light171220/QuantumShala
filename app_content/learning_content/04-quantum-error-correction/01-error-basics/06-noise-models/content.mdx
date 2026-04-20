@@ -1,0 +1,814 @@
+# Noise Models: Realistic Simulations for Quantum Systems
+
+## Introduction
+
+Accurate noise models are essential for designing and testing quantum error correction. This lesson covers how to build realistic noise models based on physical device parameters and how to apply them in circuit simulations.
+
+## Noise Model Hierarchy
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    NOISE MODEL HIERARCHY                            │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Level 0: IDEAL                                                     │
+│  └── No noise (perfect gates)                                      │
+│                                                                     │
+│  Level 1: SIMPLE PAULI                                             │
+│  └── Independent X, Y, Z errors with fixed probability            │
+│      Easy to simulate, captures essential QEC behavior             │
+│                                                                     │
+│  Level 2: DEPOLARIZING + DEPHASING                                 │
+│  └── Different rates for different error types                    │
+│      Separates amplitude and phase errors                          │
+│                                                                     │
+│  Level 3: PHYSICAL CHANNELS                                        │
+│  └── T1/T2 decay, amplitude damping, phase damping                │
+│      Based on measured device parameters                           │
+│                                                                     │
+│  Level 4: CIRCUIT-LEVEL                                            │
+│  └── Different errors for 1Q gates, 2Q gates, idling, readout    │
+│      Includes crosstalk and connectivity constraints              │
+│                                                                     │
+│  Level 5: FULL PHYSICS                                             │
+│  └── Time-dependent noise, correlated errors, leakage            │
+│      Coherent + incoherent, non-Markovian effects                 │
+│                                                                     │
+│  Accuracy increases ↓  but  Simulation cost increases ↓           │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Basic Noise Models
+
+```python
+import numpy as np
+from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass
+from enum import Enum
+
+# Pauli matrices
+I = np.eye(2, dtype=complex)
+X = np.array([[0, 1], [1, 0]], dtype=complex)
+Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+class NoiseType(Enum):
+    """Types of quantum noise."""
+    DEPOLARIZING = "depolarizing"
+    AMPLITUDE_DAMPING = "amplitude_damping"
+    PHASE_DAMPING = "phase_damping"
+    BIT_FLIP = "bit_flip"
+    PHASE_FLIP = "phase_flip"
+    PAULI = "pauli"
+
+@dataclass
+class NoiseParameters:
+    """Parameters defining a noise model."""
+    T1: float = 50e-6          # Relaxation time (s)
+    T2: float = 70e-6          # Dephasing time (s)
+    gate_time_1q: float = 20e-9  # Single-qubit gate time (s)
+    gate_time_2q: float = 200e-9 # Two-qubit gate time (s)
+    readout_error: float = 0.01   # Measurement error probability
+    p_depol_1q: float = 0.001     # Depolarizing per 1Q gate
+    p_depol_2q: float = 0.01      # Depolarizing per 2Q gate
+
+class BasicNoiseModel:
+    """
+    Implements basic noise channels.
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                    BASIC NOISE CHANNELS                         │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                                                                 │
+    │  DEPOLARIZING:                                                  │
+    │  E(ρ) = (1-p)ρ + (p/3)(XρX + YρY + ZρZ)                        │
+    │                                                                 │
+    │  AMPLITUDE DAMPING (T1):                                        │
+    │  K₀ = [[1, 0], [0, √(1-γ)]]                                    │
+    │  K₁ = [[0, √γ], [0, 0]]                                        │
+    │  γ = 1 - exp(-t/T1)                                            │
+    │                                                                 │
+    │  PHASE DAMPING (T_φ):                                          │
+    │  K₀ = [[1, 0], [0, √(1-λ)]]                                    │
+    │  K₁ = [[0, 0], [0, √λ]]                                        │
+    │  λ = 1 - exp(-t/T_φ)                                           │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+    """
+
+    def depolarizing_channel(self, rho: np.ndarray, p: float) -> np.ndarray:
+        """Apply depolarizing noise."""
+        return (1 - p) * rho + (p / 3) * (
+            X @ rho @ X + Y @ rho @ Y + Z @ rho @ Z
+        )
+
+    def amplitude_damping(self, rho: np.ndarray, gamma: float) -> np.ndarray:
+        """Apply amplitude damping (T1 decay)."""
+        K0 = np.array([[1, 0], [0, np.sqrt(1 - gamma)]], dtype=complex)
+        K1 = np.array([[0, np.sqrt(gamma)], [0, 0]], dtype=complex)
+        return K0 @ rho @ K0.conj().T + K1 @ rho @ K1.conj().T
+
+    def phase_damping(self, rho: np.ndarray, lambd: float) -> np.ndarray:
+        """Apply phase damping (pure dephasing)."""
+        K0 = np.array([[1, 0], [0, np.sqrt(1 - lambd)]], dtype=complex)
+        K1 = np.array([[0, 0], [0, np.sqrt(lambd)]], dtype=complex)
+        return K0 @ rho @ K0.conj().T + K1 @ rho @ K1.conj().T
+
+    def combined_t1_t2(self, rho: np.ndarray, t: float,
+                       T1: float, T2: float) -> np.ndarray:
+        """
+        Apply combined T1 and T2 decoherence.
+
+        T2 includes both T1 and pure dephasing:
+        1/T2 = 1/(2T1) + 1/T_φ
+        """
+        # Amplitude damping
+        gamma = 1 - np.exp(-t / T1)
+        rho = self.amplitude_damping(rho, gamma)
+
+        # Pure dephasing (if T2 < 2*T1)
+        if T2 < 2 * T1:
+            T_phi = 1 / (1/T2 - 1/(2*T1))
+            lambd = 1 - np.exp(-t / T_phi)
+            rho = self.phase_damping(rho, lambd)
+
+        return rho
+
+    def pauli_channel(self, rho: np.ndarray, px: float,
+                      py: float, pz: float) -> np.ndarray:
+        """Apply general Pauli channel."""
+        p0 = 1 - px - py - pz
+        return (p0 * rho + px * X @ rho @ X +
+                py * Y @ rho @ Y + pz * Z @ rho @ Z)
+
+# Demonstrate basic noise
+noise = BasicNoiseModel()
+
+print("Basic Noise Model Effects")
+print("=" * 60)
+
+# Start with |+⟩ state
+plus = np.array([1, 1], dtype=complex) / np.sqrt(2)
+rho = np.outer(plus, plus.conj())
+
+print("Initial |+⟩ state coherence:", np.abs(rho[0, 1]))
+
+# Apply different noise types
+rho_depol = noise.depolarizing_channel(rho.copy(), 0.1)
+rho_ad = noise.amplitude_damping(rho.copy(), 0.1)
+rho_pd = noise.phase_damping(rho.copy(), 0.1)
+
+print(f"After depolarizing (p=0.1):     {np.abs(rho_depol[0, 1]):.4f}")
+print(f"After amplitude damping (γ=0.1): {np.abs(rho_ad[0, 1]):.4f}")
+print(f"After phase damping (λ=0.1):    {np.abs(rho_pd[0, 1]):.4f}")
+```
+
+## Circuit-Level Noise Model
+
+```python
+import numpy as np
+from typing import List, Dict, Tuple, Optional
+from dataclasses import dataclass, field
+
+@dataclass
+class CircuitNoiseModel:
+    """
+    Complete circuit-level noise model.
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                 CIRCUIT-LEVEL NOISE MODEL                       │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                                                                 │
+    │  NOISE LOCATIONS:                                               │
+    │                                                                 │
+    │  ┌───┐     ┌───┐     ┌────┐     ╔═══╗                          │
+    │  │ P ├──N──┤ G ├──N──┤ 2Q ├──N──╢ M ╟──N                       │
+    │  └───┘     └───┘     └────┘     ╚═══╝                          │
+    │    ↑         ↑          ↑          ↑                           │
+    │  Prep     1Q Gate    2Q Gate    Readout                        │
+    │  Error    + idle     + idle     Error                          │
+    │                                                                 │
+    │  IDLE NOISE: Applied between gates based on duration           │
+    │  GATE NOISE: Applied after each gate operation                 │
+    │  SPAM NOISE: State prep and measurement errors                 │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+    """
+
+    # Physical parameters
+    T1: float = 50e-6
+    T2: float = 70e-6
+
+    # Gate times
+    gate_time_1q: float = 20e-9
+    gate_time_2q: float = 200e-9
+
+    # Gate error rates
+    p_1q: float = 0.001      # 1Q depolarizing probability
+    p_2q: float = 0.01       # 2Q depolarizing probability
+
+    # SPAM errors
+    p_prep: float = 0.005    # State preparation error
+    p_meas: float = 0.01     # Measurement error
+
+    # Crosstalk (for 2Q gates affecting spectator qubits)
+    p_crosstalk: float = 0.001
+
+    # Idle noise (in addition to T1/T2)
+    p_idle: float = 0.0001   # Extra depolarizing during idle
+
+    def __post_init__(self):
+        self.basic = BasicNoiseModel()
+
+    def apply_1q_gate_noise(self, rho: np.ndarray, qubit: int,
+                            n_qubits: int) -> np.ndarray:
+        """
+        Apply noise for a single-qubit gate.
+
+        Includes:
+        1. Depolarizing noise on target qubit
+        2. T1/T2 decay during gate time
+        """
+        # Gate depolarizing
+        rho = self._single_qubit_depolarizing(rho, qubit, n_qubits, self.p_1q)
+
+        # Decoherence during gate
+        rho = self._apply_idle_noise(rho, n_qubits, self.gate_time_1q)
+
+        return rho
+
+    def apply_2q_gate_noise(self, rho: np.ndarray, qubit1: int,
+                            qubit2: int, n_qubits: int) -> np.ndarray:
+        """
+        Apply noise for a two-qubit gate.
+
+        Includes:
+        1. Two-qubit depolarizing noise
+        2. T1/T2 decay during gate time (all qubits)
+        3. Crosstalk on neighboring qubits
+        """
+        # Two-qubit depolarizing
+        rho = self._two_qubit_depolarizing(rho, qubit1, qubit2, n_qubits, self.p_2q)
+
+        # Decoherence during gate
+        rho = self._apply_idle_noise(rho, n_qubits, self.gate_time_2q)
+
+        # Crosstalk on other qubits (simplified)
+        for q in range(n_qubits):
+            if q != qubit1 and q != qubit2:
+                rho = self._single_qubit_depolarizing(rho, q, n_qubits, self.p_crosstalk)
+
+        return rho
+
+    def apply_measurement_noise(self, rho: np.ndarray, qubit: int,
+                                 n_qubits: int) -> Tuple[int, np.ndarray]:
+        """
+        Perform noisy measurement.
+
+        Returns measured outcome and post-measurement state.
+        """
+        # Get ideal measurement probabilities
+        p0 = self._get_qubit_probability(rho, qubit, n_qubits, outcome=0)
+        p1 = 1 - p0
+
+        # Apply measurement error (bit-flip on outcome)
+        p0_noisy = (1 - self.p_meas) * p0 + self.p_meas * p1
+        p1_noisy = (1 - self.p_meas) * p1 + self.p_meas * p0
+
+        # Sample outcome
+        outcome = 0 if np.random.random() < p0_noisy else 1
+
+        # Project state (ideal projection)
+        rho_post = self._project_qubit(rho, qubit, n_qubits, outcome)
+
+        return outcome, rho_post
+
+    def _single_qubit_depolarizing(self, rho: np.ndarray, qubit: int,
+                                    n_qubits: int, p: float) -> np.ndarray:
+        """Apply single-qubit depolarizing to specified qubit."""
+        if p == 0:
+            return rho
+
+        # Build Pauli operators for this qubit
+        paulis = [I, X, Y, Z]
+        d = 2 ** n_qubits
+
+        rho_out = (1 - p) * rho
+        for P in [X, Y, Z]:
+            # Build n-qubit Pauli
+            P_full = self._embed_operator(P, qubit, n_qubits)
+            rho_out += (p / 3) * P_full @ rho @ P_full.conj().T
+
+        return rho_out
+
+    def _two_qubit_depolarizing(self, rho: np.ndarray, q1: int, q2: int,
+                                 n_qubits: int, p: float) -> np.ndarray:
+        """Apply two-qubit depolarizing channel."""
+        if p == 0:
+            return rho
+
+        paulis = [I, X, Y, Z]
+        rho_out = (1 - p) * rho
+
+        for P1 in paulis:
+            for P2 in paulis:
+                if np.array_equal(P1, I) and np.array_equal(P2, I):
+                    continue
+                # Build two-qubit Pauli
+                P_full = self._embed_two_qubit_operator(P1, P2, q1, q2, n_qubits)
+                rho_out += (p / 15) * P_full @ rho @ P_full.conj().T
+
+        return rho_out
+
+    def _apply_idle_noise(self, rho: np.ndarray, n_qubits: int,
+                          duration: float) -> np.ndarray:
+        """Apply T1/T2 decoherence during idle time."""
+        gamma = 1 - np.exp(-duration / self.T1)
+
+        if self.T2 < 2 * self.T1:
+            T_phi = 1 / (1/self.T2 - 1/(2*self.T1))
+            lambd = 1 - np.exp(-duration / T_phi)
+        else:
+            lambd = 0
+
+        # Apply to each qubit
+        for q in range(n_qubits):
+            rho = self._single_qubit_t1_t2(rho, q, n_qubits, gamma, lambd)
+
+        return rho
+
+    def _single_qubit_t1_t2(self, rho: np.ndarray, qubit: int,
+                            n_qubits: int, gamma: float, lambd: float) -> np.ndarray:
+        """Apply T1/T2 noise to single qubit in multi-qubit state."""
+        # Amplitude damping Kraus operators
+        K0_ad = np.array([[1, 0], [0, np.sqrt(1 - gamma)]], dtype=complex)
+        K1_ad = np.array([[0, np.sqrt(gamma)], [0, 0]], dtype=complex)
+
+        # Phase damping Kraus operators
+        K0_pd = np.array([[1, 0], [0, np.sqrt(1 - lambd)]], dtype=complex)
+        K1_pd = np.array([[0, 0], [0, np.sqrt(lambd)]], dtype=complex)
+
+        # Apply amplitude damping
+        K0_full = self._embed_operator(K0_ad, qubit, n_qubits)
+        K1_full = self._embed_operator(K1_ad, qubit, n_qubits)
+        rho = K0_full @ rho @ K0_full.conj().T + K1_full @ rho @ K1_full.conj().T
+
+        # Apply phase damping
+        K0_full = self._embed_operator(K0_pd, qubit, n_qubits)
+        K1_full = self._embed_operator(K1_pd, qubit, n_qubits)
+        rho = K0_full @ rho @ K0_full.conj().T + K1_full @ rho @ K1_full.conj().T
+
+        return rho
+
+    def _embed_operator(self, op: np.ndarray, qubit: int,
+                        n_qubits: int) -> np.ndarray:
+        """Embed single-qubit operator into n-qubit space."""
+        result = np.array([[1]], dtype=complex)
+        for q in range(n_qubits):
+            if q == qubit:
+                result = np.kron(result, op)
+            else:
+                result = np.kron(result, I)
+        return result
+
+    def _embed_two_qubit_operator(self, op1: np.ndarray, op2: np.ndarray,
+                                   q1: int, q2: int, n_qubits: int) -> np.ndarray:
+        """Embed two-qubit operator into n-qubit space."""
+        result = np.array([[1]], dtype=complex)
+        for q in range(n_qubits):
+            if q == q1:
+                result = np.kron(result, op1)
+            elif q == q2:
+                result = np.kron(result, op2)
+            else:
+                result = np.kron(result, I)
+        return result
+
+    def _get_qubit_probability(self, rho: np.ndarray, qubit: int,
+                                n_qubits: int, outcome: int) -> float:
+        """Get probability of measuring outcome on qubit."""
+        proj = np.array([[1, 0], [0, 0]] if outcome == 0 else [[0, 0], [0, 1]])
+        proj_full = self._embed_operator(proj, qubit, n_qubits)
+        return np.real(np.trace(proj_full @ rho))
+
+    def _project_qubit(self, rho: np.ndarray, qubit: int,
+                       n_qubits: int, outcome: int) -> np.ndarray:
+        """Project qubit to measured outcome."""
+        proj = np.array([[1, 0], [0, 0]] if outcome == 0 else [[0, 0], [0, 1]])
+        proj_full = self._embed_operator(proj, qubit, n_qubits)
+
+        rho_post = proj_full @ rho @ proj_full.conj().T
+        trace = np.trace(rho_post)
+        if trace > 0:
+            rho_post /= trace
+
+        return rho_post
+
+# Demonstrate circuit noise
+model = CircuitNoiseModel(T1=50e-6, T2=70e-6, p_1q=0.001, p_2q=0.01)
+
+print("\nCircuit Noise Model Demonstration")
+print("=" * 60)
+
+# Create Bell state |00⟩ + |11⟩
+n_qubits = 2
+rho = np.zeros((4, 4), dtype=complex)
+rho[0, 0] = 0.5
+rho[0, 3] = 0.5
+rho[3, 0] = 0.5
+rho[3, 3] = 0.5
+
+print("Initial Bell state fidelity:", np.real(rho[0, 0] + rho[3, 3] + rho[0, 3] + rho[3, 0]) / 2)
+
+# Apply noise
+rho_noisy = model.apply_2q_gate_noise(rho, 0, 1, n_qubits)
+
+print(f"After noisy 2Q gate:")
+print(f"  Fidelity: {np.real(rho_noisy[0, 0] + rho_noisy[3, 3] + rho_noisy[0, 3] + rho_noisy[3, 0]) / 2:.4f}")
+print(f"  Coherence |00><11|: {np.abs(rho_noisy[0, 3]):.4f}")
+```
+
+## Technology-Specific Noise Models
+
+```python
+import numpy as np
+from typing import Dict
+from dataclasses import dataclass
+
+@dataclass
+class SuperconductingNoiseModel:
+    """
+    Noise model calibrated for superconducting qubits.
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │              SUPERCONDUCTING QUBIT NOISE                        │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                                                                 │
+    │  DOMINANT SOURCES:                                              │
+    │  • T1: 50-500 μs (improving rapidly)                           │
+    │  • T2: 50-200 μs (often limited by flux noise)                 │
+    │  • Gate time: 20-50 ns (1Q), 50-300 ns (2Q)                   │
+    │                                                                 │
+    │  SPECIFIC ISSUES:                                               │
+    │  • Leakage to |2⟩ state                                        │
+    │  • ZZ crosstalk (always-on coupling)                           │
+    │  • Frequency collisions                                        │
+    │  • TLS defects causing fluctuations                            │
+    │                                                                 │
+    │  TYPICAL PARAMETERS:                                            │
+    │  ┌──────────────┬────────────────────┐                         │
+    │  │ T1           │ 100 μs            │                         │
+    │  │ T2           │ 100 μs            │                         │
+    │  │ 1Q gate time │ 25 ns             │                         │
+    │  │ 2Q gate time │ 200 ns            │                         │
+    │  │ 1Q error     │ 0.1%              │                         │
+    │  │ 2Q error     │ 0.5-1%            │                         │
+    │  │ Readout      │ 1-2%              │                         │
+    │  └──────────────┴────────────────────┘                         │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+    """
+
+    T1: float = 100e-6
+    T2: float = 100e-6
+    gate_time_1q: float = 25e-9
+    gate_time_2q: float = 200e-9
+    p_1q: float = 0.001
+    p_2q: float = 0.005
+    p_readout: float = 0.015
+    p_leakage: float = 0.001
+    zz_coupling: float = 50e3  # Hz
+
+    def get_noise_parameters(self) -> Dict:
+        """Return noise parameters for simulation."""
+        return {
+            'T1': self.T1,
+            'T2': self.T2,
+            'gate_time_1q': self.gate_time_1q,
+            'gate_time_2q': self.gate_time_2q,
+            'p_1q': self.p_1q,
+            'p_2q': self.p_2q,
+            'p_meas': self.p_readout,
+            'p_leakage': self.p_leakage
+        }
+
+@dataclass
+class TrappedIonNoiseModel:
+    """
+    Noise model calibrated for trapped ion qubits.
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │               TRAPPED ION QUBIT NOISE                           │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                                                                 │
+    │  DOMINANT SOURCES:                                              │
+    │  • Laser intensity noise (coherent errors)                     │
+    │  • Motional heating (affects 2Q gates)                         │
+    │  • Off-resonant scattering (leakage)                          │
+    │                                                                 │
+    │  ADVANTAGES:                                                    │
+    │  • Very long T1, T2 (seconds to minutes)                       │
+    │  • All-to-all connectivity                                     │
+    │  • High-fidelity gates possible                                │
+    │                                                                 │
+    │  TYPICAL PARAMETERS:                                            │
+    │  ┌──────────────┬────────────────────┐                         │
+    │  │ T1           │ > 1 second        │                         │
+    │  │ T2           │ 1-10 seconds      │                         │
+    │  │ 1Q gate time │ 1-10 μs           │                         │
+    │  │ 2Q gate time │ 50-200 μs         │                         │
+    │  │ 1Q error     │ 0.01-0.1%         │                         │
+    │  │ 2Q error     │ 0.1-1%            │                         │
+    │  │ Readout      │ 0.1-1%            │                         │
+    │  └──────────────┴────────────────────┘                         │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+    """
+
+    T1: float = 10.0          # Very long!
+    T2: float = 1.0           # Seconds
+    gate_time_1q: float = 5e-6
+    gate_time_2q: float = 100e-6
+    p_1q: float = 0.0003
+    p_2q: float = 0.003
+    p_readout: float = 0.005
+    heating_rate: float = 10.0  # Motional quanta per second
+
+    def get_noise_parameters(self) -> Dict:
+        """Return noise parameters for simulation."""
+        return {
+            'T1': self.T1,
+            'T2': self.T2,
+            'gate_time_1q': self.gate_time_1q,
+            'gate_time_2q': self.gate_time_2q,
+            'p_1q': self.p_1q,
+            'p_2q': self.p_2q,
+            'p_meas': self.p_readout
+        }
+
+@dataclass
+class NeutralAtomNoiseModel:
+    """
+    Noise model for neutral atom qubits.
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │              NEUTRAL ATOM QUBIT NOISE                           │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                                                                 │
+    │  DOMINANT SOURCES:                                              │
+    │  • Atom loss (from traps)                                      │
+    │  • Rydberg state decay                                         │
+    │  • Position fluctuations                                       │
+    │                                                                 │
+    │  ADVANTAGES:                                                    │
+    │  • Scalable to many qubits                                     │
+    │  • Reconfigurable connectivity                                 │
+    │  • Identical qubits                                            │
+    │                                                                 │
+    │  TYPICAL PARAMETERS:                                            │
+    │  ┌──────────────┬────────────────────┐                         │
+    │  │ T1           │ 1-10 seconds      │                         │
+    │  │ T2           │ 0.1-1 seconds     │                         │
+    │  │ 1Q gate time │ 0.1-1 μs          │                         │
+    │  │ 2Q gate time │ 0.2-1 μs          │                         │
+    │  │ 1Q error     │ 0.1-1%            │                         │
+    │  │ 2Q error     │ 0.5-5%            │                         │
+    │  │ Atom loss    │ 0.1-1% per cycle  │                         │
+    │  └──────────────┴────────────────────┘                         │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+    """
+
+    T1: float = 5.0
+    T2: float = 0.5
+    gate_time_1q: float = 0.5e-6
+    gate_time_2q: float = 0.5e-6
+    p_1q: float = 0.005
+    p_2q: float = 0.02
+    p_readout: float = 0.03
+    p_atom_loss: float = 0.005  # Per circuit cycle
+
+# Compare technologies
+print("\nTechnology Comparison")
+print("=" * 60)
+
+sc = SuperconductingNoiseModel()
+ti = TrappedIonNoiseModel()
+na = NeutralAtomNoiseModel()
+
+print(f"{'Parameter':<20} {'Supercond.':<15} {'Trapped Ion':<15} {'Neutral Atom':<15}")
+print("-" * 65)
+print(f"{'T1':<20} {sc.T1*1e6:>10.0f} μs  {ti.T1:>10.1f} s   {na.T1:>10.1f} s")
+print(f"{'T2':<20} {sc.T2*1e6:>10.0f} μs  {ti.T2:>10.1f} s   {na.T2:>10.2f} s")
+print(f"{'1Q gate time':<20} {sc.gate_time_1q*1e9:>10.0f} ns  {ti.gate_time_1q*1e6:>10.0f} μs  {na.gate_time_1q*1e6:>10.1f} μs")
+print(f"{'2Q gate time':<20} {sc.gate_time_2q*1e9:>10.0f} ns  {ti.gate_time_2q*1e6:>10.0f} μs  {na.gate_time_2q*1e6:>10.1f} μs")
+print(f"{'1Q error':<20} {sc.p_1q*100:>10.2f}%   {ti.p_1q*100:>10.3f}%  {na.p_1q*100:>10.2f}%")
+print(f"{'2Q error':<20} {sc.p_2q*100:>10.2f}%   {ti.p_2q*100:>10.2f}%  {na.p_2q*100:>10.1f}%")
+```
+
+## Correlated and Time-Dependent Noise
+
+```python
+import numpy as np
+from typing import List, Tuple
+
+class CorrelatedNoiseModel:
+    """
+    Model correlated noise effects.
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                   CORRELATED NOISE                              │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                                                                 │
+    │  SPATIAL CORRELATIONS:                                          │
+    │  • Nearby qubits experience similar noise                      │
+    │  • ZZ coupling creates entangling errors                       │
+    │  • Global control errors affect all qubits similarly           │
+    │                                                                 │
+    │  TEMPORAL CORRELATIONS:                                         │
+    │  • Low-frequency noise (1/f, drift)                            │
+    │  • Errors persist across gate cycles                           │
+    │  • Can defeat randomized compiling                             │
+    │                                                                 │
+    │  EXAMPLE: CORRELATED DEPHASING                                  │
+    │                                                                 │
+    │     Z₁ ─┬─► same noise affects multiple qubits                 │
+    │     Z₂ ─┤                                                       │
+    │     Z₃ ─┘                                                       │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+    """
+
+    def __init__(self, n_qubits: int, correlation_length: float = 2.0):
+        self.n_qubits = n_qubits
+        self.correlation_length = correlation_length
+
+    def correlated_dephasing(self, rho: np.ndarray,
+                             p_local: float,
+                             p_global: float) -> np.ndarray:
+        """
+        Apply dephasing with both local and global components.
+
+        Global dephasing: same Z rotation on all qubits
+        Local dephasing: independent Z rotations
+        """
+        d = 2 ** self.n_qubits
+
+        # Global dephasing (Z on all qubits)
+        Z_global = np.eye(1)
+        for _ in range(self.n_qubits):
+            Z_global = np.kron(Z_global, Z)
+
+        rho_out = (1 - p_global) * rho + p_global * Z_global @ rho @ Z_global
+
+        # Local dephasing
+        for q in range(self.n_qubits):
+            Z_q = self._embed_pauli(Z, q)
+            rho_out = (1 - p_local) * rho_out + p_local * Z_q @ rho_out @ Z_q
+
+        return rho_out
+
+    def spatially_correlated_noise(self, rho: np.ndarray,
+                                    noise_amplitude: float) -> np.ndarray:
+        """
+        Apply spatially correlated noise based on qubit positions.
+
+        Correlation decays with distance.
+        """
+        # Generate correlated noise phases
+        phases = self._generate_correlated_phases(noise_amplitude)
+
+        # Apply correlated Z rotations
+        for q in range(self.n_qubits):
+            U = np.array([[np.exp(-1j * phases[q]/2), 0],
+                          [0, np.exp(1j * phases[q]/2)]])
+            U_full = self._embed_unitary(U, q)
+            rho = U_full @ rho @ U_full.conj().T
+
+        return rho
+
+    def _generate_correlated_phases(self, amplitude: float) -> np.ndarray:
+        """Generate spatially correlated noise phases."""
+        # Build correlation matrix
+        corr = np.zeros((self.n_qubits, self.n_qubits))
+        for i in range(self.n_qubits):
+            for j in range(self.n_qubits):
+                distance = abs(i - j)
+                corr[i, j] = np.exp(-distance / self.correlation_length)
+
+        # Generate correlated Gaussian noise
+        L = np.linalg.cholesky(corr + 1e-10 * np.eye(self.n_qubits))
+        independent_noise = np.random.randn(self.n_qubits)
+        correlated_noise = L @ independent_noise
+
+        return amplitude * correlated_noise
+
+    def _embed_pauli(self, P: np.ndarray, qubit: int) -> np.ndarray:
+        """Embed Pauli operator into n-qubit space."""
+        result = np.eye(1)
+        for q in range(self.n_qubits):
+            if q == qubit:
+                result = np.kron(result, P)
+            else:
+                result = np.kron(result, I)
+        return result
+
+    def _embed_unitary(self, U: np.ndarray, qubit: int) -> np.ndarray:
+        """Embed single-qubit unitary into n-qubit space."""
+        return self._embed_pauli(U, qubit)
+
+
+class TimeDependentNoise:
+    """
+    Model time-dependent (non-Markovian) noise.
+    """
+
+    def __init__(self, drift_rate: float = 0.001):
+        self.drift_rate = drift_rate
+        self.time = 0
+        self.accumulated_drift = 0
+
+    def evolve(self, rho: np.ndarray, dt: float) -> np.ndarray:
+        """
+        Evolve state with time-dependent noise.
+
+        Models slow drift in qubit parameters.
+        """
+        self.time += dt
+
+        # Update accumulated drift (random walk)
+        self.accumulated_drift += self.drift_rate * np.sqrt(dt) * np.random.randn()
+
+        # Apply as Z rotation
+        U = np.array([[np.exp(-1j * self.accumulated_drift/2), 0],
+                      [0, np.exp(1j * self.accumulated_drift/2)]])
+
+        return U @ rho @ U.conj().T
+
+    def reset(self):
+        """Reset time and drift (e.g., after recalibration)."""
+        self.time = 0
+        self.accumulated_drift = 0
+
+# Demonstrate correlated noise
+print("\nCorrelated Noise Effects")
+print("=" * 60)
+
+corr_noise = CorrelatedNoiseModel(n_qubits=3, correlation_length=2.0)
+
+# Create GHZ state |000⟩ + |111⟩
+ghz = np.zeros(8, dtype=complex)
+ghz[0] = 1/np.sqrt(2)
+ghz[7] = 1/np.sqrt(2)
+rho_ghz = np.outer(ghz, ghz.conj())
+
+# Apply correlated vs uncorrelated dephasing
+rho_local = corr_noise.correlated_dephasing(rho_ghz.copy(), p_local=0.1, p_global=0.0)
+rho_global = corr_noise.correlated_dephasing(rho_ghz.copy(), p_local=0.0, p_global=0.1)
+rho_both = corr_noise.correlated_dephasing(rho_ghz.copy(), p_local=0.05, p_global=0.05)
+
+print("GHZ state coherence |000><111| under different noise:")
+print(f"  Original:          {np.abs(rho_ghz[0, 7]):.4f}")
+print(f"  Local dephasing:   {np.abs(rho_local[0, 7]):.4f}")
+print(f"  Global dephasing:  {np.abs(rho_global[0, 7]):.4f}")
+print(f"  Mixed:             {np.abs(rho_both[0, 7]):.4f}")
+```
+
+## Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    NOISE MODELS SUMMARY                             │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  MODEL HIERARCHY:                                                   │
+│  • Simple Pauli → Physical channels → Circuit-level → Full physics│
+│  • Trade-off between accuracy and simulation cost                  │
+│                                                                     │
+│  KEY NOISE CHANNELS:                                                │
+│  • Depolarizing: symmetric errors (QEC benchmark)                  │
+│  • Amplitude damping: T1 relaxation                                │
+│  • Phase damping: pure dephasing (T_φ)                             │
+│  • Combined T1/T2: realistic decoherence                          │
+│                                                                     │
+│  TECHNOLOGY DIFFERENCES:                                            │
+│  • Superconducting: fast gates, shorter coherence                  │
+│  • Trapped ion: slow gates, long coherence                         │
+│  • Neutral atom: scalable, mid-range performance                   │
+│                                                                     │
+│  ADVANCED EFFECTS:                                                  │
+│  • Crosstalk: errors on spectator qubits                           │
+│  • Leakage: population outside computational space                 │
+│  • Correlated noise: spatial and temporal correlations             │
+│  • Non-Markovian: memory effects and drift                         │
+│                                                                     │
+│  BEST PRACTICES:                                                    │
+│  • Match model complexity to simulation goals                      │
+│  • Validate against experimental data when possible                │
+│  • Include dominant error sources for your technology              │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Accurate noise modeling is the foundation for developing and benchmarking quantum error correction codes.

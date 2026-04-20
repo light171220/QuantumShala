@@ -1,0 +1,768 @@
+---
+title: "Testing and Validation"
+description: "Comprehensive testing strategies for PQC implementations including known answer tests, interoperability testing, and security validation."
+---
+
+# Testing and Validation
+
+Thorough testing is critical for cryptographic implementations. A single bug can completely compromise security. This lesson covers comprehensive testing strategies for PQC.
+
+## Testing Philosophy
+
+### Why Crypto Testing Is Different
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│           Why Cryptographic Testing Is Critical                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  CONSEQUENCES OF BUGS                                           │
+│  ├─ Most software: Bug = functionality fails                   │
+│  ├─ Cryptography: Bug = complete security compromise           │
+│  └─ Often silent: Wrong output may still "work"                │
+│                                                                  │
+│  EXAMPLES OF CRITICAL BUGS                                      │
+│  • Off-by-one in buffer: Full memory disclosure               │
+│  • Wrong constant: All signatures forgeable                    │
+│  • Timing leak: Secret key extractable                         │
+│  • RNG bug: All keys predictable                               │
+│                                                                  │
+│  TESTING CHALLENGES                                             │
+│  ├─ Correctness: Output looks random even when wrong           │
+│  ├─ Security: Correct functionality ≠ secure                   │
+│  ├─ Edge cases: Many corner cases in math operations           │
+│  └─ Environment: Platform-specific behaviors                   │
+│                                                                  │
+├─────────────────────────────────────────────────────────────────┤
+│  TESTING PYRAMID FOR CRYPTO                                     │
+│                                                                  │
+│              ┌───────────────┐                                  │
+│              │  Security     │  ← Hardest, most important       │
+│              │  Testing      │                                  │
+│            ┌─┴───────────────┴─┐                                │
+│            │ Interoperability  │  ← Multiple implementations    │
+│          ┌─┴───────────────────┴─┐                              │
+│          │ Known Answer Tests    │  ← NIST vectors             │
+│        ┌─┴───────────────────────┴─┐                            │
+│        │ Unit Tests (Math Ops)     │  ← Foundation             │
+│        └───────────────────────────┘                            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Known Answer Tests (KAT)
+
+### Understanding KAT
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Known Answer Tests (KAT)                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  PURPOSE                                                        │
+│  Verify that implementation produces exact same outputs as     │
+│  reference implementation for fixed inputs.                     │
+│                                                                  │
+│  STRUCTURE                                                      │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  Input (Seed/Key/Message) → Algorithm → Expected Output   │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                  │
+│  COMPONENTS                                                     │
+│  1. Deterministic RNG seed                                     │
+│  2. Input parameters (keys, messages)                          │
+│  3. Expected outputs (ciphertexts, signatures)                 │
+│  4. Intermediate values (optional, for debugging)              │
+│                                                                  │
+│  NIST PROVIDES KAT FOR                                         │
+│  • ML-KEM (FIPS 203)                                           │
+│  • ML-DSA (FIPS 204)                                           │
+│  • SLH-DSA (FIPS 205)                                          │
+│  • FN-DSA (when finalized)                                     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Implementing KAT Framework
+
+```python
+"""
+Known Answer Test Framework for PQC
+"""
+
+import json
+from dataclasses import dataclass
+from typing import Dict, List, Callable, Optional
+from pathlib import Path
+
+@dataclass
+class KATVector:
+    """Single KAT test vector."""
+    count: int
+    seed: bytes
+    public_key: bytes
+    secret_key: bytes
+    message: Optional[bytes]  # For signatures
+    ciphertext: Optional[bytes]  # For KEM
+    signature: Optional[bytes]  # For signatures
+    shared_secret: Optional[bytes]  # For KEM
+
+class KATRunner:
+    """
+    Framework for running Known Answer Tests.
+    """
+
+    def __init__(self):
+        self.results: List[Dict] = []
+
+    def load_vectors(self, path: str) -> List[KATVector]:
+        """
+        Load KAT vectors from file.
+
+        Expected format (example):
+        count = 0
+        seed = AABBCC...
+        pk = 112233...
+        sk = 445566...
+        ct = 778899...  (for KEM)
+        ss = AABBCC...  (for KEM)
+        """
+        vectors = []
+        current = {}
+
+        with open(path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+
+                if '=' in line:
+                    key, value = line.split('=', 1)
+                    key = key.strip()
+                    value = value.strip()
+
+                    if key == 'count':
+                        if current:
+                            vectors.append(self._parse_vector(current))
+                        current = {'count': int(value)}
+                    else:
+                        current[key] = bytes.fromhex(value)
+
+            if current:
+                vectors.append(self._parse_vector(current))
+
+        return vectors
+
+    def _parse_vector(self, data: Dict) -> KATVector:
+        """Parse raw data into KATVector."""
+        return KATVector(
+            count=data.get('count', 0),
+            seed=data.get('seed', b''),
+            public_key=data.get('pk', b''),
+            secret_key=data.get('sk', b''),
+            message=data.get('msg'),
+            ciphertext=data.get('ct'),
+            signature=data.get('sig'),
+            shared_secret=data.get('ss')
+        )
+
+    def run_kem_tests(self, vectors: List[KATVector],
+                       keygen: Callable,
+                       encaps: Callable,
+                       decaps: Callable) -> Dict:
+        """
+        Run KEM KAT tests.
+
+        Args:
+            keygen: (seed) -> (pk, sk)
+            encaps: (pk, seed) -> (ct, ss)
+            decaps: (sk, ct) -> ss
+        """
+        passed = 0
+        failed = 0
+        errors = []
+
+        for v in vectors:
+            try:
+                # Test keygen
+                pk, sk = keygen(v.seed)
+                if pk != v.public_key:
+                    errors.append(f"Vector {v.count}: pk mismatch")
+                    failed += 1
+                    continue
+
+                if sk != v.secret_key:
+                    errors.append(f"Vector {v.count}: sk mismatch")
+                    failed += 1
+                    continue
+
+                # Test encapsulation
+                if v.ciphertext and v.shared_secret:
+                    ct, ss = encaps(v.public_key, v.seed[32:64])
+                    if ct != v.ciphertext:
+                        errors.append(f"Vector {v.count}: ct mismatch")
+                        failed += 1
+                        continue
+
+                    if ss != v.shared_secret:
+                        errors.append(f"Vector {v.count}: ss mismatch")
+                        failed += 1
+                        continue
+
+                    # Test decapsulation
+                    ss_dec = decaps(v.secret_key, v.ciphertext)
+                    if ss_dec != v.shared_secret:
+                        errors.append(f"Vector {v.count}: decaps ss mismatch")
+                        failed += 1
+                        continue
+
+                passed += 1
+
+            except Exception as e:
+                errors.append(f"Vector {v.count}: Exception {e}")
+                failed += 1
+
+        return {
+            "passed": passed,
+            "failed": failed,
+            "total": len(vectors),
+            "errors": errors[:10]  # First 10 errors
+        }
+
+    def run_signature_tests(self, vectors: List[KATVector],
+                             keygen: Callable,
+                             sign: Callable,
+                             verify: Callable) -> Dict:
+        """
+        Run signature KAT tests.
+        """
+        passed = 0
+        failed = 0
+        errors = []
+
+        for v in vectors:
+            try:
+                # Test keygen
+                pk, sk = keygen(v.seed)
+                if pk != v.public_key:
+                    errors.append(f"Vector {v.count}: pk mismatch")
+                    failed += 1
+                    continue
+
+                # Test signing
+                if v.message and v.signature:
+                    sig = sign(v.secret_key, v.message)
+                    if sig != v.signature:
+                        errors.append(f"Vector {v.count}: sig mismatch")
+                        failed += 1
+                        continue
+
+                    # Test verification
+                    if not verify(v.public_key, v.message, v.signature):
+                        errors.append(f"Vector {v.count}: verify failed")
+                        failed += 1
+                        continue
+
+                passed += 1
+
+            except Exception as e:
+                errors.append(f"Vector {v.count}: {e}")
+                failed += 1
+
+        return {
+            "passed": passed,
+            "failed": failed,
+            "total": len(vectors),
+            "errors": errors[:10]
+        }
+
+# Example usage
+runner = KATRunner()
+print("KAT Testing Framework")
+print("=" * 50)
+print("Ready to load and run NIST test vectors")
+```
+
+## Interoperability Testing
+
+### Cross-Implementation Testing
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Interoperability Testing                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  PURPOSE                                                        │
+│  Verify that different implementations can work together:       │
+│  • Keys from Impl A work in Impl B                             │
+│  • Signatures from A verify in B and vice versa                │
+│  • Ciphertexts from A decrypt in B                             │
+│                                                                  │
+│  TEST MATRIX                                                    │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                  Verification Implementation             │   │
+│  │              ┌─────────┬─────────┬─────────┬──────────┐ │   │
+│  │              │ liboqs  │ pqcrypto│ BoringSSL│ Custom  │ │   │
+│  │  ┌──────────┼─────────┼─────────┼─────────┼──────────┤ │   │
+│  │  │ liboqs   │    ✓    │    ✓    │    ✓    │    ✓     │ │   │
+│  │  │ pqcrypto │    ✓    │    ✓    │    ✓    │    ✓     │ │   │
+│  │  │BoringSSL │    ✓    │    ✓    │    ✓    │    ✓     │ │   │
+│  │  │ Custom   │    ✓    │    ✓    │    ✓    │    ✓     │ │   │
+│  │  └──────────┴─────────┴─────────┴─────────┴──────────┘ │   │
+│  │  Signing                                                 │   │
+│  │  Implementation                                          │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  KEY TEST CASES                                                 │
+│  1. Generate key in A, import to B, perform operations         │
+│  2. Sign in A, verify in B                                      │
+│  3. Encapsulate in A, decapsulate in B                         │
+│  4. Round-trip: A→B→A                                           │
+│  5. Multiple formats: Raw, PEM, DER                            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Interop Test Implementation
+
+```python
+"""
+Interoperability testing framework
+"""
+
+from abc import ABC, abstractmethod
+from typing import Tuple, List
+from dataclasses import dataclass
+
+class CryptoImplementation(ABC):
+    """Abstract interface for crypto implementations."""
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        pass
+
+    @abstractmethod
+    def ml_dsa_keygen(self) -> Tuple[bytes, bytes]:
+        pass
+
+    @abstractmethod
+    def ml_dsa_sign(self, sk: bytes, msg: bytes) -> bytes:
+        pass
+
+    @abstractmethod
+    def ml_dsa_verify(self, pk: bytes, msg: bytes, sig: bytes) -> bool:
+        pass
+
+@dataclass
+class InteropResult:
+    signer: str
+    verifier: str
+    success: bool
+    error: str = ""
+
+class InteropTester:
+    """
+    Cross-implementation testing framework.
+    """
+
+    def __init__(self, implementations: List[CryptoImplementation]):
+        self.implementations = implementations
+
+    def test_signature_interop(self,
+                                message: bytes = b"test message") -> List[InteropResult]:
+        """
+        Test all pairs of implementations for signature interop.
+        """
+        results = []
+
+        for signer_impl in self.implementations:
+            # Generate key with this implementation
+            pk, sk = signer_impl.ml_dsa_keygen()
+
+            # Sign with this implementation
+            sig = signer_impl.ml_dsa_sign(sk, message)
+
+            for verifier_impl in self.implementations:
+                try:
+                    # Verify with other implementation
+                    valid = verifier_impl.ml_dsa_verify(pk, message, sig)
+
+                    results.append(InteropResult(
+                        signer=signer_impl.name,
+                        verifier=verifier_impl.name,
+                        success=valid,
+                        error="" if valid else "Verification returned False"
+                    ))
+
+                except Exception as e:
+                    results.append(InteropResult(
+                        signer=signer_impl.name,
+                        verifier=verifier_impl.name,
+                        success=False,
+                        error=str(e)
+                    ))
+
+        return results
+
+    def print_matrix(self, results: List[InteropResult]):
+        """Print interop results as matrix."""
+        impls = [i.name for i in self.implementations]
+
+        print("\nInteroperability Matrix")
+        print("Rows = Signer, Columns = Verifier")
+        print()
+
+        # Header
+        print(f"{'':12}", end="")
+        for impl in impls:
+            print(f"{impl[:10]:12}", end="")
+        print()
+
+        # Data
+        for signer in impls:
+            print(f"{signer[:10]:12}", end="")
+            for verifier in impls:
+                # Find result
+                for r in results:
+                    if r.signer == signer and r.verifier == verifier:
+                        status = "✓" if r.success else "✗"
+                        print(f"{status:12}", end="")
+                        break
+            print()
+
+# Mock implementations for demonstration
+class MockImpl(CryptoImplementation):
+    def __init__(self, name: str):
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def ml_dsa_keygen(self) -> Tuple[bytes, bytes]:
+        return b"pk" * 100, b"sk" * 100
+
+    def ml_dsa_sign(self, sk: bytes, msg: bytes) -> bytes:
+        return b"sig" * 100
+
+    def ml_dsa_verify(self, pk: bytes, msg: bytes, sig: bytes) -> bool:
+        return True  # Mock always succeeds
+
+# Example
+impls = [
+    MockImpl("liboqs"),
+    MockImpl("custom"),
+    MockImpl("reference")
+]
+
+tester = InteropTester(impls)
+results = tester.test_signature_interop()
+tester.print_matrix(results)
+```
+
+## Fuzzing and Property Testing
+
+### Fuzzing for Security
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Fuzzing Strategies for PQC                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  WHAT TO FUZZ                                                   │
+│  1. Key parsing (malformed public/private keys)                │
+│  2. Signature parsing (truncated, corrupted signatures)        │
+│  3. Ciphertext parsing (invalid ciphertexts)                   │
+│  4. Message handling (various lengths, special values)         │
+│  5. API boundary (null pointers, zero lengths)                 │
+│                                                                  │
+│  FUZZING PROPERTIES TO CHECK                                   │
+│  □ No crashes or undefined behavior                            │
+│  □ No memory leaks or buffer overflows                         │
+│  □ Consistent error handling                                    │
+│  □ No information leakage in error cases                       │
+│                                                                  │
+│  TOOLS                                                          │
+│  • AFL (American Fuzzy Lop)                                    │
+│  • libFuzzer (LLVM)                                            │
+│  • Hypothesis (Python property testing)                        │
+│  • OSS-Fuzz (continuous fuzzing)                               │
+│                                                                  │
+│  COVERAGE TARGETS                                               │
+│  • All error paths executed                                    │
+│  • Edge cases in modular arithmetic                            │
+│  • Boundary conditions (max values)                            │
+│  • Invalid algorithm parameters                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Property-Based Testing
+
+```python
+"""
+Property-based testing for cryptographic operations
+"""
+
+import random
+from typing import Callable
+
+class PropertyTester:
+    """
+    Property-based testing framework for crypto.
+    """
+
+    def __init__(self, iterations: int = 1000):
+        self.iterations = iterations
+
+    def test_keygen_deterministic(self,
+                                   keygen: Callable,
+                                   seed_gen: Callable) -> bool:
+        """
+        Property: Same seed always produces same keypair.
+        """
+        for _ in range(self.iterations):
+            seed = seed_gen()
+            pk1, sk1 = keygen(seed)
+            pk2, sk2 = keygen(seed)
+
+            if pk1 != pk2 or sk1 != sk2:
+                print(f"FAIL: Different output for same seed")
+                return False
+
+        print("PASS: Keygen is deterministic")
+        return True
+
+    def test_sign_verify_roundtrip(self,
+                                    keygen: Callable,
+                                    sign: Callable,
+                                    verify: Callable,
+                                    msg_gen: Callable) -> bool:
+        """
+        Property: sign(sk, m) always verifies with matching pk.
+        """
+        for _ in range(self.iterations):
+            pk, sk = keygen()
+            msg = msg_gen()
+            sig = sign(sk, msg)
+
+            if not verify(pk, msg, sig):
+                print(f"FAIL: Valid signature didn't verify")
+                return False
+
+        print("PASS: Sign-verify roundtrip works")
+        return True
+
+    def test_wrong_key_fails(self,
+                              keygen: Callable,
+                              sign: Callable,
+                              verify: Callable,
+                              msg_gen: Callable) -> bool:
+        """
+        Property: Signature with wrong key never verifies.
+        """
+        for _ in range(self.iterations):
+            pk1, sk1 = keygen()
+            pk2, sk2 = keygen()
+            msg = msg_gen()
+            sig = sign(sk1, msg)
+
+            # Verify with wrong public key
+            if pk1 != pk2 and verify(pk2, msg, sig):
+                print(f"FAIL: Signature verified with wrong key!")
+                return False
+
+        print("PASS: Wrong key correctly fails")
+        return True
+
+    def test_modified_sig_fails(self,
+                                 keygen: Callable,
+                                 sign: Callable,
+                                 verify: Callable,
+                                 msg_gen: Callable) -> bool:
+        """
+        Property: Any modification to signature causes failure.
+        """
+        for _ in range(self.iterations):
+            pk, sk = keygen()
+            msg = msg_gen()
+            sig = bytearray(sign(sk, msg))
+
+            # Flip a random bit
+            pos = random.randint(0, len(sig) - 1)
+            bit = random.randint(0, 7)
+            sig[pos] ^= (1 << bit)
+
+            if verify(pk, msg, bytes(sig)):
+                print(f"FAIL: Modified signature verified!")
+                return False
+
+        print("PASS: Modified signatures correctly rejected")
+        return True
+
+    def test_modified_msg_fails(self,
+                                 keygen: Callable,
+                                 sign: Callable,
+                                 verify: Callable,
+                                 msg_gen: Callable) -> bool:
+        """
+        Property: Any modification to message causes failure.
+        """
+        for _ in range(self.iterations):
+            pk, sk = keygen()
+            msg = bytearray(msg_gen())
+            sig = sign(sk, bytes(msg))
+
+            # Modify message
+            if len(msg) > 0:
+                pos = random.randint(0, len(msg) - 1)
+                msg[pos] ^= 0x01
+
+                if verify(pk, bytes(msg), sig):
+                    print(f"FAIL: Signature verified for modified message!")
+                    return False
+
+        print("PASS: Modified messages correctly rejected")
+        return True
+
+# Example usage with mock functions
+def mock_keygen():
+    return b"pk" * 100, b"sk" * 100
+
+def mock_sign(sk, msg):
+    return b"sig" * 100
+
+def mock_verify(pk, msg, sig):
+    return sig == b"sig" * 100  # Only valid sig verifies
+
+def random_message():
+    return bytes(random.randint(0, 255) for _ in range(random.randint(0, 1000)))
+
+tester = PropertyTester(iterations=100)
+print("Property-Based Testing")
+print("=" * 50)
+tester.test_sign_verify_roundtrip(mock_keygen, mock_sign, mock_verify, random_message)
+tester.test_modified_sig_fails(mock_keygen, mock_sign, mock_verify, random_message)
+```
+
+## Security Validation
+
+### Security Testing Checklist
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Security Validation Checklist                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  SIDE-CHANNEL RESISTANCE                                        │
+│  □ Constant-time comparison verified                            │
+│  □ No secret-dependent branches                                 │
+│  □ No secret-dependent memory access                            │
+│  □ Timing tests pass (DUDECT or similar)                       │
+│  □ Power analysis resistance (if applicable)                   │
+│                                                                  │
+│  MEMORY SAFETY                                                  │
+│  □ No buffer overflows (verified by fuzzing)                   │
+│  □ Sensitive data zeroization                                  │
+│  □ No use-after-free                                           │
+│  □ Valgrind/ASan clean                                         │
+│                                                                  │
+│  INPUT VALIDATION                                               │
+│  □ Invalid keys rejected gracefully                            │
+│  □ Malformed signatures rejected                               │
+│  □ Zero/null inputs handled                                    │
+│  □ Oversized inputs rejected                                   │
+│                                                                  │
+│  ERROR HANDLING                                                 │
+│  □ Errors don't leak information                               │
+│  □ All paths return appropriate status                         │
+│  □ Resources cleaned up on error                               │
+│  □ No partial operation state exposed                          │
+│                                                                  │
+│  RANDOMNESS                                                     │
+│  □ Proper CSPRNG used                                          │
+│  □ Seed entropy verified                                       │
+│  □ Nonces never reused                                         │
+│  □ RNG failure detected and handled                            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Test Automation
+
+### CI/CD Integration
+
+```yaml
+# Example CI pipeline for PQC testing
+
+name: PQC Crypto Tests
+
+on: [push, pull_request]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Run unit tests
+        run: make test-unit
+
+  kat-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Download NIST KAT vectors
+        run: ./scripts/download_kat.sh
+
+      - name: Run KAT tests
+        run: make test-kat
+
+  interop-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install reference implementations
+        run: ./scripts/install_references.sh
+
+      - name: Run interoperability tests
+        run: make test-interop
+
+  fuzz-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Run fuzzing (short)
+        run: make fuzz FUZZ_TIME=60
+
+  timing-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Run timing tests
+        run: make test-timing
+
+  memory-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Build with AddressSanitizer
+        run: make SANITIZE=address
+
+      - name: Run tests under ASan
+        run: make test-asan
+```
+
+## Summary
+
+Comprehensive PQC testing requires:
+
+1. **KAT Tests**: Verify exact match with NIST test vectors
+2. **Interoperability**: Test across multiple implementations
+3. **Property Testing**: Verify cryptographic properties hold
+4. **Fuzzing**: Find edge cases and crashes
+5. **Security Validation**: Side-channels, memory safety, error handling
+6. **Automation**: Continuous testing in CI/CD
+
+No implementation should be deployed without passing all testing levels.

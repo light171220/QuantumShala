@@ -1,0 +1,799 @@
+---
+title: "Measurement Debugging"
+description: "Learn to debug quantum measurement outcomes by analyzing shot statistics, comparing distributions, and implementing error mitigation techniques."
+duration: 40
+difficulty: "intermediate"
+---
+
+## 1. Understanding Measurement in Quantum Debugging
+
+Measurement debugging focuses on analyzing the probabilistic outcomes from quantum circuit execution to identify and diagnose issues.
+
+```
+Measurement Debugging Overview
+══════════════════════════════
+
+Theoretical          Actual Hardware
+─────────────        ───────────────
+|ψ⟩ = α|0⟩ + β|1⟩    Noisy state |ψ'⟩
+
+P(0) = |α|²          P'(0) ≈ |α|² + noise
+P(1) = |β|²          P'(1) ≈ |β|² + noise
+
+Key Challenges:
+├── Finite sampling (shot noise)
+├── Measurement errors (bit flips)
+├── State preparation errors
+├── Decoherence before measurement
+└── Crosstalk between qubits
+
+Debugging Strategy:
+1. Collect sufficient shots
+2. Compare with expected distribution
+3. Analyze statistical significance
+4. Apply error mitigation
+5. Identify systematic vs random errors
+```
+
+## 2. Shot Statistics Analysis
+
+```python
+from qiskit import QuantumCircuit, transpile
+from qiskit_aer import AerSimulator
+import numpy as np
+from typing import Dict, List, Tuple
+from collections import Counter
+import scipy.stats as stats
+
+class ShotStatisticsAnalyzer:
+    """Analyze measurement shot statistics for debugging."""
+
+    def __init__(self, counts: Dict[str, int]):
+        self.counts = counts
+        self.total_shots = sum(counts.values())
+        self.probabilities = {k: v / self.total_shots
+                             for k, v in counts.items()}
+
+    def get_statistics(self) -> Dict:
+        """Calculate comprehensive statistics."""
+        probs = list(self.probabilities.values())
+
+        return {
+            'total_shots': self.total_shots,
+            'unique_outcomes': len(self.counts),
+            'most_probable': max(self.probabilities, key=self.probabilities.get),
+            'least_probable': min(self.probabilities, key=self.probabilities.get),
+            'max_probability': max(probs),
+            'min_probability': min(probs) if probs else 0,
+            'entropy': -sum(p * np.log2(p) for p in probs if p > 0)
+        }
+
+    def expected_vs_actual(self, expected: Dict[str, float],
+                           alpha: float = 0.05) -> Dict:
+        """Compare actual distribution with expected."""
+        results = {
+            'comparisons': [],
+            'chi_square_test': None,
+            'overall_match': True
+        }
+
+        # Per-state comparison
+        all_states = set(self.probabilities.keys()) | set(expected.keys())
+
+        for state in sorted(all_states):
+            actual_prob = self.probabilities.get(state, 0)
+            expected_prob = expected.get(state, 0)
+            actual_count = self.counts.get(state, 0)
+            expected_count = expected_prob * self.total_shots
+
+            # Wilson score interval for binomial proportion
+            if self.total_shots > 0:
+                ci_low, ci_high = self._wilson_ci(actual_count,
+                                                   self.total_shots, alpha)
+            else:
+                ci_low, ci_high = 0, 0
+
+            in_interval = ci_low <= expected_prob <= ci_high
+
+            results['comparisons'].append({
+                'state': state,
+                'expected_prob': expected_prob,
+                'actual_prob': actual_prob,
+                'actual_count': actual_count,
+                'expected_count': expected_count,
+                'ci_low': ci_low,
+                'ci_high': ci_high,
+                'within_ci': in_interval,
+                'deviation': abs(actual_prob - expected_prob)
+            })
+
+            if not in_interval and expected_prob > 0.01:
+                results['overall_match'] = False
+
+        # Chi-square test
+        observed = []
+        expected_vals = []
+        for state in sorted(all_states):
+            observed.append(self.counts.get(state, 0))
+            expected_vals.append(expected.get(state, 0) * self.total_shots)
+
+        # Filter out states with expected count < 5
+        filtered = [(o, e) for o, e in zip(observed, expected_vals) if e >= 5]
+        if len(filtered) >= 2:
+            obs, exp = zip(*filtered)
+            chi2, p_value = stats.chisquare(obs, exp)
+            results['chi_square_test'] = {
+                'chi2': chi2,
+                'p_value': p_value,
+                'significant': p_value < alpha
+            }
+
+        return results
+
+    def _wilson_ci(self, successes: int, trials: int,
+                   alpha: float) -> Tuple[float, float]:
+        """Wilson score confidence interval."""
+        if trials == 0:
+            return 0, 0
+
+        z = stats.norm.ppf(1 - alpha / 2)
+        p_hat = successes / trials
+
+        denominator = 1 + z ** 2 / trials
+        center = (p_hat + z ** 2 / (2 * trials)) / denominator
+        margin = z * np.sqrt((p_hat * (1 - p_hat) + z ** 2 / (4 * trials))
+                             / trials) / denominator
+
+        return max(0, center - margin), min(1, center + margin)
+
+    def detect_anomalies(self, expected: Dict[str, float],
+                         threshold: float = 3.0) -> List[Dict]:
+        """Detect states with anomalously different probabilities."""
+        anomalies = []
+
+        for state in set(self.probabilities.keys()) | set(expected.keys()):
+            actual = self.probabilities.get(state, 0)
+            exp = expected.get(state, 0)
+
+            if exp > 0:
+                # Calculate z-score
+                std_dev = np.sqrt(exp * (1 - exp) / self.total_shots)
+                if std_dev > 0:
+                    z_score = (actual - exp) / std_dev
+                    if abs(z_score) > threshold:
+                        anomalies.append({
+                            'state': state,
+                            'actual': actual,
+                            'expected': exp,
+                            'z_score': z_score,
+                            'direction': 'high' if z_score > 0 else 'low'
+                        })
+
+        return sorted(anomalies, key=lambda x: abs(x['z_score']), reverse=True)
+
+# Example usage
+qc = QuantumCircuit(2)
+qc.h(0)
+qc.cx(0, 1)
+qc.measure_all()
+
+sim = AerSimulator()
+job = sim.run(transpile(qc, sim), shots=10000)
+counts = job.result().get_counts()
+
+analyzer = ShotStatisticsAnalyzer(counts)
+print("Shot Statistics:")
+for key, value in analyzer.get_statistics().items():
+    print(f"  {key}: {value}")
+
+# Compare with expected Bell state distribution
+expected = {'00': 0.5, '11': 0.5}
+comparison = analyzer.expected_vs_actual(expected)
+print(f"\nDistribution match: {comparison['overall_match']}")
+```
+
+## 3. Distribution Comparison Tools
+
+```python
+class DistributionComparator:
+    """Compare measurement distributions for debugging."""
+
+    def __init__(self):
+        pass
+
+    def hellinger_distance(self, p: Dict[str, float],
+                           q: Dict[str, float]) -> float:
+        """Calculate Hellinger distance between distributions."""
+        all_states = set(p.keys()) | set(q.keys())
+
+        sum_sq = 0
+        for state in all_states:
+            p_val = p.get(state, 0)
+            q_val = q.get(state, 0)
+            sum_sq += (np.sqrt(p_val) - np.sqrt(q_val)) ** 2
+
+        return np.sqrt(sum_sq / 2)
+
+    def kl_divergence(self, p: Dict[str, float],
+                      q: Dict[str, float],
+                      epsilon: float = 1e-10) -> float:
+        """Calculate KL divergence D(P||Q)."""
+        all_states = set(p.keys()) | set(q.keys())
+
+        kl = 0
+        for state in all_states:
+            p_val = p.get(state, 0)
+            q_val = q.get(state, epsilon)  # Avoid log(0)
+
+            if p_val > 0:
+                kl += p_val * np.log(p_val / q_val)
+
+        return kl
+
+    def total_variation_distance(self, p: Dict[str, float],
+                                  q: Dict[str, float]) -> float:
+        """Calculate total variation distance."""
+        all_states = set(p.keys()) | set(q.keys())
+
+        return 0.5 * sum(abs(p.get(s, 0) - q.get(s, 0)) for s in all_states)
+
+    def compare_distributions(self, actual: Dict[str, int],
+                               expected: Dict[str, float]) -> Dict:
+        """Full distribution comparison."""
+        total = sum(actual.values())
+        actual_prob = {k: v / total for k, v in actual.items()}
+
+        return {
+            'hellinger_distance': self.hellinger_distance(actual_prob, expected),
+            'kl_divergence': self.kl_divergence(actual_prob, expected),
+            'total_variation': self.total_variation_distance(actual_prob, expected),
+            'actual_distribution': actual_prob,
+            'expected_distribution': expected
+        }
+
+    def identify_problematic_states(self, actual: Dict[str, int],
+                                     expected: Dict[str, float],
+                                     threshold: float = 0.05) -> List[Dict]:
+        """Identify states with significant deviations."""
+        total = sum(actual.values())
+        problems = []
+
+        all_states = set(actual.keys()) | set(expected.keys())
+
+        for state in all_states:
+            actual_prob = actual.get(state, 0) / total
+            expected_prob = expected.get(state, 0)
+            deviation = actual_prob - expected_prob
+
+            if abs(deviation) > threshold:
+                problems.append({
+                    'state': state,
+                    'actual': actual_prob,
+                    'expected': expected_prob,
+                    'deviation': deviation,
+                    'type': 'excess' if deviation > 0 else 'deficit'
+                })
+
+        return sorted(problems, key=lambda x: abs(x['deviation']), reverse=True)
+
+# Example
+comparator = DistributionComparator()
+
+# Simulated buggy results
+buggy_counts = {'00': 4000, '01': 1000, '10': 1000, '11': 4000}
+expected_bell = {'00': 0.5, '11': 0.5}
+
+result = comparator.compare_distributions(buggy_counts, expected_bell)
+print(f"\nHellinger distance: {result['hellinger_distance']:.4f}")
+print(f"TV distance: {result['total_variation']:.4f}")
+
+problems = comparator.identify_problematic_states(buggy_counts, expected_bell)
+print("\nProblematic states:")
+for p in problems:
+    print(f"  {p['state']}: {p['type']} by {abs(p['deviation']):.3f}")
+```
+
+## 4. Measurement Error Analysis
+
+```python
+class MeasurementErrorAnalyzer:
+    """Analyze and diagnose measurement errors."""
+
+    def __init__(self):
+        self.calibration_data = {}
+
+    def estimate_readout_error(self, zero_prep_counts: Dict[str, int],
+                                one_prep_counts: Dict[str, int]) -> Dict:
+        """Estimate readout error rates from calibration data."""
+        # Prepare |0⟩ and measure
+        total_zero = sum(zero_prep_counts.values())
+        p_1_given_0 = zero_prep_counts.get('1', 0) / total_zero
+
+        # Prepare |1⟩ and measure
+        total_one = sum(one_prep_counts.values())
+        p_0_given_1 = one_prep_counts.get('0', 0) / total_one
+
+        return {
+            'p_1_given_0': p_1_given_0,  # False positive
+            'p_0_given_1': p_0_given_1,  # False negative
+            'average_error': (p_1_given_0 + p_0_given_1) / 2,
+            'assignment_fidelity': 1 - (p_1_given_0 + p_0_given_1) / 2
+        }
+
+    def build_readout_matrix(self, num_qubits: int,
+                              error_rates: List[Dict]) -> np.ndarray:
+        """Build readout error matrix for multiple qubits."""
+        dim = 2 ** num_qubits
+
+        # Start with identity
+        readout_matrix = np.eye(dim)
+
+        # Build tensor product of single-qubit error matrices
+        single_matrices = []
+        for err in error_rates:
+            p01 = err['p_1_given_0']
+            p10 = err['p_0_given_1']
+            m = np.array([[1 - p01, p10],
+                          [p01, 1 - p10]])
+            single_matrices.append(m)
+
+        # Tensor product
+        result = single_matrices[0]
+        for m in single_matrices[1:]:
+            result = np.kron(result, m)
+
+        return result
+
+    def mitigate_readout_error(self, counts: Dict[str, int],
+                                readout_matrix: np.ndarray) -> Dict[str, float]:
+        """Apply readout error mitigation."""
+        n_qubits = int(np.log2(len(readout_matrix)))
+        total = sum(counts.values())
+
+        # Create probability vector
+        prob_vector = np.zeros(2 ** n_qubits)
+        for state, count in counts.items():
+            idx = int(state, 2)
+            prob_vector[idx] = count / total
+
+        # Apply inverse calibration matrix
+        try:
+            inv_matrix = np.linalg.inv(readout_matrix)
+            mitigated = inv_matrix @ prob_vector
+
+            # Clip to valid probabilities
+            mitigated = np.clip(mitigated, 0, 1)
+            mitigated /= mitigated.sum()
+
+            result = {}
+            for i, prob in enumerate(mitigated):
+                if prob > 1e-6:
+                    state = format(i, f'0{n_qubits}b')
+                    result[state] = prob
+
+            return result
+
+        except np.linalg.LinAlgError:
+            return {k: v / total for k, v in counts.items()}
+
+    def diagnose_measurement_issues(self, counts: Dict[str, int],
+                                     expected: Dict[str, float]) -> List[Dict]:
+        """Diagnose potential measurement issues."""
+        issues = []
+        n_qubits = len(list(counts.keys())[0])
+        total = sum(counts.values())
+
+        # Check for single-bit flip patterns
+        for state, count in counts.items():
+            prob = count / total
+            exp_prob = expected.get(state, 0)
+
+            if exp_prob < 0.01 and prob > 0.05:
+                # Unexpected state - check if it's one bit flip away
+                for exp_state in expected:
+                    if expected[exp_state] > 0.1:
+                        hamming = sum(a != b for a, b in zip(state, exp_state))
+                        if hamming == 1:
+                            flip_pos = [i for i, (a, b) in
+                                       enumerate(zip(state, exp_state)) if a != b][0]
+                            issues.append({
+                                'type': 'possible_bit_flip',
+                                'observed': state,
+                                'likely_source': exp_state,
+                                'flip_position': flip_pos,
+                                'probability': prob
+                            })
+
+        # Check for low expected states being absent
+        for state, exp_prob in expected.items():
+            if exp_prob > 0.1 and counts.get(state, 0) / total < exp_prob * 0.5:
+                issues.append({
+                    'type': 'missing_probability',
+                    'state': state,
+                    'expected': exp_prob,
+                    'actual': counts.get(state, 0) / total
+                })
+
+        return issues
+
+# Example
+error_analyzer = MeasurementErrorAnalyzer()
+
+# Simulate calibration
+zero_prep = {'0': 9700, '1': 300}  # 3% error preparing |0⟩
+one_prep = {'0': 200, '1': 9800}   # 2% error preparing |1⟩
+
+error_rates = error_analyzer.estimate_readout_error(zero_prep, one_prep)
+print("\nReadout Error Rates:")
+for k, v in error_rates.items():
+    print(f"  {k}: {v:.4f}")
+```
+
+## 5. Multi-Shot Convergence Analysis
+
+```python
+class ConvergenceAnalyzer:
+    """Analyze how measurements converge with increasing shots."""
+
+    def __init__(self, circuit: QuantumCircuit, backend=None):
+        self.circuit = circuit
+        self.backend = backend or AerSimulator()
+
+    def run_convergence_study(self, shot_counts: List[int],
+                               expected: Dict[str, float]) -> List[Dict]:
+        """Study convergence across different shot counts."""
+        results = []
+
+        for shots in shot_counts:
+            job = self.backend.run(transpile(self.circuit, self.backend),
+                                    shots=shots)
+            counts = job.result().get_counts()
+
+            total = sum(counts.values())
+            actual = {k: v / total for k, v in counts.items()}
+
+            # Calculate error metrics
+            tvd = sum(abs(actual.get(s, 0) - expected.get(s, 0))
+                     for s in set(actual) | set(expected)) / 2
+
+            max_deviation = max(
+                abs(actual.get(s, 0) - expected.get(s, 0))
+                for s in set(actual) | set(expected)
+            )
+
+            results.append({
+                'shots': shots,
+                'tvd': tvd,
+                'max_deviation': max_deviation,
+                'unique_states': len(counts),
+                'distribution': actual
+            })
+
+        return results
+
+    def estimate_required_shots(self, expected: Dict[str, float],
+                                 target_error: float = 0.01,
+                                 confidence: float = 0.95) -> int:
+        """Estimate shots needed to achieve target error."""
+        # Using Hoeffding bound
+        z = stats.norm.ppf((1 + confidence) / 2)
+
+        # Most uncertain probability (closest to 0.5)
+        max_variance_prob = min(expected.values(),
+                                key=lambda p: abs(p - 0.5))
+        variance = max_variance_prob * (1 - max_variance_prob)
+
+        required_shots = int(np.ceil((z ** 2 * variance) / (target_error ** 2)))
+        return max(100, required_shots)
+
+    def detect_convergence_issues(self, results: List[Dict]) -> List[str]:
+        """Detect issues with measurement convergence."""
+        issues = []
+
+        if len(results) < 3:
+            return ["Insufficient data points for convergence analysis"]
+
+        # Check if error is decreasing
+        tvds = [r['tvd'] for r in results]
+        shots = [r['shots'] for r in results]
+
+        # Fit 1/sqrt(n) decay
+        expected_decay = [tvds[0] * np.sqrt(shots[0] / s) for s in shots]
+
+        for i, (actual, expected_tvd) in enumerate(zip(tvds, expected_decay)):
+            if actual > expected_tvd * 1.5:
+                issues.append(
+                    f"TVD at {shots[i]} shots ({actual:.4f}) is higher than "
+                    f"expected ({expected_tvd:.4f}) - possible systematic error"
+                )
+
+        # Check for non-monotonic behavior
+        for i in range(1, len(tvds)):
+            if tvds[i] > tvds[i - 1] * 1.2:
+                issues.append(
+                    f"Error increased from {shots[i-1]} to {shots[i]} shots"
+                )
+
+        return issues
+
+# Example
+qc = QuantumCircuit(2)
+qc.h(0)
+qc.cx(0, 1)
+qc.measure_all()
+
+conv_analyzer = ConvergenceAnalyzer(qc)
+expected_bell = {'00': 0.5, '11': 0.5}
+
+print("\nConvergence Study:")
+results = conv_analyzer.run_convergence_study(
+    [100, 500, 1000, 5000, 10000],
+    expected_bell
+)
+
+for r in results:
+    print(f"  Shots: {r['shots']:5d}, TVD: {r['tvd']:.4f}, "
+          f"Max dev: {r['max_deviation']:.4f}")
+```
+
+## 6. Debugging Measurement Patterns
+
+```
+Common Measurement Issues and Diagnoses
+═══════════════════════════════════════
+
+1. UNEXPECTED STATES APPEARING
+   Symptom: States with 0 expected probability show counts
+   Causes:
+   ├── Measurement bit-flip errors
+   ├── Decoherence during circuit
+   ├── Circuit construction errors
+   └── Crosstalk between qubits
+   Debug: Check Hamming distance from expected states
+
+2. MISSING EXPECTED STATES
+   Symptom: States that should appear have 0 or low counts
+   Causes:
+   ├── Insufficient shots
+   ├── Circuit kills that branch
+   ├── Measurement errors mapping to other states
+   └── Wrong expected distribution
+   Debug: Increase shots, verify circuit logic
+
+3. WRONG PROBABILITY RATIOS
+   Symptom: All states appear but ratios are off
+   Causes:
+   ├── Rotation angle errors
+   ├── Partial decoherence
+   ├── Calibration drift
+   └── Control amplitude errors
+   Debug: Check intermediate states, rotation gates
+
+4. BIASED TOWARDS |0⟩ OR |1⟩
+   Symptom: Systematic excess of 0s or 1s
+   Causes:
+   ├── Asymmetric readout errors
+   ├── T1 decay (biases toward 0)
+   ├── State preparation errors
+   └── Initialization issues
+   Debug: Run calibration circuits
+```
+
+## 7. Statistical Testing for Measurement Debugging
+
+```python
+class StatisticalTester:
+    """Statistical tests for measurement debugging."""
+
+    def binomial_test(self, successes: int, trials: int,
+                      expected_prob: float) -> Dict:
+        """Test if observed proportion matches expected."""
+        result = stats.binomtest(successes, trials, expected_prob)
+
+        return {
+            'observed_proportion': successes / trials,
+            'expected_proportion': expected_prob,
+            'p_value': result.pvalue,
+            'significant_difference': result.pvalue < 0.05,
+            'confidence_interval': result.proportion_ci()
+        }
+
+    def multinomial_test(self, counts: Dict[str, int],
+                         expected: Dict[str, float]) -> Dict:
+        """Test if multinomial distribution matches expected."""
+        total = sum(counts.values())
+        observed = []
+        expected_counts = []
+
+        all_states = sorted(set(counts.keys()) | set(expected.keys()))
+
+        for state in all_states:
+            observed.append(counts.get(state, 0))
+            expected_counts.append(expected.get(state, 0) * total)
+
+        # Chi-square test
+        chi2, p_value = stats.chisquare(observed, expected_counts)
+
+        # G-test (log-likelihood ratio)
+        g_stat = 2 * sum(
+            o * np.log(o / e) if o > 0 and e > 0 else 0
+            for o, e in zip(observed, expected_counts)
+        )
+
+        return {
+            'chi_square': chi2,
+            'chi_square_p_value': p_value,
+            'g_statistic': g_stat,
+            'degrees_of_freedom': len(all_states) - 1,
+            'significant_difference': p_value < 0.05
+        }
+
+    def compare_two_runs(self, counts1: Dict[str, int],
+                         counts2: Dict[str, int]) -> Dict:
+        """Test if two measurement runs are from same distribution."""
+        total1 = sum(counts1.values())
+        total2 = sum(counts2.values())
+
+        all_states = sorted(set(counts1.keys()) | set(counts2.keys()))
+
+        # Two-sample chi-square test
+        observed = np.array([
+            [counts1.get(s, 0) for s in all_states],
+            [counts2.get(s, 0) for s in all_states]
+        ])
+
+        chi2, p_value, dof, expected = stats.chi2_contingency(observed)
+
+        return {
+            'chi_square': chi2,
+            'p_value': p_value,
+            'degrees_of_freedom': dof,
+            'runs_differ': p_value < 0.05
+        }
+
+    def test_uniformity(self, counts: Dict[str, int]) -> Dict:
+        """Test if distribution is uniform."""
+        total = sum(counts.values())
+        n_states = len(counts)
+        expected_count = total / n_states
+
+        chi2, p_value = stats.chisquare(list(counts.values()),
+                                         [expected_count] * n_states)
+
+        return {
+            'is_uniform': p_value > 0.05,
+            'chi_square': chi2,
+            'p_value': p_value,
+            'expected_per_state': expected_count
+        }
+
+# Example
+tester = StatisticalTester()
+
+# Test single probability
+result = tester.binomial_test(480, 1000, 0.5)
+print("\nBinomial Test (expected 0.5):")
+print(f"  Observed: {result['observed_proportion']:.3f}")
+print(f"  P-value: {result['p_value']:.4f}")
+print(f"  Significant: {result['significant_difference']}")
+```
+
+## 8. Practical Measurement Debugging Workflow
+
+```python
+class MeasurementDebugger:
+    """Complete measurement debugging workflow."""
+
+    def __init__(self, circuit: QuantumCircuit,
+                 expected: Dict[str, float],
+                 shots: int = 10000):
+        self.circuit = circuit
+        self.expected = expected
+        self.shots = shots
+        self.backend = AerSimulator()
+
+    def run_debug_analysis(self) -> Dict:
+        """Complete debugging analysis."""
+        # Execute circuit
+        job = self.backend.run(
+            transpile(self.circuit, self.backend),
+            shots=self.shots
+        )
+        counts = job.result().get_counts()
+
+        # Initialize analyzers
+        stats_analyzer = ShotStatisticsAnalyzer(counts)
+        comparator = DistributionComparator()
+        stat_tester = StatisticalTester()
+
+        # Gather results
+        report = {
+            'execution': {
+                'shots': self.shots,
+                'unique_outcomes': len(counts)
+            },
+            'statistics': stats_analyzer.get_statistics(),
+            'comparison': comparator.compare_distributions(counts, self.expected),
+            'statistical_test': stat_tester.multinomial_test(counts, self.expected),
+            'anomalies': stats_analyzer.detect_anomalies(self.expected),
+            'recommendations': []
+        }
+
+        # Generate recommendations
+        report['recommendations'] = self._generate_recommendations(report)
+
+        return report
+
+    def _generate_recommendations(self, report: Dict) -> List[str]:
+        """Generate debugging recommendations."""
+        recs = []
+
+        # Check total variation distance
+        tvd = report['comparison']['total_variation']
+        if tvd > 0.1:
+            recs.append(f"High TVD ({tvd:.3f}): Significant distribution mismatch")
+
+        # Check statistical test
+        if report['statistical_test']['significant_difference']:
+            recs.append(
+                f"Chi-square test significant (p={report['statistical_test']['chi_square_p_value']:.4f}): "
+                "Distribution differs from expected"
+            )
+
+        # Check for anomalies
+        if report['anomalies']:
+            for anomaly in report['anomalies'][:3]:
+                recs.append(
+                    f"State |{anomaly['state']}⟩ is {anomaly['direction']} "
+                    f"(z-score: {anomaly['z_score']:.2f})"
+                )
+
+        if not recs:
+            recs.append("No significant issues detected")
+
+        return recs
+
+    def print_report(self, report: Dict):
+        """Print formatted debug report."""
+        print("=" * 60)
+        print("MEASUREMENT DEBUG REPORT")
+        print("=" * 60)
+
+        print(f"\nExecution: {report['execution']['shots']} shots, "
+              f"{report['execution']['unique_outcomes']} outcomes")
+
+        print("\nDistribution Metrics:")
+        print(f"  Hellinger distance: {report['comparison']['hellinger_distance']:.4f}")
+        print(f"  Total variation: {report['comparison']['total_variation']:.4f}")
+
+        print("\nStatistical Test:")
+        print(f"  Chi-square: {report['statistical_test']['chi_square']:.2f}")
+        print(f"  P-value: {report['statistical_test']['chi_square_p_value']:.4f}")
+
+        print("\nRecommendations:")
+        for rec in report['recommendations']:
+            print(f"  - {rec}")
+
+# Example
+qc = QuantumCircuit(2)
+qc.h(0)
+qc.cx(0, 1)
+qc.measure_all()
+
+debugger = MeasurementDebugger(qc, {'00': 0.5, '11': 0.5})
+report = debugger.run_debug_analysis()
+debugger.print_report(report)
+```
+
+## Summary
+
+Measurement debugging requires statistical analysis of quantum circuit outputs:
+
+1. **Shot Statistics**: Analyze counts, probabilities, and confidence intervals
+2. **Distribution Comparison**: Use metrics like TVD, Hellinger distance, KL divergence
+3. **Error Analysis**: Identify and mitigate readout errors
+4. **Convergence**: Verify measurements converge with increasing shots
+5. **Statistical Testing**: Apply rigorous tests to validate results
+6. **Systematic Workflow**: Combine tools for comprehensive debugging
+
+Remember that measurement outcomes are probabilistic - sufficient shots and proper statistical analysis are essential for reliable debugging.

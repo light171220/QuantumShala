@@ -1,0 +1,841 @@
+---
+title: "Domain Adaptation"
+description: "Learn techniques to adapt quantum models when source and target domains differ"
+---
+
+# Domain Adaptation
+
+When source and target domains differ, direct transfer may fail. This lesson covers domain adaptation techniques to bridge the gap between domains in quantum machine learning.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Identify domain shift in quantum settings
+- Implement domain alignment techniques
+- Apply adversarial domain adaptation
+- Use importance weighting for adaptation
+- Handle covariate shift in QML
+- Evaluate domain adaptation effectiveness
+
+## 1. Understanding Domain Shift
+
+Identify and quantify differences between domains.
+
+<Definition term="Domain Shift">
+Domain shift occurs when the data distribution differs between source and target:
+
+P_source(x, y) ≠ P_target(x, y)
+
+Types include:
+- Covariate shift: P(x) differs, P(y|x) same
+- Label shift: P(y) differs, P(x|y) same
+- Concept drift: P(y|x) differs
+</Definition>
+
+```python
+import numpy as np
+
+class DomainShiftDetector:
+    """
+    Detect and quantify domain shift.
+    """
+
+    def __init__(self):
+        pass
+
+    def detect_covariate_shift(self, source_x, target_x, n_bins=20):
+        """
+        Detect covariate shift using distribution comparison.
+        """
+        # Compute histograms
+        min_val = min(source_x.min(), target_x.min())
+        max_val = max(source_x.max(), target_x.max())
+
+        source_hist, bins = np.histogram(source_x, bins=n_bins,
+                                          range=(min_val, max_val), density=True)
+        target_hist, _ = np.histogram(target_x, bins=n_bins,
+                                       range=(min_val, max_val), density=True)
+
+        # KL divergence
+        source_hist = source_hist + 1e-10
+        target_hist = target_hist + 1e-10
+        source_hist /= source_hist.sum()
+        target_hist /= target_hist.sum()
+
+        kl_divergence = np.sum(source_hist * np.log(source_hist / target_hist))
+
+        return {
+            'kl_divergence': kl_divergence,
+            'shift_detected': kl_divergence > 0.1,
+            'shift_level': 'high' if kl_divergence > 0.5 else 'moderate' if kl_divergence > 0.1 else 'low'
+        }
+
+    def detect_label_shift(self, source_y, target_y):
+        """
+        Detect label shift (prior probability shift).
+        """
+        # For classification: compare label distributions
+        source_unique, source_counts = np.unique(source_y, return_counts=True)
+        target_unique, target_counts = np.unique(target_y, return_counts=True)
+
+        source_dist = source_counts / source_counts.sum()
+        target_dist = target_counts / target_counts.sum()
+
+        # Total variation distance
+        tv_distance = 0.5 * np.sum(np.abs(source_dist - target_dist))
+
+        return {
+            'tv_distance': tv_distance,
+            'source_distribution': dict(zip(source_unique, source_dist)),
+            'target_distribution': dict(zip(target_unique, target_dist)),
+            'shift_detected': tv_distance > 0.1
+        }
+
+    def comprehensive_analysis(self, source_x, source_y, target_x, target_y):
+        """
+        Full domain shift analysis.
+        """
+        covariate = self.detect_covariate_shift(source_x, target_x)
+        label = self.detect_label_shift(source_y, target_y)
+
+        return {
+            'covariate_shift': covariate,
+            'label_shift': label,
+            'recommendation': self._recommend_strategy(covariate, label)
+        }
+
+    def _recommend_strategy(self, covariate, label):
+        """Recommend adaptation strategy."""
+        if covariate['shift_level'] == 'low' and not label['shift_detected']:
+            return 'Direct transfer should work'
+        elif covariate['shift_level'] == 'high':
+            return 'Use domain alignment or adversarial adaptation'
+        elif label['shift_detected']:
+            return 'Apply importance weighting'
+        else:
+            return 'Fine-tuning with target data recommended'
+
+# Demonstrate domain shift detection
+print("Domain Shift Detection:")
+print("=" * 50)
+
+np.random.seed(42)
+detector = DomainShiftDetector()
+
+# Scenario 1: Similar domains
+print("\nScenario 1: Similar domains")
+source_x = np.random.randn(100)
+target_x = np.random.randn(100) + 0.1  # Small shift
+source_y = (source_x > 0).astype(int)
+target_y = (target_x > 0).astype(int)
+
+result = detector.comprehensive_analysis(source_x, source_y, target_x, target_y)
+print(f"  Covariate shift: {result['covariate_shift']['shift_level']}")
+print(f"  Label shift: {result['label_shift']['shift_detected']}")
+print(f"  → {result['recommendation']}")
+
+# Scenario 2: Covariate shift
+print("\nScenario 2: Covariate shift")
+source_x = np.random.randn(100)
+target_x = np.random.randn(100) + 2.0  # Significant shift
+source_y = (source_x > 0).astype(int)
+target_y = (target_x > 0).astype(int)
+
+result = detector.comprehensive_analysis(source_x, source_y, target_x, target_y)
+print(f"  Covariate shift: {result['covariate_shift']['shift_level']}")
+print(f"  KL divergence: {result['covariate_shift']['kl_divergence']:.3f}")
+print(f"  → {result['recommendation']}")
+
+# Scenario 3: Label shift
+print("\nScenario 3: Label shift")
+source_x = np.random.randn(100)
+source_y = np.random.choice([0, 1], 100, p=[0.5, 0.5])
+target_y = np.random.choice([0, 1], 100, p=[0.8, 0.2])  # Different class balance
+target_x = np.random.randn(100)
+
+result = detector.comprehensive_analysis(source_x, source_y, target_x, target_y)
+print(f"  Covariate shift: {result['covariate_shift']['shift_level']}")
+print(f"  Label shift: {result['label_shift']['shift_detected']}")
+print(f"  TV distance: {result['label_shift']['tv_distance']:.3f}")
+print(f"  → {result['recommendation']}")
+```
+
+## 2. Domain Alignment
+
+Align source and target feature distributions.
+
+<Formula>
+Domain alignment minimizes the discrepancy between feature distributions:
+
+min_θ L_task(θ) + λ·D(F_θ(X_source), F_θ(X_target))
+
+where D is a distribution distance (MMD, Wasserstein, etc.)
+</Formula>
+
+```python
+class DomainAligner:
+    """
+    Align source and target domains.
+    """
+
+    def __init__(self, feature_dim):
+        self.feature_dim = feature_dim
+        self.alignment_params = np.random.randn(feature_dim) * 0.1
+
+    def extract_features(self, x, params=None):
+        """Extract features (simulated quantum encoder)."""
+        if params is None:
+            params = self.alignment_params
+        # Simplified feature extraction
+        return np.tanh(params * x)
+
+    def compute_mmd(self, source_features, target_features, gamma=1.0):
+        """Maximum Mean Discrepancy between domains."""
+        def rbf_kernel(x, y):
+            diff = x[:, np.newaxis] - y[np.newaxis, :]
+            return np.exp(-gamma * np.sum(diff**2, axis=-1) if diff.ndim > 2 else np.exp(-gamma * diff**2))
+
+        K_ss = rbf_kernel(source_features, source_features)
+        K_tt = rbf_kernel(target_features, target_features)
+        K_st = rbf_kernel(source_features, target_features)
+
+        mmd = np.mean(K_ss) + np.mean(K_tt) - 2 * np.mean(K_st)
+        return mmd
+
+    def align(self, source_x, target_x, source_y, epochs=100, lr=0.1, lambda_mmd=0.5):
+        """
+        Train with domain alignment.
+        """
+        print(f"Domain Alignment Training (λ={lambda_mmd})")
+
+        for epoch in range(epochs):
+            # Extract features
+            source_features = np.array([self.extract_features(x) for x in source_x])
+            target_features = np.array([self.extract_features(x) for x in target_x])
+
+            # Compute losses
+            task_loss = self._task_loss(source_features, source_y)
+            mmd_loss = self.compute_mmd(source_features, target_features)
+
+            total_loss = task_loss + lambda_mmd * mmd_loss
+
+            # Gradient update (simplified)
+            grad = self._compute_gradient(source_x, target_x, source_y, lambda_mmd)
+            self.alignment_params -= lr * grad
+
+            if epoch % 20 == 0:
+                print(f"  Epoch {epoch}: Task={task_loss:.4f}, MMD={mmd_loss:.4f}")
+
+        return self.alignment_params
+
+    def _task_loss(self, features, labels):
+        """Simple regression loss."""
+        predictions = np.mean(features, axis=1) if features.ndim > 1 else features
+        return np.mean((predictions - labels) ** 2)
+
+    def _compute_gradient(self, source_x, target_x, source_y, lambda_mmd, eps=0.01):
+        """Numerical gradient for alignment params."""
+        grad = np.zeros_like(self.alignment_params)
+
+        for i in range(len(self.alignment_params)):
+            self.alignment_params[i] += eps
+            source_f_plus = np.array([self.extract_features(x) for x in source_x])
+            target_f_plus = np.array([self.extract_features(x) for x in target_x])
+            loss_plus = self._task_loss(source_f_plus, source_y) + \
+                       lambda_mmd * self.compute_mmd(source_f_plus, target_f_plus)
+
+            self.alignment_params[i] -= 2 * eps
+            source_f_minus = np.array([self.extract_features(x) for x in source_x])
+            target_f_minus = np.array([self.extract_features(x) for x in target_x])
+            loss_minus = self._task_loss(source_f_minus, source_y) + \
+                        lambda_mmd * self.compute_mmd(source_f_minus, target_f_minus)
+
+            self.alignment_params[i] += eps
+            grad[i] = (loss_plus - loss_minus) / (2 * eps)
+
+        return grad
+
+# Demonstrate domain alignment
+print("\nDomain Alignment:")
+print("=" * 50)
+
+np.random.seed(42)
+
+# Source and target with different distributions
+source_x = np.random.randn(30)
+target_x = np.random.randn(30) + 1.5  # Shifted
+
+source_y = np.sin(source_x)
+
+aligner = DomainAligner(feature_dim=4)
+
+# Before alignment
+source_f = np.array([aligner.extract_features(x) for x in source_x])
+target_f = np.array([aligner.extract_features(x) for x in target_x])
+mmd_before = aligner.compute_mmd(source_f, target_f)
+print(f"\nMMD before alignment: {mmd_before:.4f}")
+
+# Align domains
+aligner.align(source_x, target_x, source_y, epochs=60, lambda_mmd=0.5)
+
+# After alignment
+source_f = np.array([aligner.extract_features(x) for x in source_x])
+target_f = np.array([aligner.extract_features(x) for x in target_x])
+mmd_after = aligner.compute_mmd(source_f, target_f)
+print(f"\nMMD after alignment: {mmd_after:.4f}")
+print(f"MMD reduction: {(mmd_before - mmd_after) / mmd_before * 100:.1f}%")
+```
+
+<Tip>
+Balance the task loss and alignment loss carefully. Too much emphasis on alignment can hurt task performance.
+</Tip>
+
+## 3. Importance Weighting
+
+Reweight source samples to match target distribution.
+
+```python
+class ImportanceWeightedTransfer:
+    """
+    Transfer learning with importance weighting.
+    """
+
+    def __init__(self):
+        pass
+
+    def estimate_density_ratio(self, source_x, target_x, method='kliep'):
+        """
+        Estimate importance weights w(x) = p_target(x) / p_source(x).
+        """
+        if method == 'kliep':
+            return self._kliep_weights(source_x, target_x)
+        elif method == 'histogram':
+            return self._histogram_weights(source_x, target_x)
+
+    def _histogram_weights(self, source_x, target_x, n_bins=20):
+        """Simple histogram-based density ratio."""
+        min_val = min(source_x.min(), target_x.min())
+        max_val = max(source_x.max(), target_x.max())
+
+        source_hist, bins = np.histogram(source_x, bins=n_bins,
+                                          range=(min_val, max_val))
+        target_hist, _ = np.histogram(target_x, bins=n_bins,
+                                       range=(min_val, max_val))
+
+        # Density ratio
+        source_hist = source_hist + 1  # Smoothing
+        target_hist = target_hist + 1
+        ratio = target_hist / source_hist
+
+        # Assign weights to source samples
+        bin_indices = np.digitize(source_x, bins[:-1]) - 1
+        bin_indices = np.clip(bin_indices, 0, n_bins - 1)
+        weights = ratio[bin_indices]
+
+        # Normalize
+        weights = weights / np.mean(weights)
+
+        return weights
+
+    def _kliep_weights(self, source_x, target_x, n_iter=100, lr=0.01):
+        """
+        Simplified KLIEP (Kullback-Leibler Importance Estimation).
+        """
+        # Use RBF kernel features
+        n_centers = min(20, len(target_x))
+        centers = target_x[np.random.choice(len(target_x), n_centers, replace=False)]
+
+        def phi(x):
+            return np.exp(-0.5 * (x[:, np.newaxis] - centers[np.newaxis, :]) ** 2)
+
+        source_phi = phi(source_x)
+        target_phi = phi(target_x)
+
+        # Initialize weights
+        alpha = np.ones(n_centers)
+
+        for _ in range(n_iter):
+            w = source_phi @ alpha
+            w = np.maximum(w, 1e-10)
+
+            # KLIEP update
+            grad = np.mean(target_phi, axis=0) - np.mean(source_phi * (1 / w)[:, np.newaxis], axis=0)
+            alpha += lr * grad
+            alpha = np.maximum(alpha, 0)
+
+        weights = source_phi @ alpha
+        weights = weights / np.mean(weights)
+
+        return weights
+
+    def weighted_training(self, source_x, source_y, weights, model_fn, epochs=50, lr=0.1):
+        """
+        Train with importance-weighted loss.
+        """
+        params = np.random.randn(4) * 0.1
+
+        for epoch in range(epochs):
+            weighted_loss = 0
+            grad = np.zeros_like(params)
+
+            for i, (x, y, w) in enumerate(zip(source_x, source_y, weights)):
+                pred = model_fn(params, x)
+                loss = w * (pred - y) ** 2
+                weighted_loss += loss
+
+                # Weighted gradient
+                for j in range(len(params)):
+                    eps = 0.01
+                    params[j] += eps
+                    pred_plus = model_fn(params, x)
+                    params[j] -= eps
+                    grad[j] += 2 * w * (pred - y) * (pred_plus - pred) / eps
+
+            params -= lr * grad / len(source_x)
+
+            if epoch % 10 == 0:
+                print(f"  Epoch {epoch}: Weighted loss = {weighted_loss/len(source_x):.4f}")
+
+        return params
+
+# Demonstrate importance weighting
+print("\nImportance Weighted Transfer:")
+print("=" * 50)
+
+np.random.seed(42)
+
+# Source: uniform distribution
+source_x = np.random.uniform(-2, 2, 50)
+source_y = np.sin(source_x)
+
+# Target: Gaussian (different distribution)
+target_x = np.random.randn(30)
+
+iw_transfer = ImportanceWeightedTransfer()
+
+# Estimate importance weights
+weights = iw_transfer.estimate_density_ratio(source_x, target_x, method='histogram')
+
+print("\nSample importance weights:")
+print(f"  Min: {weights.min():.3f}, Max: {weights.max():.3f}")
+print(f"  Mean: {weights.mean():.3f}")
+
+# Train with weights
+def simple_model(params, x):
+    return np.sum(params * np.sin(np.arange(1, 5) * x))
+
+print("\nTraining with importance weighting:")
+weighted_params = iw_transfer.weighted_training(source_x, source_y, weights, simple_model)
+```
+
+## 4. Adversarial Domain Adaptation
+
+Use adversarial training to learn domain-invariant features.
+
+```python
+class AdversarialDomainAdapter:
+    """
+    Adversarial domain adaptation with domain discriminator.
+    """
+
+    def __init__(self, feature_dim):
+        self.feature_dim = feature_dim
+
+        # Feature extractor
+        self.extractor_params = np.random.randn(feature_dim) * 0.1
+
+        # Task predictor
+        self.predictor_params = np.random.randn(feature_dim) * 0.1
+
+        # Domain discriminator
+        self.discriminator_params = np.random.randn(feature_dim) * 0.1
+
+    def extract_features(self, x):
+        """Feature extraction."""
+        return np.tanh(self.extractor_params * x)
+
+    def predict_task(self, features):
+        """Task prediction from features."""
+        return np.sum(self.predictor_params * features)
+
+    def predict_domain(self, features):
+        """Domain prediction (0=source, 1=target)."""
+        logit = np.sum(self.discriminator_params * features)
+        return 1 / (1 + np.exp(-logit))
+
+    def train(self, source_x, source_y, target_x, epochs=100, lr=0.1, lambda_adv=0.5):
+        """
+        Adversarial domain adaptation training.
+
+        Min-max game:
+        - Extractor: minimize task loss, maximize domain confusion
+        - Discriminator: minimize domain classification loss
+        """
+        print(f"Adversarial Domain Adaptation (λ={lambda_adv})")
+
+        for epoch in range(epochs):
+            # === Train discriminator ===
+            disc_loss = 0
+            for x in source_x:
+                features = self.extract_features(x)
+                pred = self.predict_domain(features)
+                disc_loss += -np.log(1 - pred + 1e-10)  # Should predict 0
+
+            for x in target_x:
+                features = self.extract_features(x)
+                pred = self.predict_domain(features)
+                disc_loss += -np.log(pred + 1e-10)  # Should predict 1
+
+            # Update discriminator
+            self._update_discriminator(source_x, target_x, lr)
+
+            # === Train extractor and predictor ===
+            task_loss = 0
+            for x, y in zip(source_x, source_y):
+                features = self.extract_features(x)
+                pred = self.predict_task(features)
+                task_loss += (pred - y) ** 2
+
+            # Domain confusion: want discriminator to be confused
+            confusion_loss = 0
+            for x in source_x:
+                features = self.extract_features(x)
+                pred = self.predict_domain(features)
+                confusion_loss += -np.log(pred + 1e-10)  # Want source to look like target
+
+            for x in target_x:
+                features = self.extract_features(x)
+                pred = self.predict_domain(features)
+                confusion_loss += -np.log(1 - pred + 1e-10)
+
+            # Update extractor and predictor
+            self._update_extractor(source_x, source_y, target_x, lr, lambda_adv)
+
+            if epoch % 20 == 0:
+                avg_task = task_loss / len(source_x)
+                avg_disc = disc_loss / (len(source_x) + len(target_x))
+                print(f"  Epoch {epoch}: Task={avg_task:.4f}, Disc={avg_disc:.4f}")
+
+    def _update_discriminator(self, source_x, target_x, lr, eps=0.01):
+        """Update discriminator to classify domains."""
+        grad = np.zeros_like(self.discriminator_params)
+
+        for i in range(len(self.discriminator_params)):
+            self.discriminator_params[i] += eps
+            loss_plus = self._discriminator_loss(source_x, target_x)
+            self.discriminator_params[i] -= 2 * eps
+            loss_minus = self._discriminator_loss(source_x, target_x)
+            self.discriminator_params[i] += eps
+            grad[i] = (loss_plus - loss_minus) / (2 * eps)
+
+        self.discriminator_params -= lr * grad
+
+    def _discriminator_loss(self, source_x, target_x):
+        loss = 0
+        for x in source_x:
+            features = self.extract_features(x)
+            pred = self.predict_domain(features)
+            loss += -np.log(1 - pred + 1e-10)
+        for x in target_x:
+            features = self.extract_features(x)
+            pred = self.predict_domain(features)
+            loss += -np.log(pred + 1e-10)
+        return loss
+
+    def _update_extractor(self, source_x, source_y, target_x, lr, lambda_adv, eps=0.01):
+        """Update extractor for task and domain confusion."""
+        grad = np.zeros_like(self.extractor_params)
+
+        for i in range(len(self.extractor_params)):
+            self.extractor_params[i] += eps
+            loss_plus = self._extractor_loss(source_x, source_y, target_x, lambda_adv)
+            self.extractor_params[i] -= 2 * eps
+            loss_minus = self._extractor_loss(source_x, source_y, target_x, lambda_adv)
+            self.extractor_params[i] += eps
+            grad[i] = (loss_plus - loss_minus) / (2 * eps)
+
+        self.extractor_params -= lr * grad
+
+    def _extractor_loss(self, source_x, source_y, target_x, lambda_adv):
+        # Task loss
+        task_loss = 0
+        for x, y in zip(source_x, source_y):
+            features = self.extract_features(x)
+            pred = self.predict_task(features)
+            task_loss += (pred - y) ** 2
+
+        # Confusion loss (reversed for extractor)
+        confusion = 0
+        for x in source_x:
+            features = self.extract_features(x)
+            pred = self.predict_domain(features)
+            confusion += -np.log(pred + 1e-10)
+
+        return task_loss + lambda_adv * confusion
+
+# Demonstrate adversarial adaptation
+print("\nAdversarial Domain Adaptation:")
+print("=" * 50)
+
+np.random.seed(42)
+
+source_x = np.random.randn(25)
+source_y = np.sin(source_x)
+target_x = np.random.randn(25) + 1.5
+
+adapter = AdversarialDomainAdapter(feature_dim=4)
+adapter.train(source_x, source_y, target_x, epochs=80, lambda_adv=0.3)
+```
+
+<Warning>
+Adversarial domain adaptation requires careful balancing. If the discriminator wins too easily or loses too badly, adaptation fails.
+</Warning>
+
+## 5. Quantum-Specific Adaptation
+
+Handle noise-induced domain shift in quantum systems.
+
+```python
+class QuantumNoiseAdapter:
+    """
+    Adapt for noise-induced domain shift.
+
+    Common scenario: simulator (clean) -> hardware (noisy)
+    """
+
+    def __init__(self, n_qubits):
+        self.n_qubits = n_qubits
+
+    def characterize_noise_shift(self, simulator_outputs, hardware_outputs):
+        """
+        Characterize the noise-induced shift.
+        """
+        # Compare output distributions
+        sim_mean = np.mean(simulator_outputs)
+        hw_mean = np.mean(hardware_outputs)
+
+        sim_std = np.std(simulator_outputs)
+        hw_std = np.std(hardware_outputs)
+
+        # Estimate noise parameters
+        bias = hw_mean - sim_mean  # Systematic bias
+        variance_ratio = hw_std / sim_std if sim_std > 0 else 1.0
+
+        return {
+            'bias': bias,
+            'variance_ratio': variance_ratio,
+            'sim_stats': {'mean': sim_mean, 'std': sim_std},
+            'hw_stats': {'mean': hw_mean, 'std': hw_std}
+        }
+
+    def simple_noise_correction(self, hardware_output, noise_params):
+        """Apply simple correction based on characterized noise."""
+        corrected = (hardware_output - noise_params['bias'])
+        if noise_params['variance_ratio'] > 0:
+            corrected /= noise_params['variance_ratio']
+        return corrected
+
+    def learn_noise_mapping(self, clean_outputs, noisy_outputs, degree=2):
+        """
+        Learn polynomial mapping from noisy to clean.
+        """
+        # Fit polynomial: clean = f(noisy)
+        coefficients = np.polyfit(noisy_outputs, clean_outputs, degree)
+        return coefficients
+
+    def apply_learned_correction(self, noisy_output, coefficients):
+        """Apply learned correction."""
+        return np.polyval(coefficients, noisy_output)
+
+    def calibration_aware_training(self, params, train_fn, calibration_data):
+        """
+        Training that incorporates calibration information.
+        """
+        # Adjust training based on known hardware characteristics
+        adjusted_params = params.copy()
+
+        # Example: scale parameters to account for gate errors
+        gate_error_rate = calibration_data.get('gate_error', 0.01)
+        adjusted_params *= (1 + gate_error_rate)
+
+        return adjusted_params
+
+# Demonstrate quantum noise adaptation
+print("\nQuantum Noise Adaptation:")
+print("=" * 50)
+
+np.random.seed(42)
+adapter = QuantumNoiseAdapter(n_qubits=4)
+
+# Simulate clean vs noisy outputs
+ideal_params = np.linspace(-1, 1, 20)
+clean_outputs = np.sin(ideal_params)
+noisy_outputs = clean_outputs * 0.85 + 0.1 + 0.05 * np.random.randn(20)
+
+# Characterize shift
+noise_params = adapter.characterize_noise_shift(clean_outputs, noisy_outputs)
+print("\nNoise characterization:")
+print(f"  Bias: {noise_params['bias']:.4f}")
+print(f"  Variance ratio: {noise_params['variance_ratio']:.4f}")
+
+# Learn correction
+coefficients = adapter.learn_noise_mapping(clean_outputs, noisy_outputs, degree=1)
+print(f"\nLearned correction coefficients: {coefficients}")
+
+# Apply correction
+test_noisy = noisy_outputs[-5:]
+test_clean = clean_outputs[-5:]
+corrected = [adapter.apply_learned_correction(n, coefficients) for n in test_noisy]
+
+print("\nCorrection results:")
+print(f"  MSE before: {np.mean((test_noisy - test_clean)**2):.4f}")
+print(f"  MSE after: {np.mean((np.array(corrected) - test_clean)**2):.4f}")
+```
+
+## 6. Evaluation and Validation
+
+Evaluate domain adaptation effectiveness.
+
+```python
+class DomainAdaptationEvaluator:
+    """
+    Evaluate domain adaptation quality.
+    """
+
+    def __init__(self):
+        pass
+
+    def evaluate_transfer(self, model_fn, source_x, source_y, target_x, target_y):
+        """
+        Complete transfer evaluation.
+        """
+        # Source performance
+        source_preds = [model_fn(x) for x in source_x]
+        source_mse = np.mean((np.array(source_preds) - source_y) ** 2)
+
+        # Target performance
+        target_preds = [model_fn(x) for x in target_x]
+        target_mse = np.mean((np.array(target_preds) - target_y) ** 2)
+
+        # Transfer gap
+        transfer_gap = target_mse - source_mse
+
+        return {
+            'source_mse': source_mse,
+            'target_mse': target_mse,
+            'transfer_gap': transfer_gap,
+            'transfer_success': transfer_gap < source_mse * 0.5
+        }
+
+    def compare_strategies(self, strategies_results):
+        """
+        Compare different adaptation strategies.
+        """
+        comparison = {}
+        best_strategy = None
+        best_target_mse = float('inf')
+
+        for name, result in strategies_results.items():
+            comparison[name] = {
+                'target_mse': result['target_mse'],
+                'transfer_gap': result['transfer_gap']
+            }
+
+            if result['target_mse'] < best_target_mse:
+                best_target_mse = result['target_mse']
+                best_strategy = name
+
+        return {
+            'comparison': comparison,
+            'best_strategy': best_strategy,
+            'best_target_mse': best_target_mse
+        }
+
+    def domain_invariance_test(self, feature_extractor, source_x, target_x):
+        """
+        Test if features are domain-invariant.
+        """
+        source_features = [feature_extractor(x) for x in source_x]
+        target_features = [feature_extractor(x) for x in target_x]
+
+        source_features = np.array(source_features)
+        target_features = np.array(target_features)
+
+        # A-distance proxy
+        combined = np.vstack([source_features, target_features])
+        labels = np.concatenate([np.zeros(len(source_features)),
+                                  np.ones(len(target_features))])
+
+        # Try to classify domains with simple threshold
+        threshold = np.median(combined)
+        preds = (combined > threshold).astype(int).flatten()
+        accuracy = np.mean(preds == labels)
+
+        # Good adaptation: accuracy close to 0.5 (can't distinguish)
+        return {
+            'domain_classification_accuracy': accuracy,
+            'domain_invariance_score': 2 * abs(0.5 - accuracy),
+            'is_invariant': abs(accuracy - 0.5) < 0.1
+        }
+
+# Demonstrate evaluation
+print("\nDomain Adaptation Evaluation:")
+print("=" * 50)
+
+evaluator = DomainAdaptationEvaluator()
+
+# Simulate different strategies
+np.random.seed(42)
+
+strategies_results = {
+    'no_adaptation': {
+        'target_mse': 0.25,
+        'transfer_gap': 0.20
+    },
+    'mmd_alignment': {
+        'target_mse': 0.12,
+        'transfer_gap': 0.07
+    },
+    'adversarial': {
+        'target_mse': 0.10,
+        'transfer_gap': 0.05
+    },
+    'importance_weighting': {
+        'target_mse': 0.15,
+        'transfer_gap': 0.10
+    }
+}
+
+comparison = evaluator.compare_strategies(strategies_results)
+
+print("\nStrategy Comparison:")
+for name, metrics in comparison['comparison'].items():
+    print(f"  {name}:")
+    print(f"    Target MSE: {metrics['target_mse']:.4f}")
+    print(f"    Transfer gap: {metrics['transfer_gap']:.4f}")
+
+print(f"\nBest strategy: {comparison['best_strategy']}")
+print(f"Best target MSE: {comparison['best_target_mse']:.4f}")
+```
+
+<Tip>
+Always compare adapted models to both: (1) no adaptation baseline, and (2) training from scratch on target data when available.
+</Tip>
+
+## Summary
+
+In this lesson, you learned:
+
+- **Domain shift types**: Covariate, label, and concept drift
+- **MMD alignment**: Minimize feature distribution distance
+- **Importance weighting**: Reweight source samples
+- **Adversarial adaptation**: Learn domain-invariant features
+- **Quantum noise**: Handle simulator-to-hardware shift
+- **Evaluation**: Measure transfer gap and domain invariance
+
+Domain adaptation bridges the gap when simple transfer fails.
+
+## Next Steps
+
+In the next lesson, we'll explore transferring knowledge from quantum to classical models.

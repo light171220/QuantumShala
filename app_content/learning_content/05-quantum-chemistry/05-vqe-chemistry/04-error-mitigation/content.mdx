@@ -1,0 +1,550 @@
+---
+title: "Error Mitigation"
+description: "Learn error mitigation techniques to improve VQE accuracy on noisy quantum hardware without full error correction."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand error sources in NISQ devices
+- Apply zero-noise extrapolation (ZNE)
+- Implement probabilistic error cancellation (PEC)
+- Use measurement error mitigation
+- Combine multiple mitigation techniques
+
+## 1. Errors in NISQ Devices
+
+<Definition term="NISQ">
+Noisy Intermediate-Scale Quantum devices have 50-1000 qubits with error rates of 10⁻³ to 10⁻², insufficient for full error correction but capable of useful computations with error mitigation.
+</Definition>
+
+```python
+def nisq_error_sources():
+    """Overview of error sources in NISQ devices."""
+
+    print("Error Sources in NISQ Devices")
+    print("=" * 60)
+
+    print("\nGate Errors:")
+    print("-" * 45)
+    gate_errors = [
+        ("Single-qubit", "0.1-0.5%", "Rx, Ry, Rz gates"),
+        ("Two-qubit", "0.5-5%", "CNOT, CZ gates"),
+        ("Coherent", "Systematic", "Over/under rotation"),
+        ("Incoherent", "Random", "Depolarizing noise"),
+    ]
+    print(f"  {'Type':<15} {'Error Rate':<12} {'Description'}")
+    print("  " + "-" * 45)
+    for t, r, d in gate_errors:
+        print(f"  {t:<15} {r:<12} {d}")
+
+    print("\nDecoherence:")
+    print("-" * 45)
+    print("  T₁ (relaxation): 50-200 μs")
+    print("    • |1⟩ → |0⟩ energy decay")
+    print("  T₂ (dephasing): 50-150 μs")
+    print("    • Loss of phase coherence")
+    print()
+    print("  Circuit must complete before T₁, T₂!")
+
+    print("\nMeasurement Errors:")
+    print("-" * 45)
+    print("  P(measure 1 | state 0): 1-5%")
+    print("  P(measure 0 | state 1): 2-10%")
+    print("  Asymmetric errors common")
+
+    print("\nCrosstalk:")
+    print("-" * 45)
+    print("  • Operations on one qubit affect neighbors")
+    print("  • Simultaneous gates interact")
+    print("  • Depends on hardware layout")
+
+    print("\nError Budget for VQE (Chemical Accuracy):")
+    print("-" * 45)
+    print("  Target: 1.6 mHa (1 kcal/mol)")
+    print("  Current NISQ: 10-100 mHa errors")
+    print("  → Error mitigation essential!")
+
+nisq_error_sources()
+```
+
+## 2. Zero-Noise Extrapolation (ZNE)
+
+<Formula>
+$$E_{\text{mitigated}} = \lim_{\lambda \to 0} E(\lambda) \approx \sum_k c_k E(\lambda_k)$$
+</Formula>
+
+```python
+import numpy as np
+
+def zero_noise_extrapolation():
+    """Zero-noise extrapolation technique."""
+
+    print("Zero-Noise Extrapolation (ZNE)")
+    print("=" * 60)
+
+    print("\nKey Idea:")
+    print("  Run circuits at multiple noise levels")
+    print("  Extrapolate to zero-noise limit")
+
+    print("\nNoise Amplification Methods:")
+    print("-" * 45)
+    methods = [
+        ("Pulse stretching", "Stretch gate pulses by factor λ"),
+        ("Unitary folding", "Replace U with U·U†·U (factor 3)"),
+        ("Identity insertion", "Insert I = U·U† pairs"),
+    ]
+    for method, desc in methods:
+        print(f"  {method}:")
+        print(f"    {desc}")
+        print()
+
+    print("Unitary Folding:")
+    print("-" * 45)
+    print("  Original:  U")
+    print("  λ = 1:     U")
+    print("  λ = 3:     U · U† · U")
+    print("  λ = 5:     U · U† · U · U† · U")
+
+    print("\nExtrapolation Methods:")
+    print("-" * 45)
+
+    # Example data
+    lambdas = np.array([1.0, 3.0, 5.0])
+    energies = np.array([-1.10, -1.05, -1.00])
+
+    print("  Linear extrapolation:")
+    print("    E(λ) = a + bλ → E(0) = a")
+    coeffs_lin = np.polyfit(lambdas, energies, 1)
+    e_linear = coeffs_lin[1]
+    print(f"    Example: E(0) = {e_linear:.3f}")
+
+    print("\n  Richardson extrapolation:")
+    print("    Polynomial fit through data points")
+    coeffs_quad = np.polyfit(lambdas, energies, 2)
+    e_richardson = np.polyval(coeffs_quad, 0)
+    print(f"    Example: E(0) = {e_richardson:.3f}")
+
+    print("\n  Exponential extrapolation:")
+    print("    E(λ) = E₀ + A·exp(-λ/B)")
+    print("    Better for large noise scaling")
+
+    print("\nExample Results:")
+    print("-" * 45)
+    print(f"  {'λ':<8} {'Measured E':<15} {'True E'}")
+    print("  " + "-" * 35)
+    for l, e in zip(lambdas, energies):
+        print(f"  {l:<8} {e:<15.3f}")
+    print("  " + "-" * 35)
+    print(f"  {'0 (extrap)':<8} {e_richardson:<15.3f} {-1.137:.3f}")
+
+zero_noise_extrapolation()
+```
+
+<Tip>
+Linear extrapolation is simplest but may underestimate the zero-noise limit. Richardson extrapolation with multiple noise levels often gives better results but requires more circuit evaluations.
+</Tip>
+
+## 3. Probabilistic Error Cancellation (PEC)
+
+```python
+def probabilistic_error_cancellation():
+    """Probabilistic error cancellation technique."""
+
+    print("Probabilistic Error Cancellation (PEC)")
+    print("=" * 60)
+
+    print("\nKey Idea:")
+    print("  Decompose ideal operation as linear combination")
+    print("  of noisy operations")
+
+    print("\nMathematical Framework:")
+    print("-" * 45)
+    print("  Ideal operation: U")
+    print("  Noisy operation: Ũ")
+    print()
+    print("  Find decomposition:")
+    print("  U = Σᵢ ηᵢ Oᵢ")
+    print()
+    print("  where Oᵢ are implementable noisy operations")
+    print("  and ηᵢ can be negative (quasi-probability)")
+
+    print("\nSimple Example:")
+    print("-" * 45)
+    print("  Ideal: I (identity)")
+    print("  Noisy: depolarizing channel")
+    print()
+    print("  I ≈ (1+ε)Ĩ - ε(X̃ + Ỹ + Z̃)/3")
+    print()
+    print("  Sample operations with |ηᵢ| weights")
+    print("  Multiply result by sign(ηᵢ)")
+
+    print("\nSampling Cost:")
+    print("-" * 45)
+    print("  Cost factor γ = Σᵢ |ηᵢ|")
+    print("  Variance increases by γ²")
+    print("  For n gates: γⁿ overhead")
+    print()
+    print("  Example: γ = 1.1 per gate")
+    print("    10 gates: 1.1¹⁰ ≈ 2.6× overhead")
+    print("    100 gates: 1.1¹⁰⁰ ≈ 10⁴× overhead")
+
+    print("\nAlgorithm:")
+    print("-" * 45)
+    steps = [
+        "1. Characterize noise model for each gate",
+        "2. Compute quasi-probability decomposition",
+        "3. For each circuit execution:",
+        "   a. Sample which operations to apply",
+        "   b. Track the sign (±1)",
+        "   c. Execute modified circuit",
+        "   d. Multiply measurement by sign",
+        "4. Average signed results",
+    ]
+    for step in steps:
+        print(f"  {step}")
+
+probabilistic_error_cancellation()
+```
+
+## 4. Measurement Error Mitigation
+
+```python
+def measurement_error_mitigation():
+    """Measurement error mitigation techniques."""
+
+    print("Measurement Error Mitigation")
+    print("=" * 60)
+
+    print("\nMeasurement Error Model:")
+    print("-" * 45)
+    print("  Confusion matrix M:")
+    print("    M[i,j] = P(measure i | prepared j)")
+    print()
+    print("  Example (2 qubits):")
+    confusion = np.array([
+        [0.95, 0.03, 0.02, 0.01],
+        [0.02, 0.94, 0.01, 0.02],
+        [0.02, 0.02, 0.93, 0.03],
+        [0.01, 0.01, 0.04, 0.94]
+    ])
+    print("    States: |00⟩, |01⟩, |10⟩, |11⟩")
+    print(f"    M = ")
+    for row in confusion:
+        print(f"        [{', '.join(f'{x:.2f}' for x in row)}]")
+
+    print("\nCalibration Procedure:")
+    print("-" * 45)
+    print("  1. Prepare each computational basis state")
+    print("  2. Measure many times")
+    print("  3. Build confusion matrix from statistics")
+
+    print("\nMitigation by Matrix Inversion:")
+    print("-" * 45)
+    print("  measured = M @ ideal")
+    print("  ideal = M⁻¹ @ measured")
+    print()
+    print("  Problem: M⁻¹ may give negative probabilities")
+    print("  Solution: Use constrained optimization (NNLS)")
+
+    print("\nTensor Product Assumption:")
+    print("-" * 45)
+    print("  For n qubits, full M is 2ⁿ × 2ⁿ")
+    print("  Too large to calibrate!")
+    print()
+    print("  Approximation: M = M₁ ⊗ M₂ ⊗ ... ⊗ Mₙ")
+    print("  Each Mᵢ is 2×2 → only 2n parameters")
+
+    print("\nExample Correction:")
+    print("-" * 45)
+    measured = np.array([0.42, 0.08, 0.07, 0.43])
+    M_inv = np.linalg.inv(confusion)
+    corrected = M_inv @ measured
+    # Clip to valid probabilities
+    corrected = np.clip(corrected, 0, 1)
+    corrected = corrected / np.sum(corrected)
+
+    print("  Measured:  ", [f"{p:.2f}" for p in measured])
+    print("  Corrected: ", [f"{p:.2f}" for p in corrected])
+
+measurement_error_mitigation()
+```
+
+## 5. Symmetry Verification
+
+```python
+def symmetry_verification():
+    """Use symmetries to detect and mitigate errors."""
+
+    print("Symmetry Verification")
+    print("=" * 60)
+
+    print("\nPhysical Symmetries in Chemistry:")
+    print("-" * 45)
+    symmetries = [
+        ("Particle number", "N = Σᵢ nᵢ", "Fixed electron count"),
+        ("Spin", "Sz = Σᵢ sᵢ", "Net spin projection"),
+        ("Parity", "P = (-1)^N", "Even/odd electrons"),
+        ("Point group", "Molecular symmetry", "Spatial symmetry"),
+    ]
+    for sym, op, desc in symmetries:
+        print(f"  {sym}:")
+        print(f"    Operator: {op}")
+        print(f"    {desc}")
+        print()
+
+    print("Error Detection:")
+    print("-" * 45)
+    print("  Correct state: Sz|ψ⟩ = m|ψ⟩")
+    print("  If measurement gives wrong Sz → error occurred!")
+    print()
+    print("  Post-selection:")
+    print("    Only keep results with correct symmetry")
+
+    print("\nSymmetry-Based Mitigation:")
+    print("-" * 45)
+    print("  1. Post-selection:")
+    print("     Discard measurements violating symmetry")
+    print("     Cost: reduces effective shot count")
+    print()
+    print("  2. Symmetry expansion:")
+    print("     Project onto symmetry sector")
+    print("     ⟨O⟩_sym = ⟨P_sym O P_sym⟩ / ⟨P_sym⟩")
+    print()
+    print("  3. Constrained VQE:")
+    print("     Add symmetry penalty to cost function")
+    print("     E_total = E + λ(⟨S²⟩ - s(s+1))²")
+
+    print("\nExample: Particle Number Conservation")
+    print("-" * 45)
+    print("  H₂: should have exactly 2 electrons")
+    print("  Measure particle number after VQE circuit")
+    print()
+    print("  Results:")
+    print("    N=2 (correct): 85% of shots")
+    print("    N=1 or N=3:    12% (1-bit error)")
+    print("    N=0 or N=4:    3%  (2-bit errors)")
+    print()
+    print("  Keep only N=2 results → effective error mitigation")
+
+symmetry_verification()
+```
+
+<Warning>
+Post-selection on symmetries reduces the effective number of measurements. If too many shots are discarded, statistical uncertainty increases. Balance error mitigation with measurement overhead.
+</Warning>
+
+## 6. Clifford Data Regression (CDR)
+
+```python
+def clifford_data_regression():
+    """Clifford data regression for error mitigation."""
+
+    print("Clifford Data Regression (CDR)")
+    print("=" * 60)
+
+    print("\nKey Insight:")
+    print("  Clifford circuits can be efficiently simulated")
+    print("  Use them to learn the noise model")
+
+    print("\nClifford Circuits:")
+    print("-" * 45)
+    print("  Gates: H, S, CNOT (and combinations)")
+    print("  Property: map Paulis to Paulis")
+    print("  Simulation: O(n²) classical cost")
+
+    print("\nCDR Algorithm:")
+    print("-" * 45)
+    steps = [
+        "1. Generate 'near-Clifford' training circuits",
+        "2. Compute exact results classically",
+        "3. Run training circuits on noisy hardware",
+        "4. Learn noise model: noisy = f(ideal)",
+        "5. Run target circuit on hardware",
+        "6. Apply learned correction: ideal ≈ f⁻¹(noisy)",
+    ]
+    for step in steps:
+        print(f"  {step}")
+
+    print("\nNear-Clifford Construction:")
+    print("-" * 45)
+    print("  Original: U(θ) with non-Clifford rotations")
+    print("  Training: Replace θ → nearest Clifford angle")
+    print("    Clifford angles: 0, π/2, π, 3π/2")
+
+    print("\nLearning the Correction:")
+    print("-" * 45)
+    print("  Simple model: E_ideal = a × E_noisy + b")
+    print("  Fit a, b from training data")
+    print()
+    print("  Example training data:")
+    training = [
+        (1.2, 1.0),
+        (0.8, 0.6),
+        (0.4, 0.2),
+        (-0.2, -0.3),
+    ]
+    print(f"    {'E_noisy':<12} {'E_exact'}")
+    for noisy, exact in training:
+        print(f"    {noisy:<12} {exact}")
+
+    # Fit linear model
+    noisy_vals = np.array([t[0] for t in training])
+    exact_vals = np.array([t[1] for t in training])
+    a, b = np.polyfit(noisy_vals, exact_vals, 1)
+    print(f"\n  Fitted model: E_ideal = {a:.2f} × E_noisy + {b:.2f}")
+
+clifford_data_regression()
+```
+
+## 7. Virtual Distillation
+
+```python
+def virtual_distillation():
+    """Virtual distillation error mitigation."""
+
+    print("Virtual Distillation")
+    print("=" * 60)
+
+    print("\nKey Idea:")
+    print("  Use multiple copies of noisy state")
+    print("  'Distill' a purer estimate")
+
+    print("\nMathematical Basis:")
+    print("-" * 45)
+    print("  Noisy state: ρ = (1-p)|ψ⟩⟨ψ| + p·noise")
+    print("  With 2 copies:")
+    print("    Tr(ρ²O) / Tr(ρ²) → purer estimate")
+
+    print("\nPurity Estimation:")
+    print("-" * 45)
+    print("  Tr(ρ²) ≤ 1 for mixed states")
+    print("  Tr(ρ²) = 1 for pure states")
+    print()
+    print("  Error-free: ρ = |ψ⟩⟨ψ|, Tr(ρ²) = 1")
+    print("  With errors: Tr(ρ²) < 1")
+
+    print("\nCircuit Implementation:")
+    print("-" * 45)
+    print("  Prepare 2 copies: ρ ⊗ ρ")
+    print("  Apply SWAP test variants")
+    print("  Measure collective observables")
+    print()
+    print("  Cost: 2× qubits, modified measurements")
+
+    print("\nExponential Error Suppression:")
+    print("-" * 45)
+    print("  With M copies:")
+    print("    Error suppression: ~ (error)^M")
+    print("    Cost: M× qubits")
+    print()
+    print("  Example:")
+    print("    1 copy:  10% error")
+    print("    2 copies: 1% error")
+    print("    3 copies: 0.1% error")
+
+    print("\nLimitations:")
+    print("-" * 45)
+    print("  • Requires multiple copies (more qubits)")
+    print("  • Doesn't fix coherent errors")
+    print("  • Overhead for circuit modifications")
+
+virtual_distillation()
+```
+
+## 8. Combining Mitigation Techniques
+
+```python
+def combined_mitigation():
+    """Combining multiple error mitigation techniques."""
+
+    print("Combined Error Mitigation Strategy")
+    print("=" * 60)
+
+    print("\nLayered Approach:")
+    print("-" * 45)
+    print("  Layer 1: Measurement error mitigation")
+    print("    → Always apply, low overhead")
+    print()
+    print("  Layer 2: Symmetry verification")
+    print("    → Post-select on valid symmetries")
+    print()
+    print("  Layer 3: Zero-noise extrapolation")
+    print("    → Extrapolate gate errors")
+    print()
+    print("  Layer 4: Problem-specific techniques")
+    print("    → CDR, PEC for refined correction")
+
+    print("\nTypical VQE Pipeline:")
+    print("-" * 45)
+    pipeline = [
+        "1. Calibrate measurement error matrices",
+        "2. Run VQE circuits at multiple noise levels",
+        "3. Apply measurement error correction",
+        "4. Post-select on particle number, spin",
+        "5. Extrapolate to zero noise",
+        "6. Report energy with uncertainty",
+    ]
+    for step in pipeline:
+        print(f"  {step}")
+
+    print("\nError Mitigation Comparison:")
+    print("-" * 45)
+    techniques = [
+        ("Meas. correction", "Low", "Always", "Readout only"),
+        ("Post-selection", "Medium", "If symmetries", "Loses shots"),
+        ("ZNE", "2-5×", "Usually", "Extra circuits"),
+        ("PEC", "γⁿ", "Short circuits", "Expensive"),
+        ("CDR", "10-100×", "If training OK", "Needs Cliffords"),
+    ]
+    print(f"  {'Technique':<18} {'Overhead':<10} {'When':<15} {'Notes'}")
+    print("  " + "-" * 60)
+    for t, o, w, n in techniques:
+        print(f"  {t:<18} {o:<10} {w:<15} {n}")
+
+    print("\nExample Combined Results:")
+    print("-" * 45)
+    print("  Raw noisy energy:       -1.05 ± 0.05 Eh")
+    print("  + Meas. correction:     -1.08 ± 0.04 Eh")
+    print("  + Post-selection:       -1.10 ± 0.03 Eh")
+    print("  + ZNE:                  -1.13 ± 0.02 Eh")
+    print("  Exact:                  -1.137 Eh")
+
+combined_mitigation()
+```
+
+<Example title="Error Mitigation for H₂">
+For H₂ at 0.74 Å on IBMQ:
+
+| Method | Energy (Eh) | Error (mHa) |
+|--------|-------------|-------------|
+| Raw noisy | -1.05 | 87 |
+| + Measurement | -1.08 | 57 |
+| + Symmetry | -1.11 | 27 |
+| + ZNE | -1.13 | 7 |
+| Exact | -1.137 | 0 |
+
+Combined techniques reduce error by >10×.
+</Example>
+
+## Summary
+
+In this lesson, you learned:
+
+1. **NISQ errors** include gate, decoherence, measurement, and crosstalk
+2. **Zero-noise extrapolation** scales noise and extrapolates
+3. **Probabilistic error cancellation** uses quasi-probability sampling
+4. **Measurement mitigation** inverts the confusion matrix
+5. **Symmetry verification** detects and removes erroneous results
+6. **Clifford data regression** learns corrections from simulable circuits
+7. **Virtual distillation** uses multiple copies for purity
+8. **Combined approaches** layer multiple techniques
+
+## Further Reading
+
+- Next lesson: Molecular Applications
+- Related: Quantum Error Correction
+- Advanced: Fault-Tolerant Quantum Chemistry

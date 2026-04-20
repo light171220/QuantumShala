@@ -1,0 +1,698 @@
+# Entanglement Purification
+
+## Introduction
+
+When entanglement is distributed through noisy channels, the resulting pairs have reduced fidelity. Entanglement purification (also called entanglement distillation) is a technique to combine multiple low-fidelity pairs into fewer high-fidelity pairs. This is essential for quantum repeaters and fault-tolerant quantum networking.
+
+## The Purification Concept
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              ENTANGLEMENT PURIFICATION CONCEPT                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Before:  Many noisy pairs                                         │
+│   ┌────┐ ┌────┐ ┌────┐ ┌────┐ ┌────┐ ┌────┐                        │
+│   │F=.7│ │F=.7│ │F=.7│ │F=.7│ │F=.7│ │F=.7│  ... (low fidelity)   │
+│   └────┘ └────┘ └────┘ └────┘ └────┘ └────┘                        │
+│      │      │      │      │      │      │                           │
+│      └──┬───┘      └──┬───┘      └──┬───┘                           │
+│         │             │             │     PURIFICATION              │
+│         ↓             ↓             ↓                               │
+│      ┌─────┐       ┌─────┐       ┌─────┐                            │
+│      │F=.85│       │F=.85│       │F=.85│   (higher fidelity)       │
+│      └─────┘       └─────┘       └─────┘                            │
+│                                                                     │
+│   After:  Fewer pairs with higher fidelity                          │
+│                                                                     │
+│   Key insight: 2 pairs at F → 1 pair at F' > F (if successful)     │
+│   Trade: quantity for quality                                       │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Werner States and Noise Models
+
+Noisy entangled states are often modeled as Werner states - mixtures of a pure Bell state with white noise:
+
+```python
+import numpy as np
+from dataclasses import dataclass
+from typing import Tuple, List, Optional
+
+class WernerState:
+    """
+    Werner state: mixture of Bell state with white noise.
+
+    ρ = F|Φ⁺⟩⟨Φ⁺| + (1-F)/3 × (|Φ⁻⟩⟨Φ⁻| + |Ψ⁺⟩⟨Ψ⁺| + |Ψ⁻⟩⟨Ψ⁻|)
+
+    This is equivalent to:
+    ρ = F|Φ⁺⟩⟨Φ⁺| + (1-F)/4 × I (depolarizing noise)
+    """
+
+    def __init__(self, fidelity: float):
+        if not 0 <= fidelity <= 1:
+            raise ValueError("Fidelity must be between 0 and 1")
+        self.fidelity = fidelity
+
+        # Create density matrix
+        # Bell states
+        phi_plus = np.array([1, 0, 0, 1]) / np.sqrt(2)
+        phi_minus = np.array([1, 0, 0, -1]) / np.sqrt(2)
+        psi_plus = np.array([0, 1, 1, 0]) / np.sqrt(2)
+        psi_minus = np.array([0, 1, -1, 0]) / np.sqrt(2)
+
+        # Projectors
+        P_phi_plus = np.outer(phi_plus, phi_plus)
+        P_phi_minus = np.outer(phi_minus, phi_minus)
+        P_psi_plus = np.outer(psi_plus, psi_plus)
+        P_psi_minus = np.outer(psi_minus, psi_minus)
+
+        # Werner state density matrix
+        self.rho = (fidelity * P_phi_plus +
+                   (1 - fidelity) / 3 * (P_phi_minus + P_psi_plus + P_psi_minus))
+
+    def is_entangled(self) -> bool:
+        """Werner state is entangled iff F > 0.5."""
+        return self.fidelity > 0.5
+
+    def concurrence(self) -> float:
+        """Calculate concurrence of Werner state."""
+        return max(0, (2 * self.fidelity - 1))
+
+    def bell_diagonal_form(self) -> dict:
+        """Express as probabilities in Bell basis."""
+        p_phi_plus = self.fidelity
+        p_others = (1 - self.fidelity) / 3
+        return {
+            "phi+": p_phi_plus,
+            "phi-": p_others,
+            "psi+": p_others,
+            "psi-": p_others
+        }
+
+# Demonstrate Werner states
+print("Werner State Properties")
+print("=" * 50)
+
+for f in [0.5, 0.7, 0.85, 0.95]:
+    ws = WernerState(f)
+    print(f"\nF = {f}:")
+    print(f"  Entangled: {ws.is_entangled()}")
+    print(f"  Concurrence: {ws.concurrence():.3f}")
+    probs = ws.bell_diagonal_form()
+    print(f"  Bell probs: Φ⁺={probs['phi+']:.3f}, others={probs['phi-']:.3f} each")
+```
+
+## The BBPSSW Protocol
+
+The Bennett-Brassard-Popescu-Schumacher-Smolin-Wootters (BBPSSW) protocol is the foundational purification scheme:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    BBPSSW PROTOCOL                                  │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Alice                                              Bob            │
+│   ┌─────┐                                          ┌─────┐         │
+│   │ A₁  │────────────── Pair 1 ────────────────────│ B₁  │         │
+│   └──┬──┘                                          └──┬──┘         │
+│      │                                                │             │
+│      │ CNOT                                      CNOT │             │
+│      ↓                                                ↓             │
+│   ┌──┴──┐                                          ┌──┴──┐         │
+│   │ A₂  │────────────── Pair 2 ────────────────────│ B₂  │         │
+│   └──┬──┘        (target of CNOT)                  └──┬──┘         │
+│      │                                                │             │
+│      ↓ Measure Z                              Measure Z ↓           │
+│   ┌─────┐                                          ┌─────┐         │
+│   │ m_A │                                          │ m_B │         │
+│   └─────┘                                          └─────┘         │
+│                                                                     │
+│   Classical Communication:                                          │
+│   If m_A = m_B: Keep Pair 1 (purified!)                            │
+│   If m_A ≠ m_B: Discard Pair 1 (protocol failed)                   │
+│                                                                     │
+│   Success probability: P = F² + (1-F)²/9 × 3 = F² + (1-F)²/3       │
+│   New fidelity: F' = F² / P  (when successful)                     │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### BBPSSW Implementation
+
+```python
+class BBPSSWProtocol:
+    """
+    BBPSSW entanglement purification protocol.
+
+    Uses two pairs to potentially produce one higher-fidelity pair.
+    Bilateral CNOT operations followed by measurement.
+    """
+
+    def __init__(self):
+        # CNOT gate
+        self.CNOT = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 0, 1],
+            [0, 0, 1, 0]
+        ])
+
+        # Z measurement projectors
+        self.P0 = np.array([[1, 0], [0, 0]])  # |0⟩⟨0|
+        self.P1 = np.array([[0, 0], [0, 1]])  # |1⟩⟨1|
+
+    def theoretical_success_probability(self, F: float) -> float:
+        """
+        Calculate probability that purification succeeds.
+
+        For Werner states with fidelity F:
+        P_success = F² + (1-F)²/3 + 2F(1-F)/3
+        """
+        # Probability of same measurement outcomes
+        p_00 = F**2 + ((1-F)/3)**2 * 2  # Both in Φ states
+        p_11 = ((1-F)/3)**2 * 2         # Both in Ψ states with same parity
+        return F**2 + (1-F)**2 / 3
+
+    def theoretical_output_fidelity(self, F: float) -> float:
+        """
+        Calculate output fidelity when protocol succeeds.
+
+        F' = F² / P_success
+        """
+        p_success = self.theoretical_success_probability(F)
+        if p_success == 0:
+            return 0
+        return F**2 / p_success
+
+    def is_purification_beneficial(self, F: float) -> bool:
+        """Check if purification improves fidelity."""
+        F_out = self.theoretical_output_fidelity(F)
+        return F_out > F
+
+    def simulate_purification(
+        self,
+        F1: float,
+        F2: float = None
+    ) -> Tuple[bool, float]:
+        """
+        Simulate one purification attempt.
+
+        Returns (success, output_fidelity).
+        """
+        if F2 is None:
+            F2 = F1
+
+        # Sample input states from Werner distribution
+        def sample_bell_state(F):
+            """Sample Bell state according to Werner distribution."""
+            if np.random.random() < F:
+                return "phi+"
+            else:
+                return np.random.choice(["phi-", "psi+", "psi-"])
+
+        state1 = sample_bell_state(F1)
+        state2 = sample_bell_state(F2)
+
+        # Determine measurement outcomes based on states
+        # CNOT correlates parity of states
+        parities = {
+            "phi+": 0, "phi-": 0,  # Even parity
+            "psi+": 1, "psi-": 1   # Odd parity
+        }
+
+        # Measurement outcomes
+        parity1 = parities[state1]
+        parity2 = parities[state2]
+
+        # After bilateral CNOT, measure pair 2
+        # Outcomes match if total parity is even
+        alice_outcome = (parity1 + parity2) % 2
+        bob_outcome = alice_outcome  # Perfect bilateral CNOT
+
+        # Check for success (matching outcomes)
+        success = (alice_outcome == bob_outcome)  # Always true for bilateral
+
+        # Actually need to track bit flip errors too
+        # Simplified: success if both pairs had same parity component
+        phases1 = {"phi+": 0, "phi-": 1, "psi+": 0, "psi-": 1}
+        phases2 = {"phi+": 0, "phi-": 1, "psi+": 0, "psi-": 1}
+
+        # Success when phase errors match (XOR = 0)
+        phase_match = (phases1[state1] == phases2[state2])
+
+        if phase_match:
+            # Output state depends on input parities
+            if state1 in ["phi+", "phi-"]:
+                output_fidelity = 1.0 if state1 == "phi+" else 0.0
+            else:
+                output_fidelity = 0.0
+            return True, self.theoretical_output_fidelity((F1 + F2) / 2)
+        else:
+            return False, 0.0
+
+    def run_protocol(
+        self,
+        input_fidelity: float,
+        n_trials: int = 1000
+    ) -> dict:
+        """Run multiple purification attempts."""
+        successes = 0
+        output_fidelities = []
+
+        for _ in range(n_trials):
+            success, F_out = self.simulate_purification(input_fidelity)
+            if success:
+                successes += 1
+                output_fidelities.append(F_out)
+
+        return {
+            "input_fidelity": input_fidelity,
+            "success_rate": successes / n_trials,
+            "theoretical_success": self.theoretical_success_probability(input_fidelity),
+            "output_fidelity": np.mean(output_fidelities) if output_fidelities else 0,
+            "theoretical_output": self.theoretical_output_fidelity(input_fidelity),
+            "fidelity_improvement": (self.theoretical_output_fidelity(input_fidelity) -
+                                    input_fidelity)
+        }
+
+# Demonstrate BBPSSW
+bbpssw = BBPSSWProtocol()
+
+print("\nBBPSSW Protocol Analysis")
+print("=" * 60)
+
+print("\nFidelity improvement curve:")
+for F in [0.55, 0.6, 0.7, 0.8, 0.9, 0.95]:
+    F_out = bbpssw.theoretical_output_fidelity(F)
+    p_success = bbpssw.theoretical_success_probability(F)
+    print(f"  F={F:.2f} → F'={F_out:.4f} (P_success={p_success:.3f})")
+```
+
+## The DEJMPS Protocol
+
+The Deutsch-Ekert-Jozsa-Macchiavello-Popescu-Sanpera (DEJMPS) protocol is an improvement that works better for certain noise models:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    DEJMPS PROTOCOL                                  │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Key difference from BBPSSW:                                       │
+│   • Uses bilateral rotations before CNOT                            │
+│   • Better for phase-error dominated noise                          │
+│                                                                     │
+│   Alice                                              Bob            │
+│   ┌─────┐                                          ┌─────┐         │
+│   │ A₁  │──────────────────────────────────────────│ B₁  │         │
+│   └──┬──┘                                          └──┬──┘         │
+│      │ Rotate                                  Rotate │             │
+│      ↓ π/2                                        π/2 ↓             │
+│   ┌──┴──┐                                          ┌──┴──┐         │
+│   │     │                                          │     │         │
+│   └──┬──┘                                          └──┬──┘         │
+│      │ CNOT                                      CNOT │             │
+│      ↓                                                ↓             │
+│   ┌──┴──┐                                          ┌──┴──┐         │
+│   │ A₂  │──────────────────────────────────────────│ B₂  │         │
+│   └──┬──┘                                          └──┬──┘         │
+│      ↓ Measure                                Measure ↓             │
+│                                                                     │
+│   Advantage: Can handle both bit-flip and phase-flip errors        │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### DEJMPS Implementation
+
+```python
+class DEJMPSProtocol:
+    """
+    DEJMPS entanglement purification protocol.
+
+    Enhanced version that handles both bit and phase errors.
+    """
+
+    def __init__(self):
+        # Rotation gate (π/2 around Y axis)
+        theta = np.pi / 2
+        self.Ry = np.array([
+            [np.cos(theta/2), -np.sin(theta/2)],
+            [np.sin(theta/2), np.cos(theta/2)]
+        ])
+
+    def theoretical_output_fidelity(
+        self,
+        A: float,
+        B: float,
+        C: float,
+        D: float
+    ) -> Tuple[float, float, float, float, float]:
+        """
+        Calculate output probabilities for Bell-diagonal state.
+
+        Input state: A|Φ⁺⟩ + B|Φ⁻⟩ + C|Ψ⁺⟩ + D|Ψ⁻⟩
+        (A + B + C + D = 1)
+        """
+        # Success probability
+        p_success = (A + D)**2 + (B + C)**2
+
+        if p_success == 0:
+            return 0, 0, 0, 0, 0
+
+        # Output probabilities (when successful)
+        A_out = (A**2 + D**2) / p_success
+        B_out = 2 * A * D / p_success
+        C_out = 2 * B * C / p_success
+        D_out = (B**2 + C**2) / p_success
+
+        return A_out, B_out, C_out, D_out, p_success
+
+    def purify_werner(self, F: float) -> Tuple[float, float]:
+        """
+        Purify Werner state with DEJMPS.
+
+        Werner: F|Φ⁺⟩ + (1-F)/3 each for others
+        """
+        A = F
+        B = C = D = (1 - F) / 3
+
+        A_out, B_out, C_out, D_out, p_success = \
+            self.theoretical_output_fidelity(A, B, C, D)
+
+        return A_out, p_success  # A_out is fidelity to |Φ⁺⟩
+
+    def compare_with_bbpssw(self, F: float) -> dict:
+        """Compare DEJMPS with BBPSSW for Werner states."""
+        # DEJMPS
+        F_dejmps, p_dejmps = self.purify_werner(F)
+
+        # BBPSSW (from earlier class)
+        bbpssw = BBPSSWProtocol()
+        F_bbpssw = bbpssw.theoretical_output_fidelity(F)
+        p_bbpssw = bbpssw.theoretical_success_probability(F)
+
+        return {
+            "input_fidelity": F,
+            "dejmps_output": F_dejmps,
+            "dejmps_success": p_dejmps,
+            "bbpssw_output": F_bbpssw,
+            "bbpssw_success": p_bbpssw,
+            "dejmps_better": F_dejmps > F_bbpssw
+        }
+
+# Compare protocols
+dejmps = DEJMPSProtocol()
+
+print("\nDEJMPS vs BBPSSW Comparison")
+print("=" * 60)
+
+print("\n  F_in  | DEJMPS F_out | BBPSSW F_out | Winner")
+print("-" * 60)
+
+for F in [0.6, 0.7, 0.8, 0.9, 0.95]:
+    comparison = dejmps.compare_with_bbpssw(F)
+    winner = "DEJMPS" if comparison["dejmps_better"] else "BBPSSW"
+    print(f"  {F:.2f}  |    {comparison['dejmps_output']:.4f}    |"
+          f"    {comparison['bbpssw_output']:.4f}    |  {winner}")
+```
+
+## Iterative Purification
+
+Multiple rounds of purification can achieve arbitrarily high fidelity:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              ITERATIVE PURIFICATION                                 │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Round 1:  8 pairs (F=0.7) → 4 pairs (F≈0.85)                     │
+│   Round 2:  4 pairs (F≈0.85) → 2 pairs (F≈0.95)                    │
+│   Round 3:  2 pairs (F≈0.95) → 1 pair (F≈0.99)                     │
+│                                                                     │
+│   ┌─┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐                                 │
+│   │ │ │ │ │ │ │ │ │ │ │ │ │ │ │ │   8 pairs                        │
+│   └┬┘ └┬┘ └┬┘ └┬┘ └┬┘ └┬┘ └┬┘ └┬┘                                  │
+│    └┬──┘   └┬──┘   └┬──┘   └┬──┘                                    │
+│     │       │       │       │       4 pairs (Round 1)               │
+│    ┌┴┐     ┌┴┐     ┌┴┐     ┌┴┐                                     │
+│    │ │     │ │     │ │     │ │                                      │
+│    └┬┘     └┬┘     └┬┘     └┬┘                                      │
+│     └───┬───┘       └───┬───┘                                       │
+│         │               │           2 pairs (Round 2)               │
+│        ┌┴┐             ┌┴┐                                         │
+│        │ │             │ │                                          │
+│        └┬┘             └┬┘                                          │
+│         └───────┬───────┘                                           │
+│                 │               1 pair (Round 3)                    │
+│                ┌┴┐                                                  │
+│                │●│  F ≈ 0.99                                        │
+│                └─┘                                                  │
+│                                                                     │
+│   Cost: Exponential in rounds (2^n pairs for n rounds)             │
+│   Benefit: Can reach any target fidelity (if F₀ > threshold)       │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Iterative Protocol Implementation
+
+```python
+class IterativePurification:
+    """
+    Multi-round iterative entanglement purification.
+    """
+
+    def __init__(self, protocol: str = "bbpssw"):
+        self.protocol = protocol
+        if protocol == "bbpssw":
+            self.purifier = BBPSSWProtocol()
+        else:
+            self.purifier = DEJMPSProtocol()
+
+    def single_round(self, F: float) -> Tuple[float, float]:
+        """Perform one purification round."""
+        if self.protocol == "bbpssw":
+            F_out = self.purifier.theoretical_output_fidelity(F)
+            p_success = self.purifier.theoretical_success_probability(F)
+        else:
+            F_out, p_success = self.purifier.purify_werner(F)
+        return F_out, p_success
+
+    def calculate_rounds_needed(
+        self,
+        initial_fidelity: float,
+        target_fidelity: float,
+        max_rounds: int = 20
+    ) -> dict:
+        """Calculate rounds needed to reach target fidelity."""
+        F = initial_fidelity
+        rounds = []
+        total_success_prob = 1.0
+        pairs_consumed = 1
+
+        for round_num in range(max_rounds):
+            if F >= target_fidelity:
+                break
+
+            F_new, p_success = self.single_round(F)
+
+            # Check if we're making progress
+            if F_new <= F:
+                break
+
+            rounds.append({
+                "round": round_num + 1,
+                "input_fidelity": F,
+                "output_fidelity": F_new,
+                "success_prob": p_success,
+                "pairs_consumed": pairs_consumed * 2
+            })
+
+            F = F_new
+            total_success_prob *= p_success
+            pairs_consumed *= 2
+
+        return {
+            "initial_fidelity": initial_fidelity,
+            "target_fidelity": target_fidelity,
+            "achieved_fidelity": F,
+            "rounds_needed": len(rounds),
+            "total_success_prob": total_success_prob,
+            "pairs_consumed": pairs_consumed,
+            "round_details": rounds,
+            "target_reached": F >= target_fidelity
+        }
+
+    def optimal_strategy(
+        self,
+        initial_fidelity: float,
+        target_fidelity: float,
+        available_pairs: int
+    ) -> dict:
+        """Find optimal purification strategy given resources."""
+        # Try different numbers of initial pairs
+        best_strategy = None
+        best_final_fidelity = initial_fidelity
+
+        for n_pairs in [2**k for k in range(int(np.log2(available_pairs)) + 1)]:
+            if n_pairs > available_pairs:
+                break
+
+            result = self.calculate_rounds_needed(
+                initial_fidelity,
+                target_fidelity,
+                max_rounds=int(np.log2(n_pairs))
+            )
+
+            if result["achieved_fidelity"] > best_final_fidelity:
+                best_final_fidelity = result["achieved_fidelity"]
+                best_strategy = result
+
+        return best_strategy
+
+# Demonstrate iterative purification
+iterative = IterativePurification("bbpssw")
+
+print("\nIterative Purification Analysis")
+print("=" * 60)
+
+# Calculate rounds to reach high fidelity
+result = iterative.calculate_rounds_needed(
+    initial_fidelity=0.7,
+    target_fidelity=0.99
+)
+
+print(f"\nTarget: F=0.7 → F=0.99")
+print(f"Rounds needed: {result['rounds_needed']}")
+print(f"Pairs consumed: {result['pairs_consumed']}")
+print(f"Total success probability: {result['total_success_prob']:.4f}")
+print(f"Target reached: {result['target_reached']}")
+
+print("\nRound-by-round details:")
+for r in result["round_details"]:
+    print(f"  Round {r['round']}: F={r['input_fidelity']:.4f} → "
+          f"F={r['output_fidelity']:.4f} (P={r['success_prob']:.3f})")
+```
+
+## Practical Considerations
+
+```python
+@dataclass
+class PurificationSystem:
+    """
+    Practical purification system with realistic parameters.
+    """
+    gate_fidelity: float = 0.99      # CNOT gate fidelity
+    measurement_fidelity: float = 0.99
+    memory_coherence_time: float = 1.0  # seconds
+    operation_time: float = 1e-6     # seconds per operation
+    classical_comm_time: float = 0.5e-3  # 100 km at c/n
+
+    def effective_purification(
+        self,
+        input_fidelity: float,
+        distance: float = 100  # km
+    ) -> Tuple[float, float]:
+        """
+        Calculate purification with practical imperfections.
+        """
+        # Ideal BBPSSW output
+        bbpssw = BBPSSWProtocol()
+        F_ideal = bbpssw.theoretical_output_fidelity(input_fidelity)
+        p_success = bbpssw.theoretical_success_probability(input_fidelity)
+
+        # Gate errors reduce fidelity
+        gate_error = 1 - self.gate_fidelity
+        F_after_gates = F_ideal * (1 - 2 * gate_error)  # Two CNOTs
+
+        # Measurement errors
+        meas_error = 1 - self.measurement_fidelity
+        F_after_meas = F_after_gates * (1 - meas_error)
+
+        # Memory decoherence during classical communication
+        comm_time = distance / (3e5)  # km to seconds
+        memory_decay = np.exp(-comm_time / self.memory_coherence_time)
+        F_final = F_after_meas * memory_decay + (1 - memory_decay) * 0.5
+
+        return F_final, p_success
+
+    def is_purification_possible(self, input_fidelity: float) -> bool:
+        """Check if net fidelity improvement is possible."""
+        F_out, _ = self.effective_purification(input_fidelity)
+        return F_out > input_fidelity
+
+    def find_threshold_fidelity(self) -> float:
+        """Find minimum input fidelity for beneficial purification."""
+        for F in np.arange(0.5, 1.0, 0.01):
+            if self.is_purification_possible(F):
+                return F
+        return 1.0  # Not possible
+
+# Analyze practical system
+print("\nPractical Purification Considerations")
+print("=" * 60)
+
+# Ideal system
+ideal_system = PurificationSystem(
+    gate_fidelity=1.0,
+    measurement_fidelity=1.0,
+    memory_coherence_time=float('inf')
+)
+
+# Realistic system
+real_system = PurificationSystem(
+    gate_fidelity=0.99,
+    measurement_fidelity=0.99,
+    memory_coherence_time=0.1  # 100 ms
+)
+
+print("\nIdeal vs Realistic Purification:")
+print("  F_in | Ideal F_out | Real F_out | Improvement?")
+print("-" * 50)
+
+for F in [0.6, 0.7, 0.8, 0.9]:
+    F_ideal, _ = ideal_system.effective_purification(F)
+    F_real, _ = real_system.effective_purification(F)
+    improvement = "Yes" if F_real > F else "No"
+    print(f"  {F:.2f} |    {F_ideal:.4f}   |   {F_real:.4f}   |    {improvement}")
+
+threshold = real_system.find_threshold_fidelity()
+print(f"\nMinimum input fidelity for improvement: {threshold:.2f}")
+```
+
+## Summary
+
+Entanglement purification is essential for quantum networking:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              ENTANGLEMENT PURIFICATION SUMMARY                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Protocols:                                                         │
+│  • BBPSSW: Basic protocol using bilateral CNOT + measurement       │
+│  • DEJMPS: Enhanced protocol handling both error types             │
+│  • Hashing: Asymptotically optimal but complex                     │
+│                                                                     │
+│  Key Results:                                                       │
+│  • 2 pairs → 1 pair with higher fidelity (when successful)        │
+│  • Works only if F > threshold (≈0.5 for ideal, higher for real)  │
+│  • Iterative: Can reach any fidelity with enough pairs            │
+│  • Cost: Exponential in purification rounds                        │
+│                                                                     │
+│  Practical Limits:                                                  │
+│  • Gate fidelity must be high (>0.99)                              │
+│  • Memory coherence must exceed communication time                 │
+│  • Success probability compounds across rounds                     │
+│                                                                     │
+│  Role in Quantum Repeaters:                                         │
+│  • Purification restores fidelity lost in distribution             │
+│  • Combined with swapping for long-distance entanglement           │
+│  • Trade time/resources for quality                                │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Purification enables practical quantum networks by converting abundant low-quality entanglement into the high-fidelity resources needed for quantum protocols.

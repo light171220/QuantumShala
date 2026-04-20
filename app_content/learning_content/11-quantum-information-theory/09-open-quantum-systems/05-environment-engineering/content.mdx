@@ -1,0 +1,668 @@
+---
+title: "Environment Engineering"
+description: "Learn how to engineer dissipation to prepare quantum states and perform quantum operations through controlled coupling to environments."
+duration: 50
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand dissipative state preparation techniques
+- Design Lindblad operators for target steady states
+- Implement reservoir engineering for entanglement generation
+- Analyze convergence rates and fidelity of dissipative protocols
+- Apply environment engineering to quantum computing tasks
+
+## 1. The Power of Dissipation
+
+<Definition term="Environment Engineering">
+Environment engineering (or reservoir engineering) is the deliberate design of system-environment couplings to achieve desired quantum states or operations. Instead of fighting decoherence, we harness it.
+</Definition>
+
+**Advantages of dissipative approaches:**
+- Robust to perturbations and initial state
+- Autonomous operation (no time-dependent control)
+- Can prepare states unreachable by unitary evolution
+- Natural error correction through continuous stabilization
+
+## 2. Dissipative State Preparation
+
+<Definition term="Dissipative State Preparation">
+Preparing a quantum state as the unique steady state of engineered Lindbladian dynamics. The system naturally evolves to the target state regardless of initial conditions.
+</Definition>
+
+<Formula>
+**Goal:** Design $H$ and $\{L_k\}$ such that:
+$$\mathcal{L}\rho_{target} = 0 \quad \text{(target is steady state)}$$
+$$\rho(t) \rightarrow \rho_{target} \text{ as } t \rightarrow \infty \text{ (unique attractor)}$$
+</Formula>
+
+<Example>
+```python
+import numpy as np
+from scipy.linalg import expm, null_space
+
+def lindblad_superoperator(H: np.ndarray, L_ops: list, gamma: list) -> np.ndarray:
+    """Construct Lindbladian superoperator."""
+    dim = H.shape[0]
+    I = np.eye(dim, dtype=complex)
+
+    L_H = -1j * (np.kron(H, I) - np.kron(I, H.T))
+    L_D = np.zeros((dim**2, dim**2), dtype=complex)
+
+    for L, g in zip(L_ops, gamma):
+        L_D += g * np.kron(L.conj(), L)
+        LdL = L.conj().T @ L
+        L_D -= 0.5 * g * (np.kron(LdL.T, I) + np.kron(I, LdL))
+
+    return L_H + L_D
+
+def prepare_pure_state_dissipatively(target_state: np.ndarray,
+                                      decay_rate: float = 1.0) -> tuple:
+    """
+    Design Lindblad operator to prepare a pure target state.
+
+    Strategy: L = sqrt(gamma) * |target><psi_orth|
+    for all states orthogonal to target.
+    """
+    dim = len(target_state)
+    target = target_state.reshape(-1, 1)
+    target = target / np.linalg.norm(target)
+
+    # Find orthogonal subspace
+    # Gram-Schmidt to get orthonormal basis
+    basis = [target]
+    for i in range(dim - 1):
+        v = np.zeros((dim, 1), dtype=complex)
+        v[i] = 1
+        for b in basis:
+            v = v - (b.conj().T @ v) * b
+        if np.linalg.norm(v) > 1e-10:
+            v = v / np.linalg.norm(v)
+            basis.append(v)
+
+    # Lindblad operators: |target><orth_i|
+    L_ops = []
+    gamma = []
+    for i in range(1, len(basis)):
+        L = np.sqrt(decay_rate) * (target @ basis[i].conj().T)
+        L_ops.append(L)
+        gamma.append(1.0)
+
+    return L_ops, gamma
+
+# Example: Prepare |+⟩ state
+target_plus = np.array([1, 1], dtype=complex) / np.sqrt(2)
+L_ops, gamma = prepare_pure_state_dissipatively(target_plus)
+
+H = np.zeros((2, 2), dtype=complex)  # No Hamiltonian
+
+print("Dissipative preparation of |+⟩ state")
+print("=" * 50)
+
+# Verify steady state
+L = lindblad_superoperator(H, L_ops, gamma)
+ns = null_space(L)
+rho_ss = ns[:, 0].reshape((2, 2))
+rho_ss = rho_ss / np.trace(rho_ss)
+
+target_dm = np.outer(target_plus, target_plus.conj())
+print(f"Target state |+⟩⟨+|:")
+print(target_dm)
+print(f"\nSteady state:")
+print(np.round(rho_ss, 4))
+print(f"\nFidelity: {np.real(np.trace(target_dm @ rho_ss)):.6f}")
+
+# Test convergence from different initial states
+print("\nConvergence from different initial states:")
+initial_states = {
+    '|0⟩': np.array([[1, 0], [0, 0]], dtype=complex),
+    '|1⟩': np.array([[0, 0], [0, 1]], dtype=complex),
+    'mixed': np.eye(2, dtype=complex) / 2
+}
+
+for name, rho0 in initial_states.items():
+    rho_final = expm(L * 5) @ rho0.flatten()
+    rho_final = rho_final.reshape((2, 2))
+    fidelity = np.real(np.trace(target_dm @ rho_final))
+    print(f"  {name}: fidelity after t=5 is {fidelity:.6f}")
+```
+</Example>
+
+## 3. Designing Lindblad Operators
+
+<Formula>
+**Key design principle:** To prepare target state $|\psi_T\rangle$:
+1. Find the kernel: $L_k |\psi_T\rangle = 0$ for all $k$
+2. Ensure uniqueness: No other state satisfies this
+3. Check connectivity: All states can reach target
+</Formula>
+
+<Example>
+```python
+import numpy as np
+
+def design_cooling_operator(ground_state: np.ndarray,
+                            excited_states: list,
+                            rates: list = None) -> tuple:
+    """
+    Design Lindblad operators for "cooling" to ground state.
+    L_k = |ground><excited_k| pumps population from excited to ground.
+    """
+    dim = len(ground_state)
+    if rates is None:
+        rates = [1.0] * len(excited_states)
+
+    L_ops = []
+    gamma = []
+
+    ground = ground_state.reshape(-1, 1)
+
+    for exc, rate in zip(excited_states, rates):
+        exc = exc.reshape(-1, 1)
+        L = ground @ exc.conj().T
+        L_ops.append(L)
+        gamma.append(rate)
+
+    return L_ops, gamma
+
+def verify_steady_state(target: np.ndarray, H: np.ndarray,
+                        L_ops: list, gamma: list) -> dict:
+    """Verify that target is the unique steady state."""
+    dim = target.shape[0]
+
+    # Check if target is in kernel of each L
+    kernel_check = True
+    for L in L_ops:
+        result = L @ target
+        if np.linalg.norm(result) > 1e-10:
+            kernel_check = False
+
+    # Build Lindbladian and check null space dimension
+    L_super = lindblad_superoperator(H, L_ops, gamma)
+    eigenvalues = np.linalg.eigvals(L_super)
+    n_zero_eigenvalues = np.sum(np.abs(eigenvalues) < 1e-10)
+
+    # Spectral gap (convergence rate)
+    nonzero = eigenvalues[np.abs(eigenvalues) > 1e-10]
+    if len(nonzero) > 0:
+        gap = -np.max(np.real(nonzero))
+    else:
+        gap = 0
+
+    return {
+        'is_in_kernel': kernel_check,
+        'is_unique': n_zero_eigenvalues == 1,
+        'spectral_gap': gap,
+        'convergence_time': 1/gap if gap > 0 else np.inf
+    }
+
+# Example: Prepare Bell state |Phi+⟩ = (|00⟩ + |11⟩)/sqrt(2)
+print("Dissipative Bell State Preparation")
+print("=" * 50)
+
+# Two-qubit system
+dim = 4
+ket_00 = np.array([1, 0, 0, 0], dtype=complex)
+ket_01 = np.array([0, 1, 0, 0], dtype=complex)
+ket_10 = np.array([0, 0, 1, 0], dtype=complex)
+ket_11 = np.array([0, 0, 0, 1], dtype=complex)
+
+# Bell state
+bell_plus = (ket_00 + ket_11) / np.sqrt(2)
+
+# Orthogonal states in Bell basis
+bell_minus = (ket_00 - ket_11) / np.sqrt(2)
+psi_plus = (ket_01 + ket_10) / np.sqrt(2)
+psi_minus = (ket_01 - ket_10) / np.sqrt(2)
+
+# Design operators: pump from orthogonal Bell states to |Phi+⟩
+L_ops, gamma = design_cooling_operator(
+    bell_plus,
+    [bell_minus, psi_plus, psi_minus],
+    rates=[1.0, 1.0, 1.0]
+)
+
+H = np.zeros((dim, dim), dtype=complex)
+target_dm = np.outer(bell_plus, bell_plus.conj())
+
+# Verify
+result = verify_steady_state(target_dm, H, L_ops, gamma)
+print(f"Target in kernel: {result['is_in_kernel']}")
+print(f"Unique steady state: {result['is_unique']}")
+print(f"Spectral gap: {result['spectral_gap']:.4f}")
+print(f"Convergence time: {result['convergence_time']:.2f}")
+
+# Test convergence
+L_super = lindblad_superoperator(H, L_ops, gamma)
+rho0 = np.eye(dim, dtype=complex) / dim  # Start from maximally mixed
+
+print("\nFidelity vs time (from maximally mixed):")
+for t in [0, 1, 2, 5, 10]:
+    rho_t = expm(L_super * t) @ rho0.flatten()
+    rho_t = rho_t.reshape((dim, dim))
+    fidelity = np.real(np.trace(target_dm @ rho_t))
+    print(f"  t = {t}: F = {fidelity:.6f}")
+```
+</Example>
+
+## 4. Reservoir Engineering for Entanglement
+
+<Definition term="Dissipative Entanglement Generation">
+Creating entangled states as steady states of engineered dissipation. The entanglement is continuously maintained even in the presence of local noise.
+</Definition>
+
+<Example>
+```python
+import numpy as np
+
+def partial_trace_B(rho: np.ndarray, dim_A: int, dim_B: int) -> np.ndarray:
+    """Trace out system B."""
+    reshaped = rho.reshape(dim_A, dim_B, dim_A, dim_B)
+    return np.trace(reshaped, axis1=1, axis2=3)
+
+def concurrence(rho: np.ndarray) -> float:
+    """Calculate concurrence for two-qubit state."""
+    sigma_y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+    sigma_yy = np.kron(sigma_y, sigma_y)
+
+    rho_tilde = sigma_yy @ rho.conj() @ sigma_yy
+    R = rho @ rho_tilde
+    eigenvalues = np.sqrt(np.abs(np.linalg.eigvals(R)))
+    eigenvalues = np.sort(eigenvalues)[::-1]
+
+    return max(0, eigenvalues[0] - eigenvalues[1] - eigenvalues[2] - eigenvalues[3])
+
+def design_singlet_stabilizer() -> tuple:
+    """
+    Design Lindblad operators to stabilize singlet state.
+    |Psi-⟩ = (|01⟩ - |10⟩)/sqrt(2)
+    """
+    dim = 4
+    ket_00 = np.array([1, 0, 0, 0], dtype=complex)
+    ket_01 = np.array([0, 1, 0, 0], dtype=complex)
+    ket_10 = np.array([0, 0, 1, 0], dtype=complex)
+    ket_11 = np.array([0, 0, 0, 1], dtype=complex)
+
+    singlet = (ket_01 - ket_10) / np.sqrt(2)
+    triplet_0 = (ket_01 + ket_10) / np.sqrt(2)
+    triplet_p = ket_00
+    triplet_m = ket_11
+
+    # Pump from triplet states to singlet
+    L_ops = []
+    gamma = []
+
+    for triplet in [triplet_0, triplet_p, triplet_m]:
+        L = np.outer(singlet, triplet.conj())
+        L_ops.append(L)
+        gamma.append(1.0)
+
+    return L_ops, gamma, singlet
+
+# Singlet state stabilization
+L_ops, gamma, singlet = design_singlet_stabilizer()
+H = np.zeros((4, 4), dtype=complex)
+L_super = lindblad_superoperator(H, L_ops, gamma)
+
+print("Dissipative Singlet State Stabilization")
+print("=" * 50)
+
+# Initial separable state
+rho0 = np.kron(
+    np.array([[0.5, 0.5], [0.5, 0.5]], dtype=complex),
+    np.array([[0.5, 0.5], [0.5, 0.5]], dtype=complex)
+)  # |+⟩|+⟩
+
+singlet_dm = np.outer(singlet, singlet.conj())
+
+print("Evolution from separable state |+⟩|+⟩:")
+print(f"{'Time':<8} {'Fidelity':<12} {'Concurrence':<12} {'Purity':<12}")
+
+for t in [0, 0.5, 1, 2, 5, 10]:
+    rho_t = expm(L_super * t) @ rho0.flatten()
+    rho_t = rho_t.reshape((4, 4))
+
+    fid = np.real(np.trace(singlet_dm @ rho_t))
+    conc = concurrence(rho_t)
+    pur = np.real(np.trace(rho_t @ rho_t))
+
+    print(f"{t:<8.1f} {fid:<12.4f} {conc:<12.4f} {pur:<12.4f}")
+
+# With competing local dephasing
+print("\nWith local dephasing (gamma_local = 0.1):")
+sigma_z = np.array([[1, 0], [0, -1]], dtype=complex)
+I = np.eye(2, dtype=complex)
+
+L_local = [
+    np.kron(sigma_z, I),  # Dephasing on qubit 1
+    np.kron(I, sigma_z),  # Dephasing on qubit 2
+]
+gamma_local = [0.1, 0.1]
+
+L_ops_total = L_ops + L_local
+gamma_total = gamma + gamma_local
+L_super_noisy = lindblad_superoperator(H, L_ops_total, gamma_total)
+
+print(f"{'Time':<8} {'Fidelity':<12} {'Concurrence':<12}")
+for t in [0, 1, 5, 10, 20]:
+    rho_t = expm(L_super_noisy * t) @ rho0.flatten()
+    rho_t = rho_t.reshape((4, 4))
+    fid = np.real(np.trace(singlet_dm @ rho_t))
+    conc = concurrence(rho_t)
+    print(f"{t:<8.1f} {fid:<12.4f} {conc:<12.4f}")
+```
+</Example>
+
+## 5. Convergence Analysis
+
+<Formula>
+**Convergence rate:** The approach to steady state is governed by the spectral gap $\Delta$:
+$$\|\rho(t) - \rho_{ss}\| \leq C e^{-\Delta t}$$
+Larger $\Delta$ means faster preparation.
+</Formula>
+
+<Example>
+```python
+import numpy as np
+
+def analyze_convergence(H: np.ndarray, L_ops: list, gamma: list,
+                        rho_target: np.ndarray, rho_initial: np.ndarray,
+                        times: np.ndarray) -> dict:
+    """
+    Analyze convergence to target steady state.
+    """
+    L_super = lindblad_superoperator(H, L_ops, gamma)
+    dim = H.shape[0]
+
+    # Spectral analysis
+    eigenvalues = np.linalg.eigvals(L_super)
+    idx = np.argsort(-np.real(eigenvalues))
+    eigenvalues = eigenvalues[idx]
+
+    # Spectral gap
+    nonzero = eigenvalues[np.abs(eigenvalues) > 1e-10]
+    gap = -np.max(np.real(nonzero)) if len(nonzero) > 0 else 0
+
+    # Time evolution
+    fidelities = []
+    trace_distances = []
+
+    for t in times:
+        rho_t = expm(L_super * t) @ rho_initial.flatten()
+        rho_t = rho_t.reshape((dim, dim))
+
+        fid = np.real(np.trace(rho_target @ rho_t))
+        dist = 0.5 * np.sum(np.abs(np.linalg.eigvalsh(rho_t - rho_target)))
+
+        fidelities.append(fid)
+        trace_distances.append(dist)
+
+    return {
+        'spectral_gap': gap,
+        'fidelities': fidelities,
+        'trace_distances': trace_distances,
+        'eigenvalues': eigenvalues
+    }
+
+# Compare different preparation strategies
+print("Convergence Analysis for |0⟩ Preparation")
+print("=" * 50)
+
+# Strategy 1: Single decay channel
+sigma_m = np.array([[0, 0], [1, 0]], dtype=complex)
+L_ops_1 = [sigma_m]
+gamma_1 = [1.0]
+
+# Strategy 2: Enhanced decay
+L_ops_2 = [sigma_m]
+gamma_2 = [3.0]
+
+# Strategy 3: Multiple channels
+sigma_x = np.array([[0, 1], [1, 0]], dtype=complex)
+L_ops_3 = [sigma_m, 0.5 * sigma_m @ sigma_x]
+gamma_3 = [1.0, 0.5]
+
+H = np.zeros((2, 2), dtype=complex)
+target = np.array([[1, 0], [0, 0]], dtype=complex)
+initial = np.array([[0.5, 0.5], [0.5, 0.5]], dtype=complex)  # |+⟩
+
+times = np.linspace(0, 5, 100)
+
+strategies = [
+    ("Single channel γ=1", L_ops_1, gamma_1),
+    ("Single channel γ=3", L_ops_2, gamma_2),
+    ("Multiple channels", L_ops_3, gamma_3)
+]
+
+print(f"\n{'Strategy':<25} {'Spectral Gap':<15} {'T to F>0.99':<15}")
+
+for name, L_ops, gamma in strategies:
+    result = analyze_convergence(H, L_ops, gamma, target, initial, times)
+
+    # Find time to reach 99% fidelity
+    t_99 = times[-1]
+    for i, f in enumerate(result['fidelities']):
+        if f > 0.99:
+            t_99 = times[i]
+            break
+
+    print(f"{name:<25} {result['spectral_gap']:<15.4f} {t_99:<15.2f}")
+```
+</Example>
+
+## 6. Autonomous Quantum Error Correction
+
+<Definition term="Autonomous Error Correction">
+Using engineered dissipation to continuously correct errors without measurement. The logical subspace is the steady state of the dynamics.
+</Definition>
+
+<Example>
+```python
+import numpy as np
+
+def design_bit_flip_correction() -> tuple:
+    """
+    Design Lindblad operators for autonomous 3-qubit bit-flip code.
+    Logical states: |0_L⟩ = |000⟩, |1_L⟩ = |111⟩
+    """
+    dim = 8  # 3 qubits
+
+    # Basis states
+    states = {}
+    for i in range(8):
+        binary = format(i, '03b')
+        ket = np.zeros(8, dtype=complex)
+        ket[i] = 1
+        states[binary] = ket
+
+    # Correction operators: return to code space
+    L_ops = []
+    gamma = []
+
+    # Correct single bit flips
+    # |001⟩ -> |000⟩, |010⟩ -> |000⟩, |100⟩ -> |000⟩
+    # |110⟩ -> |111⟩, |101⟩ -> |111⟩, |011⟩ -> |111⟩
+
+    corrections = [
+        ('001', '000'), ('010', '000'), ('100', '000'),  # To |0_L⟩
+        ('110', '111'), ('101', '111'), ('011', '111'),  # To |1_L⟩
+    ]
+
+    for error, correct in corrections:
+        L = np.outer(states[correct], states[error].conj())
+        L_ops.append(L)
+        gamma.append(1.0)
+
+    return L_ops, gamma, states
+
+L_ops, gamma, states = design_bit_flip_correction()
+H = np.zeros((8, 8), dtype=complex)
+L_super = lindblad_superoperator(H, L_ops, gamma)
+
+print("Autonomous 3-Qubit Bit-Flip Correction")
+print("=" * 50)
+
+# Logical states
+ket_0L = states['000']
+ket_1L = states['111']
+logical_plus = (ket_0L + ket_1L) / np.sqrt(2)
+target = np.outer(logical_plus, logical_plus.conj())
+
+# Start from error state
+error_state = states['001']  # Single bit flip on |0_L⟩
+rho0 = np.outer(error_state, error_state.conj())
+
+print("Starting from error state |001⟩:")
+print(f"{'Time':<8} {'F(|0_L⟩)':<12} {'F(|1_L⟩)':<12} {'F(code space)':<15}")
+
+code_projector = (np.outer(ket_0L, ket_0L.conj()) +
+                  np.outer(ket_1L, ket_1L.conj()))
+
+for t in [0, 0.5, 1, 2, 5]:
+    rho_t = expm(L_super * t) @ rho0.flatten()
+    rho_t = rho_t.reshape((8, 8))
+
+    f_0L = np.real(np.trace(np.outer(ket_0L, ket_0L.conj()) @ rho_t))
+    f_1L = np.real(np.trace(np.outer(ket_1L, ket_1L.conj()) @ rho_t))
+    f_code = np.real(np.trace(code_projector @ rho_t))
+
+    print(f"{t:<8.1f} {f_0L:<12.4f} {f_1L:<12.4f} {f_code:<15.4f}")
+
+# Test with continuous errors
+print("\nWith continuous bit-flip noise (rate=0.1):")
+
+# Add noise channels
+sigma_x = np.array([[0, 1], [1, 0]], dtype=complex)
+I = np.eye(2, dtype=complex)
+
+noise_ops = [
+    np.kron(np.kron(sigma_x, I), I),  # Flip qubit 1
+    np.kron(np.kron(I, sigma_x), I),  # Flip qubit 2
+    np.kron(np.kron(I, I), sigma_x),  # Flip qubit 3
+]
+noise_gamma = [0.1, 0.1, 0.1]
+
+L_ops_total = L_ops + noise_ops
+gamma_total = gamma + noise_gamma
+L_super_noisy = lindblad_superoperator(H, L_ops_total, gamma_total)
+
+# Start from logical |0_L⟩
+rho0_L = np.outer(ket_0L, ket_0L.conj())
+
+print(f"{'Time':<8} {'F(|0_L⟩)':<12} {'F(code space)':<15}")
+for t in [0, 1, 5, 10, 20]:
+    rho_t = expm(L_super_noisy * t) @ rho0_L.flatten()
+    rho_t = rho_t.reshape((8, 8))
+
+    f_0L = np.real(np.trace(np.outer(ket_0L, ket_0L.conj()) @ rho_t))
+    f_code = np.real(np.trace(code_projector @ rho_t))
+
+    print(f"{t:<8.1f} {f_0L:<12.4f} {f_code:<15.4f}")
+```
+</Example>
+
+## 7. Dissipative Quantum Gates
+
+<Definition term="Dissipative Gate">
+A quantum gate implemented through engineered dissipation. The gate is performed by bringing the system to a steady state that encodes the gate action.
+</Definition>
+
+<Example>
+```python
+import numpy as np
+
+def dissipative_cnot_preparation(control_state: int, target_state: int):
+    """
+    Design dissipation to prepare CNOT output given input state.
+    CNOT: |c,t⟩ -> |c, c XOR t⟩
+    """
+    # 2-qubit computational basis
+    basis = [np.array([1,0,0,0], dtype=complex),  # |00⟩
+             np.array([0,1,0,0], dtype=complex),  # |01⟩
+             np.array([0,0,1,0], dtype=complex),  # |10⟩
+             np.array([0,0,0,1], dtype=complex)]  # |11⟩
+
+    # Input state index
+    input_idx = control_state * 2 + target_state
+
+    # Output: CNOT action
+    if control_state == 0:
+        output_idx = input_idx  # No change
+    else:
+        output_idx = control_state * 2 + (1 - target_state)  # Flip target
+
+    input_state = basis[input_idx]
+    output_state = basis[output_idx]
+
+    # Design Lindblad: pump from other states to output
+    L_ops = []
+    gamma = []
+
+    for i, other in enumerate(basis):
+        if i != output_idx:
+            L = np.outer(output_state, other.conj())
+            L_ops.append(L)
+            gamma.append(1.0)
+
+    return L_ops, gamma, output_state
+
+print("Dissipative CNOT Gate")
+print("=" * 50)
+
+# Test all input configurations
+print("\nCNOT truth table verification:")
+print(f"{'Input':<10} {'Expected':<12} {'Achieved':<12} {'Fidelity':<10}")
+
+for c in [0, 1]:
+    for t in [0, 1]:
+        L_ops, gamma, expected_output = dissipative_cnot_preparation(c, t)
+        H = np.zeros((4, 4), dtype=complex)
+        L_super = lindblad_superoperator(H, L_ops, gamma)
+
+        # Input state
+        input_idx = c * 2 + t
+        input_state = np.zeros(4, dtype=complex)
+        input_state[input_idx] = 1
+        rho0 = np.outer(input_state, input_state.conj())
+
+        # Evolve
+        rho_final = expm(L_super * 5) @ rho0.flatten()
+        rho_final = rho_final.reshape((4, 4))
+
+        target_dm = np.outer(expected_output, expected_output.conj())
+        fidelity = np.real(np.trace(target_dm @ rho_final))
+
+        expected_idx = np.argmax(np.abs(expected_output))
+        achieved = np.argmax(np.diag(rho_final).real)
+
+        input_str = f"|{c}{t}⟩"
+        expected_str = f"|{expected_idx//2}{expected_idx%2}⟩"
+        achieved_str = f"|{achieved//2}{achieved%2}⟩"
+
+        print(f"{input_str:<10} {expected_str:<12} {achieved_str:<12} {fidelity:<10.4f}")
+```
+</Example>
+
+## Summary
+
+In this lesson, you learned about environment engineering:
+
+1. **Dissipative state preparation** uses engineered decay to reach target states
+2. **Lindblad operator design**: $L|\psi_T\rangle = 0$ ensures target is steady state
+3. **Reservoir engineering** can generate and stabilize entanglement
+4. **Convergence rate** is determined by the spectral gap
+5. **Autonomous error correction** continuously protects quantum information
+6. **Dissipative gates** implement operations through steady-state dynamics
+
+<Tip>
+Environment engineering is particularly powerful for preparing states that are difficult to reach with unitary evolution, such as highly entangled states or error-corrected logical states.
+</Tip>
+
+## Further Reading
+
+- Previous: Non-Markovian Dynamics
+- Next: Dynamical Decoupling
+- Related: Quantum Error Correction, Quantum Control

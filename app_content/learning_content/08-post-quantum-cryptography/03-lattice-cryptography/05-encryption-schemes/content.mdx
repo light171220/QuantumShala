@@ -1,0 +1,897 @@
+---
+title: "Lattice-Based Encryption: Kyber (ML-KEM) Deep Dive"
+description: "Master the NIST-standardized ML-KEM (Kyber) algorithm. Understand its construction from Module-LWE, key encapsulation mechanics, IND-CCA2 security, and practical implementation considerations."
+duration: 85
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Explain Kyber's complete construction from Module-LWE
+- Implement the core Kyber algorithms (KeyGen, Encaps, Decaps)
+- Understand the IND-CCA2 security transformation
+- Analyze Kyber's parameter choices and security levels
+- Compare Kyber to classical key exchange mechanisms
+- Identify implementation pitfalls and best practices
+
+## 1. From Module-LWE to Kyber
+
+Kyber (now standardized as ML-KEM) transforms the Module-LWE problem into a practical Key Encapsulation Mechanism (KEM).
+
+<Definition term="Key Encapsulation Mechanism (KEM)">
+A KEM is a triple of algorithms (KeyGen, Encaps, Decaps):
+- **KeyGen()** → (pk, sk): Generate public/secret key pair
+- **Encaps(pk)** → (ct, K): Generate ciphertext and shared secret
+- **Decaps(sk, ct)** → K: Recover shared secret from ciphertext
+
+Security goal: Without sk, an adversary cannot distinguish K from random.
+</Definition>
+
+```python
+import numpy as np
+from typing import Tuple, List
+import hashlib
+import secrets
+
+class KyberParameters:
+    """
+    Kyber parameter sets as specified in FIPS 203 (ML-KEM).
+    
+    The parameters balance security, key sizes, and performance.
+    """
+    
+    # Common parameters
+    n = 256        # Polynomial degree
+    q = 3329       # Modulus (prime, q ≡ 1 mod 256)
+    
+    # Security level specific parameters
+    PARAMS = {
+        'Kyber512': {   # ML-KEM-512, NIST Level 1
+            'k': 2,
+            'eta1': 3,   # Secret/error distribution parameter
+            'eta2': 2,
+            'du': 10,    # Ciphertext compression bits
+            'dv': 4,
+            'security_level': 1,
+            'security_bits': 128
+        },
+        'Kyber768': {   # ML-KEM-768, NIST Level 3
+            'k': 3,
+            'eta1': 2,
+            'eta2': 2,
+            'du': 10,
+            'dv': 4,
+            'security_level': 3,
+            'security_bits': 192
+        },
+        'Kyber1024': {  # ML-KEM-1024, NIST Level 5
+            'k': 4,
+            'eta1': 2,
+            'eta2': 2,
+            'du': 11,
+            'dv': 5,
+            'security_level': 5,
+            'security_bits': 256
+        }
+    }
+    
+    @classmethod
+    def get_sizes(cls, variant: str) -> dict:
+        """Calculate key and ciphertext sizes for a variant."""
+        p = cls.PARAMS[variant]
+        k = p['k']
+        du, dv = p['du'], p['dv']
+        
+        # Public key: ρ (32 bytes) + t̂ (k×n×12 bits)
+        pk_bytes = 32 + k * cls.n * 12 // 8
+        
+        # Secret key: s (k×n×12 bits) + pk + H(pk) + z
+        sk_bytes = k * cls.n * 12 // 8 + pk_bytes + 32 + 32
+        
+        # Ciphertext: u (k×n×du bits) + v (n×dv bits)
+        ct_bytes = k * cls.n * du // 8 + cls.n * dv // 8
+        
+        return {
+            'public_key_bytes': pk_bytes,
+            'secret_key_bytes': sk_bytes,
+            'ciphertext_bytes': ct_bytes,
+            'shared_secret_bytes': 32
+        }
+
+
+def display_kyber_parameters():
+    """Display Kyber parameter comparison."""
+    print("KYBER (ML-KEM) PARAMETER SETS")
+    print("=" * 70)
+    
+    print(f"\n{'Parameter':<20} {'Kyber512':<15} {'Kyber768':<15} {'Kyber1024':<15}")
+    print("-" * 70)
+    
+    params = ['k', 'eta1', 'eta2', 'du', 'dv', 'security_bits']
+    for param in params:
+        vals = [str(KyberParameters.PARAMS[v][param]) for v in 
+                ['Kyber512', 'Kyber768', 'Kyber1024']]
+        print(f"{param:<20} {vals[0]:<15} {vals[1]:<15} {vals[2]:<15}")
+    
+    print(f"\n{'Size (bytes)':<20} {'Kyber512':<15} {'Kyber768':<15} {'Kyber1024':<15}")
+    print("-" * 70)
+    
+    for variant in ['Kyber512', 'Kyber768', 'Kyber1024']:
+        sizes = KyberParameters.get_sizes(variant)
+        if variant == 'Kyber512':
+            print(f"{'Public Key':<20} {sizes['public_key_bytes']:<15} ", end='')
+        elif variant == 'Kyber768':
+            print(f"{sizes['public_key_bytes']:<15} ", end='')
+        else:
+            print(f"{sizes['public_key_bytes']:<15}")
+    
+    for metric in ['public_key_bytes', 'secret_key_bytes', 'ciphertext_bytes']:
+        name = metric.replace('_bytes', '').replace('_', ' ').title()
+        vals = [str(KyberParameters.get_sizes(v)[metric]) for v in 
+                ['Kyber512', 'Kyber768', 'Kyber1024']]
+        print(f"{name:<20} {vals[0]:<15} {vals[1]:<15} {vals[2]:<15}")
+    
+    print("\n--- COMPARISON WITH CLASSICAL ---")
+    print(f"{'Scheme':<20} {'Public Key':<15} {'Ciphertext':<15} {'Security':<15}")
+    print("-" * 70)
+    print(f"{'RSA-2048':<20} {'256':<15} {'256':<15} {'~112 bits':<15}")
+    print(f"{'ECDH P-256':<20} {'64':<15} {'64':<15} {'~128 bits':<15}")
+    print(f"{'X25519':<20} {'32':<15} {'32':<15} {'~128 bits':<15}")
+    print(f"{'Kyber512':<20} {'800':<15} {'768':<15} {'128 bits (PQ)':<15}")
+
+display_kyber_parameters()
+```
+
+## 2. Kyber's Core Construction
+
+### The Centered Binomial Distribution
+
+<Definition term="Centered Binomial Distribution CBD_η">
+Instead of discrete Gaussian, Kyber uses the Centered Binomial Distribution for efficiency:
+
+$$\text{CBD}_\eta: \text{Sample } (a_1, \ldots, a_\eta, b_1, \ldots, b_\eta) \xleftarrow{\$} \{0,1\}^{2\eta}$$
+$$\text{Output } \sum_{i=1}^{\eta} a_i - \sum_{i=1}^{\eta} b_i$$
+
+Values range from $-\eta$ to $+\eta$ with binomial-like distribution.
+</Definition>
+
+```python
+class KyberCore:
+    """
+    Core Kyber operations implementing the ML-KEM specification.
+    """
+    
+    def __init__(self, variant: str = 'Kyber768'):
+        self.n = 256
+        self.q = 3329
+        self.params = KyberParameters.PARAMS[variant]
+        self.k = self.params['k']
+        self.eta1 = self.params['eta1']
+        self.eta2 = self.params['eta2']
+    
+    def cbd(self, eta: int, num_samples: int = 256) -> np.ndarray:
+        """
+        Sample from Centered Binomial Distribution.
+        
+        CBD_η samples have variance η/2 and range [-η, η].
+        Much faster than discrete Gaussian while maintaining security.
+        """
+        result = np.zeros(num_samples, dtype=np.int16)
+        
+        for i in range(num_samples):
+            # Sample 2η bits
+            bits = np.random.randint(0, 2, size=2*eta)
+            # Sum first η bits minus sum of last η bits
+            result[i] = np.sum(bits[:eta]) - np.sum(bits[eta:])
+        
+        return result
+    
+    def sample_poly_cbd(self, eta: int) -> np.ndarray:
+        """Sample a polynomial with CBD coefficients."""
+        return self.cbd(eta, self.n)
+    
+    def sample_vector_cbd(self, eta: int) -> List[np.ndarray]:
+        """Sample k polynomials with CBD coefficients."""
+        return [self.sample_poly_cbd(eta) for _ in range(self.k)]
+    
+    def sample_matrix_uniform(self, seed: bytes, transposed: bool = False
+                              ) -> List[List[np.ndarray]]:
+        """
+        Sample uniform matrix from seed (deterministic).
+        
+        In real Kyber, this uses SHAKE-128 XOF for expansion.
+        """
+        np.random.seed(int.from_bytes(seed[:4], 'big'))
+        
+        matrix = []
+        for i in range(self.k):
+            row = []
+            for j in range(self.k):
+                poly = np.random.randint(0, self.q, size=self.n)
+                row.append(poly)
+            matrix.append(row)
+        
+        if transposed:
+            matrix = [[matrix[j][i] for j in range(self.k)] 
+                      for i in range(self.k)]
+        
+        return matrix
+    
+    def poly_add(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Add polynomials mod q."""
+        return (a.astype(np.int32) + b.astype(np.int32)) % self.q
+    
+    def poly_sub(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Subtract polynomials mod q."""
+        return (a.astype(np.int32) - b.astype(np.int32)) % self.q
+    
+    def poly_mult_ntt(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """
+        Multiply polynomials using schoolbook (would use NTT in practice).
+        
+        Real implementation uses NTT for O(n log n) multiplication.
+        """
+        a = a.astype(np.int64)
+        b = b.astype(np.int64)
+        
+        # Schoolbook multiplication
+        result = np.zeros(2 * self.n - 1, dtype=np.int64)
+        for i in range(self.n):
+            for j in range(self.n):
+                result[i + j] += a[i] * b[j]
+        
+        # Reduce mod x^n + 1
+        reduced = np.zeros(self.n, dtype=np.int64)
+        for i in range(2 * self.n - 1):
+            if i < self.n:
+                reduced[i] += result[i]
+            else:
+                reduced[i - self.n] -= result[i]
+        
+        return reduced % self.q
+    
+    def matrix_vector_mult(self, A: List[List[np.ndarray]], 
+                           s: List[np.ndarray]) -> List[np.ndarray]:
+        """Compute A·s where A is k×k matrix of polynomials."""
+        result = []
+        for i in range(self.k):
+            acc = np.zeros(self.n, dtype=np.int64)
+            for j in range(self.k):
+                prod = self.poly_mult_ntt(A[i][j], s[j])
+                acc = self.poly_add(acc, prod)
+            result.append(acc)
+        return result
+    
+    def vector_add(self, a: List[np.ndarray], 
+                   b: List[np.ndarray]) -> List[np.ndarray]:
+        """Add vectors of polynomials."""
+        return [self.poly_add(a[i], b[i]) for i in range(self.k)]
+    
+    def inner_product(self, a: List[np.ndarray], 
+                      b: List[np.ndarray]) -> np.ndarray:
+        """Compute ⟨a, b⟩ = Σ a[i]·b[i]."""
+        acc = np.zeros(self.n, dtype=np.int64)
+        for i in range(self.k):
+            prod = self.poly_mult_ntt(a[i], b[i])
+            acc = self.poly_add(acc, prod)
+        return acc
+
+
+def demonstrate_cbd():
+    """Demonstrate the Centered Binomial Distribution."""
+    print("\nCENTERED BINOMIAL DISTRIBUTION")
+    print("=" * 60)
+    
+    kyber = KyberCore('Kyber768')
+    
+    for eta in [2, 3]:
+        samples = kyber.cbd(eta, 10000)
+        
+        print(f"\nCBD_{eta} (10000 samples):")
+        print(f"  Range: [{samples.min()}, {samples.max()}]")
+        print(f"  Mean: {samples.mean():.4f} (expected: 0)")
+        print(f"  Variance: {samples.var():.4f} (expected: {eta/2})")
+        
+        # Distribution
+        print(f"  Distribution:")
+        for val in range(-eta, eta + 1):
+            count = np.sum(samples == val)
+            bar = "█" * (count // 200)
+            print(f"    {val:+d}: {bar} ({count/100:.1f}%)")
+
+demonstrate_cbd()
+```
+
+## 3. Kyber Key Generation
+
+<Formula>
+$$\text{KeyGen():}$$
+$$1. \text{ Sample seed } \rho \xleftarrow{\$} \{0,1\}^{256}$$
+$$2. \text{ Generate matrix } \mathbf{A} = \text{Sam}(\rho) \in R_q^{k \times k}$$
+$$3. \text{ Sample } \mathbf{s}, \mathbf{e} \leftarrow \text{CBD}_{\eta_1}^k$$
+$$4. \text{ Compute } \mathbf{t} = \mathbf{A} \cdot \mathbf{s} + \mathbf{e}$$
+$$5. \text{ Return } pk = (\rho, \mathbf{t}), \quad sk = \mathbf{s}$$
+</Formula>
+
+```python
+class KyberKEM:
+    """
+    Complete Kyber Key Encapsulation Mechanism.
+    
+    Implements the IND-CCA2 secure KEM from Module-LWE.
+    """
+    
+    def __init__(self, variant: str = 'Kyber768'):
+        self.core = KyberCore(variant)
+        self.variant = variant
+        self.params = KyberParameters.PARAMS[variant]
+    
+    def _hash_h(self, data: bytes) -> bytes:
+        """H: SHA3-256 hash."""
+        return hashlib.sha3_256(data).digest()
+    
+    def _hash_g(self, data: bytes) -> Tuple[bytes, bytes]:
+        """G: SHA3-512 hash, split into two 32-byte outputs."""
+        h = hashlib.sha3_512(data).digest()
+        return h[:32], h[32:]
+    
+    def _kdf(self, data: bytes) -> bytes:
+        """KDF: SHAKE-256 for key derivation."""
+        shake = hashlib.shake_256(data)
+        return shake.digest(32)
+    
+    def keygen(self) -> Tuple[dict, dict]:
+        """
+        Generate Kyber key pair.
+        
+        Returns:
+            pk: Public key (rho, t_hat)
+            sk: Secret key (s, pk, h_pk, z)
+        """
+        # 1. Sample randomness
+        rho = secrets.token_bytes(32)  # For matrix generation
+        sigma = secrets.token_bytes(32)  # For secret sampling
+        
+        # 2. Generate matrix A from rho
+        A = self.core.sample_matrix_uniform(rho)
+        
+        # 3. Sample secret and error vectors
+        s = self.core.sample_vector_cbd(self.params['eta1'])
+        e = self.core.sample_vector_cbd(self.params['eta1'])
+        
+        # 4. Compute t = As + e
+        As = self.core.matrix_vector_mult(A, s)
+        t = self.core.vector_add(As, e)
+        
+        # 5. Encode public key
+        pk = {
+            'rho': rho,
+            't': t,
+            'A': A  # In practice, A is regenerated from rho
+        }
+        
+        # Compute hash of public key
+        pk_bytes = self._encode_pk(pk)
+        h_pk = self._hash_h(pk_bytes)
+        
+        # Random value for implicit rejection
+        z = secrets.token_bytes(32)
+        
+        # 6. Secret key includes everything needed for decapsulation
+        sk = {
+            's': s,
+            'pk': pk,
+            'h_pk': h_pk,
+            'z': z
+        }
+        
+        return pk, sk
+    
+    def _encode_pk(self, pk: dict) -> bytes:
+        """Encode public key to bytes."""
+        # Simplified encoding - real Kyber uses specific byte encoding
+        data = pk['rho']
+        for poly in pk['t']:
+            data += poly.astype(np.int16).tobytes()
+        return data
+    
+    def _encode_ct(self, u: List[np.ndarray], v: np.ndarray) -> bytes:
+        """Encode ciphertext to bytes."""
+        data = b''
+        for poly in u:
+            data += poly.astype(np.int16).tobytes()
+        data += v.astype(np.int16).tobytes()
+        return data
+    
+    def encaps(self, pk: dict) -> Tuple[bytes, bytes]:
+        """
+        Encapsulate: Generate ciphertext and shared secret.
+        
+        This is the CPA-secure encryption wrapped with FO transform.
+        
+        Args:
+            pk: Public key
+        
+        Returns:
+            ct: Ciphertext bytes
+            K: Shared secret (32 bytes)
+        """
+        # 1. Sample random message
+        m = secrets.token_bytes(32)
+        
+        # 2. Hash to get randomness
+        pk_bytes = self._encode_pk(pk)
+        h_pk = self._hash_h(pk_bytes)
+        
+        K_bar, r = self._hash_g(m + h_pk)
+        
+        # 3. Encrypt m using randomness r
+        # In real Kyber, r determines all random choices in encryption
+        np.random.seed(int.from_bytes(r[:4], 'big'))
+        
+        # Sample ephemeral secret and errors
+        r_vec = self.core.sample_vector_cbd(self.params['eta1'])
+        e1 = self.core.sample_vector_cbd(self.params['eta2'])
+        e2 = self.core.sample_poly_cbd(self.params['eta2'])
+        
+        # Compute u = A^T r + e1
+        A_T = [[pk['A'][j][i] for j in range(self.core.k)] 
+               for i in range(self.core.k)]
+        Ar = self.core.matrix_vector_mult(A_T, r_vec)
+        u = self.core.vector_add(Ar, e1)
+        
+        # Compute v = t^T r + e2 + encode(m)
+        tr = self.core.inner_product(pk['t'], r_vec)
+        
+        # Encode message: scale to q/2 for each bit
+        m_bits = np.unpackbits(np.frombuffer(m, dtype=np.uint8))
+        m_poly = np.zeros(self.core.n, dtype=np.int64)
+        m_poly[:len(m_bits)] = m_bits * (self.core.q // 2)
+        
+        v = self.core.poly_add(self.core.poly_add(tr, e2), m_poly)
+        
+        # 4. Compress ciphertext
+        u_compressed = [self._compress(poly, self.params['du']) for poly in u]
+        v_compressed = self._compress(v, self.params['dv'])
+        
+        # 5. Encode ciphertext
+        ct = self._encode_ct(u_compressed, v_compressed)
+        
+        # 6. Derive shared secret
+        K = self._kdf(K_bar + self._hash_h(ct))
+        
+        return ct, K
+    
+    def _compress(self, poly: np.ndarray, d: int) -> np.ndarray:
+        """
+        Compress polynomial coefficients to d bits.
+        
+        Compress_q(x, d) = ⌈(2^d / q) · x⌋ mod 2^d
+        """
+        scale = (1 << d) / self.core.q
+        compressed = np.round(poly * scale).astype(np.int64) % (1 << d)
+        return compressed
+    
+    def _decompress(self, poly: np.ndarray, d: int) -> np.ndarray:
+        """
+        Decompress polynomial coefficients from d bits.
+        
+        Decompress_q(x, d) = ⌈(q / 2^d) · x⌋
+        """
+        scale = self.core.q / (1 << d)
+        decompressed = np.round(poly * scale).astype(np.int64) % self.core.q
+        return decompressed
+    
+    def decaps(self, sk: dict, ct: bytes) -> bytes:
+        """
+        Decapsulate: Recover shared secret from ciphertext.
+        
+        Includes implicit rejection for IND-CCA2 security.
+        
+        Args:
+            sk: Secret key
+            ct: Ciphertext
+        
+        Returns:
+            K: Shared secret (32 bytes)
+        """
+        # 1. Decode ciphertext
+        u, v = self._decode_ct(ct)
+        
+        # 2. Decompress
+        u_decompressed = [self._decompress(poly, self.params['du']) for poly in u]
+        v_decompressed = self._decompress(v, self.params['dv'])
+        
+        # 3. Compute v - s^T u
+        su = self.core.inner_product(sk['s'], u_decompressed)
+        m_noisy = self.core.poly_sub(v_decompressed, su)
+        
+        # 4. Decode message (round to nearest 0 or q/2)
+        m_bits = np.zeros(256, dtype=np.uint8)
+        for i in range(256):
+            coeff = m_noisy[i]
+            # Center around 0
+            if coeff > self.core.q // 2:
+                coeff -= self.core.q
+            # Decode
+            m_bits[i] = 1 if abs(coeff - self.core.q // 2) < self.core.q // 4 else 0
+        
+        m = np.packbits(m_bits).tobytes()
+        
+        # 5. Re-encrypt and compare (Fujisaki-Okamoto check)
+        K_bar, r = self._hash_g(m + sk['h_pk'])
+        
+        # Re-encrypt with same randomness
+        ct_prime, _ = self._reencrypt(sk['pk'], m, r)
+        
+        # 6. Implicit rejection
+        if ct == ct_prime:
+            # Valid ciphertext
+            K = self._kdf(K_bar + self._hash_h(ct))
+        else:
+            # Invalid - return pseudorandom value
+            K = self._kdf(sk['z'] + self._hash_h(ct))
+        
+        return K
+    
+    def _decode_ct(self, ct: bytes) -> Tuple[List[np.ndarray], np.ndarray]:
+        """Decode ciphertext from bytes."""
+        k = self.core.k
+        n = self.core.n
+        
+        # Each polynomial is n * 2 bytes (int16)
+        poly_bytes = n * 2
+        
+        u = []
+        offset = 0
+        for _ in range(k):
+            poly = np.frombuffer(ct[offset:offset + poly_bytes], dtype=np.int16)
+            u.append(poly.astype(np.int64))
+            offset += poly_bytes
+        
+        v = np.frombuffer(ct[offset:offset + poly_bytes], dtype=np.int16)
+        return u, v.astype(np.int64)
+    
+    def _reencrypt(self, pk: dict, m: bytes, r: bytes) -> Tuple[bytes, bytes]:
+        """Re-encrypt message with given randomness (for FO check)."""
+        # Simplified - in practice reuses the same logic as encaps
+        np.random.seed(int.from_bytes(r[:4], 'big'))
+        
+        r_vec = self.core.sample_vector_cbd(self.params['eta1'])
+        e1 = self.core.sample_vector_cbd(self.params['eta2'])
+        e2 = self.core.sample_poly_cbd(self.params['eta2'])
+        
+        A_T = [[pk['A'][j][i] for j in range(self.core.k)] 
+               for i in range(self.core.k)]
+        Ar = self.core.matrix_vector_mult(A_T, r_vec)
+        u = self.core.vector_add(Ar, e1)
+        
+        tr = self.core.inner_product(pk['t'], r_vec)
+        
+        m_bits = np.unpackbits(np.frombuffer(m, dtype=np.uint8))
+        m_poly = np.zeros(self.core.n, dtype=np.int64)
+        m_poly[:len(m_bits)] = m_bits * (self.core.q // 2)
+        
+        v = self.core.poly_add(self.core.poly_add(tr, e2), m_poly)
+        
+        u_compressed = [self._compress(poly, self.params['du']) for poly in u]
+        v_compressed = self._compress(v, self.params['dv'])
+        
+        ct = self._encode_ct(u_compressed, v_compressed)
+        K_bar, _ = self._hash_g(m + self._hash_h(self._encode_pk(pk)))
+        K = self._kdf(K_bar + self._hash_h(ct))
+        
+        return ct, K
+
+
+def demonstrate_kyber_kem():
+    """Demonstrate complete Kyber KEM."""
+    print("\nKYBER KEM DEMONSTRATION")
+    print("=" * 60)
+    
+    for variant in ['Kyber512', 'Kyber768', 'Kyber1024']:
+        print(f"\n--- {variant} ---")
+        
+        kem = KyberKEM(variant)
+        
+        # Key generation
+        pk, sk = kem.keygen()
+        print(f"Key generation complete")
+        
+        # Encapsulation
+        ct, K_encaps = kem.encaps(pk)
+        print(f"Encapsulation: {len(ct)} byte ciphertext")
+        print(f"Shared secret (encaps): {K_encaps[:16].hex()}...")
+        
+        # Decapsulation
+        K_decaps = kem.decaps(sk, ct)
+        print(f"Shared secret (decaps): {K_decaps[:16].hex()}...")
+        
+        # Verify
+        match = K_encaps == K_decaps
+        print(f"Keys match: {match} {'✓' if match else '✗'}")
+
+demonstrate_kyber_kem()
+```
+
+## 4. IND-CCA2 Security: The Fujisaki-Okamoto Transform
+
+<Definition term="IND-CCA2 Security">
+**Indistinguishability under Adaptive Chosen-Ciphertext Attack**: An adversary who can obtain decryptions of any ciphertext (except the challenge) cannot distinguish whether the challenge ciphertext encrypts message $m_0$ or $m_1$.
+</Definition>
+
+```python
+def explain_fo_transform():
+    """
+    Explain the Fujisaki-Okamoto transform used in Kyber.
+    """
+    explanation = """
+    FUJISAKI-OKAMOTO TRANSFORM
+    ══════════════════════════════════════════════════════════════════
+    
+    The FO transform converts IND-CPA (passive) security to 
+    IND-CCA2 (active) security.
+    
+    WHY IS THIS NEEDED?
+    ───────────────────────────────────────────────────────────────────
+    Basic LWE encryption is only CPA-secure:
+    • An adversary can modify ciphertexts
+    • Decryption oracle reveals information about secret key
+    • Not suitable for real-world use where attackers are active
+    
+    THE TRANSFORM
+    ───────────────────────────────────────────────────────────────────
+    
+    Standard CPA Encryption:
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  Enc(pk, m; r) → ct       (r is random coins)                  │
+    │  Dec(sk, ct) → m                                                │
+    └─────────────────────────────────────────────────────────────────┘
+    
+    FO-Transformed CCA Encryption:
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  Enc*(pk, m):                                                   │
+    │    1. r = H(m, pk)        ← Randomness derived from message    │
+    │    2. ct = Enc(pk, m; r)  ← Deterministic given m              │
+    │    3. K = KDF(m, ct)      ← Shared secret                      │
+    │    4. Return (ct, K)                                            │
+    │                                                                 │
+    │  Dec*(sk, ct):                                                  │
+    │    1. m' = Dec(sk, ct)    ← Decrypt to get candidate message   │
+    │    2. r' = H(m', pk)      ← Recompute randomness               │
+    │    3. ct' = Enc(pk, m'; r')  ← Re-encrypt                      │
+    │    4. If ct' = ct:                                              │
+    │         Return K = KDF(m', ct)   ← Valid ciphertext            │
+    │       Else:                                                     │
+    │         Return K = KDF(z, ct)    ← IMPLICIT REJECTION          │
+    └─────────────────────────────────────────────────────────────────┘
+    
+    KEY INSIGHT: IMPLICIT REJECTION
+    ───────────────────────────────────────────────────────────────────
+    • If decryption fails or ciphertext was tampered with:
+      - We return a PSEUDORANDOM value derived from secret z
+      - Attacker cannot distinguish this from valid decryption
+      - No information leaked about the secret key!
+    
+    • This is crucial for CCA2 security:
+      - Attacker submits modified ciphertext ct*
+      - Gets back random-looking K* 
+      - Learns nothing useful
+    
+    SECURITY PROOF INTUITION
+    ───────────────────────────────────────────────────────────────────
+    In the Random Oracle Model:
+    
+    1. Attacker queries H(m, pk) to create ciphertexts
+    2. We can "see" these queries and know which m was encrypted
+    3. If attacker submits ct* ≠ ct to decryption:
+       - Either m* wasn't queried to H → re-encryption fails
+       - Or m* was queried but ct* ≠ Enc(pk, m*; H(m*, pk))
+       - Either way: implicit rejection, no information leaked
+    
+    4. This reduction shows: breaking CCA2 requires breaking CPA
+    """
+    print(explanation)
+
+explain_fo_transform()
+```
+
+## 5. Compression and Encoding
+
+<Formula>
+$$\text{Compress}_q(x, d) = \left\lceil \frac{2^d}{q} \cdot x \right\rfloor \mod 2^d$$
+$$\text{Decompress}_q(y, d) = \left\lceil \frac{q}{2^d} \cdot y \right\rfloor$$
+</Formula>
+
+```python
+def demonstrate_compression():
+    """
+    Demonstrate Kyber's compression scheme.
+    """
+    print("\nKYBER COMPRESSION")
+    print("=" * 60)
+    
+    q = 3329
+    
+    # Test compression at different bit levels
+    for d in [4, 10, 11]:
+        print(f"\n--- Compression to {d} bits ---")
+        
+        # Original coefficients
+        original = np.array([0, q//4, q//2, 3*q//4, q-1])
+        
+        # Compress
+        scale_c = (1 << d) / q
+        compressed = np.round(original * scale_c).astype(int) % (1 << d)
+        
+        # Decompress
+        scale_d = q / (1 << d)
+        decompressed = np.round(compressed * scale_d).astype(int) % q
+        
+        # Error
+        error = (decompressed - original) % q
+        error = np.where(error > q//2, error - q, error)
+        
+        print(f"Original:     {original}")
+        print(f"Compressed:   {compressed}")
+        print(f"Decompressed: {decompressed}")
+        print(f"Error:        {error}")
+        print(f"Max |error|:  {np.max(np.abs(error))}")
+        print(f"Error bound:  {q / (1 << (d+1)):.1f}")
+
+demonstrate_compression()
+```
+
+## 6. Security Analysis
+
+```python
+def security_analysis():
+    """
+    Analyze Kyber's security guarantees.
+    """
+    print("\nKYBER SECURITY ANALYSIS")
+    print("=" * 70)
+    
+    analysis = {
+        'Theoretical Foundation': {
+            'Problem': 'Module-LWE with n=256, k∈{2,3,4}',
+            'Reduction': 'Decision MLWE → worst-case Module lattice problems',
+            'Assumption': 'MLWE is hard for the chosen parameters',
+        },
+        'Classical Security': {
+            'Best Attack': 'Primal lattice attack using BKZ',
+            'Complexity': '2^(c·dim) where dim = n·k = 256k',
+            'Kyber512': '~143 bits (Core-SVP)',
+            'Kyber768': '~207 bits (Core-SVP)',
+            'Kyber1024': '~272 bits (Core-SVP)',
+        },
+        'Quantum Security': {
+            'Best Attack': 'Quantum sieving (Grover-accelerated)',
+            'Speedup': 'Polynomial (not exponential like Shor)',
+            'Kyber512': '~128 bits (NIST Level 1)',
+            'Kyber768': '~192 bits (NIST Level 3)',
+            'Kyber1024': '~256 bits (NIST Level 5)',
+        },
+        'IND-CCA2': {
+            'Transform': 'Fujisaki-Okamoto with implicit rejection',
+            'ROM Proof': 'Tight reduction from IND-CPA to IND-CCA2',
+            'QROM Proof': 'Proof also holds in Quantum Random Oracle Model',
+        }
+    }
+    
+    for category, details in analysis.items():
+        print(f"\n{category}")
+        print("-" * 60)
+        for key, value in details.items():
+            print(f"  {key}: {value}")
+    
+    print("\n" + "=" * 70)
+    print("COMPARISON: Why Kyber Parameters Are Conservative")
+    print("-" * 70)
+    
+    comparison = """
+    The chosen parameters include safety margins:
+    
+    1. Error distribution (CBD) is well-studied and easier to analyze
+       than discrete Gaussian while providing equivalent security.
+    
+    2. Module rank k > 1 provides security buffer against potential
+       algebraic attacks on Ring-LWE.
+    
+    3. Parameters target slightly HIGHER security than the corresponding
+       NIST level to account for future cryptanalytic progress.
+    
+    4. The modulus q = 3329 is chosen to enable efficient NTT while
+       being small enough for good noise tolerance.
+    """
+    print(comparison)
+
+security_analysis()
+```
+
+## 7. Practical Implementation Considerations
+
+```python
+def implementation_considerations():
+    """
+    Discuss practical implementation requirements.
+    """
+    print("\nIMPLEMENTATION CONSIDERATIONS")
+    print("=" * 70)
+    
+    considerations = {
+        'Constant-Time Implementation': {
+            'Why': 'Prevent timing side-channel attacks',
+            'What': 'All operations must take the same time regardless of secret values',
+            'Critical Points': [
+                'Polynomial multiplication',
+                'CBD sampling',
+                'Comparison in FO transform',
+                'Message encoding/decoding'
+            ]
+        },
+        'Random Number Generation': {
+            'Requirement': 'Cryptographically secure randomness',
+            'Sources': 'CSPRNG (e.g., /dev/urandom, RDRAND)',
+            'Amount': '~64 bytes per key generation, ~32 bytes per encapsulation'
+        },
+        'NTT Implementation': {
+            'Purpose': 'Fast polynomial multiplication O(n log n)',
+            'Montgomery Form': 'Used for efficient modular arithmetic',
+            'Barrett Reduction': 'Alternative for modular reduction'
+        },
+        'Memory Safety': {
+            'Secret Zeroization': 'Clear secret data after use',
+            'Stack Protection': 'Avoid stack buffer overflows',
+            'Heap Allocation': 'Consider constant-time allocators'
+        },
+        'Validation': {
+            'Public Key': 'Check that coefficients are in valid range',
+            'Ciphertext': 'Validate structure before decryption',
+            'Implicit Rejection': 'Always return a value, never error'
+        }
+    }
+    
+    for topic, details in considerations.items():
+        print(f"\n{topic}")
+        print("-" * 50)
+        for key, value in details.items():
+            if isinstance(value, list):
+                print(f"  {key}:")
+                for item in value:
+                    print(f"    • {item}")
+            else:
+                print(f"  {key}: {value}")
+
+implementation_considerations()
+```
+
+<Warning>
+**Critical Implementation Requirements:**
+1. Use constant-time operations throughout
+2. Never skip the FO validity check
+3. Always implement implicit rejection (don't return errors)
+4. Use validated, tested implementations in production
+</Warning>
+
+## Summary
+
+In this lesson, you mastered Kyber (ML-KEM):
+
+1. **Construction**: Module-LWE with k∈{2,3,4} for different security levels
+2. **CBD**: Centered Binomial Distribution replaces Gaussian for efficiency
+3. **Compression**: Reduces ciphertext size while maintaining correctness
+4. **FO Transform**: Provides IND-CCA2 security with implicit rejection
+5. **Parameters**: Conservative choices with safety margins
+6. **Security**: Proven secure under Module-LWE hardness assumption
+7. **Implementation**: Requires constant-time code and careful validation
+
+Kyber is now standardized as FIPS 203 (ML-KEM) and is the primary recommendation for post-quantum key encapsulation.
+
+## Further Reading
+
+- Next lesson: Lattice-Based Signatures (Dilithium/ML-DSA)
+- Related: FIPS 203 specification
+- Advanced: Hybrid key exchange (X25519 + Kyber)

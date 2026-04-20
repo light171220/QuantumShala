@@ -1,0 +1,742 @@
+---
+title: "Quantum Counting Algorithms"
+description: "Master quantum counting algorithms that combine Grover search with amplitude estimation to count the number of solutions to search problems, achieving quadratic speedup over classical counting methods."
+duration: 45
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the connection between counting and amplitude estimation
+- Implement quantum counting using phase estimation on the Grover operator
+- Analyze the precision and query complexity of quantum counting
+- Apply quantum counting to constraint satisfaction problems
+- Compare quantum counting with classical random sampling approaches
+
+## 1. The Counting Problem
+
+Given a boolean function $f: \{0,1\}^n \to \{0,1\}$, count the number of inputs that satisfy $f(x) = 1$:
+
+<Formula>
+$$M = |\{x \in \{0,1\}^n : f(x) = 1\}|$$
+</Formula>
+
+<Definition term="Quantum Counting">
+A quantum algorithm that estimates the number of solutions $M$ to a search problem using $O(\sqrt{N})$ oracle queries, achieving quadratic speedup over classical random sampling which requires $O(N/M)$ queries to find even one solution.
+</Definition>
+
+### Classical vs Quantum Complexity
+
+| Task | Classical | Quantum |
+|------|-----------|---------|
+| Find one solution | $O(N/M)$ | $O(\sqrt{N/M})$ |
+| Count solutions (exact) | $O(N)$ | $O(\sqrt{N})$ |
+| Estimate $M$ within $\epsilon M$ | $O(N/M)$ | $O(\sqrt{N}/\epsilon)$ |
+
+## 2. Connection to Amplitude Estimation
+
+Quantum counting is a direct application of amplitude estimation. The key insight:
+
+<Formula>
+$$\text{Fraction of solutions} = \frac{M}{N} = a$$
+</Formula>
+
+If we can estimate $a$ using amplitude estimation, we get $M = aN$.
+
+### Setup
+
+The Grover operator $G$ rotates in a 2D subspace:
+- $|s_0\rangle$: superposition of non-solutions
+- $|s_1\rangle$: superposition of solutions
+
+<Formula>
+$$|\psi\rangle = H^{\otimes n}|0\rangle^{\otimes n} = \sqrt{1-a}|s_0\rangle + \sqrt{a}|s_1\rangle$$
+</Formula>
+
+where $a = M/N$ and $\sin^2(\theta/2) = a$.
+
+```python
+import numpy as np
+from typing import Callable, Dict, List, Tuple
+
+class QuantumCounting:
+    """
+    Quantum Counting algorithm implementation.
+    Combines Grover search with amplitude estimation.
+    """
+
+    def __init__(self, num_qubits: int):
+        """
+        Initialize quantum counting.
+
+        Args:
+            num_qubits: Number of search qubits (N = 2^n)
+        """
+        self.n = num_qubits
+        self.N = 2 ** num_qubits
+
+    def classical_oracle(
+        self,
+        f: Callable[[int], bool]
+    ) -> np.ndarray:
+        """
+        Create oracle matrix for function f.
+
+        Args:
+            f: Boolean function f(x) -> {0, 1}
+
+        Returns:
+            Oracle matrix O_f that flips phase of solutions
+        """
+        oracle = np.eye(self.N, dtype=complex)
+        for x in range(self.N):
+            if f(x):
+                oracle[x, x] = -1
+        return oracle
+
+    def grover_operator(
+        self,
+        oracle: np.ndarray
+    ) -> np.ndarray:
+        """
+        Construct the Grover diffusion operator.
+
+        G = H^n (2|0><0| - I) H^n O_f
+
+        Args:
+            oracle: Oracle matrix
+
+        Returns:
+            Full Grover operator
+        """
+        # Hadamard on all qubits
+        H = np.array([[1, 1], [1, -1]]) / np.sqrt(2)
+        H_n = H
+        for _ in range(self.n - 1):
+            H_n = np.kron(H_n, H)
+
+        # Diffusion: 2|0><0| - I
+        diffusion = 2 * np.outer(
+            np.eye(self.N)[0],
+            np.eye(self.N)[0]
+        ) - np.eye(self.N)
+
+        # Full Grover operator
+        G = H_n @ diffusion @ H_n @ oracle
+
+        return G
+
+    def count_solutions_exact(
+        self,
+        f: Callable[[int], bool]
+    ) -> int:
+        """Count solutions classically for verification."""
+        return sum(1 for x in range(self.N) if f(x))
+
+    def estimate_count(
+        self,
+        f: Callable[[int], bool],
+        precision_qubits: int = 6
+    ) -> Dict:
+        """
+        Estimate the number of solutions using quantum counting.
+
+        Args:
+            f: Boolean function to count solutions of
+            precision_qubits: Qubits for phase estimation
+
+        Returns:
+            Dictionary with counting results
+        """
+        # Build operators
+        oracle = self.classical_oracle(f)
+        G = self.grover_operator(oracle)
+
+        # Get eigenvalues of G
+        eigenvalues, eigenvectors = np.linalg.eig(G)
+
+        # True count
+        M_true = self.count_solutions_exact(f)
+        a_true = M_true / self.N
+
+        if M_true == 0:
+            return {
+                'estimated_count': 0,
+                'true_count': 0,
+                'fraction': 0,
+                'error': 0
+            }
+
+        # theta where sin^2(theta/2) = a
+        theta_true = 2 * np.arcsin(np.sqrt(a_true))
+
+        # Grover eigenvalues are e^{+/- i*theta}
+        # Phase estimation extracts theta
+
+        # Simulate phase estimation
+        M_pe = 2 ** precision_qubits
+
+        # Measurement probability distribution
+        probs = np.zeros(M_pe)
+        for y in range(M_pe):
+            for sign in [1, -1]:
+                phi = sign * theta_true / (2 * np.pi)
+                phi = phi % 1
+                delta = y / M_pe - phi
+                if abs(delta - round(delta)) < 1e-10:
+                    probs[y] += 0.25
+                else:
+                    probs[y] += 0.25 * (np.sin(np.pi * M_pe * delta) ** 2) / \
+                               (M_pe ** 2 * np.sin(np.pi * delta) ** 2 + 1e-10)
+
+        probs = probs / probs.sum()
+
+        # Sample measurement
+        y_measured = np.random.choice(M_pe, p=probs)
+
+        # Convert to theta estimate
+        theta_est = 2 * np.pi * y_measured / M_pe
+
+        # Handle wrap-around
+        if theta_est > np.pi:
+            theta_est = 2 * np.pi - theta_est
+
+        # Convert to count estimate
+        a_est = np.sin(theta_est / 2) ** 2
+        M_est = a_est * self.N
+
+        return {
+            'estimated_count': round(M_est),
+            'estimated_fraction': a_est,
+            'true_count': M_true,
+            'true_fraction': a_true,
+            'theta_true': theta_true,
+            'theta_estimate': theta_est,
+            'error': abs(round(M_est) - M_true),
+            'relative_error': abs(M_est - M_true) / M_true if M_true > 0 else 0,
+            'precision_qubits': precision_qubits
+        }
+
+
+# Example: Count numbers with specific property
+np.random.seed(42)
+qc = QuantumCounting(num_qubits=6)  # N = 64
+
+# Define function: f(x) = 1 if x has even number of 1s in binary
+def even_parity(x: int) -> bool:
+    return bin(x).count('1') % 2 == 0
+
+result = qc.estimate_count(even_parity, precision_qubits=8)
+print(f"Counting even parity numbers in {{0,...,63}}:")
+print(f"  True count: {result['true_count']}")
+print(f"  Estimated: {result['estimated_count']}")
+print(f"  Error: {result['error']}")
+```
+
+## 3. Algorithm Analysis
+
+### The Grover Eigenvalue Structure
+
+The Grover operator $G$ has eigenvalues $e^{\pm i\theta}$ where:
+
+<Formula>
+$$\sin^2\left(\frac{\theta}{2}\right) = \frac{M}{N}$$
+</Formula>
+
+<Tip>
+For small $M/N$, we have $\theta \approx 2\sqrt{M/N}$, so estimating $\theta$ with precision $\delta$ gives $M$ with precision $O(N\delta)$.
+</Tip>
+
+### Precision Analysis
+
+Using $m$ precision qubits in phase estimation:
+
+<Formula>
+$$\Delta\theta = O\left(\frac{1}{2^m}\right) \implies \Delta M = O\left(\frac{\sqrt{NM}}{2^m}\right)$$
+</Formula>
+
+```python
+def analyze_counting_precision(
+    N: int,
+    true_M: int,
+    precision_qubits: int
+) -> Dict:
+    """
+    Analyze the precision of quantum counting.
+
+    Args:
+        N: Total number of items
+        true_M: True count of solutions
+        precision_qubits: Qubits for phase estimation
+
+    Returns:
+        Precision analysis
+    """
+    m = precision_qubits
+    M_pe = 2 ** m
+
+    # True angle
+    a = true_M / N
+    theta = 2 * np.arcsin(np.sqrt(a))
+
+    # Phase estimation precision
+    delta_theta = 2 * np.pi / M_pe
+
+    # Error in a = sin^2(theta/2)
+    # da/dtheta = sin(theta/2) * cos(theta/2) = sin(theta)/2
+    da_dtheta = np.sin(theta) / 2
+    delta_a = abs(da_dtheta) * delta_theta
+
+    # Error in M
+    delta_M = delta_a * N
+
+    # Number of Grover iterations needed
+    num_iterations = M_pe
+
+    return {
+        'N': N,
+        'true_M': true_M,
+        'fraction': a,
+        'theta': theta,
+        'precision_qubits': m,
+        'theta_precision': delta_theta,
+        'M_precision': delta_M,
+        'relative_precision': delta_M / true_M if true_M > 0 else float('inf'),
+        'grover_iterations': num_iterations,
+        'classical_queries_equivalent': N  # Classical would need O(N)
+    }
+
+
+# Analyze precision for different scenarios
+print("Precision Analysis for Quantum Counting:")
+print("=" * 60)
+
+for M in [10, 100, 500]:
+    analysis = analyze_counting_precision(N=1000, true_M=M, precision_qubits=10)
+    print(f"\nN=1000, M={M}:")
+    print(f"  Theta: {analysis['theta']:.4f}")
+    print(f"  Precision in M: +/- {analysis['M_precision']:.2f}")
+    print(f"  Relative precision: {analysis['relative_precision']:.2%}")
+    print(f"  Grover iterations: {analysis['grover_iterations']}")
+```
+
+## 4. Query Complexity
+
+The quantum counting algorithm achieves optimal query complexity:
+
+<Formula>
+$$\text{Queries} = O\left(\sqrt{\frac{N}{M}} \cdot \frac{1}{\epsilon}\right)$$
+</Formula>
+
+for relative precision $\epsilon$.
+
+```python
+def query_complexity_comparison(
+    N: int,
+    M: int,
+    target_relative_precision: float
+) -> Dict:
+    """
+    Compare quantum vs classical query complexity.
+
+    Args:
+        N: Total items
+        M: Number of solutions
+        target_relative_precision: Target error/M
+
+    Returns:
+        Complexity comparison
+    """
+    import math
+
+    # Classical random sampling
+    # To estimate M/N with relative error eps, need O(N/M * 1/eps^2) queries
+    classical_queries = int(N / M * 1 / target_relative_precision ** 2)
+
+    # Quantum counting
+    # Need O(sqrt(N/M) * 1/eps) queries
+    quantum_queries = int(np.sqrt(N / M) * 1 / target_relative_precision)
+
+    # Precision qubits needed
+    # Error ~ sqrt(NM)/2^m should be < eps * M
+    # 2^m > sqrt(N/M) / eps
+    m = math.ceil(math.log2(np.sqrt(N / M) / target_relative_precision))
+    quantum_queries_actual = 2 ** m
+
+    return {
+        'N': N,
+        'M': M,
+        'target_relative_precision': target_relative_precision,
+        'classical_queries': classical_queries,
+        'quantum_queries_theoretical': quantum_queries,
+        'quantum_queries_actual': quantum_queries_actual,
+        'speedup': classical_queries / quantum_queries_actual
+    }
+
+
+# Compare for different cases
+print("\nQuery Complexity Comparison:")
+print("=" * 70)
+print(f"{'N':<10}{'M':<10}{'Precision':<12}{'Classical':<15}{'Quantum':<12}{'Speedup':<10}")
+print("-" * 70)
+
+for N, M in [(1000, 100), (10000, 100), (100000, 1000)]:
+    result = query_complexity_comparison(N, M, 0.1)
+    print(f"{result['N']:<10}{result['M']:<10}{result['target_relative_precision']:<12}"
+          f"{result['classical_queries']:<15}{result['quantum_queries_actual']:<12}"
+          f"{result['speedup']:.1f}x")
+```
+
+## 5. Applications
+
+### Constraint Satisfaction Problems
+
+Quantum counting is useful for counting satisfying assignments:
+
+```python
+class SATCounter:
+    """
+    Count satisfying assignments to boolean formulas.
+    """
+
+    def __init__(self, num_variables: int):
+        """
+        Initialize SAT counter.
+
+        Args:
+            num_variables: Number of boolean variables
+        """
+        self.n = num_variables
+        self.N = 2 ** num_variables
+
+    def count_sat_solutions(
+        self,
+        clauses: List[List[int]],
+        precision_qubits: int = 8
+    ) -> Dict:
+        """
+        Count satisfying assignments to CNF formula.
+
+        Args:
+            clauses: List of clauses, each clause is list of literals
+                    (positive int = variable, negative = negated)
+            precision_qubits: Qubits for quantum counting
+
+        Returns:
+            Counting results
+        """
+        def evaluate_cnf(assignment: int) -> bool:
+            """Check if assignment satisfies all clauses."""
+            for clause in clauses:
+                clause_satisfied = False
+                for literal in clause:
+                    var_idx = abs(literal) - 1
+                    var_value = (assignment >> var_idx) & 1
+                    if literal > 0 and var_value == 1:
+                        clause_satisfied = True
+                        break
+                    elif literal < 0 and var_value == 0:
+                        clause_satisfied = True
+                        break
+                if not clause_satisfied:
+                    return False
+            return True
+
+        # Use quantum counting
+        qc = QuantumCounting(self.n)
+        return qc.estimate_count(evaluate_cnf, precision_qubits)
+
+
+# Example: 3-SAT instance
+sat_counter = SATCounter(num_variables=4)
+
+# (x1 OR x2 OR x3) AND (NOT x1 OR x3 OR x4) AND (x2 OR NOT x3 OR NOT x4)
+clauses = [
+    [1, 2, 3],      # x1 OR x2 OR x3
+    [-1, 3, 4],     # NOT x1 OR x3 OR x4
+    [2, -3, -4]     # x2 OR NOT x3 OR NOT x4
+]
+
+result = sat_counter.count_sat_solutions(clauses)
+print(f"\n3-SAT Instance Counting:")
+print(f"  Formula: (x1|x2|x3) & (!x1|x3|x4) & (x2|!x3|!x4)")
+print(f"  True satisfying assignments: {result['true_count']}")
+print(f"  Quantum estimate: {result['estimated_count']}")
+```
+
+### Graph Problems
+
+Count vertices or edges with specific properties:
+
+```python
+def count_graph_structures(
+    adjacency_matrix: np.ndarray,
+    structure_type: str = "triangles"
+) -> Dict:
+    """
+    Count graph structures using quantum counting principles.
+
+    Args:
+        adjacency_matrix: n x n adjacency matrix
+        structure_type: Type of structure to count
+
+    Returns:
+        Counting results
+    """
+    n_vertices = adjacency_matrix.shape[0]
+
+    if structure_type == "triangles":
+        # Count triangles: triplets (i,j,k) with all edges present
+        # Total possible triplets
+        from itertools import combinations
+
+        def is_triangle(triplet_idx: int) -> bool:
+            """Check if triplet index corresponds to a triangle."""
+            triplets = list(combinations(range(n_vertices), 3))
+            if triplet_idx >= len(triplets):
+                return False
+            i, j, k = triplets[triplet_idx]
+            return (adjacency_matrix[i,j] == 1 and
+                    adjacency_matrix[j,k] == 1 and
+                    adjacency_matrix[i,k] == 1)
+
+        num_triplets = len(list(combinations(range(n_vertices), 3)))
+
+        # For small cases, count exactly
+        true_count = sum(1 for t in range(num_triplets) if is_triangle(t))
+
+        return {
+            'structure_type': structure_type,
+            'total_candidates': num_triplets,
+            'true_count': true_count,
+            'density': true_count / num_triplets if num_triplets > 0 else 0
+        }
+
+    elif structure_type == "independent_sets_size_2":
+        # Count pairs of non-adjacent vertices
+        def is_independent_pair(pair_idx: int) -> bool:
+            pairs = list(combinations(range(n_vertices), 2))
+            if pair_idx >= len(pairs):
+                return False
+            i, j = pairs[pair_idx]
+            return adjacency_matrix[i,j] == 0
+
+        num_pairs = len(list(combinations(range(n_vertices), 2)))
+        true_count = sum(1 for p in range(num_pairs) if is_independent_pair(p))
+
+        return {
+            'structure_type': structure_type,
+            'total_candidates': num_pairs,
+            'true_count': true_count,
+            'density': true_count / num_pairs if num_pairs > 0 else 0
+        }
+
+
+# Example: Count triangles in a small graph
+adj = np.array([
+    [0, 1, 1, 0, 1],
+    [1, 0, 1, 1, 0],
+    [1, 1, 0, 1, 1],
+    [0, 1, 1, 0, 1],
+    [1, 0, 1, 1, 0]
+])
+
+triangle_result = count_graph_structures(adj, "triangles")
+print(f"\nGraph Triangle Counting:")
+print(f"  Vertices: {adj.shape[0]}")
+print(f"  Possible triplets: {triangle_result['total_candidates']}")
+print(f"  Triangles found: {triangle_result['true_count']}")
+```
+
+## 6. Improved Quantum Counting
+
+Several improvements to basic quantum counting exist:
+
+### Iterative Quantum Counting
+
+Avoid deep circuits by using adaptive iteration counts:
+
+```python
+class IterativeQuantumCounting:
+    """
+    Iterative quantum counting with adaptive precision.
+    """
+
+    def __init__(self, num_qubits: int):
+        self.n = num_qubits
+        self.N = 2 ** num_qubits
+
+    def estimate_iteratively(
+        self,
+        f: Callable[[int], bool],
+        max_iterations: int = 10,
+        shots_per_iteration: int = 100
+    ) -> Dict:
+        """
+        Iteratively refine count estimate.
+
+        Args:
+            f: Boolean function
+            max_iterations: Maximum refinement iterations
+            shots_per_iteration: Measurements per iteration
+
+        Returns:
+            Iterative estimation results
+        """
+        # Get true count for comparison
+        true_count = sum(1 for x in range(self.N) if f(x))
+
+        # Start with rough estimate using few Grover iterations
+        estimates = []
+        k_values = [1, 2, 4, 8, 16, 32]
+
+        for k in k_values[:max_iterations]:
+            # After k Grover iterations, success probability is
+            # sin^2((2k+1)*theta/2) where sin^2(theta/2) = M/N
+
+            a_true = true_count / self.N
+            theta = 2 * np.arcsin(np.sqrt(a_true)) if a_true > 0 else 0
+            success_prob = np.sin((2*k + 1) * theta / 2) ** 2
+
+            # Simulate measurements
+            successes = np.random.binomial(shots_per_iteration, success_prob)
+
+            # Estimate theta from success rate
+            measured_prob = successes / shots_per_iteration
+            # This is sin^2((2k+1)*theta/2)
+            # theta_est = 2 * arcsin(sqrt(prob)) / (2k+1)
+
+            if measured_prob > 0 and measured_prob < 1:
+                angle = np.arcsin(np.sqrt(measured_prob))
+                theta_est = 2 * angle / (2*k + 1)
+                a_est = np.sin(theta_est / 2) ** 2
+                M_est = a_est * self.N
+            else:
+                M_est = self.N if measured_prob >= 1 else 0
+
+            estimates.append({
+                'k': k,
+                'measured_probability': measured_prob,
+                'estimated_count': round(M_est)
+            })
+
+        # Combine estimates (simplified - take median)
+        final_estimate = int(np.median([e['estimated_count'] for e in estimates]))
+
+        return {
+            'true_count': true_count,
+            'final_estimate': final_estimate,
+            'error': abs(final_estimate - true_count),
+            'iteration_results': estimates
+        }
+
+
+# Test iterative counting
+iqc = IterativeQuantumCounting(num_qubits=8)  # N = 256
+
+# Count multiples of 7
+def is_multiple_of_7(x: int) -> bool:
+    return x % 7 == 0
+
+result = iqc.estimate_iteratively(is_multiple_of_7)
+print(f"\nIterative Quantum Counting (multiples of 7 in 0-255):")
+print(f"  True count: {result['true_count']}")
+print(f"  Final estimate: {result['final_estimate']}")
+print(f"  Error: {result['error']}")
+```
+
+## 7. Error Bounds and Failure Probability
+
+### Success Probability
+
+The quantum counting algorithm succeeds with high probability when using sufficient precision:
+
+<Formula>
+$$P(\text{error} > \epsilon M) \leq 2e^{-c \epsilon^2 2^m}$$
+</Formula>
+
+```python
+def error_probability_analysis(
+    N: int,
+    M: int,
+    precision_qubits: int,
+    target_error_fraction: float = 0.1
+) -> Dict:
+    """
+    Analyze error probability for quantum counting.
+
+    Args:
+        N: Total items
+        M: True count
+        precision_qubits: Number of precision qubits
+        target_error_fraction: Target relative error
+
+    Returns:
+        Error probability analysis
+    """
+    m = precision_qubits
+    eps = target_error_fraction
+
+    # Phase estimation error bound
+    # |theta_est - theta| <= pi/2^m with probability >= 1 - 1/2^m
+
+    # This translates to count error
+    a = M / N
+    theta = 2 * np.arcsin(np.sqrt(a))
+
+    # Maximum theta error
+    delta_theta = np.pi / (2 ** m)
+
+    # Maximum count error
+    # M = N * sin^2(theta/2)
+    # dM/dtheta = N * sin(theta/2) * cos(theta/2) = N/2 * sin(theta)
+    dM_dtheta = N / 2 * np.sin(theta) if theta > 0 else N / 2
+
+    max_count_error = dM_dtheta * delta_theta
+
+    # Probability of larger error (simplified bound)
+    failure_prob = 1 / (2 ** m)
+
+    return {
+        'N': N,
+        'M': M,
+        'precision_qubits': m,
+        'max_theta_error': delta_theta,
+        'max_count_error': max_count_error,
+        'relative_max_error': max_count_error / M if M > 0 else float('inf'),
+        'failure_probability': failure_prob,
+        'success_probability': 1 - failure_prob
+    }
+
+
+# Example analysis
+analysis = error_probability_analysis(N=10000, M=500, precision_qubits=12)
+print(f"\nError Probability Analysis:")
+print(f"  N={analysis['N']}, M={analysis['M']}, m={analysis['precision_qubits']}")
+print(f"  Max count error: +/- {analysis['max_count_error']:.2f}")
+print(f"  Relative max error: {analysis['relative_max_error']:.2%}")
+print(f"  Success probability: {analysis['success_probability']:.6f}")
+```
+
+<Warning>
+Quantum counting requires coherent operations over O(sqrt(N)) Grover iterations. On NISQ devices, noise may limit practical precision. Error mitigation and fault-tolerant implementations are active research areas.
+</Warning>
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Problem Statement**: Counting solutions $M$ to a search problem over $N$ items
+2. **Connection to AE**: Quantum counting = amplitude estimation of $\sqrt{M/N}$
+3. **Algorithm**: Phase estimation on Grover operator extracts $\theta$ where $\sin^2(\theta/2) = M/N$
+4. **Query Complexity**: $O(\sqrt{N/M}/\epsilon)$ for relative precision $\epsilon$
+5. **Applications**: SAT counting, graph structure counting, combinatorial enumeration
+6. **Improvements**: Iterative methods reduce circuit depth
+
+## Further Reading
+
+- Next lesson: Quantum Importance Sampling
+- Related: Grover's Algorithm, Amplitude Estimation
+- Application: Combinatorial Optimization

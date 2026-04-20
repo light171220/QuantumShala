@@ -1,0 +1,517 @@
+---
+title: "Execution Profiling"
+description: "Profile quantum job execution times and analyze runtime performance."
+duration: 40
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+- Profile end-to-end quantum job execution times
+- Measure and optimize compilation overhead
+- Analyze queue wait times and backend utilization
+- Compare execution performance across backends
+- Implement automated profiling workflows
+
+## 1. Introduction to Execution Profiling
+
+Execution profiling is essential for understanding where time is spent in quantum computing workflows and identifying optimization opportunities.
+
+```
+Quantum Job Execution Timeline
+══════════════════════════════════════════════════════════════════
+
+ Circuit      Transpilation    Queue        Execution     Results
+ Creation         │            Wait            │          Processing
+    │              │             │              │              │
+    ▼              ▼             ▼              ▼              ▼
+┌────────┐   ┌──────────┐   ┌────────┐   ┌──────────┐   ┌────────┐
+│ Build  │──▶│ Compile  │──▶│  Wait  │──▶│   Run    │──▶│ Parse  │
+│ Circuit│   │ & Optimize│   │ in Queue│   │ on QPU  │   │ Results│
+└────────┘   └──────────┘   └────────┘   └──────────┘   └────────┘
+   ~ms         ~100ms-10s     ~0-hours      ~ms-sec        ~ms
+
+                     Total Job Time
+```
+
+## 2. Building an Execution Profiler
+
+```python
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Callable
+from contextlib import contextmanager
+from datetime import datetime
+import numpy as np
+
+@dataclass
+class TimingRecord:
+    """Record of a single timing measurement."""
+    phase: str
+    start_time: float
+    end_time: float
+    metadata: Dict = field(default_factory=dict)
+
+    @property
+    def duration_ms(self) -> float:
+        return (self.end_time - self.start_time) * 1000
+
+    @property
+    def duration_s(self) -> float:
+        return self.end_time - self.start_time
+
+@dataclass
+class ProfileReport:
+    """Complete profiling report for a quantum job."""
+    job_id: str
+    timestamp: datetime
+    timings: List[TimingRecord]
+    total_time_ms: float
+    metadata: Dict = field(default_factory=dict)
+
+    def get_phase_time(self, phase: str) -> float:
+        """Get total time for a specific phase."""
+        return sum(t.duration_ms for t in self.timings if t.phase == phase)
+
+    def get_breakdown(self) -> Dict[str, float]:
+        """Get time breakdown by phase."""
+        breakdown = {}
+        for timing in self.timings:
+            if timing.phase not in breakdown:
+                breakdown[timing.phase] = 0
+            breakdown[timing.phase] += timing.duration_ms
+        return breakdown
+
+    def get_percentages(self) -> Dict[str, float]:
+        """Get percentage breakdown by phase."""
+        breakdown = self.get_breakdown()
+        return {k: (v / self.total_time_ms) * 100 for k, v in breakdown.items()}
+
+
+class ExecutionProfiler:
+    """Profile quantum job execution."""
+
+    def __init__(self):
+        self.timings: List[TimingRecord] = []
+        self.current_phase: Optional[str] = None
+        self.phase_start: Optional[float] = None
+        self.job_start: Optional[float] = None
+
+    def start_job(self, job_id: str = None):
+        """Start profiling a new job."""
+        self.job_id = job_id or f"job_{int(time.time())}"
+        self.job_start = time.perf_counter()
+        self.timings = []
+
+    @contextmanager
+    def phase(self, name: str, **metadata):
+        """Context manager for timing a phase."""
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            end = time.perf_counter()
+            self.timings.append(TimingRecord(
+                phase=name,
+                start_time=start,
+                end_time=end,
+                metadata=metadata
+            ))
+
+    def record_phase(self, name: str, duration_s: float, **metadata):
+        """Manually record a phase timing."""
+        now = time.perf_counter()
+        self.timings.append(TimingRecord(
+            phase=name,
+            start_time=now - duration_s,
+            end_time=now,
+            metadata=metadata
+        ))
+
+    def finish_job(self) -> ProfileReport:
+        """Finish profiling and generate report."""
+        total_time = (time.perf_counter() - self.job_start) * 1000
+
+        return ProfileReport(
+            job_id=self.job_id,
+            timestamp=datetime.now(),
+            timings=self.timings,
+            total_time_ms=total_time
+        )
+
+    def print_report(self, report: ProfileReport):
+        """Print a formatted profiling report."""
+        print("\n" + "=" * 60)
+        print(f"EXECUTION PROFILE: {report.job_id}")
+        print("=" * 60)
+        print(f"Timestamp: {report.timestamp}")
+        print(f"Total Time: {report.total_time_ms:.2f} ms")
+        print("\nPhase Breakdown:")
+        print("-" * 40)
+
+        percentages = report.get_percentages()
+        breakdown = report.get_breakdown()
+
+        for phase, time_ms in sorted(breakdown.items(),
+                                      key=lambda x: x[1],
+                                      reverse=True):
+            pct = percentages[phase]
+            bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
+            print(f"  {phase:20s} {time_ms:8.2f} ms  {bar} {pct:5.1f}%")
+
+
+# Example usage
+profiler = ExecutionProfiler()
+profiler.start_job("example_vqe_job")
+
+with profiler.phase("circuit_creation"):
+    # Simulate circuit creation
+    time.sleep(0.01)
+
+with profiler.phase("transpilation"):
+    # Simulate transpilation
+    time.sleep(0.05)
+
+with profiler.phase("queue_wait"):
+    # Simulate queue wait
+    time.sleep(0.02)
+
+with profiler.phase("execution"):
+    # Simulate execution
+    time.sleep(0.03)
+
+with profiler.phase("result_processing"):
+    # Simulate result processing
+    time.sleep(0.005)
+
+report = profiler.finish_job()
+profiler.print_report(report)
+```
+
+## 3. Profiling Real Quantum Jobs
+
+```python
+from typing import Any
+import json
+
+class QuantumJobProfiler:
+    """Profile real quantum job submissions."""
+
+    def __init__(self, backend=None):
+        self.backend = backend
+        self.profiler = ExecutionProfiler()
+        self.history: List[ProfileReport] = []
+
+    def profile_job(self, circuit, shots: int = 1000) -> Dict[str, Any]:
+        """Profile a complete quantum job execution."""
+        from qiskit import transpile
+        from qiskit_aer import AerSimulator
+
+        backend = self.backend or AerSimulator()
+        self.profiler.start_job()
+
+        # Phase 1: Transpilation
+        with self.profiler.phase("transpilation",
+                                  original_depth=circuit.depth(),
+                                  num_qubits=circuit.num_qubits):
+            transpiled = transpile(circuit, backend=backend,
+                                   optimization_level=2)
+
+        # Phase 2: Job Submission
+        with self.profiler.phase("submission"):
+            job = backend.run(transpiled, shots=shots)
+
+        # Phase 3: Wait for Results
+        with self.profiler.phase("execution_wait"):
+            result = job.result()
+
+        # Phase 4: Process Results
+        with self.profiler.phase("result_processing"):
+            counts = result.get_counts()
+
+        report = self.profiler.finish_job()
+        self.history.append(report)
+
+        return {
+            'counts': counts,
+            'profile': report,
+            'transpiled_depth': transpiled.depth()
+        }
+
+    def get_statistics(self) -> Dict[str, Dict[str, float]]:
+        """Get statistics across all profiled jobs."""
+        if not self.history:
+            return {}
+
+        stats = {}
+        all_phases = set()
+        for report in self.history:
+            all_phases.update(report.get_breakdown().keys())
+
+        for phase in all_phases:
+            times = [r.get_phase_time(phase) for r in self.history]
+            stats[phase] = {
+                'mean_ms': np.mean(times),
+                'std_ms': np.std(times),
+                'min_ms': np.min(times),
+                'max_ms': np.max(times),
+                'count': len(times)
+            }
+
+        return stats
+
+    def compare_backends(self, circuit, backends: List,
+                         shots: int = 1000) -> Dict[str, ProfileReport]:
+        """Compare execution profiles across backends."""
+        results = {}
+
+        for backend in backends:
+            self.backend = backend
+            backend_name = getattr(backend, 'name', str(backend))
+
+            result = self.profile_job(circuit, shots)
+            results[backend_name] = result['profile']
+
+        return results
+```
+
+## 4. Compilation Overhead Analysis
+
+```python
+class CompilationProfiler:
+    """Analyze compilation and transpilation overhead."""
+
+    def __init__(self):
+        self.compilation_history = []
+
+    def profile_transpilation(self, circuit, backend,
+                               optimization_levels: List[int] = [0, 1, 2, 3]):
+        """Profile transpilation across optimization levels."""
+        from qiskit import transpile
+
+        results = []
+
+        for level in optimization_levels:
+            start = time.perf_counter()
+            transpiled = transpile(circuit, backend=backend,
+                                   optimization_level=level)
+            compile_time = (time.perf_counter() - start) * 1000
+
+            results.append({
+                'optimization_level': level,
+                'compile_time_ms': compile_time,
+                'original_depth': circuit.depth(),
+                'transpiled_depth': transpiled.depth(),
+                'original_gates': sum(circuit.count_ops().values()),
+                'transpiled_gates': sum(transpiled.count_ops().values()),
+                'depth_reduction': circuit.depth() - transpiled.depth(),
+                'gate_reduction': sum(circuit.count_ops().values()) -
+                                  sum(transpiled.count_ops().values())
+            })
+
+        self.compilation_history.extend(results)
+        return results
+
+    def analyze_tradeoffs(self, results: List[Dict]) -> Dict:
+        """Analyze compilation time vs quality tradeoffs."""
+        if not results:
+            return {}
+
+        # Find best configurations
+        fastest = min(results, key=lambda x: x['compile_time_ms'])
+        smallest_depth = min(results, key=lambda x: x['transpiled_depth'])
+        fewest_gates = min(results, key=lambda x: x['transpiled_gates'])
+
+        return {
+            'fastest_compilation': {
+                'level': fastest['optimization_level'],
+                'time_ms': fastest['compile_time_ms']
+            },
+            'smallest_depth': {
+                'level': smallest_depth['optimization_level'],
+                'depth': smallest_depth['transpiled_depth']
+            },
+            'fewest_gates': {
+                'level': fewest_gates['optimization_level'],
+                'gates': fewest_gates['transpiled_gates']
+            },
+            'recommendation': self._recommend(results)
+        }
+
+    def _recommend(self, results: List[Dict]) -> str:
+        """Generate recommendation based on results."""
+        # Simple heuristic: prefer level 2 unless 3 gives >20% improvement
+        level_2 = next((r for r in results if r['optimization_level'] == 2), None)
+        level_3 = next((r for r in results if r['optimization_level'] == 3), None)
+
+        if level_2 and level_3:
+            depth_improvement = (level_2['transpiled_depth'] -
+                                level_3['transpiled_depth']) / level_2['transpiled_depth']
+            time_increase = (level_3['compile_time_ms'] -
+                            level_2['compile_time_ms']) / level_2['compile_time_ms']
+
+            if depth_improvement > 0.2 and time_increase < 2:
+                return "Use optimization_level=3 for significant depth reduction"
+            else:
+                return "Use optimization_level=2 for best time/quality balance"
+
+        return "Use optimization_level=2 as default"
+```
+
+## 5. Backend Performance Comparison
+
+```python
+class BackendBenchmark:
+    """Benchmark quantum backends."""
+
+    def __init__(self):
+        self.benchmarks = {}
+
+    def run_benchmark(self, circuit, backends: List,
+                      shots: int = 1000,
+                      iterations: int = 5) -> Dict:
+        """Run benchmark across multiple backends."""
+        from qiskit import transpile
+
+        results = {}
+
+        for backend in backends:
+            backend_name = getattr(backend, 'name', str(type(backend).__name__))
+            timings = []
+
+            for i in range(iterations):
+                start = time.perf_counter()
+
+                # Transpile
+                transpiled = transpile(circuit, backend=backend)
+                transpile_time = time.perf_counter() - start
+
+                # Execute
+                exec_start = time.perf_counter()
+                job = backend.run(transpiled, shots=shots)
+                result = job.result()
+                exec_time = time.perf_counter() - exec_start
+
+                timings.append({
+                    'iteration': i,
+                    'transpile_ms': transpile_time * 1000,
+                    'execute_ms': exec_time * 1000,
+                    'total_ms': (transpile_time + exec_time) * 1000
+                })
+
+            results[backend_name] = {
+                'timings': timings,
+                'mean_total_ms': np.mean([t['total_ms'] for t in timings]),
+                'std_total_ms': np.std([t['total_ms'] for t in timings]),
+                'mean_transpile_ms': np.mean([t['transpile_ms'] for t in timings]),
+                'mean_execute_ms': np.mean([t['execute_ms'] for t in timings])
+            }
+
+        self.benchmarks = results
+        return results
+
+    def print_comparison(self, results: Dict):
+        """Print formatted comparison table."""
+        print("\n" + "=" * 70)
+        print("BACKEND PERFORMANCE COMPARISON")
+        print("=" * 70)
+        print(f"{'Backend':<25} {'Total (ms)':<15} {'Transpile':<15} {'Execute':<15}")
+        print("-" * 70)
+
+        for backend, data in sorted(results.items(),
+                                     key=lambda x: x[1]['mean_total_ms']):
+            print(f"{backend:<25} "
+                  f"{data['mean_total_ms']:>8.2f} ± {data['std_total_ms']:<5.2f} "
+                  f"{data['mean_transpile_ms']:>10.2f} "
+                  f"{data['mean_execute_ms']:>12.2f}")
+```
+
+## 6. Automated Profiling Workflow
+
+```python
+class AutoProfiler:
+    """Automated profiling for quantum workflows."""
+
+    def __init__(self, output_dir: str = "./profiles"):
+        self.output_dir = output_dir
+        self.profiler = ExecutionProfiler()
+
+    def profile_vqe_iteration(self, ansatz, hamiltonian,
+                               optimizer_step: int) -> ProfileReport:
+        """Profile a single VQE iteration."""
+        self.profiler.start_job(f"vqe_iter_{optimizer_step}")
+
+        with self.profiler.phase("parameter_update"):
+            # Simulate parameter update
+            time.sleep(0.001)
+
+        with self.profiler.phase("circuit_binding"):
+            # Simulate circuit parameter binding
+            time.sleep(0.002)
+
+        with self.profiler.phase("expectation_estimation"):
+            # Simulate expectation value calculation
+            time.sleep(0.05)
+
+        with self.profiler.phase("gradient_computation"):
+            # Simulate gradient computation
+            time.sleep(0.03)
+
+        return self.profiler.finish_job()
+
+    def profile_workflow(self, workflow_fn: Callable,
+                          name: str = "workflow") -> ProfileReport:
+        """Profile an arbitrary quantum workflow."""
+        self.profiler.start_job(name)
+
+        # Wrap workflow execution
+        with self.profiler.phase("workflow_execution"):
+            result = workflow_fn()
+
+        report = self.profiler.finish_job()
+        return report, result
+
+    def generate_summary(self, reports: List[ProfileReport]) -> Dict:
+        """Generate summary statistics from multiple reports."""
+        if not reports:
+            return {}
+
+        total_times = [r.total_time_ms for r in reports]
+
+        all_phases = set()
+        for r in reports:
+            all_phases.update(r.get_breakdown().keys())
+
+        phase_stats = {}
+        for phase in all_phases:
+            times = [r.get_phase_time(phase) for r in reports]
+            phase_stats[phase] = {
+                'mean': np.mean(times),
+                'std': np.std(times),
+                'total': np.sum(times),
+                'percentage': np.sum(times) / np.sum(total_times) * 100
+            }
+
+        return {
+            'num_jobs': len(reports),
+            'total_time_ms': np.sum(total_times),
+            'mean_job_time_ms': np.mean(total_times),
+            'phase_statistics': phase_stats
+        }
+```
+
+## Summary
+
+| Profiling Aspect | Key Metrics | Optimization Target |
+|------------------|-------------|---------------------|
+| Compilation | Time, depth reduction | Balance time vs quality |
+| Queue Wait | Wait time, utilization | Backend selection |
+| Execution | QPU time per shot | Circuit optimization |
+| Results | Processing overhead | Batch size tuning |
+
+## Further Reading
+
+- Qiskit Runtime Performance Guide
+- IBM Quantum Job Monitoring Documentation
+- "Optimizing Quantum Workflows" - arXiv papers

@@ -1,0 +1,916 @@
+---
+title: "Scaling Strategies for Quantum Applications"
+description: "Learn techniques for scaling quantum applications including horizontal scaling, load balancing across QPUs, and hybrid architectures."
+duration: 65
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+- Design horizontally scalable quantum architectures
+- Implement multi-backend load balancing strategies
+- Optimize resource utilization across quantum processors
+- Build elastic quantum computing infrastructure
+
+## 1. Scaling Challenges in Quantum Computing
+
+Quantum applications face unique scaling challenges that differ from classical systems:
+
+```
+QUANTUM SCALING CONSTRAINTS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Classical Scaling          Quantum Scaling
+──────────────────────    ──────────────────────
+Add more servers          Limited QPU availability
+Horizontal replication    Cannot clone quantum states
+Unlimited parallelism     Shot-based parallelism
+Predictable latency       Queue-dependent latency
+Linear cost scaling       Tiered pricing models
+
+Scaling Dimensions:
+┌─────────────────────────────────────────────────────────┐
+│ 1. THROUGHPUT: Jobs per unit time                       │
+│ 2. CIRCUIT SIZE: Number of qubits and gates             │
+│ 3. PROBLEM SIZE: Classical data dimensions              │
+│ 4. ACCURACY: Result fidelity requirements               │
+└─────────────────────────────────────────────────────────┘
+
+Key Metric: Quantum Throughput
+  T_quantum = (n_backends × shots_per_job) / avg_queue_time
+```
+
+## 2. Multi-Backend Architecture
+
+```python
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Callable, Any
+from enum import Enum
+from abc import ABC, abstractmethod
+import time
+import random
+import math
+from datetime import datetime, timedelta
+
+class BackendStatus(Enum):
+    """QPU backend operational status."""
+    ONLINE = "online"
+    OFFLINE = "offline"
+    MAINTENANCE = "maintenance"
+    DEGRADED = "degraded"
+    CALIBRATING = "calibrating"
+
+@dataclass
+class BackendCapabilities:
+    """Quantum backend capabilities."""
+    name: str
+    provider: str
+    num_qubits: int
+    basis_gates: List[str]
+    connectivity: str  # "linear", "grid", "all-to-all"
+    t1_microseconds: float
+    t2_microseconds: float
+    single_qubit_error: float
+    two_qubit_error: float
+    readout_error: float
+    max_shots: int
+    max_circuits_per_job: int
+
+@dataclass
+class BackendState:
+    """Current state of a backend."""
+    backend: BackendCapabilities
+    status: BackendStatus
+    queue_depth: int
+    estimated_wait_seconds: int
+    current_load: float  # 0.0 to 1.0
+    last_calibration: datetime
+    recent_success_rate: float
+
+class BackendRegistry:
+    """
+    Registry of available quantum backends.
+
+    Maintains current state and capabilities of all configured backends.
+    """
+
+    def __init__(self):
+        self.backends: Dict[str, BackendState] = {}
+        self._health_check_interval = 60  # seconds
+
+    def register_backend(self, capabilities: BackendCapabilities):
+        """Register a new backend."""
+        self.backends[capabilities.name] = BackendState(
+            backend=capabilities,
+            status=BackendStatus.ONLINE,
+            queue_depth=0,
+            estimated_wait_seconds=0,
+            current_load=0.0,
+            last_calibration=datetime.now(),
+            recent_success_rate=1.0
+        )
+
+    def update_state(self, backend_name: str, **kwargs):
+        """Update backend state."""
+        if backend_name in self.backends:
+            state = self.backends[backend_name]
+            for key, value in kwargs.items():
+                if hasattr(state, key):
+                    setattr(state, key, value)
+
+    def get_available_backends(self, min_qubits: int = 0) -> List[BackendState]:
+        """Get list of available backends meeting requirements."""
+        available = []
+        for state in self.backends.values():
+            if (state.status == BackendStatus.ONLINE and
+                state.backend.num_qubits >= min_qubits):
+                available.append(state)
+        return available
+
+    def get_backend_by_name(self, name: str) -> Optional[BackendState]:
+        """Get specific backend by name."""
+        return self.backends.get(name)
+
+
+# Example backend configurations
+def create_sample_backends() -> BackendRegistry:
+    """Create sample backend registry."""
+    registry = BackendRegistry()
+
+    registry.register_backend(BackendCapabilities(
+        name="ibm_brisbane",
+        provider="IBM",
+        num_qubits=127,
+        basis_gates=["cx", "id", "rz", "sx", "x"],
+        connectivity="heavy-hex",
+        t1_microseconds=200,
+        t2_microseconds=150,
+        single_qubit_error=0.0002,
+        two_qubit_error=0.008,
+        readout_error=0.015,
+        max_shots=100000,
+        max_circuits_per_job=300
+    ))
+
+    registry.register_backend(BackendCapabilities(
+        name="ionq_aria",
+        provider="IonQ",
+        num_qubits=25,
+        basis_gates=["gpi", "gpi2", "ms"],
+        connectivity="all-to-all",
+        t1_microseconds=10000,
+        t2_microseconds=1000,
+        single_qubit_error=0.0003,
+        two_qubit_error=0.005,
+        readout_error=0.003,
+        max_shots=10000,
+        max_circuits_per_job=100
+    ))
+
+    registry.register_backend(BackendCapabilities(
+        name="rigetti_ankaa",
+        provider="Rigetti",
+        num_qubits=84,
+        basis_gates=["rx", "rz", "cz"],
+        connectivity="grid",
+        t1_microseconds=25,
+        t2_microseconds=20,
+        single_qubit_error=0.001,
+        two_qubit_error=0.02,
+        readout_error=0.03,
+        max_shots=100000,
+        max_circuits_per_job=1000
+    ))
+
+    return registry
+```
+
+## 3. Load Balancing Strategies
+
+```python
+class LoadBalancingStrategy(ABC):
+    """Abstract base for load balancing strategies."""
+
+    @abstractmethod
+    def select_backend(
+        self,
+        job_requirements: Dict[str, Any],
+        available_backends: List[BackendState]
+    ) -> Optional[BackendState]:
+        """Select best backend for a job."""
+        pass
+
+class RoundRobinBalancer(LoadBalancingStrategy):
+    """Simple round-robin load balancing."""
+
+    def __init__(self):
+        self._current_index = 0
+
+    def select_backend(
+        self,
+        job_requirements: Dict[str, Any],
+        available_backends: List[BackendState]
+    ) -> Optional[BackendState]:
+        if not available_backends:
+            return None
+
+        # Filter by requirements
+        suitable = [
+            b for b in available_backends
+            if b.backend.num_qubits >= job_requirements.get('min_qubits', 0)
+        ]
+
+        if not suitable:
+            return None
+
+        selected = suitable[self._current_index % len(suitable)]
+        self._current_index += 1
+        return selected
+
+class LeastQueueBalancer(LoadBalancingStrategy):
+    """Select backend with shortest queue."""
+
+    def select_backend(
+        self,
+        job_requirements: Dict[str, Any],
+        available_backends: List[BackendState]
+    ) -> Optional[BackendState]:
+        suitable = [
+            b for b in available_backends
+            if b.backend.num_qubits >= job_requirements.get('min_qubits', 0)
+        ]
+
+        if not suitable:
+            return None
+
+        return min(suitable, key=lambda b: b.estimated_wait_seconds)
+
+class FidelityOptimizedBalancer(LoadBalancingStrategy):
+    """Select backend with best expected fidelity for the circuit."""
+
+    def _estimate_fidelity(
+        self,
+        backend: BackendState,
+        circuit_depth: int,
+        num_two_qubit_gates: int
+    ) -> float:
+        """Estimate circuit fidelity on this backend."""
+        caps = backend.backend
+
+        # Simple fidelity model
+        single_qubit_fidelity = (1 - caps.single_qubit_error) ** circuit_depth
+        two_qubit_fidelity = (1 - caps.two_qubit_error) ** num_two_qubit_gates
+        readout_fidelity = 1 - caps.readout_error
+
+        return single_qubit_fidelity * two_qubit_fidelity * readout_fidelity
+
+    def select_backend(
+        self,
+        job_requirements: Dict[str, Any],
+        available_backends: List[BackendState]
+    ) -> Optional[BackendState]:
+        suitable = [
+            b for b in available_backends
+            if b.backend.num_qubits >= job_requirements.get('min_qubits', 0)
+        ]
+
+        if not suitable:
+            return None
+
+        circuit_depth = job_requirements.get('circuit_depth', 10)
+        two_qubit_gates = job_requirements.get('two_qubit_gates', 5)
+
+        return max(
+            suitable,
+            key=lambda b: self._estimate_fidelity(b, circuit_depth, two_qubit_gates)
+        )
+
+class CostOptimizedBalancer(LoadBalancingStrategy):
+    """Balance between cost, queue time, and fidelity."""
+
+    def __init__(
+        self,
+        cost_weight: float = 0.3,
+        time_weight: float = 0.4,
+        fidelity_weight: float = 0.3
+    ):
+        self.cost_weight = cost_weight
+        self.time_weight = time_weight
+        self.fidelity_weight = fidelity_weight
+
+        # Cost per shot (normalized)
+        self.cost_model = {
+            "IBM": 0.01,
+            "IonQ": 0.10,
+            "Rigetti": 0.02
+        }
+
+    def _score_backend(
+        self,
+        backend: BackendState,
+        job_requirements: Dict[str, Any]
+    ) -> float:
+        """Calculate composite score for backend."""
+        caps = backend.backend
+
+        # Normalize cost (lower is better)
+        cost = self.cost_model.get(caps.provider, 0.05)
+        cost_score = 1 - min(cost / 0.1, 1.0)
+
+        # Normalize queue time (lower is better)
+        max_acceptable_wait = job_requirements.get('max_wait_seconds', 600)
+        time_score = 1 - min(backend.estimated_wait_seconds / max_acceptable_wait, 1.0)
+
+        # Estimate fidelity (higher is better)
+        depth = job_requirements.get('circuit_depth', 10)
+        fidelity = (1 - caps.two_qubit_error) ** depth
+        fidelity_score = fidelity
+
+        return (
+            self.cost_weight * cost_score +
+            self.time_weight * time_score +
+            self.fidelity_weight * fidelity_score
+        )
+
+    def select_backend(
+        self,
+        job_requirements: Dict[str, Any],
+        available_backends: List[BackendState]
+    ) -> Optional[BackendState]:
+        suitable = [
+            b for b in available_backends
+            if b.backend.num_qubits >= job_requirements.get('min_qubits', 0)
+        ]
+
+        if not suitable:
+            return None
+
+        return max(suitable, key=lambda b: self._score_backend(b, job_requirements))
+
+
+class QuantumLoadBalancer:
+    """
+    Main load balancer for distributing quantum jobs across backends.
+    """
+
+    def __init__(
+        self,
+        registry: BackendRegistry,
+        strategy: LoadBalancingStrategy
+    ):
+        self.registry = registry
+        self.strategy = strategy
+        self.job_history: List[Dict] = []
+
+    def route_job(self, job_requirements: Dict[str, Any]) -> Optional[str]:
+        """Route a job to the best available backend."""
+        available = self.registry.get_available_backends(
+            min_qubits=job_requirements.get('min_qubits', 0)
+        )
+
+        selected = self.strategy.select_backend(job_requirements, available)
+
+        if selected:
+            # Record routing decision
+            self.job_history.append({
+                'timestamp': datetime.now(),
+                'requirements': job_requirements,
+                'selected_backend': selected.backend.name,
+                'queue_at_selection': selected.queue_depth
+            })
+            return selected.backend.name
+
+        return None
+
+    def get_routing_stats(self) -> Dict:
+        """Get statistics about routing decisions."""
+        if not self.job_history:
+            return {'total_jobs': 0}
+
+        backend_counts = {}
+        for job in self.job_history:
+            backend = job['selected_backend']
+            backend_counts[backend] = backend_counts.get(backend, 0) + 1
+
+        return {
+            'total_jobs': len(self.job_history),
+            'jobs_per_backend': backend_counts,
+            'distribution': {
+                k: v / len(self.job_history)
+                for k, v in backend_counts.items()
+            }
+        }
+```
+
+## 4. Horizontal Scaling with Circuit Partitioning
+
+```python
+@dataclass
+class CircuitPartition:
+    """A partition of a larger circuit."""
+    partition_id: int
+    qubits: List[int]
+    gates: List[Dict]
+    dependencies: List[int]  # IDs of partitions this depends on
+
+class CircuitPartitioner:
+    """
+    Partition large circuits for distributed execution.
+
+    Uses circuit cutting techniques to split circuits that exceed
+    single backend capabilities.
+    """
+
+    def __init__(self, max_qubits_per_partition: int = 20):
+        self.max_qubits = max_qubits_per_partition
+
+    def partition_circuit(
+        self,
+        circuit_qubits: int,
+        gates: List[Dict]
+    ) -> List[CircuitPartition]:
+        """
+        Partition a circuit into smaller subcircuits.
+
+        Uses a greedy approach to minimize cut edges.
+        """
+        if circuit_qubits <= self.max_qubits:
+            return [CircuitPartition(
+                partition_id=0,
+                qubits=list(range(circuit_qubits)),
+                gates=gates,
+                dependencies=[]
+            )]
+
+        # Simple partitioning by qubit groups
+        num_partitions = math.ceil(circuit_qubits / self.max_qubits)
+        partitions = []
+
+        for i in range(num_partitions):
+            start_qubit = i * self.max_qubits
+            end_qubit = min((i + 1) * self.max_qubits, circuit_qubits)
+            partition_qubits = list(range(start_qubit, end_qubit))
+
+            # Get gates operating on these qubits
+            partition_gates = [
+                g for g in gates
+                if all(q in partition_qubits for q in g.get('qubits', []))
+            ]
+
+            partitions.append(CircuitPartition(
+                partition_id=i,
+                qubits=partition_qubits,
+                gates=partition_gates,
+                dependencies=[]
+            ))
+
+        # Identify cut edges (gates spanning partitions)
+        self._identify_dependencies(partitions, gates)
+
+        return partitions
+
+    def _identify_dependencies(
+        self,
+        partitions: List[CircuitPartition],
+        all_gates: List[Dict]
+    ):
+        """Identify dependencies between partitions from cut edges."""
+        partition_map = {}
+        for p in partitions:
+            for q in p.qubits:
+                partition_map[q] = p.partition_id
+
+        for gate in all_gates:
+            qubits = gate.get('qubits', [])
+            if len(qubits) >= 2:
+                partitions_involved = set(partition_map[q] for q in qubits)
+                if len(partitions_involved) > 1:
+                    # This gate spans partitions
+                    partition_list = sorted(partitions_involved)
+                    for later in partition_list[1:]:
+                        earlier = partition_list[0]
+                        if earlier not in partitions[later].dependencies:
+                            partitions[later].dependencies.append(earlier)
+
+    def estimate_overhead(self, partitions: List[CircuitPartition]) -> Dict:
+        """Estimate the overhead from circuit partitioning."""
+        num_cuts = sum(len(p.dependencies) for p in partitions)
+
+        # Each cut requires classical communication
+        # Overhead grows exponentially with cuts: O(2^k) for k cuts
+        overhead_factor = 2 ** num_cuts if num_cuts < 10 else float('inf')
+
+        return {
+            'num_partitions': len(partitions),
+            'num_cuts': num_cuts,
+            'overhead_factor': overhead_factor,
+            'feasible': overhead_factor < 1000
+        }
+
+
+class DistributedExecutor:
+    """
+    Execute partitioned circuits across multiple backends.
+    """
+
+    def __init__(
+        self,
+        load_balancer: QuantumLoadBalancer,
+        partitioner: CircuitPartitioner
+    ):
+        self.load_balancer = load_balancer
+        self.partitioner = partitioner
+
+    def execute_distributed(
+        self,
+        circuit_qubits: int,
+        gates: List[Dict],
+        shots: int
+    ) -> Dict:
+        """
+        Execute a circuit in distributed fashion.
+
+        Returns combined results from all partitions.
+        """
+        partitions = self.partitioner.partition_circuit(circuit_qubits, gates)
+        overhead = self.partitioner.estimate_overhead(partitions)
+
+        if not overhead['feasible']:
+            raise ValueError(
+                f"Circuit partitioning overhead too high: {overhead['overhead_factor']}x"
+            )
+
+        execution_plan = []
+
+        for partition in partitions:
+            backend = self.load_balancer.route_job({
+                'min_qubits': len(partition.qubits),
+                'circuit_depth': len(partition.gates)
+            })
+
+            execution_plan.append({
+                'partition_id': partition.partition_id,
+                'backend': backend,
+                'qubits': partition.qubits,
+                'dependencies': partition.dependencies
+            })
+
+        return {
+            'execution_plan': execution_plan,
+            'overhead': overhead,
+            'total_partitions': len(partitions)
+        }
+```
+
+## 5. Auto-Scaling Infrastructure
+
+```python
+@dataclass
+class ScalingPolicy:
+    """Auto-scaling policy configuration."""
+    name: str
+    metric: str
+    scale_up_threshold: float
+    scale_down_threshold: float
+    cooldown_seconds: int
+    min_instances: int
+    max_instances: int
+
+class QuantumAutoScaler:
+    """
+    Auto-scaling manager for quantum workloads.
+
+    Scales classical processing resources and manages
+    backend allocation based on demand.
+    """
+
+    def __init__(self):
+        self.policies: Dict[str, ScalingPolicy] = {}
+        self.current_scale: Dict[str, int] = {}
+        self.last_scale_action: Dict[str, datetime] = {}
+        self._setup_default_policies()
+
+    def _setup_default_policies(self):
+        """Configure default scaling policies."""
+
+        self.policies['job_processors'] = ScalingPolicy(
+            name="Job Processors",
+            metric="queue_depth",
+            scale_up_threshold=100,
+            scale_down_threshold=10,
+            cooldown_seconds=300,
+            min_instances=2,
+            max_instances=20
+        )
+
+        self.policies['result_processors'] = ScalingPolicy(
+            name="Result Processors",
+            metric="pending_results",
+            scale_up_threshold=50,
+            scale_down_threshold=5,
+            cooldown_seconds=180,
+            min_instances=1,
+            max_instances=10
+        )
+
+        self.policies['circuit_compilers'] = ScalingPolicy(
+            name="Circuit Compilers",
+            metric="compilation_queue",
+            scale_up_threshold=20,
+            scale_down_threshold=2,
+            cooldown_seconds=240,
+            min_instances=1,
+            max_instances=8
+        )
+
+        # Initialize current scale
+        for policy_name, policy in self.policies.items():
+            self.current_scale[policy_name] = policy.min_instances
+
+    def evaluate_scaling(self, metrics: Dict[str, float]) -> List[Dict]:
+        """Evaluate if scaling actions are needed."""
+        actions = []
+        now = datetime.now()
+
+        for policy_name, policy in self.policies.items():
+            metric_value = metrics.get(policy.metric, 0)
+            current = self.current_scale.get(policy_name, policy.min_instances)
+
+            # Check cooldown
+            last_action = self.last_scale_action.get(policy_name)
+            if last_action and (now - last_action).seconds < policy.cooldown_seconds:
+                continue
+
+            # Evaluate scaling
+            if metric_value > policy.scale_up_threshold and current < policy.max_instances:
+                actions.append({
+                    'policy': policy_name,
+                    'action': 'scale_up',
+                    'from': current,
+                    'to': min(current + 1, policy.max_instances),
+                    'reason': f"{policy.metric}={metric_value} > {policy.scale_up_threshold}"
+                })
+            elif metric_value < policy.scale_down_threshold and current > policy.min_instances:
+                actions.append({
+                    'policy': policy_name,
+                    'action': 'scale_down',
+                    'from': current,
+                    'to': max(current - 1, policy.min_instances),
+                    'reason': f"{policy.metric}={metric_value} < {policy.scale_down_threshold}"
+                })
+
+        return actions
+
+    def apply_action(self, action: Dict):
+        """Apply a scaling action."""
+        policy_name = action['policy']
+        self.current_scale[policy_name] = action['to']
+        self.last_scale_action[policy_name] = datetime.now()
+
+    def get_scaling_status(self) -> Dict:
+        """Get current scaling status."""
+        return {
+            'current_scale': dict(self.current_scale),
+            'policies': {
+                name: {
+                    'min': p.min_instances,
+                    'max': p.max_instances,
+                    'current': self.current_scale.get(name, p.min_instances)
+                }
+                for name, p in self.policies.items()
+            }
+        }
+```
+
+## 6. Shot Distribution for Throughput
+
+```python
+class ShotDistributor:
+    """
+    Distribute shots across multiple backends for improved throughput.
+
+    When high shot counts are needed, distribute across available
+    backends and aggregate results.
+    """
+
+    def __init__(self, registry: BackendRegistry):
+        self.registry = registry
+
+    def distribute_shots(
+        self,
+        total_shots: int,
+        circuit_qubits: int,
+        min_shots_per_backend: int = 1000
+    ) -> List[Dict]:
+        """
+        Create shot distribution plan across backends.
+
+        Returns list of (backend, shots) allocations.
+        """
+        available = self.registry.get_available_backends(min_qubits=circuit_qubits)
+
+        if not available:
+            raise ValueError("No available backends with sufficient qubits")
+
+        # Sort by estimated wait time (prefer less busy)
+        available.sort(key=lambda b: b.estimated_wait_seconds)
+
+        distribution = []
+        remaining_shots = total_shots
+
+        for backend in available:
+            if remaining_shots <= 0:
+                break
+
+            max_shots = backend.backend.max_shots
+            allocated = min(remaining_shots, max_shots)
+
+            if allocated >= min_shots_per_backend:
+                distribution.append({
+                    'backend': backend.backend.name,
+                    'shots': allocated,
+                    'estimated_wait': backend.estimated_wait_seconds
+                })
+                remaining_shots -= allocated
+
+        if remaining_shots > 0:
+            # Add overflow to first backend
+            distribution[0]['shots'] += remaining_shots
+
+        return distribution
+
+    def aggregate_results(
+        self,
+        results: List[Dict[str, int]],
+        shots_per_result: List[int]
+    ) -> Dict[str, float]:
+        """
+        Aggregate results from multiple backends.
+
+        Performs weighted averaging based on shot counts.
+        """
+        total_shots = sum(shots_per_result)
+        aggregated = {}
+
+        for result, shots in zip(results, shots_per_result):
+            weight = shots / total_shots
+            for bitstring, count in result.items():
+                if bitstring not in aggregated:
+                    aggregated[bitstring] = 0
+                aggregated[bitstring] += (count / shots) * weight
+
+        return aggregated
+
+    def estimate_throughput_gain(
+        self,
+        distribution: List[Dict]
+    ) -> Dict:
+        """Estimate throughput improvement from distribution."""
+        if len(distribution) == 1:
+            return {
+                'speedup': 1.0,
+                'parallel_backends': 1
+            }
+
+        # Parallel execution - time is max of individual times
+        max_wait = max(d['estimated_wait'] for d in distribution)
+        serial_wait = sum(d['estimated_wait'] for d in distribution)
+
+        speedup = serial_wait / max_wait if max_wait > 0 else len(distribution)
+
+        return {
+            'speedup': speedup,
+            'parallel_backends': len(distribution),
+            'estimated_completion_seconds': max_wait
+        }
+```
+
+## 7. Caching and Result Reuse
+
+```python
+import hashlib
+import json
+
+class QuantumResultCache:
+    """
+    Cache quantum computation results for reuse.
+
+    Caches are keyed by circuit hash and backend characteristics.
+    Results are only reused when accuracy requirements allow.
+    """
+
+    def __init__(self, max_cache_size: int = 10000):
+        self.cache: Dict[str, Dict] = {}
+        self.max_size = max_cache_size
+        self.hits = 0
+        self.misses = 0
+
+    def _compute_cache_key(
+        self,
+        circuit_hash: str,
+        shots: int,
+        backend_name: str
+    ) -> str:
+        """Compute cache key for a circuit execution."""
+        key_data = f"{circuit_hash}:{shots}:{backend_name}"
+        return hashlib.sha256(key_data.encode()).hexdigest()[:32]
+
+    def _circuit_hash(self, circuit_data: Dict) -> str:
+        """Compute deterministic hash of circuit."""
+        serialized = json.dumps(circuit_data, sort_keys=True)
+        return hashlib.sha256(serialized.encode()).hexdigest()
+
+    def get(
+        self,
+        circuit_data: Dict,
+        shots: int,
+        backend_name: str,
+        max_age_seconds: int = 3600
+    ) -> Optional[Dict]:
+        """
+        Get cached result if available and fresh.
+        """
+        circuit_hash = self._circuit_hash(circuit_data)
+        cache_key = self._compute_cache_key(circuit_hash, shots, backend_name)
+
+        if cache_key in self.cache:
+            entry = self.cache[cache_key]
+            age = (datetime.now() - entry['timestamp']).seconds
+
+            if age < max_age_seconds:
+                self.hits += 1
+                return entry['result']
+
+        self.misses += 1
+        return None
+
+    def put(
+        self,
+        circuit_data: Dict,
+        shots: int,
+        backend_name: str,
+        result: Dict
+    ):
+        """Store result in cache."""
+        if len(self.cache) >= self.max_size:
+            self._evict_oldest()
+
+        circuit_hash = self._circuit_hash(circuit_data)
+        cache_key = self._compute_cache_key(circuit_hash, shots, backend_name)
+
+        self.cache[cache_key] = {
+            'result': result,
+            'timestamp': datetime.now(),
+            'circuit_hash': circuit_hash,
+            'shots': shots,
+            'backend': backend_name
+        }
+
+    def _evict_oldest(self):
+        """Evict oldest cache entries."""
+        if not self.cache:
+            return
+
+        sorted_keys = sorted(
+            self.cache.keys(),
+            key=lambda k: self.cache[k]['timestamp']
+        )
+
+        # Remove oldest 10%
+        to_remove = max(1, len(sorted_keys) // 10)
+        for key in sorted_keys[:to_remove]:
+            del self.cache[key]
+
+    def get_stats(self) -> Dict:
+        """Get cache statistics."""
+        total_requests = self.hits + self.misses
+        hit_rate = self.hits / total_requests if total_requests > 0 else 0
+
+        return {
+            'size': len(self.cache),
+            'max_size': self.max_size,
+            'hits': self.hits,
+            'misses': self.misses,
+            'hit_rate': hit_rate
+        }
+```
+
+## Summary
+
+Scaling quantum applications requires specialized strategies:
+
+1. **Multi-Backend Architecture**: Registry and state management for multiple QPUs
+2. **Load Balancing**: Strategies optimizing for queue time, fidelity, or cost
+3. **Circuit Partitioning**: Split large circuits across backends with overhead management
+4. **Auto-Scaling**: Dynamic resource allocation based on demand
+5. **Shot Distribution**: Parallel execution across backends for throughput
+6. **Result Caching**: Intelligent caching to reduce redundant computation
+
+The key insight is that quantum scaling differs fundamentally from classical scaling due to hardware constraints, probabilistic outputs, and the impossibility of cloning quantum states.
+
+## Further Reading
+
+- Circuit Cutting Techniques: arXiv:2005.12702
+- Quantum Cloud Computing Architectures
+- Distributed Quantum Computing Protocols

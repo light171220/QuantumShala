@@ -1,0 +1,936 @@
+---
+title: "Quantum Singular Value Decomposition"
+description: "Master quantum algorithms for singular value decomposition including quantum SVD estimation, low-rank approximation, and applications to dimensionality reduction."
+duration: 80
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the quantum approach to singular value decomposition
+- Implement quantum singular value estimation algorithms
+- Apply quantum SVD to low-rank matrix approximation
+- Analyze quantum speedups for SVD-based applications
+- Connect quantum SVD to recommendation systems and PCA
+
+## 1. Classical SVD and Its Importance
+
+The Singular Value Decomposition (SVD) is one of the most powerful tools in linear algebra:
+
+<Definition term="Singular Value Decomposition">
+For any $m \times n$ matrix $A$, there exist unitary matrices $U$ (m x m), $V$ (n x n) and diagonal matrix $\Sigma$ such that:
+$$A = U \Sigma V^\dagger$$
+where $\Sigma$ contains non-negative singular values $\sigma_1 \geq \sigma_2 \geq \ldots \geq 0$.
+</Definition>
+
+<Tip>
+SVD is fundamental to:
+- **Principal Component Analysis (PCA)**: Dimensionality reduction
+- **Recommendation Systems**: Matrix completion
+- **Signal Processing**: Noise reduction
+- **Machine Learning**: Feature extraction and compression
+</Tip>
+
+## 2. Quantum Approach to SVD
+
+Quantum computers can estimate singular values through phase estimation on the Hermitian extension:
+
+<Formula>
+Given matrix $A$, construct the Hermitian operator:
+$$H_A = \begin{pmatrix} 0 & A \\ A^\dagger & 0 \end{pmatrix}$$
+The eigenvalues of $H_A$ are $\pm\sigma_j$, where $\sigma_j$ are singular values of $A$.
+</Formula>
+
+```python
+import numpy as np
+from scipy.linalg import svd
+
+def construct_hermitian_extension(A: np.ndarray) -> np.ndarray:
+    """
+    Construct Hermitian matrix for SVD via eigenvalue methods.
+
+    Args:
+        A: Input matrix (m x n)
+
+    Returns:
+        Hermitian matrix H with eigenvalues ±σ
+    """
+    m, n = A.shape
+
+    # Pad to square if needed
+    max_dim = max(m, n)
+    A_padded = np.zeros((max_dim, max_dim), dtype=complex)
+    A_padded[:m, :n] = A
+
+    # Construct [[0, A], [A†, 0]]
+    H = np.block([
+        [np.zeros((max_dim, max_dim)), A_padded],
+        [A_padded.conj().T, np.zeros((max_dim, max_dim))]
+    ])
+
+    return H
+
+def verify_svd_eigenvalue_relation(A: np.ndarray) -> dict:
+    """
+    Verify that eigenvalues of H_A correspond to singular values of A.
+
+    Args:
+        A: Input matrix
+
+    Returns:
+        Verification results
+    """
+    # Classical SVD
+    U, S, Vh = svd(A)
+
+    # Hermitian extension
+    H = construct_hermitian_extension(A)
+    eigenvalues = np.linalg.eigvalsh(H)
+
+    # Sort by absolute value
+    eigenvalues_sorted = np.sort(np.abs(eigenvalues))[::-1]
+
+    # Compare with singular values (doubled and ± pairs)
+    n_sv = len(S)
+    reconstructed_sv = eigenvalues_sorted[:n_sv]
+
+    return {
+        'singular_values': S,
+        'eigenvalues': eigenvalues,
+        'reconstructed_sv': reconstructed_sv,
+        'match': np.allclose(S, reconstructed_sv[:len(S)], atol=1e-10)
+    }
+
+# Example
+A = np.array([[3, 2, 2], [2, 3, -2]])
+
+result = verify_svd_eigenvalue_relation(A)
+
+print("SVD via Hermitian Extension")
+print("=" * 40)
+print(f"Matrix A:\n{A}")
+print(f"\nSingular values: {result['singular_values']}")
+print(f"H_A eigenvalues: {np.sort(result['eigenvalues'])}")
+print(f"Match verified: {result['match']}")
+```
+
+## 3. Quantum Singular Value Estimation
+
+Using quantum phase estimation on the Hermitian extension:
+
+```python
+import numpy as np
+from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
+from qiskit.quantum_info import Operator, Statevector
+from qiskit.circuit.library import QFT
+
+def quantum_sv_estimation(A: np.ndarray, n_precision: int = 4) -> dict:
+    """
+    Estimate singular values using quantum phase estimation.
+
+    Args:
+        A: Input matrix
+        n_precision: Precision qubits for QPE
+
+    Returns:
+        Singular value estimates
+    """
+    # Construct Hermitian extension
+    H = construct_hermitian_extension(A)
+    n = H.shape[0]
+    n_system = int(np.log2(n))
+
+    # Normalize for phase encoding
+    H_norm = np.linalg.norm(H, ord=2)
+    t = np.pi / H_norm  # Time for unitary
+
+    # Unitary: e^{iHt}
+    U = Operator(np.exp(1j * H * t / 2)).data
+
+    # Build QPE circuit
+    precision = QuantumRegister(n_precision, 'prec')
+    system = QuantumRegister(n_system, 'sys')
+    qc = QuantumCircuit(precision, system)
+
+    # Prepare superposition of singular vectors
+    # (In practice, would prepare specific state)
+    qc.h(system)
+
+    # QPE
+    qc.h(precision)
+
+    U_op = Operator(U)
+    for k in range(n_precision):
+        power = 2 ** k
+        U_power = U_op.power(power)
+        controlled_U = U_power.to_instruction().control(1)
+        qc.append(controlled_U, [precision[k]] + list(system))
+
+    qc.append(QFT(n_precision, inverse=True), precision)
+
+    # Analyze output
+    sv = Statevector(qc)
+    probs = sv.probabilities()
+
+    # Extract singular value estimates from phases
+    estimates = []
+    for k in range(2 ** n_precision):
+        phase = k / (2 ** n_precision)
+        sigma_est = phase * 2 * H_norm / np.pi
+
+        # Get probability for this phase
+        # Sum over all system states
+        total_prob = sum(probs[k * (2**n_system) + j] for j in range(2**n_system))
+
+        if total_prob > 0.01:
+            estimates.append({
+                'phase': phase,
+                'singular_value': sigma_est,
+                'probability': total_prob
+            })
+
+    # True singular values for comparison
+    true_sv = np.linalg.svd(A, compute_uv=False)
+
+    return {
+        'estimates': sorted(estimates, key=lambda x: -x['probability']),
+        'true_singular_values': true_sv,
+        'normalization': H_norm
+    }
+
+# Example
+A = np.array([[2, 1], [1, 2]])
+
+result = quantum_sv_estimation(A, n_precision=5)
+
+print("Quantum Singular Value Estimation")
+print("=" * 40)
+print(f"Matrix A:\n{A}")
+print(f"\nTrue singular values: {result['true_singular_values']}")
+print("\nQuantum estimates (top 5):")
+for est in result['estimates'][:5]:
+    print(f"  σ ≈ {est['singular_value']:.4f} (prob: {est['probability']:.4f})")
+```
+
+## 4. Low-Rank Approximation
+
+Quantum SVD enables efficient low-rank approximations:
+
+<Definition term="Low-Rank Approximation">
+The best rank-k approximation to matrix $A$ is:
+$$A_k = \sum_{j=1}^{k} \sigma_j |u_j\rangle\langle v_j|$$
+This minimizes $\|A - A_k\|$ in both Frobenius and spectral norms.
+</Definition>
+
+```python
+import numpy as np
+
+def classical_low_rank_approximation(A: np.ndarray, k: int) -> dict:
+    """
+    Compute rank-k approximation using classical SVD.
+
+    Args:
+        A: Input matrix
+        k: Target rank
+
+    Returns:
+        Low-rank approximation and error analysis
+    """
+    U, S, Vh = np.linalg.svd(A, full_matrices=False)
+
+    # Truncate to rank k
+    U_k = U[:, :k]
+    S_k = S[:k]
+    Vh_k = Vh[:k, :]
+
+    # Reconstruct
+    A_k = U_k @ np.diag(S_k) @ Vh_k
+
+    # Errors
+    frobenius_error = np.sqrt(np.sum(S[k:]**2))
+    spectral_error = S[k] if k < len(S) else 0
+    relative_error = frobenius_error / np.linalg.norm(A, 'fro')
+
+    # Compression ratio
+    m, n = A.shape
+    original_size = m * n
+    compressed_size = k * (m + n + 1)
+    compression = original_size / compressed_size
+
+    return {
+        'A_k': A_k,
+        'U_k': U_k,
+        'S_k': S_k,
+        'Vh_k': Vh_k,
+        'frobenius_error': frobenius_error,
+        'spectral_error': spectral_error,
+        'relative_error': relative_error,
+        'compression_ratio': compression,
+        'energy_captured': np.sum(S_k**2) / np.sum(S**2)
+    }
+
+def quantum_low_rank_preparation(A: np.ndarray, k: int,
+                                  n_precision: int = 6) -> dict:
+    """
+    Quantum state preparation for low-rank approximation.
+
+    Prepares state encoding the rank-k approximation.
+
+    Args:
+        A: Input matrix
+        k: Target rank
+        n_precision: QPE precision qubits
+
+    Returns:
+        Quantum state encoding A_k
+    """
+    U, S, Vh = np.linalg.svd(A, full_matrices=False)
+    m, n = A.shape
+
+    # State encoding A_k
+    # |ψ⟩ = Σⱼ₌₁ᵏ σⱼ |uⱼ⟩|vⱼ⟩
+    state_dim = max(m, n)
+    state = np.zeros((state_dim, state_dim), dtype=complex)
+
+    for j in range(min(k, len(S))):
+        u_j = np.zeros(state_dim, dtype=complex)
+        u_j[:m] = U[:, j]
+
+        v_j = np.zeros(state_dim, dtype=complex)
+        v_j[:n] = Vh[j, :].conj()
+
+        state += S[j] * np.outer(u_j, v_j)
+
+    # Normalize for quantum state
+    norm = np.linalg.norm(state, 'fro')
+    state_normalized = state / norm
+
+    # Vectorize for quantum state
+    state_vector = state_normalized.flatten()
+    state_vector = state_vector / np.linalg.norm(state_vector)
+
+    return {
+        'state_vector': state_vector,
+        'state_matrix': state_normalized,
+        'normalization': norm,
+        'rank': min(k, len(S)),
+        'singular_values_used': S[:k]
+    }
+
+# Example: Image-like matrix
+np.random.seed(42)
+# Create a naturally low-rank matrix (sum of outer products)
+m, n = 16, 16
+rank_true = 3
+U_true = np.random.randn(m, rank_true)
+V_true = np.random.randn(rank_true, n)
+A = U_true @ V_true + 0.1 * np.random.randn(m, n)  # Add noise
+
+print("Low-Rank Approximation")
+print("=" * 40)
+print(f"Matrix size: {m}x{n}")
+print(f"True rank: {rank_true}")
+
+for k in [1, 2, 3, 5]:
+    result = classical_low_rank_approximation(A, k)
+    print(f"\nRank-{k} approximation:")
+    print(f"  Relative error: {result['relative_error']:.4f}")
+    print(f"  Energy captured: {result['energy_captured']:.2%}")
+    print(f"  Compression: {result['compression_ratio']:.1f}x")
+```
+
+## 5. Quantum PCA (Principal Component Analysis)
+
+Quantum PCA extracts principal components with potential speedup:
+
+```python
+import numpy as np
+
+def classical_pca(X: np.ndarray, n_components: int) -> dict:
+    """
+    Classical PCA implementation.
+
+    Args:
+        X: Data matrix (samples x features)
+        n_components: Number of components
+
+    Returns:
+        PCA results
+    """
+    # Center data
+    X_centered = X - np.mean(X, axis=0)
+
+    # Covariance matrix
+    n_samples = X.shape[0]
+    C = X_centered.T @ X_centered / (n_samples - 1)
+
+    # Eigendecomposition
+    eigenvalues, eigenvectors = np.linalg.eigh(C)
+
+    # Sort descending
+    idx = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[idx]
+    eigenvectors = eigenvectors[:, idx]
+
+    # Select components
+    components = eigenvectors[:, :n_components]
+    explained_variance = eigenvalues[:n_components]
+
+    # Project data
+    X_projected = X_centered @ components
+
+    return {
+        'components': components,
+        'explained_variance': explained_variance,
+        'explained_variance_ratio': explained_variance / np.sum(eigenvalues),
+        'projected_data': X_projected,
+        'reconstruction_error': np.mean(
+            np.linalg.norm(X_centered - X_projected @ components.T, axis=1)**2
+        )
+    }
+
+def quantum_pca_density_matrix(rho: np.ndarray, n_precision: int = 5) -> dict:
+    """
+    Quantum PCA via density matrix exponentiation.
+
+    Lloyd's quantum PCA uses e^{-iρt} to extract eigenvalues of ρ.
+
+    Args:
+        rho: Density matrix (covariance matrix in PCA context)
+        n_precision: QPE precision
+
+    Returns:
+        Principal components via quantum estimation
+    """
+    # Verify density matrix properties
+    trace = np.trace(rho)
+    rho_normalized = rho / trace if trace != 1 else rho
+
+    # Eigendecomposition (classical for analysis)
+    eigenvalues, eigenvectors = np.linalg.eigh(rho_normalized)
+
+    # Sort descending
+    idx = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[idx]
+    eigenvectors = eigenvectors[:, idx]
+
+    # Quantum complexity analysis
+    n = rho.shape[0]
+    d = np.linalg.matrix_rank(rho_normalized)
+
+    # Quantum speedup conditions
+    # Need: efficient state preparation and sparse ρ
+    classical_complexity = n ** 3  # Eigendecomposition
+    quantum_complexity = d ** 2 * np.log(n)  # Approximate
+
+    return {
+        'eigenvalues': eigenvalues,
+        'eigenvectors': eigenvectors,
+        'rank': d,
+        'classical_complexity': classical_complexity,
+        'quantum_complexity': quantum_complexity,
+        'potential_speedup': classical_complexity / quantum_complexity if quantum_complexity > 0 else float('inf')
+    }
+
+# Example: PCA on synthetic data
+np.random.seed(42)
+n_samples, n_features = 100, 10
+
+# Generate correlated data
+cov = np.eye(n_features)
+cov[0, 1] = cov[1, 0] = 0.8
+cov[2, 3] = cov[3, 2] = 0.6
+
+X = np.random.multivariate_normal(np.zeros(n_features), cov, n_samples)
+
+print("Quantum PCA Analysis")
+print("=" * 40)
+print(f"Data: {n_samples} samples, {n_features} features")
+
+# Classical PCA
+pca_result = classical_pca(X, n_components=3)
+print(f"\nClassical PCA (3 components):")
+print(f"  Explained variance ratio: {pca_result['explained_variance_ratio']}")
+print(f"  Total explained: {np.sum(pca_result['explained_variance_ratio']):.2%}")
+
+# Quantum PCA complexity
+rho = np.cov(X.T)
+qpca_result = quantum_pca_density_matrix(rho)
+print(f"\nQuantum PCA Analysis:")
+print(f"  Covariance rank: {qpca_result['rank']}")
+print(f"  Classical complexity: O({qpca_result['classical_complexity']:.0f})")
+print(f"  Quantum complexity: O({qpca_result['quantum_complexity']:.0f})")
+print(f"  Potential speedup: {qpca_result['potential_speedup']:.1f}x")
+```
+
+## 6. Quantum Recommendation Systems
+
+The quantum SVD approach was first proposed for recommendation systems:
+
+```python
+import numpy as np
+
+def create_recommendation_matrix(n_users: int, n_items: int,
+                                   n_factors: int, sparsity: float = 0.1) -> dict:
+    """
+    Create synthetic recommendation matrix with latent factors.
+
+    Args:
+        n_users: Number of users
+        n_items: Number of items
+        n_factors: Latent factor dimension
+        sparsity: Fraction of observed entries
+
+    Returns:
+        Rating matrix and ground truth
+    """
+    # Latent factors
+    U = np.random.randn(n_users, n_factors)
+    V = np.random.randn(n_items, n_factors)
+
+    # True rating matrix
+    R_true = U @ V.T
+
+    # Normalize to [1, 5] range
+    R_true = 3 + 2 * R_true / np.max(np.abs(R_true))
+
+    # Observed ratings (sparse)
+    mask = np.random.random((n_users, n_items)) < sparsity
+    R_observed = R_true * mask
+
+    return {
+        'R_true': R_true,
+        'R_observed': R_observed,
+        'mask': mask,
+        'U_true': U,
+        'V_true': V,
+        'n_factors': n_factors
+    }
+
+def matrix_completion_svd(R_observed: np.ndarray, mask: np.ndarray,
+                           k: int, n_iterations: int = 100) -> dict:
+    """
+    Matrix completion using SVD-based iterative method.
+
+    Args:
+        R_observed: Observed ratings (0 where unobserved)
+        mask: Boolean mask of observed entries
+        k: Rank for approximation
+        n_iterations: Number of iterations
+
+    Returns:
+        Completed matrix and analysis
+    """
+    R = R_observed.copy()
+
+    # Initialize missing entries with column means
+    col_means = np.sum(R_observed, axis=0) / np.sum(mask, axis=0)
+    col_means = np.nan_to_num(col_means, nan=3.0)
+
+    for i in range(R.shape[0]):
+        for j in range(R.shape[1]):
+            if not mask[i, j]:
+                R[i, j] = col_means[j]
+
+    # Iterative SVD
+    for iteration in range(n_iterations):
+        # SVD
+        U, S, Vh = np.linalg.svd(R, full_matrices=False)
+
+        # Truncate
+        U_k = U[:, :k]
+        S_k = S[:k]
+        Vh_k = Vh[:k, :]
+
+        # Reconstruct
+        R_new = U_k @ np.diag(S_k) @ Vh_k
+
+        # Keep observed values
+        R_new[mask] = R_observed[mask]
+
+        # Check convergence
+        if np.linalg.norm(R_new - R) < 1e-6:
+            break
+
+        R = R_new
+
+    return {
+        'R_completed': R,
+        'iterations': iteration + 1,
+        'singular_values': S[:k]
+    }
+
+def analyze_quantum_recommendation_advantage(n_users: int, n_items: int,
+                                               k: int) -> dict:
+    """
+    Analyze potential quantum speedup for recommendation systems.
+
+    Args:
+        n_users, n_items: Matrix dimensions
+        k: Number of latent factors
+
+    Returns:
+        Complexity comparison
+    """
+    n = max(n_users, n_items)
+
+    # Classical complexity
+    # Full SVD: O(n²k) for k largest singular values
+    classical_svd = n ** 2 * k
+    classical_iteration = n ** 2  # Per iteration update
+
+    # Quantum complexity (under specific conditions)
+    # Kerenidis-Prakash: O(polylog(n) * k³ / ε⁴)
+    # Requires QRAM for state preparation
+    epsilon = 0.01
+    quantum_complexity = np.log(n) ** 2 * k ** 3 / epsilon ** 4
+
+    # Conditions for quantum advantage
+    conditions = {
+        'qram_available': 'Required for O(polylog(n)) state prep',
+        'low_rank': f'k = {k} should be small',
+        'sampling_sufficient': 'Only need samples from distribution',
+        'precision': f'ε = {epsilon} acceptable'
+    }
+
+    return {
+        'classical_svd': classical_svd,
+        'quantum_complexity': quantum_complexity,
+        'speedup': classical_svd / quantum_complexity,
+        'exponential_speedup_in': 'n (matrix dimension)',
+        'conditions': conditions
+    }
+
+# Example: Small recommendation system
+np.random.seed(42)
+
+data = create_recommendation_matrix(n_users=50, n_items=30, n_factors=5, sparsity=0.2)
+
+print("Quantum Recommendation System")
+print("=" * 40)
+print(f"Users: {50}, Items: {30}")
+print(f"Observed ratings: {np.sum(data['mask'])} / {50*30} ({np.mean(data['mask']):.1%})")
+
+# Complete matrix
+result = matrix_completion_svd(data['R_observed'], data['mask'], k=5)
+
+# Evaluate on unobserved entries
+test_mask = ~data['mask']
+predicted = result['R_completed'][test_mask]
+actual = data['R_true'][test_mask]
+rmse = np.sqrt(np.mean((predicted - actual) ** 2))
+
+print(f"\nMatrix completion (rank-5):")
+print(f"  Iterations: {result['iterations']}")
+print(f"  Test RMSE: {rmse:.4f}")
+print(f"  Top singular values: {result['singular_values']}")
+
+# Quantum advantage analysis
+advantage = analyze_quantum_recommendation_advantage(50, 30, k=5)
+print(f"\nQuantum advantage analysis:")
+print(f"  Classical: O({advantage['classical_svd']:.0f})")
+print(f"  Quantum: O({advantage['quantum_complexity']:.0f})")
+print(f"  Potential speedup: {advantage['speedup']:.1f}x")
+```
+
+## 7. Quantum Singular Value Transformation (QSVT) for SVD
+
+QSVT provides a unified framework for SVD-related operations:
+
+```python
+import numpy as np
+
+def qsvt_for_matrix_function(A: np.ndarray, func, poly_degree: int = 20) -> dict:
+    """
+    Apply function to singular values using QSVT approach.
+
+    Args:
+        A: Input matrix
+        func: Function to apply to singular values
+        poly_degree: Polynomial approximation degree
+
+    Returns:
+        f(A) with function applied to singular values
+    """
+    U, S, Vh = np.linalg.svd(A, full_matrices=False)
+
+    # Apply function to singular values
+    S_transformed = np.array([func(s) for s in S])
+
+    # Reconstruct
+    A_transformed = U @ np.diag(S_transformed) @ Vh
+
+    # Polynomial approximation analysis
+    # How well can we approximate func with degree-d polynomial?
+    x = np.linspace(0.01, 1, 100)
+    y = np.array([func(xi) for xi in x])
+
+    # Chebyshev fit
+    coeffs = np.polynomial.chebyshev.chebfit(x, y, poly_degree)
+    y_approx = np.polynomial.chebyshev.chebval(x, coeffs)
+    approx_error = np.max(np.abs(y - y_approx))
+
+    return {
+        'result': A_transformed,
+        'original_sv': S,
+        'transformed_sv': S_transformed,
+        'poly_degree': poly_degree,
+        'approximation_error': approx_error,
+        'qsvt_queries': 2 * poly_degree + 1
+    }
+
+# Example transformations
+A = np.array([[2, 1, 0], [1, 2, 1], [0, 1, 2]]) / 3
+
+print("QSVT for Matrix Functions")
+print("=" * 40)
+print(f"Matrix A:\n{A}")
+print(f"Singular values: {np.linalg.svd(A, compute_uv=False)}")
+
+transformations = [
+    ("Square root", lambda s: np.sqrt(s)),
+    ("Inverse (pseudo)", lambda s: 1/s if s > 0.1 else 0),
+    ("Sign", lambda s: 1 if s > 0.5 else 0),
+    ("Soft threshold", lambda s: max(s - 0.3, 0))
+]
+
+for name, func in transformations:
+    result = qsvt_for_matrix_function(A, func)
+    print(f"\n{name}:")
+    print(f"  Transformed SVs: {result['transformed_sv']}")
+    print(f"  Approx error: {result['approximation_error']:.6f}")
+    print(f"  QSVT queries: {result['qsvt_queries']}")
+```
+
+## 8. Error Analysis and Precision Requirements
+
+Understanding error sources is crucial for practical quantum SVD:
+
+```python
+import numpy as np
+
+def analyze_svd_precision_requirements(A: np.ndarray,
+                                         target_error: float = 0.01) -> dict:
+    """
+    Analyze precision requirements for quantum SVD.
+
+    Args:
+        A: Input matrix
+        target_error: Acceptable error in singular value estimation
+
+    Returns:
+        Precision analysis
+    """
+    U, S, Vh = np.linalg.svd(A)
+
+    # Singular value gaps
+    sv_gaps = np.diff(S)
+    min_gap = np.min(np.abs(sv_gaps)) if len(sv_gaps) > 0 else S[-1]
+
+    # Condition number (ratio of largest to smallest SV)
+    condition_number = S[0] / S[-1] if S[-1] > 1e-10 else float('inf')
+
+    # QPE precision requirements
+    # Need to resolve min_gap with precision target_error
+    if min_gap > 0:
+        precision_bits = int(np.ceil(-np.log2(min_gap * target_error))) + 2
+    else:
+        precision_bits = float('inf')
+
+    # Circuit depth estimate
+    qpe_depth = 2 ** precision_bits
+
+    # Total complexity
+    n, m = A.shape
+    log_dim = int(np.ceil(np.log2(max(n, m))))
+
+    return {
+        'singular_values': S,
+        'condition_number': condition_number,
+        'min_sv_gap': min_gap,
+        'precision_bits': precision_bits,
+        'qpe_depth': qpe_depth,
+        'total_qubits': 2 * log_dim + precision_bits,
+        'gate_count_estimate': qpe_depth * log_dim ** 2
+    }
+
+def compare_classical_quantum_svd(n_values: list, k: int = 5) -> dict:
+    """
+    Compare classical vs quantum SVD complexity.
+
+    Args:
+        n_values: List of matrix dimensions
+        k: Number of singular values to extract
+
+    Returns:
+        Complexity comparison
+    """
+    results = []
+
+    for n in n_values:
+        # Classical: O(n²k) for truncated SVD
+        # Full SVD: O(min(mn², m²n)) ≈ O(n³) for square
+        classical_truncated = n ** 2 * k
+        classical_full = n ** 3
+
+        # Quantum (idealized): O(polylog(n) * k * κ²)
+        # κ = condition number, assume moderate
+        kappa = 10  # Typical
+        quantum = (np.log(n) ** 2) * k * kappa ** 2
+
+        results.append({
+            'n': n,
+            'classical_truncated': classical_truncated,
+            'classical_full': classical_full,
+            'quantum': quantum,
+            'speedup_over_truncated': classical_truncated / quantum,
+            'speedup_over_full': classical_full / quantum
+        })
+
+    return results
+
+# Analysis
+print("SVD Precision and Complexity Analysis")
+print("=" * 50)
+
+# Random matrix with structure
+np.random.seed(42)
+A = np.random.randn(8, 6) @ np.random.randn(6, 8) / 10  # Rank-6 matrix
+
+analysis = analyze_svd_precision_requirements(A, target_error=0.01)
+
+print(f"\nMatrix: 8x8, effective rank 6")
+print(f"Singular values: {analysis['singular_values']}")
+print(f"Condition number: {analysis['condition_number']:.2f}")
+print(f"Minimum SV gap: {analysis['min_sv_gap']:.4f}")
+print(f"\nQuantum requirements:")
+print(f"  Precision bits: {analysis['precision_bits']}")
+print(f"  Total qubits: {analysis['total_qubits']}")
+print(f"  Gate count estimate: {analysis['gate_count_estimate']}")
+
+# Complexity scaling
+print("\n" + "=" * 50)
+print("Complexity Scaling")
+print("=" * 50)
+
+n_values = [32, 64, 128, 256, 512, 1024]
+comparisons = compare_classical_quantum_svd(n_values, k=10)
+
+print(f"\n{'n':>6} {'Classical':>12} {'Quantum':>12} {'Speedup':>10}")
+print("-" * 42)
+for c in comparisons:
+    print(f"{c['n']:>6} {c['classical_truncated']:>12.0f} {c['quantum']:>12.0f} "
+          f"{c['speedup_over_truncated']:>10.1f}x")
+```
+
+## 9. Applications Summary
+
+Quantum SVD enables speedups for various applications:
+
+| Application | Classical | Quantum | Conditions |
+|------------|-----------|---------|------------|
+| PCA | O(nd + d³) | O(polylog(nd)) | QRAM, low rank |
+| Recommendations | O(nmk) | O(polylog(nm)k³) | QRAM, sampling |
+| Low-rank approx | O(n²k) | O(log(n)k/ε) | Block-encoding |
+| Pseudoinverse | O(n³) | O(κ² log(n)) | Well-conditioned |
+
+<Warning>
+Quantum SVD advantages require:
+1. **QRAM** for efficient state preparation
+2. **Low effective rank** for polynomial approximations
+3. **Sampling sufficient** rather than full output
+4. **Good conditioning** (bounded κ)
+</Warning>
+
+## 10. Practical Considerations
+
+```python
+import numpy as np
+
+def evaluate_quantum_svd_feasibility(A: np.ndarray) -> dict:
+    """
+    Evaluate whether quantum SVD is advantageous for a given matrix.
+
+    Args:
+        A: Input matrix
+
+    Returns:
+        Feasibility assessment
+    """
+    m, n = A.shape
+    U, S, Vh = np.linalg.svd(A, full_matrices=False)
+
+    # Matrix properties
+    effective_rank = np.sum(S > 0.01 * S[0])
+    condition_number = S[0] / S[-1] if S[-1] > 1e-10 else float('inf')
+    sparsity = np.sum(np.abs(A) < 1e-10) / (m * n)
+
+    # Feasibility criteria
+    criteria = {
+        'large_dimension': m * n > 10000,
+        'low_rank': effective_rank < min(m, n) / 10,
+        'well_conditioned': condition_number < 100,
+        'sparse_or_structured': sparsity > 0.9 or effective_rank < 10
+    }
+
+    # Overall assessment
+    n_met = sum(criteria.values())
+    if n_met >= 3:
+        recommendation = "Strong candidate for quantum SVD"
+    elif n_met == 2:
+        recommendation = "Possible quantum advantage"
+    else:
+        recommendation = "Classical methods likely better"
+
+    return {
+        'dimensions': (m, n),
+        'effective_rank': effective_rank,
+        'condition_number': condition_number,
+        'sparsity': sparsity,
+        'criteria_met': criteria,
+        'n_criteria_met': n_met,
+        'recommendation': recommendation
+    }
+
+# Test cases
+test_matrices = [
+    ("Small dense", np.random.randn(10, 10)),
+    ("Large low-rank", np.random.randn(100, 5) @ np.random.randn(5, 100)),
+    ("Sparse", np.diag(np.random.randn(50))),
+    ("Ill-conditioned", np.diag(np.logspace(0, -10, 20)))
+]
+
+print("Quantum SVD Feasibility Assessment")
+print("=" * 50)
+
+for name, A in test_matrices:
+    result = evaluate_quantum_svd_feasibility(A)
+    print(f"\n{name}:")
+    print(f"  Size: {result['dimensions']}")
+    print(f"  Effective rank: {result['effective_rank']}")
+    print(f"  Condition number: {result['condition_number']:.2e}")
+    print(f"  Criteria met: {result['n_criteria_met']}/4")
+    print(f"  Recommendation: {result['recommendation']}")
+```
+
+## Summary
+
+Quantum SVD provides powerful tools for matrix analysis:
+
+1. **Hermitian Extension**: Convert SVD to eigenvalue problem via $H_A$
+2. **Quantum Estimation**: Use QPE to extract singular values
+3. **Low-Rank Approximation**: Efficient preparation of truncated SVD
+4. **PCA**: Quantum speedup for principal component extraction
+5. **Recommendations**: Matrix completion with quantum advantage
+6. **QSVT**: Unified framework for singular value transformations
+7. **Conditions**: QRAM, low rank, good conditioning required for advantage
+
+The quantum approach offers exponential speedups in matrix dimension for suitable problems, but practical advantages depend heavily on problem structure and available quantum resources.
+
+## Further Reading
+
+- Next lesson: Linear System Applications (HHL for ML and PDEs)
+- Related: Block-Encoding and QSVT (matrix function framework)
+- Advanced: Dequantization and classical limits of quantum SVD

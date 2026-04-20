@@ -1,0 +1,689 @@
+---
+title: "Quantum Amplitude Estimation Algorithm"
+description: "Deep dive into the quantum amplitude estimation algorithm, including its connection to phase estimation, the quadratic speedup over classical sampling, and modern variants like iterative and maximum likelihood estimation."
+duration: 45
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the mathematical foundation of amplitude estimation
+- Implement the canonical quantum amplitude estimation algorithm
+- Analyze the quadratic speedup compared to classical Monte Carlo
+- Compare different variants: canonical, iterative, and maximum likelihood
+- Apply amplitude estimation to practical problems
+
+## 1. Introduction to Amplitude Estimation
+
+Quantum Amplitude Estimation (QAE) is a fundamental quantum algorithm that provides a quadratic speedup over classical methods for estimating probabilities and expectations. It lies at the heart of many quantum algorithms including quantum counting, quantum Monte Carlo, and quantum machine learning.
+
+<Definition term="Amplitude Estimation Problem">
+Given a quantum operator $\mathcal{A}$ that prepares a state $\mathcal{A}|0\rangle = \sqrt{1-a}|\psi_0\rangle|0\rangle + \sqrt{a}|\psi_1\rangle|1\rangle$, estimate the amplitude $a \in [0,1]$ with precision $\epsilon$ and success probability at least $1-\delta$.
+</Definition>
+
+The classical approach would require $O(1/\epsilon^2)$ samples to estimate $a$ with precision $\epsilon$. Quantum amplitude estimation achieves $O(1/\epsilon)$ complexity - a quadratic speedup!
+
+<Formula>
+$$\text{Classical: } O\left(\frac{1}{\epsilon^2}\right) \quad \text{vs} \quad \text{Quantum: } O\left(\frac{1}{\epsilon}\right)$$
+</Formula>
+
+## 2. Mathematical Foundation
+
+### The Grover Operator
+
+The amplitude estimation algorithm builds on Grover's search. Define the Grover operator:
+
+<Formula>
+$$Q = \mathcal{A} S_0 \mathcal{A}^\dagger S_\chi$$
+</Formula>
+
+where:
+- $S_0 = I - 2|0\rangle\langle 0|$ reflects about $|0\rangle$
+- $S_\chi = I - 2|\psi_1\rangle\langle\psi_1| \otimes |1\rangle\langle 1|$ reflects about marked states
+
+<Definition term="Grover Operator">
+The Grover operator $Q$ performs a rotation by angle $2\theta$ in the two-dimensional subspace spanned by $|\psi_0\rangle|0\rangle$ and $|\psi_1\rangle|1\rangle$, where $\sin^2(\theta) = a$.
+</Definition>
+
+### Eigenvalue Structure
+
+The Grover operator has eigenvalues $e^{\pm 2i\theta}$ where $\sin^2(\theta) = a$:
+
+<Formula>
+$$Q|\psi_\pm\rangle = e^{\pm 2i\theta}|\psi_\pm\rangle$$
+</Formula>
+
+The eigenvectors are:
+
+<Formula>
+$$|\psi_\pm\rangle = \frac{1}{\sqrt{2}}\left(|\psi_0\rangle|0\rangle \mp i|\psi_1\rangle|1\rangle\right)$$
+</Formula>
+
+```python
+import numpy as np
+from typing import Tuple, List, Optional
+
+def grover_operator_matrix(
+    A_matrix: np.ndarray,
+    marked_indices: List[int]
+) -> np.ndarray:
+    """
+    Construct the Grover operator matrix Q = A S_0 A^dag S_chi.
+
+    Args:
+        A_matrix: Unitary state preparation operator
+        marked_indices: Indices of marked (good) states
+
+    Returns:
+        Grover operator matrix Q
+    """
+    dim = A_matrix.shape[0]
+
+    # S_0: Reflection about |0>
+    S_0 = np.eye(dim)
+    S_0[0, 0] = -1
+
+    # S_chi: Reflection about marked states
+    S_chi = np.eye(dim)
+    for idx in marked_indices:
+        S_chi[idx, idx] = -1
+
+    # Q = A S_0 A^dag S_chi
+    Q = A_matrix @ S_0 @ A_matrix.conj().T @ S_chi
+
+    return Q
+
+def verify_grover_eigenvalues(
+    Q: np.ndarray,
+    amplitude: float
+) -> dict:
+    """
+    Verify the eigenvalue structure of the Grover operator.
+
+    Args:
+        Q: Grover operator matrix
+        amplitude: Expected amplitude a
+
+    Returns:
+        Dictionary with eigenvalue analysis
+    """
+    eigenvalues, eigenvectors = np.linalg.eig(Q)
+
+    # Expected angle
+    theta = np.arcsin(np.sqrt(amplitude))
+    expected_eigenvalues = [np.exp(2j * theta), np.exp(-2j * theta)]
+
+    # Find matching eigenvalues
+    matches = []
+    for ev in expected_eigenvalues:
+        diffs = np.abs(eigenvalues - ev)
+        min_idx = np.argmin(diffs)
+        matches.append({
+            'expected': ev,
+            'found': eigenvalues[min_idx],
+            'error': diffs[min_idx]
+        })
+
+    return {
+        'theta': theta,
+        'amplitude': amplitude,
+        'eigenvalue_matches': matches,
+        'all_eigenvalues': eigenvalues
+    }
+```
+
+## 3. Canonical Amplitude Estimation
+
+The canonical QAE algorithm uses quantum phase estimation on the Grover operator:
+
+### Algorithm Steps
+
+1. Prepare the state $\mathcal{A}|0\rangle$ in the target register
+2. Apply controlled-$Q^{2^j}$ operations from ancilla qubits
+3. Apply inverse QFT to ancilla register
+4. Measure ancilla to get estimate $\tilde{\theta}$
+5. Compute $\tilde{a} = \sin^2(\tilde{\theta})$
+
+```python
+import numpy as np
+from typing import Tuple
+
+class CanonicalAmplitudeEstimation:
+    """
+    Canonical Quantum Amplitude Estimation using phase estimation.
+    Simulated implementation for educational purposes.
+    """
+
+    def __init__(self, num_precision_qubits: int):
+        """
+        Initialize QAE with specified precision.
+
+        Args:
+            num_precision_qubits: Number of qubits for phase estimation
+        """
+        self.m = num_precision_qubits
+        self.M = 2 ** num_precision_qubits
+
+    def _qft_inverse(self, amplitudes: np.ndarray) -> np.ndarray:
+        """Apply inverse QFT to amplitude vector."""
+        n = len(amplitudes)
+        result = np.zeros(n, dtype=complex)
+
+        for k in range(n):
+            for j in range(n):
+                result[k] += amplitudes[j] * np.exp(2j * np.pi * j * k / n)
+            result[k] /= np.sqrt(n)
+
+        return result
+
+    def estimate(
+        self,
+        true_amplitude: float,
+        num_shots: int = 1000
+    ) -> dict:
+        """
+        Simulate amplitude estimation.
+
+        Args:
+            true_amplitude: The true amplitude a to estimate
+            num_shots: Number of measurement shots
+
+        Returns:
+            Dictionary with estimation results
+        """
+        theta = np.arcsin(np.sqrt(true_amplitude))
+
+        # Phase estimation creates superposition over phase values
+        # The phases are 2*theta and -2*theta (mod 2*pi)
+        # We measure in the computational basis after QFT^-1
+
+        # Ideal measurement probabilities
+        # Phase y/M approximates theta/pi
+        probs = np.zeros(self.M)
+
+        for y in range(self.M):
+            # Probability of measuring y
+            # From the phase estimation analysis
+            phi_plus = 2 * theta / (2 * np.pi)  # Normalized phase
+            phi_minus = -2 * theta / (2 * np.pi)
+
+            # Contribution from both eigenvalues
+            for phi in [phi_plus, phi_minus]:
+                phase_diff = y / self.M - phi
+                if abs(phase_diff - round(phase_diff)) < 1e-10:
+                    probs[y] += 0.5
+                else:
+                    # Sinc-like distribution
+                    probs[y] += 0.5 * (np.sin(np.pi * self.M * phase_diff) ** 2) / \
+                               (self.M ** 2 * np.sin(np.pi * phase_diff) ** 2)
+
+        probs = probs / probs.sum()  # Normalize
+
+        # Sample measurements
+        measurements = np.random.choice(self.M, size=num_shots, p=probs)
+
+        # Estimate theta from most frequent measurement
+        counts = np.bincount(measurements, minlength=self.M)
+        y_estimate = np.argmax(counts)
+
+        # Convert to amplitude estimate
+        theta_estimate = np.pi * y_estimate / self.M
+
+        # Handle both theta and pi - theta
+        a_estimate_1 = np.sin(theta_estimate) ** 2
+        a_estimate_2 = np.sin(np.pi - theta_estimate) ** 2
+
+        # Choose closer estimate
+        if abs(a_estimate_1 - true_amplitude) < abs(a_estimate_2 - true_amplitude):
+            a_estimate = a_estimate_1
+            theta_final = theta_estimate
+        else:
+            a_estimate = a_estimate_2
+            theta_final = np.pi - theta_estimate
+
+        return {
+            'amplitude_estimate': a_estimate,
+            'theta_estimate': theta_final,
+            'true_amplitude': true_amplitude,
+            'true_theta': theta,
+            'error': abs(a_estimate - true_amplitude),
+            'measurement_counts': counts,
+            'precision_qubits': self.m
+        }
+
+# Example usage
+qae = CanonicalAmplitudeEstimation(num_precision_qubits=6)
+result = qae.estimate(true_amplitude=0.3)
+print(f"True amplitude: {result['true_amplitude']:.4f}")
+print(f"Estimated: {result['amplitude_estimate']:.4f}")
+print(f"Error: {result['error']:.6f}")
+```
+
+## 4. Precision Analysis
+
+### Error Bounds
+
+The canonical QAE achieves the following precision guarantee:
+
+<Formula>
+$$|\tilde{a} - a| \leq \frac{2\pi\sqrt{a(1-a)}}{M} + \frac{\pi^2}{M^2}$$
+</Formula>
+
+where $M = 2^m$ is determined by the number of precision qubits $m$.
+
+<Tip>
+For target precision $\epsilon$, use approximately $m = \lceil \log_2(\pi/\epsilon) \rceil$ precision qubits.
+</Tip>
+
+### Query Complexity
+
+The algorithm makes $O(M) = O(1/\epsilon)$ queries to the Grover operator:
+
+```python
+def analyze_qae_complexity(
+    target_precision: float,
+    amplitude: float
+) -> dict:
+    """
+    Analyze the query complexity of QAE.
+
+    Args:
+        target_precision: Desired precision epsilon
+        amplitude: True amplitude a
+
+    Returns:
+        Complexity analysis dictionary
+    """
+    import math
+
+    # Number of precision qubits needed
+    m = math.ceil(math.log2(math.pi / target_precision))
+    M = 2 ** m
+
+    # Total queries to Q (Grover operator)
+    # QPE uses Q^1, Q^2, Q^4, ..., Q^{2^{m-1}}
+    total_queries = sum(2**j for j in range(m))  # = 2^m - 1 = M - 1
+
+    # Classical comparison
+    classical_samples = int(1 / (target_precision ** 2))
+
+    # Actual precision achieved
+    actual_precision = (2 * np.pi * np.sqrt(amplitude * (1 - amplitude)) / M +
+                       np.pi ** 2 / M ** 2)
+
+    return {
+        'precision_qubits': m,
+        'M': M,
+        'total_queries': total_queries,
+        'classical_samples': classical_samples,
+        'quantum_advantage': classical_samples / total_queries,
+        'actual_precision': actual_precision,
+        'target_precision': target_precision
+    }
+
+# Example
+analysis = analyze_qae_complexity(0.01, 0.3)
+print(f"For precision 0.01:")
+print(f"  Quantum queries: {analysis['total_queries']}")
+print(f"  Classical samples: {analysis['classical_samples']}")
+print(f"  Speedup: {analysis['quantum_advantage']:.1f}x")
+```
+
+## 5. Iterative Amplitude Estimation
+
+The iterative variant avoids the deep circuits of phase estimation:
+
+<Definition term="Iterative Amplitude Estimation (IAE)">
+A variant that uses only Grover iterates $Q^k$ and classical post-processing to estimate amplitudes, requiring shallower circuits at the cost of more measurements.
+</Definition>
+
+```python
+class IterativeAmplitudeEstimation:
+    """
+    Iterative Amplitude Estimation without phase estimation.
+    Uses adaptive schedule of Grover iterations.
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        alpha: float = 0.05
+    ):
+        """
+        Initialize IAE.
+
+        Args:
+            epsilon: Target precision
+            alpha: Confidence level (failure probability)
+        """
+        self.epsilon = epsilon
+        self.alpha = alpha
+
+    def _compute_schedule(self) -> List[int]:
+        """Compute schedule of Grover iterations."""
+        import math
+
+        # Chernoff-Hoeffding schedule
+        T = math.ceil(math.log2(math.pi / (4 * self.epsilon)))
+        schedule = [2**k for k in range(T + 1)]
+
+        return schedule
+
+    def _shots_per_round(self) -> int:
+        """Compute shots needed per round."""
+        import math
+
+        T = len(self._compute_schedule())
+        N_k = math.ceil(8 * math.log(2 * T / self.alpha))
+
+        return N_k
+
+    def estimate(
+        self,
+        true_amplitude: float
+    ) -> dict:
+        """
+        Perform iterative amplitude estimation.
+
+        Args:
+            true_amplitude: True amplitude (for simulation)
+
+        Returns:
+            Estimation results
+        """
+        theta_true = np.arcsin(np.sqrt(true_amplitude))
+
+        schedule = self._compute_schedule()
+        N_k = self._shots_per_round()
+
+        # Track bounds on theta
+        theta_min = 0
+        theta_max = np.pi / 2
+
+        results_per_round = []
+        total_queries = 0
+
+        for k in schedule:
+            # Apply Q^k and measure
+            # Probability of measuring |1> is sin^2((2k+1)*theta)
+
+            prob_one = np.sin((2 * k + 1) * theta_true) ** 2
+
+            # Simulate measurements
+            measurements = np.random.binomial(N_k, prob_one)
+            p_estimate = measurements / N_k
+
+            total_queries += k * N_k
+
+            # Update bounds based on measurement
+            # This is a simplified version of the actual update rule
+            theta_estimate = np.arcsin(np.sqrt(p_estimate)) / (2 * k + 1)
+
+            results_per_round.append({
+                'k': k,
+                'shots': N_k,
+                'p_measured': p_estimate,
+                'theta_estimate': theta_estimate
+            })
+
+        # Final estimate (simplified - actual IAE uses more sophisticated post-processing)
+        final_theta = results_per_round[-1]['theta_estimate']
+        a_estimate = np.sin(final_theta) ** 2
+
+        return {
+            'amplitude_estimate': a_estimate,
+            'true_amplitude': true_amplitude,
+            'error': abs(a_estimate - true_amplitude),
+            'total_queries': total_queries,
+            'schedule': schedule,
+            'shots_per_round': N_k,
+            'rounds': results_per_round
+        }
+
+# Example
+iae = IterativeAmplitudeEstimation(epsilon=0.01)
+result = iae.estimate(true_amplitude=0.3)
+print(f"Iterative AE estimate: {result['amplitude_estimate']:.4f}")
+print(f"Total queries: {result['total_queries']}")
+```
+
+## 6. Maximum Likelihood Amplitude Estimation
+
+Maximum Likelihood AE (MLAE) achieves near-optimal performance with flexible circuit depths:
+
+```python
+from scipy.optimize import minimize_scalar
+
+class MaximumLikelihoodAE:
+    """
+    Maximum Likelihood Amplitude Estimation.
+    Combines measurements from different Grover depths.
+    """
+
+    def __init__(
+        self,
+        schedule: List[int],
+        shots_per_depth: int = 100
+    ):
+        """
+        Initialize MLAE.
+
+        Args:
+            schedule: List of Grover iteration counts to use
+            shots_per_depth: Measurements per depth
+        """
+        self.schedule = schedule
+        self.shots_per_depth = shots_per_depth
+
+    def _success_probability(
+        self,
+        theta: float,
+        k: int
+    ) -> float:
+        """Probability of measuring '1' after k Grover iterations."""
+        return np.sin((2 * k + 1) * theta) ** 2
+
+    def _log_likelihood(
+        self,
+        theta: float,
+        measurements: List[Tuple[int, int, int]]
+    ) -> float:
+        """
+        Compute log-likelihood of measurements given theta.
+
+        Args:
+            theta: Candidate angle
+            measurements: List of (k, successes, total) tuples
+
+        Returns:
+            Log-likelihood value
+        """
+        ll = 0
+        for k, h, N in measurements:
+            p = self._success_probability(theta, k)
+            # Avoid log(0)
+            p = np.clip(p, 1e-10, 1 - 1e-10)
+            ll += h * np.log(p) + (N - h) * np.log(1 - p)
+
+        return ll
+
+    def estimate(
+        self,
+        true_amplitude: float
+    ) -> dict:
+        """
+        Perform maximum likelihood estimation.
+
+        Args:
+            true_amplitude: True amplitude (for simulation)
+
+        Returns:
+            Estimation results
+        """
+        theta_true = np.arcsin(np.sqrt(true_amplitude))
+
+        # Collect measurements at each depth
+        measurements = []
+        total_queries = 0
+
+        for k in self.schedule:
+            prob = np.sin((2 * k + 1) * theta_true) ** 2
+            successes = np.random.binomial(self.shots_per_depth, prob)
+            measurements.append((k, successes, self.shots_per_depth))
+            total_queries += k * self.shots_per_depth
+
+        # Maximum likelihood estimation
+        def neg_log_likelihood(theta):
+            return -self._log_likelihood(theta, measurements)
+
+        result = minimize_scalar(
+            neg_log_likelihood,
+            bounds=(0, np.pi / 2),
+            method='bounded'
+        )
+
+        theta_mle = result.x
+        a_estimate = np.sin(theta_mle) ** 2
+
+        # Fisher information for confidence interval
+        fisher_info = 0
+        for k, h, N in measurements:
+            p = self._success_probability(theta_mle, k)
+            dp_dtheta = (2 * k + 1) * np.sin(2 * (2 * k + 1) * theta_mle)
+            fisher_info += N * dp_dtheta ** 2 / (p * (1 - p) + 1e-10)
+
+        std_error = 1 / np.sqrt(fisher_info + 1e-10)
+
+        return {
+            'amplitude_estimate': a_estimate,
+            'theta_estimate': theta_mle,
+            'true_amplitude': true_amplitude,
+            'error': abs(a_estimate - true_amplitude),
+            'total_queries': total_queries,
+            'std_error': std_error,
+            'confidence_interval': (
+                max(0, a_estimate - 2 * std_error),
+                min(1, a_estimate + 2 * std_error)
+            ),
+            'measurements': measurements
+        }
+
+# Example
+mlae = MaximumLikelihoodAE(
+    schedule=[0, 1, 2, 4, 8, 16],
+    shots_per_depth=100
+)
+result = mlae.estimate(true_amplitude=0.3)
+print(f"MLAE estimate: {result['amplitude_estimate']:.4f}")
+print(f"95% CI: [{result['confidence_interval'][0]:.4f}, "
+      f"{result['confidence_interval'][1]:.4f}]")
+```
+
+## 7. Comparison of Methods
+
+Each amplitude estimation variant has tradeoffs:
+
+| Method | Circuit Depth | Queries | Ancilla Qubits |
+|--------|--------------|---------|----------------|
+| Canonical QAE | $O(1/\epsilon)$ | $O(1/\epsilon)$ | $O(\log(1/\epsilon))$ |
+| Iterative AE | $O(1/\epsilon)$ | $O(1/\epsilon \log(1/\epsilon))$ | 0 |
+| ML AE | Flexible | Near-optimal | 0 |
+
+```python
+def compare_ae_methods(
+    true_amplitude: float,
+    target_precision: float,
+    num_trials: int = 100
+) -> dict:
+    """
+    Compare different amplitude estimation methods.
+
+    Args:
+        true_amplitude: Amplitude to estimate
+        target_precision: Target precision
+        num_trials: Number of trials for statistics
+
+    Returns:
+        Comparison results
+    """
+    results = {
+        'canonical': {'errors': [], 'queries': []},
+        'iterative': {'errors': [], 'queries': []},
+        'mle': {'errors': [], 'queries': []}
+    }
+
+    import math
+    m = math.ceil(math.log2(math.pi / target_precision))
+
+    for _ in range(num_trials):
+        # Canonical QAE
+        qae = CanonicalAmplitudeEstimation(num_precision_qubits=m)
+        r = qae.estimate(true_amplitude)
+        results['canonical']['errors'].append(r['error'])
+        results['canonical']['queries'].append(2**m - 1)
+
+        # Iterative AE
+        iae = IterativeAmplitudeEstimation(epsilon=target_precision)
+        r = iae.estimate(true_amplitude)
+        results['iterative']['errors'].append(r['error'])
+        results['iterative']['queries'].append(r['total_queries'])
+
+        # Maximum Likelihood AE
+        schedule = [2**k for k in range(m)]
+        mlae = MaximumLikelihoodAE(schedule=schedule, shots_per_depth=50)
+        r = mlae.estimate(true_amplitude)
+        results['mle']['errors'].append(r['error'])
+        results['mle']['queries'].append(r['total_queries'])
+
+    # Compute statistics
+    summary = {}
+    for method, data in results.items():
+        summary[method] = {
+            'mean_error': np.mean(data['errors']),
+            'std_error': np.std(data['errors']),
+            'mean_queries': np.mean(data['queries']),
+            'success_rate': np.mean(np.array(data['errors']) < target_precision)
+        }
+
+    return summary
+
+# Compare methods
+comparison = compare_ae_methods(0.3, 0.02, num_trials=50)
+for method, stats in comparison.items():
+    print(f"\n{method.upper()}:")
+    print(f"  Mean error: {stats['mean_error']:.4f}")
+    print(f"  Success rate: {stats['success_rate']:.1%}")
+    print(f"  Mean queries: {stats['mean_queries']:.0f}")
+```
+
+## 8. Applications Overview
+
+Amplitude estimation is a key subroutine in many quantum algorithms:
+
+1. **Quantum Counting**: Count solutions to search problems
+2. **Quantum Monte Carlo**: Estimate expectations with quadratic speedup
+3. **Option Pricing**: Financial derivatives valuation
+4. **Risk Analysis**: Value-at-Risk and other risk metrics
+5. **Machine Learning**: Gradient estimation, sampling
+
+<Warning>
+While QAE provides a quadratic speedup in query complexity, the constant factors and coherence requirements make near-term implementation challenging. NISQ-friendly variants like MLAE are being actively developed.
+</Warning>
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Amplitude Estimation Problem**: Estimating $a$ where $\mathcal{A}|0\rangle$ has amplitude $\sqrt{a}$ in marked states
+2. **Grover Operator**: The key ingredient connecting QAE to phase estimation
+3. **Canonical QAE**: Uses quantum phase estimation for $O(1/\epsilon)$ query complexity
+4. **Iterative and MLAE Variants**: Trade depth for shots, suitable for near-term devices
+5. **Quadratic Speedup**: QAE achieves $O(1/\epsilon)$ vs classical $O(1/\epsilon^2)$
+
+## Further Reading
+
+- Next lesson: Quantum Monte Carlo Methods
+- Related: Quantum Phase Estimation
+- Application: Quantum Finance Algorithms

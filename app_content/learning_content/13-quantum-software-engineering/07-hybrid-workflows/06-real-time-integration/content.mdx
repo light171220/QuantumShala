@@ -1,0 +1,1466 @@
+---
+title: "Real-Time Quantum-Classical Integration"
+description: "Implement real-time feedback loops between quantum and classical systems"
+duration: 50
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+- Implement real-time quantum-classical feedback loops
+- Design low-latency communication protocols for QPU-classical interaction
+- Build streaming data processing pipelines for quantum results
+- Create live monitoring dashboards and control systems
+
+## 1. Real-Time Feedback Loop Architecture
+
+Real-time quantum-classical integration enables dynamic control of quantum systems based on measurement outcomes. This is essential for error correction, adaptive algorithms, and interactive quantum applications.
+
+```
+REAL-TIME FEEDBACK ARCHITECTURE
+================================
+
+Classical Controller                    Quantum Processor
+-------------------                     -----------------
+┌─────────────────┐                    ┌─────────────────┐
+│  Parameter      │   Parameters       │  Circuit        │
+│  Generator      │ ──────────────────►│  Execution      │
+└────────┬────────┘                    └────────┬────────┘
+         │                                      │
+         │                                      │ Measurements
+         │                                      ▼
+┌────────┴────────┐   Stream           ┌─────────────────┐
+│  Feedback       │◄──────────────────│  Measurement    │
+│  Processor      │   Results          │  System         │
+└────────┬────────┘                    └─────────────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Live Dashboard │
+│  & Monitoring   │
+└─────────────────┘
+
+Latency Requirements:
+- Parameter update: < 100 μs (ideal) to < 10 ms (practical)
+- Measurement readout: < 1 ms
+- Feedback decision: < 5 ms
+- Total loop time: < 20 ms for coherent feedback
+```
+
+## 2. Low-Latency Communication Protocols
+
+Efficient communication between classical and quantum systems requires careful protocol design to minimize latency.
+
+```python
+import asyncio
+import time
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional, Callable, AsyncIterator
+from enum import Enum
+import json
+from collections import deque
+
+class MessagePriority(Enum):
+    """Priority levels for quantum-classical messages."""
+    CRITICAL = 0    # Error correction, safety
+    HIGH = 1        # Measurement results
+    NORMAL = 2      # Parameter updates
+    LOW = 3         # Telemetry, logging
+
+@dataclass
+class QuantumMessage:
+    """Low-latency message for quantum-classical communication."""
+    message_id: str
+    message_type: str
+    payload: Dict[str, Any]
+    priority: MessagePriority
+    timestamp: float = field(default_factory=time.time)
+    latency_budget_ms: float = 10.0
+
+    def is_expired(self) -> bool:
+        """Check if message has exceeded latency budget."""
+        elapsed_ms = (time.time() - self.timestamp) * 1000
+        return elapsed_ms > self.latency_budget_ms
+
+    def remaining_budget_ms(self) -> float:
+        """Get remaining time budget in milliseconds."""
+        elapsed_ms = (time.time() - self.timestamp) * 1000
+        return max(0, self.latency_budget_ms - elapsed_ms)
+
+
+class PriorityMessageQueue:
+    """
+    Priority queue for quantum-classical communication.
+
+    Features:
+    - Priority-based message ordering
+    - Latency tracking
+    - Expired message handling
+    - Backpressure management
+    """
+
+    def __init__(self, max_size: int = 1000):
+        self.queues: Dict[MessagePriority, deque] = {
+            priority: deque(maxlen=max_size // 4)
+            for priority in MessagePriority
+        }
+        self.stats = {
+            "enqueued": 0,
+            "dequeued": 0,
+            "expired": 0,
+            "total_latency_ms": 0.0
+        }
+
+    async def enqueue(self, message: QuantumMessage):
+        """Add message to appropriate priority queue."""
+        if message.is_expired():
+            self.stats["expired"] += 1
+            return False
+
+        self.queues[message.priority].append(message)
+        self.stats["enqueued"] += 1
+        return True
+
+    async def dequeue(self) -> Optional[QuantumMessage]:
+        """Get highest priority non-expired message."""
+        for priority in MessagePriority:
+            queue = self.queues[priority]
+            while queue:
+                message = queue.popleft()
+                if not message.is_expired():
+                    latency = (time.time() - message.timestamp) * 1000
+                    self.stats["total_latency_ms"] += latency
+                    self.stats["dequeued"] += 1
+                    return message
+                self.stats["expired"] += 1
+        return None
+
+    def get_average_latency_ms(self) -> float:
+        """Get average message latency."""
+        if self.stats["dequeued"] == 0:
+            return 0.0
+        return self.stats["total_latency_ms"] / self.stats["dequeued"]
+
+
+class LowLatencyProtocol:
+    """
+    Protocol for low-latency quantum-classical communication.
+
+    Implements:
+    - Asynchronous message handling
+    - Priority-based processing
+    - Latency monitoring
+    - Connection management
+    """
+
+    def __init__(self, name: str):
+        self.name = name
+        self.message_queue = PriorityMessageQueue()
+        self.handlers: Dict[str, Callable] = {}
+        self.running = False
+        self.latency_threshold_ms = 5.0
+
+    def register_handler(
+        self,
+        message_type: str,
+        handler: Callable[[QuantumMessage], Any]
+    ):
+        """Register handler for message type."""
+        self.handlers[message_type] = handler
+
+    async def send_parameter_update(
+        self,
+        parameters: Dict[str, float],
+        priority: MessagePriority = MessagePriority.NORMAL
+    ) -> str:
+        """Send parameter update to quantum system."""
+        import uuid
+        message = QuantumMessage(
+            message_id=str(uuid.uuid4()),
+            message_type="parameter_update",
+            payload={"parameters": parameters},
+            priority=priority
+        )
+        await self.message_queue.enqueue(message)
+        return message.message_id
+
+    async def send_measurement_result(
+        self,
+        counts: Dict[str, int],
+        circuit_id: str
+    ) -> str:
+        """Send measurement results with high priority."""
+        import uuid
+        message = QuantumMessage(
+            message_id=str(uuid.uuid4()),
+            message_type="measurement_result",
+            payload={"counts": counts, "circuit_id": circuit_id},
+            priority=MessagePriority.HIGH,
+            latency_budget_ms=5.0  # Tight latency for measurements
+        )
+        await self.message_queue.enqueue(message)
+        return message.message_id
+
+    async def process_messages(self):
+        """Process messages from queue."""
+        self.running = True
+        while self.running:
+            message = await self.message_queue.dequeue()
+            if message:
+                handler = self.handlers.get(message.message_type)
+                if handler:
+                    try:
+                        await handler(message)
+                    except Exception as e:
+                        print(f"Handler error: {e}")
+            else:
+                await asyncio.sleep(0.001)  # 1ms sleep to prevent busy waiting
+
+    def stop(self):
+        """Stop message processing."""
+        self.running = False
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get protocol statistics."""
+        return {
+            "queue_stats": self.message_queue.stats,
+            "average_latency_ms": self.message_queue.get_average_latency_ms(),
+            "latency_threshold_ms": self.latency_threshold_ms
+        }
+
+
+# Example usage
+async def demo_protocol():
+    protocol = LowLatencyProtocol("quantum_feedback")
+
+    # Register handlers
+    async def handle_measurement(msg: QuantumMessage):
+        print(f"Received measurement: {msg.payload}")
+
+    protocol.register_handler("measurement_result", handle_measurement)
+
+    # Send test message
+    await protocol.send_measurement_result(
+        counts={"00": 512, "11": 512},
+        circuit_id="circuit_001"
+    )
+
+    print(f"Protocol stats: {protocol.get_stats()}")
+
+# asyncio.run(demo_protocol())
+```
+
+## 3. Mid-Circuit Measurement and Conditional Operations
+
+Mid-circuit measurements enable real-time feedback within quantum circuit execution.
+
+```python
+from dataclasses import dataclass
+from typing import List, Optional, Callable, Dict, Any
+import numpy as np
+
+@dataclass
+class MidCircuitMeasurement:
+    """Represents a mid-circuit measurement point."""
+    qubit_indices: List[int]
+    classical_register: str
+    measurement_id: str
+    condition_callback: Optional[Callable[[Dict[str, int]], List[Any]]] = None
+
+@dataclass
+class ConditionalOperation:
+    """Operation conditioned on classical measurement results."""
+    operation_type: str
+    target_qubits: List[int]
+    parameters: Dict[str, Any]
+    condition: str  # Classical register condition
+
+class RealTimeCircuitController:
+    """
+    Controller for real-time circuit execution with mid-circuit measurements.
+
+    Enables:
+    - Mid-circuit measurements
+    - Classical feedback
+    - Conditional operations
+    - Dynamic circuit modification
+    """
+
+    def __init__(self, num_qubits: int):
+        self.num_qubits = num_qubits
+        self.measurements: List[MidCircuitMeasurement] = []
+        self.conditional_ops: List[ConditionalOperation] = []
+        self.classical_registers: Dict[str, int] = {}
+        self.execution_log: List[Dict] = []
+
+    def add_mid_circuit_measurement(
+        self,
+        qubit_indices: List[int],
+        register_name: str,
+        condition_callback: Optional[Callable] = None
+    ) -> str:
+        """Add a mid-circuit measurement point."""
+        import uuid
+        measurement = MidCircuitMeasurement(
+            qubit_indices=qubit_indices,
+            classical_register=register_name,
+            measurement_id=str(uuid.uuid4()),
+            condition_callback=condition_callback
+        )
+        self.measurements.append(measurement)
+        return measurement.measurement_id
+
+    def add_conditional_operation(
+        self,
+        operation: str,
+        target_qubits: List[int],
+        condition: str,
+        parameters: Optional[Dict[str, Any]] = None
+    ):
+        """Add operation conditioned on classical register value."""
+        self.conditional_ops.append(ConditionalOperation(
+            operation_type=operation,
+            target_qubits=target_qubits,
+            parameters=parameters or {},
+            condition=condition
+        ))
+
+    async def execute_with_feedback(
+        self,
+        circuit_executor: Callable,
+        feedback_processor: Callable[[Dict[str, int]], Dict[str, float]]
+    ) -> Dict[str, Any]:
+        """
+        Execute circuit with real-time feedback.
+
+        Args:
+            circuit_executor: Function to execute quantum operations
+            feedback_processor: Function to process measurements and return new parameters
+
+        Returns:
+            Execution results including all intermediate measurements
+        """
+        results = {
+            "measurements": [],
+            "final_state": None,
+            "feedback_history": [],
+            "total_time_ms": 0
+        }
+
+        import time
+        start_time = time.time()
+
+        for measurement in self.measurements:
+            # Execute circuit up to measurement point
+            counts = await circuit_executor(measurement.qubit_indices)
+
+            # Store measurement result
+            self.classical_registers[measurement.classical_register] = counts
+            results["measurements"].append({
+                "id": measurement.measurement_id,
+                "register": measurement.classical_register,
+                "counts": counts
+            })
+
+            # Process feedback
+            new_params = feedback_processor(counts)
+            results["feedback_history"].append(new_params)
+
+            # Apply conditional operations
+            for cond_op in self.conditional_ops:
+                if self._evaluate_condition(cond_op.condition):
+                    self.execution_log.append({
+                        "operation": cond_op.operation_type,
+                        "qubits": cond_op.target_qubits,
+                        "triggered_by": cond_op.condition
+                    })
+
+        results["total_time_ms"] = (time.time() - start_time) * 1000
+        return results
+
+    def _evaluate_condition(self, condition: str) -> bool:
+        """Evaluate classical condition."""
+        # Simple condition parser: "register == value"
+        try:
+            parts = condition.split()
+            if len(parts) == 3:
+                register, op, value = parts
+                reg_value = self.classical_registers.get(register, {})
+                if op == "==":
+                    return str(reg_value) == value
+            return False
+        except:
+            return False
+
+    def get_execution_summary(self) -> Dict[str, Any]:
+        """Get summary of execution with feedback."""
+        return {
+            "num_measurements": len(self.measurements),
+            "num_conditional_ops": len(self.conditional_ops),
+            "registers": self.classical_registers,
+            "execution_log": self.execution_log
+        }
+
+
+# Error correction feedback example
+class ErrorCorrectionFeedback:
+    """
+    Real-time error correction using mid-circuit measurements.
+
+    Implements syndrome measurement and correction feedback loop.
+    """
+
+    def __init__(self, code_distance: int = 3):
+        self.code_distance = code_distance
+        self.syndrome_history: List[Dict] = []
+        self.correction_history: List[Dict] = []
+
+    def process_syndrome(
+        self,
+        syndrome_counts: Dict[str, int]
+    ) -> Dict[str, Any]:
+        """
+        Process syndrome measurement and determine correction.
+
+        Args:
+            syndrome_counts: Measurement counts from syndrome qubits
+
+        Returns:
+            Correction operations to apply
+        """
+        # Determine most likely syndrome
+        total = sum(syndrome_counts.values())
+        syndrome = max(syndrome_counts.keys(), key=lambda k: syndrome_counts[k])
+        confidence = syndrome_counts[syndrome] / total
+
+        self.syndrome_history.append({
+            "syndrome": syndrome,
+            "confidence": confidence,
+            "counts": syndrome_counts
+        })
+
+        # Decode syndrome to correction
+        correction = self._decode_syndrome(syndrome)
+
+        self.correction_history.append({
+            "syndrome": syndrome,
+            "correction": correction,
+            "applied": confidence > 0.7  # Only apply high-confidence corrections
+        })
+
+        return correction
+
+    def _decode_syndrome(self, syndrome: str) -> Dict[str, Any]:
+        """Decode syndrome to determine error location and type."""
+        # Simplified lookup table decoder
+        # In practice, use MWPM or other decoding algorithms
+        lookup_table = {
+            "00": {"error": None, "qubit": None},
+            "01": {"error": "X", "qubit": 0},
+            "10": {"error": "X", "qubit": 1},
+            "11": {"error": "Z", "qubit": 0}
+        }
+        return lookup_table.get(syndrome, {"error": None, "qubit": None})
+
+    def get_error_rate_estimate(self) -> float:
+        """Estimate current error rate from syndrome history."""
+        if not self.syndrome_history:
+            return 0.0
+
+        error_syndromes = sum(
+            1 for s in self.syndrome_history
+            if s["syndrome"] != "0" * len(s["syndrome"])
+        )
+        return error_syndromes / len(self.syndrome_history)
+
+
+# Demonstration
+controller = RealTimeCircuitController(num_qubits=5)
+
+# Add mid-circuit measurement for error syndrome
+controller.add_mid_circuit_measurement(
+    qubit_indices=[3, 4],  # Ancilla qubits
+    register_name="syndrome"
+)
+
+# Add conditional correction
+controller.add_conditional_operation(
+    operation="X",
+    target_qubits=[0],
+    condition="syndrome == 01"
+)
+
+print("Real-time circuit controller configured:")
+print(controller.get_execution_summary())
+```
+
+## 4. Streaming Quantum Results Processing
+
+Process quantum measurement results in real-time using async streaming pipelines.
+
+```python
+import asyncio
+from dataclasses import dataclass
+from typing import AsyncIterator, Dict, Any, List, Callable, Optional
+from collections import deque
+import time
+
+@dataclass
+class QuantumResultStream:
+    """A single quantum result in the stream."""
+    result_id: str
+    circuit_id: str
+    counts: Dict[str, int]
+    timestamp: float
+    metadata: Dict[str, Any]
+
+class StreamingResultProcessor:
+    """
+    Process quantum results as they arrive in real-time.
+
+    Features:
+    - Async streaming processing
+    - Windowed aggregation
+    - Real-time statistics
+    - Backpressure handling
+    """
+
+    def __init__(self, window_size: int = 100):
+        self.window_size = window_size
+        self.result_window: deque = deque(maxlen=window_size)
+        self.processors: List[Callable] = []
+        self.stats = {
+            "total_processed": 0,
+            "processing_time_ms": 0.0,
+            "results_per_second": 0.0
+        }
+        self._start_time = time.time()
+
+    def add_processor(self, processor: Callable[[QuantumResultStream], Any]):
+        """Add a processing function to the pipeline."""
+        self.processors.append(processor)
+
+    async def process_stream(
+        self,
+        result_stream: AsyncIterator[QuantumResultStream]
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Process incoming result stream.
+
+        Yields processed results with statistics.
+        """
+        async for result in result_stream:
+            process_start = time.time()
+
+            # Add to window
+            self.result_window.append(result)
+
+            # Run all processors
+            processed = {"result_id": result.result_id, "outputs": []}
+            for processor in self.processors:
+                try:
+                    output = await self._run_processor(processor, result)
+                    processed["outputs"].append(output)
+                except Exception as e:
+                    processed["outputs"].append({"error": str(e)})
+
+            # Update statistics
+            self.stats["total_processed"] += 1
+            self.stats["processing_time_ms"] += (time.time() - process_start) * 1000
+            elapsed = time.time() - self._start_time
+            self.stats["results_per_second"] = self.stats["total_processed"] / elapsed
+
+            # Add window statistics
+            processed["window_stats"] = self._calculate_window_stats()
+
+            yield processed
+
+    async def _run_processor(
+        self,
+        processor: Callable,
+        result: QuantumResultStream
+    ) -> Any:
+        """Run a single processor, handling both sync and async."""
+        if asyncio.iscoroutinefunction(processor):
+            return await processor(result)
+        return processor(result)
+
+    def _calculate_window_stats(self) -> Dict[str, Any]:
+        """Calculate statistics over the current window."""
+        if not self.result_window:
+            return {}
+
+        # Aggregate counts across window
+        total_counts: Dict[str, int] = {}
+        for result in self.result_window:
+            for bitstring, count in result.counts.items():
+                total_counts[bitstring] = total_counts.get(bitstring, 0) + count
+
+        total_shots = sum(total_counts.values())
+        probabilities = {k: v / total_shots for k, v in total_counts.items()}
+
+        return {
+            "window_size": len(self.result_window),
+            "total_shots": total_shots,
+            "probabilities": probabilities,
+            "dominant_outcome": max(probabilities.keys(), key=lambda k: probabilities[k])
+        }
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get current processing statistics."""
+        return {
+            **self.stats,
+            "avg_processing_time_ms": (
+                self.stats["processing_time_ms"] / self.stats["total_processed"]
+                if self.stats["total_processed"] > 0 else 0
+            )
+        }
+
+
+class RealTimeAggregator:
+    """
+    Aggregate quantum results in real-time with configurable windows.
+    """
+
+    def __init__(
+        self,
+        time_window_seconds: float = 1.0,
+        shot_threshold: int = 10000
+    ):
+        self.time_window = time_window_seconds
+        self.shot_threshold = shot_threshold
+        self.current_window: List[QuantumResultStream] = []
+        self.window_start_time = time.time()
+        self.aggregated_results: List[Dict] = []
+
+    async def add_result(
+        self,
+        result: QuantumResultStream
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Add result to aggregation window.
+
+        Returns aggregated result if window is complete.
+        """
+        self.current_window.append(result)
+
+        # Check if window should be closed
+        time_elapsed = time.time() - self.window_start_time
+        total_shots = sum(
+            sum(r.counts.values()) for r in self.current_window
+        )
+
+        if time_elapsed >= self.time_window or total_shots >= self.shot_threshold:
+            aggregated = self._aggregate_window()
+            self.aggregated_results.append(aggregated)
+            self._reset_window()
+            return aggregated
+
+        return None
+
+    def _aggregate_window(self) -> Dict[str, Any]:
+        """Aggregate all results in current window."""
+        combined_counts: Dict[str, int] = {}
+
+        for result in self.current_window:
+            for bitstring, count in result.counts.items():
+                combined_counts[bitstring] = combined_counts.get(bitstring, 0) + count
+
+        total = sum(combined_counts.values())
+
+        return {
+            "window_id": len(self.aggregated_results),
+            "num_results": len(self.current_window),
+            "total_shots": total,
+            "counts": combined_counts,
+            "probabilities": {k: v / total for k, v in combined_counts.items()},
+            "duration_seconds": time.time() - self.window_start_time
+        }
+
+    def _reset_window(self):
+        """Reset for new aggregation window."""
+        self.current_window = []
+        self.window_start_time = time.time()
+
+
+# WebSocket-based streaming
+class WebSocketResultStream:
+    """
+    Stream quantum results over WebSocket for real-time visualization.
+    """
+
+    def __init__(self, host: str = "localhost", port: int = 8765):
+        self.host = host
+        self.port = port
+        self.clients: List[Any] = []
+        self.result_buffer: deque = deque(maxlen=1000)
+
+    async def broadcast_result(self, result: QuantumResultStream):
+        """Broadcast result to all connected clients."""
+        message = {
+            "type": "quantum_result",
+            "result_id": result.result_id,
+            "circuit_id": result.circuit_id,
+            "counts": result.counts,
+            "timestamp": result.timestamp
+        }
+
+        # In real implementation, use websockets library
+        self.result_buffer.append(message)
+
+        # Mock broadcast
+        for client in self.clients:
+            try:
+                await self._send_to_client(client, message)
+            except Exception as e:
+                print(f"Failed to send to client: {e}")
+
+    async def _send_to_client(self, client: Any, message: Dict):
+        """Send message to a specific client."""
+        # Placeholder for actual WebSocket send
+        pass
+
+    async def handle_client(self, websocket: Any):
+        """Handle new client connection."""
+        self.clients.append(websocket)
+        try:
+            # Send buffered results to new client
+            for result in list(self.result_buffer)[-10:]:
+                await self._send_to_client(websocket, result)
+
+            # Keep connection alive
+            while True:
+                await asyncio.sleep(1)
+        finally:
+            self.clients.remove(websocket)
+
+
+# Example streaming pipeline
+async def demo_streaming():
+    processor = StreamingResultProcessor(window_size=50)
+
+    # Add processors
+    def calculate_expectation(result: QuantumResultStream) -> float:
+        total = sum(result.counts.values())
+        expectation = sum(
+            ((-1) ** bitstring.count('1')) * count / total
+            for bitstring, count in result.counts.items()
+        )
+        return expectation
+
+    processor.add_processor(calculate_expectation)
+
+    # Create mock stream
+    async def mock_result_stream() -> AsyncIterator[QuantumResultStream]:
+        import uuid
+        for i in range(10):
+            yield QuantumResultStream(
+                result_id=str(uuid.uuid4()),
+                circuit_id=f"circuit_{i}",
+                counts={"00": 500 + i * 10, "11": 500 - i * 10},
+                timestamp=time.time(),
+                metadata={"iteration": i}
+            )
+            await asyncio.sleep(0.1)
+
+    # Process stream
+    async for processed in processor.process_stream(mock_result_stream()):
+        print(f"Processed: {processed['result_id'][:8]}... "
+              f"Expectation: {processed['outputs'][0]:.4f}")
+
+    print(f"\nFinal stats: {processor.get_stats()}")
+
+# asyncio.run(demo_streaming())
+```
+
+## 5. Live Monitoring Dashboards
+
+Build real-time monitoring systems for quantum workloads.
+
+```python
+import asyncio
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional, Callable
+from collections import deque
+from enum import Enum
+import time
+
+class MetricType(Enum):
+    """Types of metrics to monitor."""
+    COUNTER = "counter"
+    GAUGE = "gauge"
+    HISTOGRAM = "histogram"
+    SUMMARY = "summary"
+
+@dataclass
+class QuantumMetric:
+    """A single quantum system metric."""
+    name: str
+    value: float
+    metric_type: MetricType
+    labels: Dict[str, str] = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
+
+class LiveMetricsCollector:
+    """
+    Collect and aggregate metrics for live monitoring.
+
+    Tracks:
+    - Circuit execution metrics
+    - Error rates
+    - Latency distributions
+    - Resource utilization
+    """
+
+    def __init__(self, retention_seconds: int = 300):
+        self.retention = retention_seconds
+        self.metrics: Dict[str, deque] = {}
+        self.alerts: List[Dict] = []
+        self.alert_rules: List[Dict] = []
+
+    def record(self, metric: QuantumMetric):
+        """Record a metric value."""
+        key = f"{metric.name}:{json.dumps(metric.labels, sort_keys=True)}"
+
+        if key not in self.metrics:
+            self.metrics[key] = deque()
+
+        self.metrics[key].append(metric)
+        self._cleanup_old_metrics(key)
+        self._check_alerts(metric)
+
+    def _cleanup_old_metrics(self, key: str):
+        """Remove metrics older than retention period."""
+        cutoff = time.time() - self.retention
+        while self.metrics[key] and self.metrics[key][0].timestamp < cutoff:
+            self.metrics[key].popleft()
+
+    def add_alert_rule(
+        self,
+        metric_name: str,
+        condition: str,  # "above", "below"
+        threshold: float,
+        severity: str = "warning"
+    ):
+        """Add an alert rule for a metric."""
+        self.alert_rules.append({
+            "metric_name": metric_name,
+            "condition": condition,
+            "threshold": threshold,
+            "severity": severity
+        })
+
+    def _check_alerts(self, metric: QuantumMetric):
+        """Check if metric triggers any alerts."""
+        for rule in self.alert_rules:
+            if rule["metric_name"] != metric.name:
+                continue
+
+            triggered = False
+            if rule["condition"] == "above" and metric.value > rule["threshold"]:
+                triggered = True
+            elif rule["condition"] == "below" and metric.value < rule["threshold"]:
+                triggered = True
+
+            if triggered:
+                self.alerts.append({
+                    "metric": metric.name,
+                    "value": metric.value,
+                    "threshold": rule["threshold"],
+                    "severity": rule["severity"],
+                    "timestamp": time.time()
+                })
+
+    def get_metric_summary(self, metric_name: str) -> Dict[str, Any]:
+        """Get summary statistics for a metric."""
+        values = []
+        for key, metrics in self.metrics.items():
+            if metric_name in key:
+                values.extend([m.value for m in metrics])
+
+        if not values:
+            return {}
+
+        import numpy as np
+        return {
+            "count": len(values),
+            "mean": np.mean(values),
+            "std": np.std(values),
+            "min": np.min(values),
+            "max": np.max(values),
+            "p50": np.percentile(values, 50),
+            "p95": np.percentile(values, 95),
+            "p99": np.percentile(values, 99)
+        }
+
+    def get_recent_alerts(self, limit: int = 10) -> List[Dict]:
+        """Get most recent alerts."""
+        return sorted(
+            self.alerts,
+            key=lambda a: a["timestamp"],
+            reverse=True
+        )[:limit]
+
+
+class QuantumDashboard:
+    """
+    Real-time dashboard for quantum system monitoring.
+
+    Provides:
+    - Live metrics visualization
+    - Alert management
+    - Historical trends
+    - System health overview
+    """
+
+    def __init__(self):
+        self.metrics_collector = LiveMetricsCollector()
+        self.panels: List[Dict] = []
+        self.refresh_rate_ms = 1000
+
+    def add_panel(
+        self,
+        title: str,
+        metric_names: List[str],
+        panel_type: str = "line_chart"
+    ):
+        """Add a visualization panel to the dashboard."""
+        self.panels.append({
+            "title": title,
+            "metrics": metric_names,
+            "type": panel_type
+        })
+
+    def get_dashboard_state(self) -> Dict[str, Any]:
+        """Get current dashboard state for rendering."""
+        panel_data = []
+
+        for panel in self.panels:
+            data = {
+                "title": panel["title"],
+                "type": panel["type"],
+                "series": []
+            }
+
+            for metric_name in panel["metrics"]:
+                summary = self.metrics_collector.get_metric_summary(metric_name)
+                data["series"].append({
+                    "name": metric_name,
+                    "summary": summary
+                })
+
+            panel_data.append(data)
+
+        return {
+            "panels": panel_data,
+            "alerts": self.metrics_collector.get_recent_alerts(),
+            "last_updated": time.time()
+        }
+
+    async def run_update_loop(self):
+        """Run continuous dashboard updates."""
+        while True:
+            state = self.get_dashboard_state()
+            await self._broadcast_update(state)
+            await asyncio.sleep(self.refresh_rate_ms / 1000)
+
+    async def _broadcast_update(self, state: Dict):
+        """Broadcast dashboard update to clients."""
+        # In real implementation, send to WebSocket clients
+        pass
+
+
+class QuantumSystemMonitor:
+    """
+    Comprehensive monitoring for quantum computing systems.
+
+    Monitors:
+    - QPU health and availability
+    - Queue depths and wait times
+    - Error rates and fidelities
+    - Resource utilization
+    """
+
+    def __init__(self):
+        self.dashboard = QuantumDashboard()
+        self.health_checks: Dict[str, Callable] = {}
+        self.system_status = "healthy"
+
+    def register_health_check(
+        self,
+        name: str,
+        check_fn: Callable[[], bool]
+    ):
+        """Register a health check function."""
+        self.health_checks[name] = check_fn
+
+    async def run_health_checks(self) -> Dict[str, Any]:
+        """Run all registered health checks."""
+        results = {}
+        all_healthy = True
+
+        for name, check_fn in self.health_checks.items():
+            try:
+                if asyncio.iscoroutinefunction(check_fn):
+                    healthy = await check_fn()
+                else:
+                    healthy = check_fn()
+                results[name] = {"healthy": healthy}
+                if not healthy:
+                    all_healthy = False
+            except Exception as e:
+                results[name] = {"healthy": False, "error": str(e)}
+                all_healthy = False
+
+        self.system_status = "healthy" if all_healthy else "degraded"
+
+        return {
+            "status": self.system_status,
+            "checks": results,
+            "timestamp": time.time()
+        }
+
+    def record_circuit_execution(
+        self,
+        circuit_id: str,
+        execution_time_ms: float,
+        success: bool,
+        error_rate: float = 0.0
+    ):
+        """Record metrics for a circuit execution."""
+        self.dashboard.metrics_collector.record(QuantumMetric(
+            name="circuit_execution_time",
+            value=execution_time_ms,
+            metric_type=MetricType.HISTOGRAM,
+            labels={"circuit_id": circuit_id}
+        ))
+
+        self.dashboard.metrics_collector.record(QuantumMetric(
+            name="circuit_success",
+            value=1.0 if success else 0.0,
+            metric_type=MetricType.COUNTER,
+            labels={"circuit_id": circuit_id}
+        ))
+
+        self.dashboard.metrics_collector.record(QuantumMetric(
+            name="circuit_error_rate",
+            value=error_rate,
+            metric_type=MetricType.GAUGE,
+            labels={"circuit_id": circuit_id}
+        ))
+
+    def record_feedback_latency(self, latency_ms: float):
+        """Record feedback loop latency."""
+        self.dashboard.metrics_collector.record(QuantumMetric(
+            name="feedback_latency_ms",
+            value=latency_ms,
+            metric_type=MetricType.HISTOGRAM
+        ))
+
+
+# Setup monitoring
+monitor = QuantumSystemMonitor()
+
+# Add alert rules
+monitor.dashboard.metrics_collector.add_alert_rule(
+    metric_name="circuit_error_rate",
+    condition="above",
+    threshold=0.1,
+    severity="critical"
+)
+
+monitor.dashboard.metrics_collector.add_alert_rule(
+    metric_name="feedback_latency_ms",
+    condition="above",
+    threshold=10.0,
+    severity="warning"
+)
+
+# Add dashboard panels
+monitor.dashboard.add_panel(
+    title="Circuit Execution",
+    metric_names=["circuit_execution_time", "circuit_success"],
+    panel_type="line_chart"
+)
+
+monitor.dashboard.add_panel(
+    title="Error Rates",
+    metric_names=["circuit_error_rate"],
+    panel_type="gauge"
+)
+
+print("Quantum System Monitor configured")
+print(f"Dashboard panels: {len(monitor.dashboard.panels)}")
+print(f"Alert rules: {len(monitor.dashboard.metrics_collector.alert_rules)}")
+```
+
+## 6. Control System Design
+
+Design adaptive control systems for quantum-classical hybrid workflows.
+
+```python
+import asyncio
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Callable, Optional
+import numpy as np
+import time
+
+@dataclass
+class ControlState:
+    """Current state of the control system."""
+    parameters: Dict[str, float]
+    target_values: Dict[str, float]
+    errors: Dict[str, float]
+    timestamp: float = field(default_factory=time.time)
+
+class PIDController:
+    """
+    PID controller for quantum parameter optimization.
+
+    Implements continuous feedback control with:
+    - Proportional gain (immediate response)
+    - Integral gain (accumulated error correction)
+    - Derivative gain (rate of change dampening)
+    """
+
+    def __init__(
+        self,
+        kp: float = 1.0,
+        ki: float = 0.1,
+        kd: float = 0.05,
+        output_limits: tuple = (-1.0, 1.0)
+    ):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.output_limits = output_limits
+
+        self.integral = 0.0
+        self.last_error = 0.0
+        self.last_time = time.time()
+
+    def compute(self, error: float) -> float:
+        """Compute control output based on error."""
+        current_time = time.time()
+        dt = current_time - self.last_time
+
+        if dt <= 0:
+            dt = 1e-6  # Avoid division by zero
+
+        # Proportional term
+        p_term = self.kp * error
+
+        # Integral term (with anti-windup)
+        self.integral += error * dt
+        self.integral = np.clip(
+            self.integral,
+            self.output_limits[0] / self.ki if self.ki != 0 else -1e6,
+            self.output_limits[1] / self.ki if self.ki != 0 else 1e6
+        )
+        i_term = self.ki * self.integral
+
+        # Derivative term
+        derivative = (error - self.last_error) / dt
+        d_term = self.kd * derivative
+
+        # Compute output
+        output = p_term + i_term + d_term
+        output = np.clip(output, *self.output_limits)
+
+        # Update state
+        self.last_error = error
+        self.last_time = current_time
+
+        return output
+
+    def reset(self):
+        """Reset controller state."""
+        self.integral = 0.0
+        self.last_error = 0.0
+        self.last_time = time.time()
+
+
+class AdaptiveQuantumController:
+    """
+    Adaptive controller for real-time quantum system optimization.
+
+    Features:
+    - Multi-parameter control
+    - Adaptive gain adjustment
+    - Constraint handling
+    - Performance tracking
+    """
+
+    def __init__(self, parameter_names: List[str]):
+        self.parameter_names = parameter_names
+        self.controllers: Dict[str, PIDController] = {
+            name: PIDController() for name in parameter_names
+        }
+        self.current_parameters: Dict[str, float] = {
+            name: 0.0 for name in parameter_names
+        }
+        self.target_metric = 0.0
+        self.control_history: List[ControlState] = []
+        self.adaptation_rate = 0.01
+
+    def set_target(self, metric_name: str, target_value: float):
+        """Set target value for optimization metric."""
+        self.target_metric = target_value
+
+    def update(
+        self,
+        measured_values: Dict[str, float],
+        metric_value: float
+    ) -> Dict[str, float]:
+        """
+        Update control based on measurements.
+
+        Args:
+            measured_values: Current measured parameter values
+            metric_value: Current optimization metric value
+
+        Returns:
+            New parameter values
+        """
+        # Calculate error from target
+        metric_error = self.target_metric - metric_value
+
+        # Update each parameter controller
+        parameter_updates = {}
+        errors = {}
+
+        for name in self.parameter_names:
+            measured = measured_values.get(name, self.current_parameters[name])
+
+            # Compute control signal
+            control_signal = self.controllers[name].compute(metric_error)
+
+            # Apply update
+            new_value = self.current_parameters[name] + control_signal
+            new_value = np.clip(new_value, 0, 2 * np.pi)  # Assume angular parameters
+
+            parameter_updates[name] = new_value
+            errors[name] = metric_error
+
+        # Store state
+        self.control_history.append(ControlState(
+            parameters=dict(self.current_parameters),
+            target_values={"metric": self.target_metric},
+            errors=errors
+        ))
+
+        # Update current parameters
+        self.current_parameters = parameter_updates
+
+        # Adapt gains based on performance
+        self._adapt_gains(metric_error)
+
+        return parameter_updates
+
+    def _adapt_gains(self, error: float):
+        """Adapt controller gains based on error magnitude."""
+        error_magnitude = abs(error)
+
+        for controller in self.controllers.values():
+            # Increase proportional gain for large errors
+            if error_magnitude > 0.5:
+                controller.kp *= (1 + self.adaptation_rate)
+            # Decrease for small errors (near target)
+            elif error_magnitude < 0.1:
+                controller.kp *= (1 - self.adaptation_rate)
+
+            # Keep gains in reasonable bounds
+            controller.kp = np.clip(controller.kp, 0.1, 10.0)
+
+    def get_control_summary(self) -> Dict[str, Any]:
+        """Get summary of control performance."""
+        if not self.control_history:
+            return {}
+
+        errors = [
+            sum(abs(e) for e in state.errors.values())
+            for state in self.control_history
+        ]
+
+        return {
+            "total_updates": len(self.control_history),
+            "current_parameters": self.current_parameters,
+            "average_error": np.mean(errors),
+            "final_error": errors[-1] if errors else 0,
+            "controller_gains": {
+                name: {"kp": c.kp, "ki": c.ki, "kd": c.kd}
+                for name, c in self.controllers.items()
+            }
+        }
+
+
+class RealTimeOptimizationLoop:
+    """
+    Real-time optimization loop for variational algorithms.
+
+    Combines:
+    - Streaming measurement processing
+    - Adaptive control
+    - Live monitoring
+    """
+
+    def __init__(
+        self,
+        controller: AdaptiveQuantumController,
+        circuit_executor: Callable,
+        cost_function: Callable
+    ):
+        self.controller = controller
+        self.circuit_executor = circuit_executor
+        self.cost_function = cost_function
+        self.running = False
+        self.iteration = 0
+        self.convergence_history: List[float] = []
+
+    async def run(
+        self,
+        max_iterations: int = 100,
+        convergence_threshold: float = 1e-6,
+        callback: Optional[Callable[[int, Dict], None]] = None
+    ) -> Dict[str, Any]:
+        """
+        Run the real-time optimization loop.
+
+        Args:
+            max_iterations: Maximum number of iterations
+            convergence_threshold: Stop when improvement is below this
+            callback: Optional callback for each iteration
+
+        Returns:
+            Optimization results
+        """
+        self.running = True
+        self.iteration = 0
+        self.convergence_history = []
+
+        best_cost = float('inf')
+        best_params = None
+        stagnation_count = 0
+
+        while self.running and self.iteration < max_iterations:
+            # Execute circuit with current parameters
+            params = self.controller.current_parameters
+            counts = await self.circuit_executor(params)
+
+            # Calculate cost
+            cost = self.cost_function(counts)
+            self.convergence_history.append(cost)
+
+            # Check for improvement
+            if cost < best_cost - convergence_threshold:
+                best_cost = cost
+                best_params = dict(params)
+                stagnation_count = 0
+            else:
+                stagnation_count += 1
+
+            # Update controller
+            measured_values = params  # In real case, get from QPU
+            new_params = self.controller.update(measured_values, cost)
+
+            # Callback
+            if callback:
+                callback(self.iteration, {
+                    "cost": cost,
+                    "params": new_params,
+                    "best_cost": best_cost
+                })
+
+            # Check convergence
+            if stagnation_count > 10:
+                print(f"Converged after {self.iteration} iterations")
+                break
+
+            self.iteration += 1
+            await asyncio.sleep(0.01)  # Small delay for real-time behavior
+
+        self.running = False
+
+        return {
+            "optimal_params": best_params,
+            "optimal_cost": best_cost,
+            "iterations": self.iteration,
+            "convergence_history": self.convergence_history,
+            "control_summary": self.controller.get_control_summary()
+        }
+
+    def stop(self):
+        """Stop the optimization loop."""
+        self.running = False
+
+
+# Example usage
+controller = AdaptiveQuantumController(["theta", "phi"])
+controller.set_target("cost", 0.0)
+
+print("Adaptive Quantum Controller initialized")
+print(f"Parameters: {controller.parameter_names}")
+print(f"Initial values: {controller.current_parameters}")
+```
+
+## 7. Integration Patterns Summary
+
+```
+REAL-TIME INTEGRATION PATTERNS
+==============================
+
+1. FEEDBACK LOOP PATTERN
+   ┌─────────┐    Parameters    ┌─────────┐
+   │Classical│ ────────────────►│ Quantum │
+   │Controller│                  │ Circuit │
+   └────┬────┘                  └────┬────┘
+        │                            │
+        │◄───── Measurements ────────┘
+        │
+   Process & Update
+
+2. STREAMING PATTERN
+   Quantum ───► Buffer ───► Processor ───► Aggregator ───► Dashboard
+   Results      (async)     (parallel)     (windowed)      (real-time)
+
+3. EVENT-DRIVEN PATTERN
+   Measurement ───► Event ───► Handler ───► Action
+   Outcome          Queue      Dispatch     Execute
+
+4. CONTROL LOOP PATTERN
+   Target ───► Error ───► PID ───► Output ───► Plant ───► Feedback
+   Value       Calc       Controller  Signal    (QPU)      └──────┘
+
+LATENCY BUDGETS
+===============
+Component               Target      Acceptable
+─────────────────────────────────────────────
+Circuit execution       1-100 ms    varies
+Measurement readout     < 1 ms      < 5 ms
+Classical processing    < 1 ms      < 5 ms
+Feedback decision       < 1 ms      < 5 ms
+Parameter update        < 1 ms      < 10 ms
+─────────────────────────────────────────────
+Total loop time         < 5 ms      < 30 ms
+```
+
+## Summary
+
+Real-time quantum-classical integration requires careful attention to:
+
+1. **Low-Latency Communication**: Priority-based message queues, async processing, and latency monitoring
+2. **Mid-Circuit Measurement**: Conditional operations based on measurement outcomes during circuit execution
+3. **Streaming Processing**: Async pipelines for continuous result processing with windowed aggregation
+4. **Live Monitoring**: Real-time dashboards with metrics collection and alerting
+5. **Adaptive Control**: PID and adaptive controllers for continuous optimization
+6. **Integration Patterns**: Feedback loops, event-driven architectures, and control systems
+
+These patterns enable advanced quantum applications including real-time error correction, adaptive algorithms, and interactive quantum systems.
+
+## Further Reading
+
+- Qiskit Dynamic Circuits Documentation
+- Real-Time Error Correction Research Papers
+- Industrial Control Systems Design
+- Async Programming with Python asyncio

@@ -1,0 +1,787 @@
+---
+title: "Trading Risk Management"
+duration: "40 minutes"
+---
+
+# Trading Risk Management
+
+Risk management is the foundation of sustainable algorithmic trading. Without proper risk controls, even profitable strategies can lead to catastrophic losses. This module covers position sizing, real-time monitoring, and quantum-enhanced risk measurement.
+
+## Position Sizing Fundamentals
+
+Position sizing determines how much capital to allocate to each trade. The goal is to maximize returns while limiting drawdowns.
+
+<QuizQuestion
+  question="What is the primary goal of position sizing?"
+  options={[
+    "Maximize the number of trades",
+    "Maximize returns while controlling risk",
+    "Minimize trading costs",
+    "Match benchmark allocations"
+  ]}
+  correctAnswer={1}
+  explanation="Position sizing balances return maximization with risk control. Proper sizing ensures that no single trade or sequence of losses can significantly damage the portfolio."
+/>
+
+```python
+import numpy as np
+from dataclasses import dataclass
+from typing import Optional, Dict, List
+from enum import Enum
+
+class SizingMethod(Enum):
+    FIXED = "fixed"
+    PERCENT_EQUITY = "percent_equity"
+    VOLATILITY_ADJUSTED = "volatility_adjusted"
+    KELLY = "kelly"
+    RISK_PARITY = "risk_parity"
+
+@dataclass
+class TradeSignal:
+    """Trading signal with risk parameters."""
+    symbol: str
+    direction: int  # 1 for long, -1 for short
+    entry_price: float
+    stop_loss: float
+    take_profit: Optional[float]
+    confidence: float  # 0-1
+
+class PositionSizer:
+    """
+    Calculate optimal position sizes using various methods.
+    """
+
+    def __init__(
+        self,
+        portfolio_value: float,
+        max_position_pct: float = 0.1,
+        max_portfolio_risk_pct: float = 0.02
+    ):
+        self.portfolio_value = portfolio_value
+        self.max_position_pct = max_position_pct
+        self.max_portfolio_risk_pct = max_portfolio_risk_pct
+
+    def fixed_size(self, dollars_per_trade: float) -> int:
+        """Fixed dollar amount per trade."""
+        return int(dollars_per_trade)
+
+    def percent_equity(
+        self,
+        signal: TradeSignal,
+        pct: float = 0.02
+    ) -> int:
+        """Size based on percentage of portfolio equity."""
+        position_value = self.portfolio_value * pct
+        shares = int(position_value / signal.entry_price)
+        return shares
+
+    def volatility_adjusted(
+        self,
+        signal: TradeSignal,
+        volatility: float,
+        target_risk_pct: float = 0.01
+    ) -> int:
+        """
+        Size inversely proportional to volatility.
+
+        Higher volatility = smaller position.
+        """
+        # Dollar volatility per share
+        dollar_vol = signal.entry_price * volatility
+
+        # Target dollar risk
+        target_risk = self.portfolio_value * target_risk_pct
+
+        # Position size
+        shares = int(target_risk / dollar_vol)
+
+        # Apply maximum position constraint
+        max_shares = int(self.portfolio_value * self.max_position_pct / signal.entry_price)
+        return min(shares, max_shares)
+
+    def kelly_criterion(
+        self,
+        signal: TradeSignal,
+        win_rate: float,
+        avg_win: float,
+        avg_loss: float,
+        kelly_fraction: float = 0.25  # Use quarter-Kelly for safety
+    ) -> int:
+        """
+        Kelly criterion for optimal position sizing.
+
+        f* = (p*b - q) / b
+        where p = win rate, q = 1-p, b = win/loss ratio
+        """
+        if avg_loss == 0:
+            return 0
+
+        b = avg_win / avg_loss
+        p = win_rate
+        q = 1 - p
+
+        full_kelly = (p * b - q) / b if b > 0 else 0
+        full_kelly = max(0, min(1, full_kelly))  # Clamp to [0, 1]
+
+        # Apply Kelly fraction for safety
+        kelly = full_kelly * kelly_fraction
+
+        position_value = self.portfolio_value * kelly
+        shares = int(position_value / signal.entry_price)
+
+        return shares
+
+    def risk_based_sizing(
+        self,
+        signal: TradeSignal,
+        risk_pct: float = 0.01
+    ) -> int:
+        """
+        Size based on maximum risk per trade.
+
+        Position sized so that hitting stop loss = risk_pct of portfolio.
+        """
+        # Risk per share
+        risk_per_share = abs(signal.entry_price - signal.stop_loss)
+
+        if risk_per_share == 0:
+            return 0
+
+        # Maximum risk in dollars
+        max_risk = self.portfolio_value * risk_pct
+
+        # Position size
+        shares = int(max_risk / risk_per_share)
+
+        return shares
+```
+
+## Real-Time Risk Monitoring
+
+Real-time monitoring catches problems before they become catastrophic.
+
+```python
+@dataclass
+class Position:
+    """Current position information."""
+    symbol: str
+    shares: int
+    avg_cost: float
+    current_price: float
+    unrealized_pnl: float
+
+class RealTimeRiskMonitor:
+    """
+    Monitor portfolio risk in real-time.
+    """
+
+    def __init__(
+        self,
+        initial_capital: float,
+        max_drawdown_pct: float = 0.10,
+        max_daily_loss_pct: float = 0.03,
+        max_position_pct: float = 0.20,
+        max_correlation: float = 0.7
+    ):
+        self.initial_capital = initial_capital
+        self.max_drawdown_pct = max_drawdown_pct
+        self.max_daily_loss_pct = max_daily_loss_pct
+        self.max_position_pct = max_position_pct
+        self.max_correlation = max_correlation
+
+        self.peak_value = initial_capital
+        self.daily_start_value = initial_capital
+        self.alerts: List[Dict] = []
+
+    def update(
+        self,
+        current_value: float,
+        positions: List[Position],
+        correlation_matrix: Optional[np.ndarray] = None
+    ) -> Dict:
+        """
+        Update risk metrics and check limits.
+
+        Returns dict with current risk state and any alerts.
+        """
+        alerts = []
+
+        # Update peak value
+        self.peak_value = max(self.peak_value, current_value)
+
+        # Check drawdown
+        drawdown = (self.peak_value - current_value) / self.peak_value
+        if drawdown > self.max_drawdown_pct:
+            alerts.append({
+                'type': 'DRAWDOWN_BREACH',
+                'severity': 'CRITICAL',
+                'value': drawdown,
+                'limit': self.max_drawdown_pct
+            })
+
+        # Check daily loss
+        daily_pnl = (current_value - self.daily_start_value) / self.daily_start_value
+        if daily_pnl < -self.max_daily_loss_pct:
+            alerts.append({
+                'type': 'DAILY_LOSS_BREACH',
+                'severity': 'HIGH',
+                'value': daily_pnl,
+                'limit': -self.max_daily_loss_pct
+            })
+
+        # Check position concentration
+        for pos in positions:
+            position_value = abs(pos.shares * pos.current_price)
+            position_pct = position_value / current_value
+
+            if position_pct > self.max_position_pct:
+                alerts.append({
+                    'type': 'CONCENTRATION_BREACH',
+                    'severity': 'MEDIUM',
+                    'symbol': pos.symbol,
+                    'value': position_pct,
+                    'limit': self.max_position_pct
+                })
+
+        # Check correlation if provided
+        if correlation_matrix is not None and len(positions) > 1:
+            for i in range(len(positions)):
+                for j in range(i + 1, len(positions)):
+                    corr = correlation_matrix[i, j]
+                    if abs(corr) > self.max_correlation:
+                        alerts.append({
+                            'type': 'CORRELATION_BREACH',
+                            'severity': 'LOW',
+                            'symbols': (positions[i].symbol, positions[j].symbol),
+                            'value': corr,
+                            'limit': self.max_correlation
+                        })
+
+        self.alerts.extend(alerts)
+
+        return {
+            'current_value': current_value,
+            'drawdown': drawdown,
+            'daily_pnl': daily_pnl,
+            'num_positions': len(positions),
+            'alerts': alerts,
+            'status': 'CRITICAL' if any(a['severity'] == 'CRITICAL' for a in alerts) else
+                     'WARNING' if alerts else 'OK'
+        }
+
+    def reset_daily(self, current_value: float):
+        """Reset daily tracking at start of new trading day."""
+        self.daily_start_value = current_value
+```
+
+<QuizQuestion
+  question="Why is maximum drawdown monitoring critical for algorithmic trading?"
+  options={[
+    "It helps reduce trading costs",
+    "It prevents catastrophic losses that are hard to recover from",
+    "It increases trading frequency",
+    "It improves signal accuracy"
+  ]}
+  correctAnswer={1}
+  explanation="Drawdown monitoring is critical because large losses are exponentially harder to recover from. A 50% loss requires a 100% gain to break even. Early intervention prevents small problems from becoming catastrophic."
+/>
+
+## Value at Risk (VaR) Calculations
+
+VaR quantifies the maximum expected loss over a given time horizon at a specified confidence level.
+
+```python
+class VaRCalculator:
+    """
+    Calculate Value at Risk using multiple methods.
+    """
+
+    def __init__(self, confidence_level: float = 0.95):
+        self.confidence_level = confidence_level
+        self.alpha = 1 - confidence_level
+
+    def historical_var(
+        self,
+        returns: np.ndarray,
+        portfolio_value: float
+    ) -> float:
+        """
+        Historical VaR using actual return distribution.
+        """
+        sorted_returns = np.sort(returns)
+        var_index = int(len(returns) * self.alpha)
+        var_return = sorted_returns[var_index]
+
+        return -var_return * portfolio_value
+
+    def parametric_var(
+        self,
+        mean_return: float,
+        std_return: float,
+        portfolio_value: float
+    ) -> float:
+        """
+        Parametric VaR assuming normal distribution.
+        """
+        from scipy.stats import norm
+
+        z_score = norm.ppf(self.alpha)
+        var_return = mean_return + z_score * std_return
+
+        return -var_return * portfolio_value
+
+    def monte_carlo_var(
+        self,
+        mean_return: float,
+        std_return: float,
+        portfolio_value: float,
+        num_simulations: int = 10000
+    ) -> float:
+        """
+        Monte Carlo VaR with simulated returns.
+        """
+        simulated_returns = np.random.normal(
+            mean_return, std_return, num_simulations
+        )
+
+        sorted_returns = np.sort(simulated_returns)
+        var_index = int(num_simulations * self.alpha)
+        var_return = sorted_returns[var_index]
+
+        return -var_return * portfolio_value
+
+    def expected_shortfall(
+        self,
+        returns: np.ndarray,
+        portfolio_value: float
+    ) -> float:
+        """
+        Expected Shortfall (CVaR): average loss beyond VaR.
+
+        More conservative than VaR as it captures tail risk.
+        """
+        sorted_returns = np.sort(returns)
+        var_index = int(len(returns) * self.alpha)
+
+        # Average of returns worse than VaR
+        tail_returns = sorted_returns[:var_index]
+        es_return = np.mean(tail_returns) if len(tail_returns) > 0 else 0
+
+        return -es_return * portfolio_value
+
+    def portfolio_var(
+        self,
+        weights: np.ndarray,
+        returns: np.ndarray,
+        portfolio_value: float
+    ) -> dict:
+        """
+        Calculate portfolio VaR considering correlations.
+
+        Args:
+            weights: Asset weights
+            returns: (T, N) matrix of historical returns
+            portfolio_value: Total portfolio value
+
+        Returns:
+            Dict with various VaR measures
+        """
+        # Portfolio returns
+        portfolio_returns = returns @ weights
+
+        # Covariance matrix
+        cov_matrix = np.cov(returns.T)
+
+        # Portfolio volatility
+        portfolio_vol = np.sqrt(weights @ cov_matrix @ weights)
+
+        return {
+            'historical_var': self.historical_var(portfolio_returns, portfolio_value),
+            'parametric_var': self.parametric_var(
+                np.mean(portfolio_returns), portfolio_vol, portfolio_value
+            ),
+            'expected_shortfall': self.expected_shortfall(portfolio_returns, portfolio_value),
+            'portfolio_volatility': portfolio_vol
+        }
+```
+
+## Stop Loss and Take Profit Management
+
+Automated exit management protects gains and limits losses.
+
+```python
+class ExitManager:
+    """
+    Manage stop losses and take profits with advanced techniques.
+    """
+
+    def __init__(self):
+        self.positions = {}
+
+    def add_position(
+        self,
+        symbol: str,
+        entry_price: float,
+        shares: int,
+        direction: int,
+        stop_loss: float,
+        take_profit: Optional[float] = None,
+        trailing_stop_pct: Optional[float] = None
+    ):
+        """Add a position with exit levels."""
+        self.positions[symbol] = {
+            'entry_price': entry_price,
+            'shares': shares,
+            'direction': direction,
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
+            'trailing_stop_pct': trailing_stop_pct,
+            'highest_price': entry_price if direction == 1 else None,
+            'lowest_price': entry_price if direction == -1 else None
+        }
+
+    def update_price(
+        self,
+        symbol: str,
+        current_price: float
+    ) -> Optional[Dict]:
+        """
+        Update price and check exit conditions.
+
+        Returns exit signal if triggered.
+        """
+        if symbol not in self.positions:
+            return None
+
+        pos = self.positions[symbol]
+        exit_signal = None
+
+        # Update trailing stop reference
+        if pos['direction'] == 1 and pos['trailing_stop_pct']:
+            pos['highest_price'] = max(pos['highest_price'], current_price)
+            trailing_stop = pos['highest_price'] * (1 - pos['trailing_stop_pct'])
+            pos['stop_loss'] = max(pos['stop_loss'], trailing_stop)
+
+        elif pos['direction'] == -1 and pos['trailing_stop_pct']:
+            pos['lowest_price'] = min(pos['lowest_price'], current_price)
+            trailing_stop = pos['lowest_price'] * (1 + pos['trailing_stop_pct'])
+            pos['stop_loss'] = min(pos['stop_loss'], trailing_stop)
+
+        # Check stop loss
+        if pos['direction'] == 1 and current_price <= pos['stop_loss']:
+            exit_signal = {
+                'symbol': symbol,
+                'type': 'STOP_LOSS',
+                'price': current_price,
+                'shares': pos['shares'],
+                'pnl': (current_price - pos['entry_price']) * pos['shares']
+            }
+
+        elif pos['direction'] == -1 and current_price >= pos['stop_loss']:
+            exit_signal = {
+                'symbol': symbol,
+                'type': 'STOP_LOSS',
+                'price': current_price,
+                'shares': pos['shares'],
+                'pnl': (pos['entry_price'] - current_price) * pos['shares']
+            }
+
+        # Check take profit
+        if pos['take_profit']:
+            if pos['direction'] == 1 and current_price >= pos['take_profit']:
+                exit_signal = {
+                    'symbol': symbol,
+                    'type': 'TAKE_PROFIT',
+                    'price': current_price,
+                    'shares': pos['shares'],
+                    'pnl': (current_price - pos['entry_price']) * pos['shares']
+                }
+
+            elif pos['direction'] == -1 and current_price <= pos['take_profit']:
+                exit_signal = {
+                    'symbol': symbol,
+                    'type': 'TAKE_PROFIT',
+                    'price': current_price,
+                    'shares': pos['shares'],
+                    'pnl': (pos['entry_price'] - current_price) * pos['shares']
+                }
+
+        if exit_signal:
+            del self.positions[symbol]
+
+        return exit_signal
+
+    def atr_based_stops(
+        self,
+        high: np.ndarray,
+        low: np.ndarray,
+        close: np.ndarray,
+        period: int = 14,
+        multiplier: float = 2.0
+    ) -> float:
+        """
+        Calculate ATR-based stop distance.
+
+        Volatility-adjusted stops adapt to market conditions.
+        """
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+
+        true_range = np.maximum(tr1, np.maximum(tr2, tr3))[1:]  # Skip first
+        atr = np.mean(true_range[-period:])
+
+        return atr * multiplier
+```
+
+<QuizQuestion
+  question="What is the advantage of trailing stops over fixed stops?"
+  options={[
+    "They are simpler to implement",
+    "They lock in profits as the price moves favorably",
+    "They always result in better returns",
+    "They never trigger early"
+  ]}
+  correctAnswer={1}
+  explanation="Trailing stops follow the price as it moves in your favor, automatically locking in profits while still giving the trade room to breathe. They convert winning trades into guaranteed profits."
+/>
+
+## Quantum Risk Measurement
+
+Quantum computing can enhance risk calculations, particularly for complex portfolios.
+
+```python
+class QuantumRiskAnalyzer:
+    """
+    Quantum-enhanced risk analysis.
+
+    Uses quantum sampling for more accurate tail risk estimation.
+    """
+
+    def __init__(self, num_qubits: int = 8):
+        self.num_qubits = num_qubits
+
+    def quantum_monte_carlo_var(
+        self,
+        mean_return: float,
+        std_return: float,
+        portfolio_value: float,
+        confidence_level: float = 0.95,
+        num_samples: int = 10000
+    ) -> dict:
+        """
+        Quantum-enhanced Monte Carlo VaR.
+
+        In practice, this would use amplitude estimation
+        for quadratic speedup in sampling.
+        """
+        # Classical simulation of quantum sampling
+        # Real implementation would use Qiskit/Pennylane
+
+        alpha = 1 - confidence_level
+
+        # Generate samples with importance sampling
+        # Focus on tail distribution
+        importance_samples = self._importance_sampling(
+            mean_return, std_return, num_samples, alpha
+        )
+
+        # Weight samples for proper VaR estimation
+        var_estimate = np.percentile(importance_samples, alpha * 100)
+        es_estimate = np.mean(importance_samples[importance_samples <= var_estimate])
+
+        return {
+            'var': -var_estimate * portfolio_value,
+            'expected_shortfall': -es_estimate * portfolio_value,
+            'tail_probability': alpha
+        }
+
+    def _importance_sampling(
+        self,
+        mean: float,
+        std: float,
+        num_samples: int,
+        focus_quantile: float
+    ) -> np.ndarray:
+        """
+        Importance sampling focused on tail distribution.
+        """
+        from scipy.stats import norm
+
+        # Focus sampling on tail
+        tail_mean = mean + norm.ppf(focus_quantile * 2) * std
+
+        # Sample from shifted distribution
+        samples = np.random.normal(tail_mean, std, num_samples)
+
+        # Importance weights
+        weights = norm.pdf(samples, mean, std) / norm.pdf(samples, tail_mean, std)
+
+        # Weighted resampling
+        weights = weights / weights.sum()
+        indices = np.random.choice(len(samples), size=num_samples, p=weights)
+
+        return samples[indices]
+
+    def correlation_stress_test(
+        self,
+        weights: np.ndarray,
+        returns: np.ndarray,
+        stress_correlations: List[float]
+    ) -> List[dict]:
+        """
+        Stress test portfolio under different correlation scenarios.
+
+        Correlations often increase during market stress,
+        so testing elevated correlations is important.
+        """
+        results = []
+
+        base_cov = np.cov(returns.T)
+        base_vol = np.sqrt(np.diag(base_cov))
+
+        for stress_corr in stress_correlations:
+            # Create stressed correlation matrix
+            n = len(weights)
+            stressed_corr = np.eye(n) * (1 - stress_corr) + np.ones((n, n)) * stress_corr
+
+            # Convert to covariance
+            stressed_cov = np.outer(base_vol, base_vol) * stressed_corr
+
+            # Portfolio volatility under stress
+            port_var = weights @ stressed_cov @ weights
+            port_vol = np.sqrt(port_var)
+
+            # Parametric VaR at 95%
+            var = 1.645 * port_vol
+
+            results.append({
+                'stress_correlation': stress_corr,
+                'portfolio_volatility': port_vol,
+                'var_95': var,
+                'volatility_increase': port_vol / np.sqrt(weights @ base_cov @ weights) - 1
+            })
+
+        return results
+```
+
+## Risk-Adjusted Performance Metrics
+
+Measuring performance relative to risk taken provides a complete picture.
+
+```python
+class PerformanceAnalyzer:
+    """
+    Calculate risk-adjusted performance metrics.
+    """
+
+    def __init__(self, risk_free_rate: float = 0.02):
+        self.risk_free_rate = risk_free_rate
+
+    def sharpe_ratio(
+        self,
+        returns: np.ndarray,
+        annualization_factor: float = 252
+    ) -> float:
+        """
+        Sharpe Ratio: excess return per unit of risk.
+        """
+        excess_returns = returns - self.risk_free_rate / annualization_factor
+        return np.sqrt(annualization_factor) * np.mean(excess_returns) / np.std(returns)
+
+    def sortino_ratio(
+        self,
+        returns: np.ndarray,
+        annualization_factor: float = 252
+    ) -> float:
+        """
+        Sortino Ratio: excess return per unit of downside risk.
+
+        Only penalizes negative volatility.
+        """
+        excess_returns = returns - self.risk_free_rate / annualization_factor
+        downside_returns = np.minimum(returns, 0)
+        downside_std = np.std(downside_returns)
+
+        if downside_std == 0:
+            return np.inf if np.mean(excess_returns) > 0 else 0
+
+        return np.sqrt(annualization_factor) * np.mean(excess_returns) / downside_std
+
+    def calmar_ratio(
+        self,
+        returns: np.ndarray,
+        annualization_factor: float = 252
+    ) -> float:
+        """
+        Calmar Ratio: annualized return / maximum drawdown.
+        """
+        cumulative = np.cumprod(1 + returns)
+        peak = np.maximum.accumulate(cumulative)
+        drawdown = (peak - cumulative) / peak
+        max_drawdown = np.max(drawdown)
+
+        annualized_return = np.mean(returns) * annualization_factor
+
+        if max_drawdown == 0:
+            return np.inf if annualized_return > 0 else 0
+
+        return annualized_return / max_drawdown
+
+    def information_ratio(
+        self,
+        returns: np.ndarray,
+        benchmark_returns: np.ndarray,
+        annualization_factor: float = 252
+    ) -> float:
+        """
+        Information Ratio: active return per unit of tracking error.
+        """
+        active_returns = returns - benchmark_returns
+        tracking_error = np.std(active_returns)
+
+        if tracking_error == 0:
+            return 0
+
+        return np.sqrt(annualization_factor) * np.mean(active_returns) / tracking_error
+
+    def generate_report(
+        self,
+        returns: np.ndarray,
+        benchmark_returns: Optional[np.ndarray] = None
+    ) -> dict:
+        """Generate comprehensive performance report."""
+        cumulative = np.cumprod(1 + returns)
+        peak = np.maximum.accumulate(cumulative)
+        drawdown = (peak - cumulative) / peak
+
+        report = {
+            'total_return': cumulative[-1] - 1,
+            'annualized_return': np.mean(returns) * 252,
+            'volatility': np.std(returns) * np.sqrt(252),
+            'sharpe_ratio': self.sharpe_ratio(returns),
+            'sortino_ratio': self.sortino_ratio(returns),
+            'calmar_ratio': self.calmar_ratio(returns),
+            'max_drawdown': np.max(drawdown),
+            'num_trades': len(returns)
+        }
+
+        if benchmark_returns is not None:
+            report['information_ratio'] = self.information_ratio(returns, benchmark_returns)
+            report['alpha'] = np.mean(returns - benchmark_returns) * 252
+
+        return report
+```
+
+## Summary
+
+Effective trading risk management requires:
+
+- **Position sizing** that balances return potential with risk limits
+- **Real-time monitoring** to catch problems before they become catastrophic
+- **VaR and Expected Shortfall** for quantifying potential losses
+- **Stop loss management** including trailing stops and volatility-adjusted levels
+- **Quantum-enhanced risk measurement** for complex portfolios
+- **Risk-adjusted metrics** for evaluating true performance
+
+Risk management isn't about avoiding all risk—it's about taking intelligent risks that align with your capital and strategy.

@@ -1,0 +1,698 @@
+---
+title: "Quantum Kernels: Feature Maps and Kernel Methods"
+description: "Deep dive into quantum kernel methods, including quantum feature maps, kernel functions, and their application to machine learning classification and regression tasks."
+duration: 75
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the relationship between feature maps and kernel functions
+- Design quantum feature maps for different data types
+- Implement quantum kernel estimation on quantum hardware
+- Analyze the expressiveness of quantum kernels
+- Apply quantum kernels to classification tasks
+
+## 1. From Classical to Quantum Kernels
+
+Kernel methods are a cornerstone of classical machine learning. The key insight is that we can implicitly compute inner products in high-dimensional feature spaces without explicitly computing the feature vectors.
+
+<Definition term="Kernel Function">
+A kernel function $k(x, x')$ computes the inner product between feature vectors: $k(x, x') = \langle\phi(x), \phi(x')\rangle$ where $\phi: \mathcal{X} \rightarrow \mathcal{F}$ maps data to a feature space.
+</Definition>
+
+### The Quantum Advantage Opportunity
+
+Classical kernels are limited by:
+1. Computational cost of evaluating complex feature maps
+2. Expressiveness bounded by classical computation
+
+Quantum computers can prepare feature states in exponentially large Hilbert spaces:
+
+<Formula>
+$$|\phi(x)\rangle = U(x)|0\rangle^{\otimes n} \in \mathbb{C}^{2^n}$$
+</Formula>
+
+The quantum kernel is then:
+
+<Formula>
+$$k_Q(x, x') = |\langle\phi(x')|\phi(x)\rangle|^2$$
+</Formula>
+
+```python
+import numpy as np
+from typing import Callable, List, Tuple
+
+class QuantumKernel:
+    """
+    Quantum kernel implementation using state vector simulation.
+    """
+
+    def __init__(self, feature_map: Callable[[np.ndarray], np.ndarray], num_qubits: int):
+        """
+        Initialize quantum kernel.
+
+        Args:
+            feature_map: Function that maps data x to unitary U(x)
+            num_qubits: Number of qubits in the feature map
+        """
+        self.feature_map = feature_map
+        self.num_qubits = num_qubits
+        self.dim = 2 ** num_qubits
+
+    def prepare_state(self, x: np.ndarray) -> np.ndarray:
+        """Prepare feature state |phi(x)> = U(x)|0>."""
+        initial_state = np.zeros(self.dim, dtype=complex)
+        initial_state[0] = 1.0
+
+        U = self.feature_map(x)
+        return U @ initial_state
+
+    def kernel(self, x1: np.ndarray, x2: np.ndarray) -> float:
+        """
+        Compute quantum kernel k(x1, x2) = |<phi(x2)|phi(x1)>|^2.
+        """
+        state1 = self.prepare_state(x1)
+        state2 = self.prepare_state(x2)
+
+        overlap = np.abs(np.vdot(state2, state1)) ** 2
+        return float(overlap)
+
+    def kernel_matrix(self, X: np.ndarray) -> np.ndarray:
+        """
+        Compute the full kernel matrix K[i,j] = k(X[i], X[j]).
+        """
+        n_samples = len(X)
+        K = np.zeros((n_samples, n_samples))
+
+        # Precompute all feature states
+        states = [self.prepare_state(x) for x in X]
+
+        for i in range(n_samples):
+            for j in range(i, n_samples):
+                overlap = np.abs(np.vdot(states[j], states[i])) ** 2
+                K[i, j] = overlap
+                K[j, i] = overlap  # Kernel matrix is symmetric
+
+        return K
+```
+
+## 2. Quantum Feature Maps
+
+The choice of feature map $U(x)$ determines the kernel's expressiveness and computational properties.
+
+### ZZ Feature Map
+
+The ZZ feature map encodes data using entangling rotations:
+
+<Formula>
+$$U_{ZZ}(x) = \prod_{k=1}^{d} \left[ \prod_{i<j} e^{-i x_i x_j Z_i Z_j} \prod_i e^{-i x_i Z_i} H^{\otimes n} \right]$$
+</Formula>
+
+```python
+def zz_feature_map(x: np.ndarray, num_qubits: int, reps: int = 2) -> np.ndarray:
+    """
+    Construct ZZ feature map unitary.
+
+    Args:
+        x: Input data vector
+        num_qubits: Number of qubits
+        reps: Number of repetitions (depth)
+
+    Returns:
+        Unitary matrix representing the feature map
+    """
+    dim = 2 ** num_qubits
+
+    # Pauli matrices
+    I = np.eye(2)
+    Z = np.array([[1, 0], [0, -1]])
+    H = np.array([[1, 1], [1, -1]]) / np.sqrt(2)
+
+    def tensor_product(ops: List[np.ndarray]) -> np.ndarray:
+        result = ops[0]
+        for op in ops[1:]:
+            result = np.kron(result, op)
+        return result
+
+    def single_qubit_z_rotation(qubit: int, angle: float) -> np.ndarray:
+        ops = [I] * num_qubits
+        ops[qubit] = np.array([[np.exp(-1j * angle / 2), 0],
+                               [0, np.exp(1j * angle / 2)]])
+        return tensor_product(ops)
+
+    def zz_rotation(q1: int, q2: int, angle: float) -> np.ndarray:
+        # exp(-i * angle * Z_q1 Z_q2)
+        ops = [I] * num_qubits
+        ops[q1] = Z
+        ops[q2] = Z
+        ZZ = tensor_product(ops)
+        return np.cos(angle) * np.eye(dim) - 1j * np.sin(angle) * ZZ
+
+    # Hadamard layer
+    H_layer = tensor_product([H] * num_qubits)
+
+    # Build full unitary
+    U = np.eye(dim, dtype=complex)
+
+    for _ in range(reps):
+        # Hadamard layer
+        U = H_layer @ U
+
+        # Single-qubit Z rotations
+        for i in range(min(num_qubits, len(x))):
+            U = single_qubit_z_rotation(i, x[i]) @ U
+
+        # ZZ entangling rotations
+        for i in range(num_qubits):
+            for j in range(i + 1, num_qubits):
+                if i < len(x) and j < len(x):
+                    angle = (np.pi - x[i]) * (np.pi - x[j])
+                    U = zz_rotation(i, j, angle) @ U
+
+    return U
+```
+
+### Pauli Feature Map
+
+A more flexible approach uses parameterized Pauli rotations:
+
+<Formula>
+$$U_P(x) = \prod_{S \subseteq \{1,...,n\}} \exp\left(-i \phi_S(x) \prod_{j \in S} P_j\right)$$
+</Formula>
+
+```python
+def pauli_feature_map(
+    x: np.ndarray,
+    num_qubits: int,
+    paulis: List[str] = ['Z', 'ZZ'],
+    reps: int = 2
+) -> np.ndarray:
+    """
+    Construct Pauli feature map with configurable Pauli terms.
+
+    Args:
+        x: Input data
+        num_qubits: Number of qubits
+        paulis: List of Pauli strings to include ('Z', 'ZZ', 'ZZZ', etc.)
+        reps: Number of repetitions
+
+    Returns:
+        Feature map unitary
+    """
+    dim = 2 ** num_qubits
+
+    I = np.eye(2)
+    X = np.array([[0, 1], [1, 0]])
+    Y = np.array([[0, -1j], [1j, 0]])
+    Z = np.array([[1, 0], [0, -1]])
+    H = np.array([[1, 1], [1, -1]]) / np.sqrt(2)
+
+    pauli_dict = {'I': I, 'X': X, 'Y': Y, 'Z': Z}
+
+    def tensor_product(ops):
+        result = ops[0]
+        for op in ops[1:]:
+            result = np.kron(result, op)
+        return result
+
+    def pauli_rotation(qubits: List[int], pauli_type: str, angle: float) -> np.ndarray:
+        """Apply exp(-i * angle * P_q1 P_q2 ...)"""
+        ops = [I] * num_qubits
+        for q in qubits:
+            ops[q] = pauli_dict[pauli_type]
+        P = tensor_product(ops)
+        return np.cos(angle) * np.eye(dim) - 1j * np.sin(angle) * P
+
+    H_layer = tensor_product([H] * num_qubits)
+    U = np.eye(dim, dtype=complex)
+
+    for _ in range(reps):
+        U = H_layer @ U
+
+        for pauli_string in paulis:
+            order = len(pauli_string)
+
+            if order == 1:
+                # Single-qubit terms
+                for i in range(min(num_qubits, len(x))):
+                    U = pauli_rotation([i], pauli_string, x[i]) @ U
+
+            elif order == 2:
+                # Two-qubit terms
+                for i in range(num_qubits):
+                    for j in range(i + 1, num_qubits):
+                        if i < len(x) and j < len(x):
+                            angle = x[i] * x[j]
+                            U = pauli_rotation([i, j], pauli_string[0], angle) @ U
+
+    return U
+```
+
+## 3. Kernel Estimation on Hardware
+
+On real quantum hardware, we estimate the kernel through measurements:
+
+<Formula>
+$$k(x, x') = |\langle 0|U^\dagger(x')U(x)|0\rangle|^2$$
+</Formula>
+
+We measure this by:
+1. Prepare $|0\rangle^{\otimes n}$
+2. Apply $U(x)$
+3. Apply $U^\dagger(x')$
+4. Measure probability of $|0\rangle^{\otimes n}$
+
+```python
+def estimate_kernel_hardware(
+    feature_map: Callable,
+    x1: np.ndarray,
+    x2: np.ndarray,
+    num_qubits: int,
+    shots: int = 8192
+) -> Tuple[float, float]:
+    """
+    Estimate quantum kernel with simulated shot noise.
+
+    Args:
+        feature_map: Feature map function
+        x1, x2: Input data points
+        num_qubits: Number of qubits
+        shots: Number of measurement shots
+
+    Returns:
+        (kernel_estimate, standard_error)
+    """
+    dim = 2 ** num_qubits
+
+    # Prepare initial state |0...0>
+    initial = np.zeros(dim, dtype=complex)
+    initial[0] = 1.0
+
+    # Apply U(x1) then U^dag(x2)
+    U1 = feature_map(x1)
+    U2 = feature_map(x2)
+
+    # U^dag(x2) @ U(x1) @ |0>
+    final_state = U2.conj().T @ U1 @ initial
+
+    # Probability of measuring |0...0>
+    prob_zero = np.abs(final_state[0]) ** 2
+
+    # Simulate shot noise (binomial distribution)
+    measured_zeros = np.random.binomial(shots, prob_zero)
+    kernel_estimate = measured_zeros / shots
+
+    # Standard error
+    std_error = np.sqrt(kernel_estimate * (1 - kernel_estimate) / shots)
+
+    return kernel_estimate, std_error
+
+def kernel_matrix_with_errors(
+    feature_map: Callable,
+    X: np.ndarray,
+    num_qubits: int,
+    shots: int = 8192
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute kernel matrix with shot noise estimates.
+
+    Returns:
+        (kernel_matrix, error_matrix)
+    """
+    n = len(X)
+    K = np.zeros((n, n))
+    errors = np.zeros((n, n))
+
+    for i in range(n):
+        for j in range(i, n):
+            k_val, k_err = estimate_kernel_hardware(
+                feature_map, X[i], X[j], num_qubits, shots
+            )
+            K[i, j] = k_val
+            K[j, i] = k_val
+            errors[i, j] = k_err
+            errors[j, i] = k_err
+
+    return K, errors
+```
+
+## 4. Quantum Support Vector Machines
+
+With a quantum kernel, we can train a classical SVM:
+
+```python
+class QuantumSVM:
+    """
+    Support Vector Machine with quantum kernel.
+    """
+
+    def __init__(
+        self,
+        feature_map: Callable,
+        num_qubits: int,
+        C: float = 1.0
+    ):
+        self.feature_map = feature_map
+        self.num_qubits = num_qubits
+        self.C = C  # Regularization parameter
+        self.alpha = None
+        self.support_vectors = None
+        self.support_labels = None
+        self.b = None
+
+    def fit(self, X: np.ndarray, y: np.ndarray):
+        """
+        Train the quantum SVM.
+
+        Args:
+            X: Training data (n_samples, n_features)
+            y: Labels (-1 or +1)
+        """
+        n = len(X)
+
+        # Compute kernel matrix
+        kernel = QuantumKernel(
+            lambda x: self.feature_map(x, self.num_qubits),
+            self.num_qubits
+        )
+        K = kernel.kernel_matrix(X)
+
+        # Solve dual SVM problem using simplified SMO
+        self.alpha = self._solve_dual(K, y, self.C)
+
+        # Find support vectors (alpha > 0)
+        sv_mask = self.alpha > 1e-7
+        self.support_vectors = X[sv_mask]
+        self.support_labels = y[sv_mask]
+        self.alpha_sv = self.alpha[sv_mask]
+
+        # Compute bias term
+        K_sv = K[sv_mask][:, sv_mask]
+        self.b = np.mean(
+            self.support_labels -
+            np.sum(self.alpha_sv * self.support_labels * K_sv, axis=1)
+        )
+
+        self._kernel = kernel
+        self._X_train = X
+
+    def _solve_dual(self, K: np.ndarray, y: np.ndarray, C: float) -> np.ndarray:
+        """
+        Simplified dual solver for SVM.
+        Uses coordinate descent for demonstration.
+        """
+        n = len(y)
+        alpha = np.zeros(n)
+
+        for _ in range(1000):  # Max iterations
+            for i in range(n):
+                # Compute gradient for alpha_i
+                margin = y[i] * (np.sum(alpha * y * K[i]) + 0)
+
+                if alpha[i] == 0 and margin >= 1:
+                    continue
+                if alpha[i] == C and margin <= 1:
+                    continue
+
+                # Update alpha_i
+                delta = (1 - margin) / (K[i, i] + 1e-8)
+                alpha[i] = np.clip(alpha[i] + delta, 0, C)
+
+        return alpha
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Predict class labels."""
+        n = len(X)
+        predictions = np.zeros(n)
+
+        for i, x in enumerate(X):
+            score = self.b
+            for j, sv in enumerate(self.support_vectors):
+                k_val = self._kernel.kernel(sv, x)
+                score += self.alpha_sv[j] * self.support_labels[j] * k_val
+            predictions[i] = np.sign(score)
+
+        return predictions
+
+    def score(self, X: np.ndarray, y: np.ndarray) -> float:
+        """Compute classification accuracy."""
+        predictions = self.predict(X)
+        return np.mean(predictions == y)
+```
+
+## 5. Kernel Expressiveness Analysis
+
+The power of quantum kernels depends on their expressiveness - the ability to distinguish different data points.
+
+<Definition term="Expressiveness">
+A kernel is highly expressive if it can produce large kernel values for similar data and small values for dissimilar data. Quantum kernels can access exponentially large feature spaces.
+</Definition>
+
+```python
+def analyze_kernel_expressiveness(
+    kernel: QuantumKernel,
+    X: np.ndarray,
+    y: np.ndarray
+) -> dict:
+    """
+    Analyze kernel expressiveness for classification.
+
+    Args:
+        kernel: Quantum kernel instance
+        X: Data points
+        y: Class labels
+
+    Returns:
+        Expressiveness metrics
+    """
+    K = kernel.kernel_matrix(X)
+
+    # Separate intra-class and inter-class kernel values
+    n = len(X)
+    intra_class = []
+    inter_class = []
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if y[i] == y[j]:
+                intra_class.append(K[i, j])
+            else:
+                inter_class.append(K[i, j])
+
+    intra_class = np.array(intra_class)
+    inter_class = np.array(inter_class)
+
+    # Kernel-target alignment
+    Y_outer = np.outer(y, y)
+    alignment = np.sum(K * Y_outer) / (np.linalg.norm(K, 'fro') * np.linalg.norm(Y_outer, 'fro'))
+
+    # Geometric difference (separation quality)
+    mean_intra = np.mean(intra_class)
+    mean_inter = np.mean(inter_class)
+    separation = mean_intra - mean_inter
+
+    return {
+        'kernel_matrix': K,
+        'mean_intra_class': mean_intra,
+        'mean_inter_class': mean_inter,
+        'separation': separation,
+        'kernel_alignment': alignment,
+        'condition_number': np.linalg.cond(K),
+        'rank': np.linalg.matrix_rank(K, tol=1e-6)
+    }
+
+def compare_kernels(
+    X: np.ndarray,
+    y: np.ndarray,
+    num_qubits: int
+) -> dict:
+    """Compare different quantum kernel designs."""
+
+    results = {}
+
+    # ZZ Feature Map
+    zz_kernel = QuantumKernel(
+        lambda x: zz_feature_map(x, num_qubits, reps=2),
+        num_qubits
+    )
+    results['ZZ'] = analyze_kernel_expressiveness(zz_kernel, X, y)
+
+    # Pauli Feature Map with different orders
+    for paulis in [['Z'], ['Z', 'ZZ']]:
+        name = '+'.join(paulis)
+        pauli_kernel = QuantumKernel(
+            lambda x, p=paulis: pauli_feature_map(x, num_qubits, p, reps=2),
+            num_qubits
+        )
+        results[name] = analyze_kernel_expressiveness(pauli_kernel, X, y)
+
+    return results
+```
+
+## 6. Projected Quantum Kernels
+
+For better generalization, we can project quantum kernels to lower-dimensional classical spaces:
+
+<Formula>
+$$k_{proj}(x, x') = \sum_i \langle\phi(x)|O_i|\phi(x)\rangle \langle\phi(x')|O_i|\phi(x')\rangle$$
+</Formula>
+
+```python
+class ProjectedQuantumKernel:
+    """
+    Projected quantum kernel for improved generalization.
+    """
+
+    def __init__(
+        self,
+        feature_map: Callable,
+        num_qubits: int,
+        observables: List[np.ndarray] = None
+    ):
+        self.feature_map = feature_map
+        self.num_qubits = num_qubits
+        self.dim = 2 ** num_qubits
+
+        # Default: use single-qubit Pauli Z observables
+        if observables is None:
+            self.observables = self._default_observables()
+        else:
+            self.observables = observables
+
+    def _default_observables(self) -> List[np.ndarray]:
+        """Create default Z observables for each qubit."""
+        I = np.eye(2)
+        Z = np.array([[1, 0], [0, -1]])
+
+        observables = []
+        for q in range(self.num_qubits):
+            ops = [I] * self.num_qubits
+            ops[q] = Z
+            O = ops[0]
+            for op in ops[1:]:
+                O = np.kron(O, op)
+            observables.append(O)
+
+        return observables
+
+    def classical_features(self, x: np.ndarray) -> np.ndarray:
+        """
+        Extract classical features from quantum state.
+
+        Returns expectation values of observables.
+        """
+        # Prepare quantum state
+        initial = np.zeros(self.dim, dtype=complex)
+        initial[0] = 1.0
+        U = self.feature_map(x)
+        state = U @ initial
+
+        # Compute expectation values
+        features = np.zeros(len(self.observables))
+        for i, O in enumerate(self.observables):
+            features[i] = np.real(np.vdot(state, O @ state))
+
+        return features
+
+    def kernel(self, x1: np.ndarray, x2: np.ndarray) -> float:
+        """Compute projected kernel as inner product of classical features."""
+        f1 = self.classical_features(x1)
+        f2 = self.classical_features(x2)
+        return np.dot(f1, f2)
+
+    def kernel_matrix(self, X: np.ndarray) -> np.ndarray:
+        """Compute full projected kernel matrix."""
+        features = np.array([self.classical_features(x) for x in X])
+        return features @ features.T
+```
+
+## 7. When Quantum Kernels Excel
+
+<Tip>
+Quantum kernels are most powerful when the data has structure that aligns with the quantum feature map, and when classical kernels cannot efficiently capture this structure.
+</Tip>
+
+### Conditions for Quantum Advantage
+
+1. **Data structure**: Data should have patterns that quantum feature maps naturally capture
+2. **Classical hardness**: Classical kernels should struggle with the problem
+3. **Noise resilience**: The kernel gap should survive quantum noise
+
+```python
+def assess_quantum_advantage(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    num_qubits: int
+) -> dict:
+    """
+    Compare quantum vs classical kernel performance.
+    """
+    from sklearn.svm import SVC
+    from sklearn.metrics import accuracy_score
+
+    results = {}
+
+    # Classical RBF kernel
+    classical_svm = SVC(kernel='rbf')
+    classical_svm.fit(X_train, y_train)
+    results['rbf_accuracy'] = accuracy_score(y_test, classical_svm.predict(X_test))
+
+    # Classical polynomial kernel
+    poly_svm = SVC(kernel='poly', degree=3)
+    poly_svm.fit(X_train, y_train)
+    results['poly_accuracy'] = accuracy_score(y_test, poly_svm.predict(X_test))
+
+    # Quantum kernel
+    quantum_kernel = QuantumKernel(
+        lambda x: zz_feature_map(x, num_qubits, reps=2),
+        num_qubits
+    )
+
+    K_train = quantum_kernel.kernel_matrix(X_train)
+
+    # Compute test kernel matrix
+    n_train, n_test = len(X_train), len(X_test)
+    K_test = np.zeros((n_test, n_train))
+    for i in range(n_test):
+        for j in range(n_train):
+            K_test[i, j] = quantum_kernel.kernel(X_test[i], X_train[j])
+
+    quantum_svm = SVC(kernel='precomputed')
+    quantum_svm.fit(K_train, y_train)
+    results['quantum_accuracy'] = accuracy_score(y_test, quantum_svm.predict(K_test))
+
+    # Analyze advantage
+    results['quantum_advantage'] = (
+        results['quantum_accuracy'] -
+        max(results['rbf_accuracy'], results['poly_accuracy'])
+    )
+
+    return results
+```
+
+## Summary
+
+In this lesson, you learned about quantum kernel methods:
+
+1. **Kernel Fundamentals**: Quantum kernels compute inner products in quantum Hilbert spaces
+2. **Feature Maps**: ZZ and Pauli feature maps encode classical data into quantum states
+3. **Hardware Estimation**: Kernels are measured via the swap test circuit
+4. **Quantum SVM**: Classical SVMs with quantum kernel matrices
+5. **Expressiveness**: Metrics to evaluate kernel quality for classification
+6. **Projected Kernels**: Hybrid approach for better generalization
+7. **Advantage Conditions**: When quantum kernels outperform classical methods
+
+<Warning>
+Quantum kernels require $O(n^2)$ circuit evaluations for $n$ data points, which can be expensive on near-term hardware. Projected kernels offer a middle ground with $O(n)$ scaling.
+</Warning>
+
+## Further Reading
+
+- Next lesson: Variational Quantum Classifiers
+- Related: Quantum Neural Networks
+- Application: Quantum Chemistry Classification

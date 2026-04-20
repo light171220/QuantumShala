@@ -1,0 +1,839 @@
+---
+title: "Generative Adversarial Networks Fundamentals"
+description: "Master the foundational concepts of Generative Adversarial Networks before exploring their quantum counterparts."
+estimatedMinutes: 60
+---
+
+# Generative Adversarial Networks Fundamentals
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the GAN minimax game framework
+- Implement generator and discriminator networks
+- Apply the GAN training algorithm
+- Analyze mode collapse and training instabilities
+- Explore GAN variants and improvements
+- Prepare foundation for quantum GANs
+
+---
+
+## 1. The GAN Framework
+
+Generative Adversarial Networks consist of two neural networks competing in a game-theoretic framework.
+
+<Definition term="Generative Adversarial Network">
+A GAN consists of:
+- **Generator G**: Maps random noise z to data samples G(z)
+- **Discriminator D**: Classifies samples as real (1) or fake (0)
+
+They play a minimax game: G tries to fool D, while D tries to distinguish real from fake.
+</Definition>
+
+<Formula expression="min_G max_D V(D,G) = E_{x~p_{data}}[log D(x)] + E_{z~p_z}[log(1 - D(G(z)))]" description="GAN minimax objective" />
+
+```python
+import numpy as np
+from typing import Callable, Tuple, List
+
+class SimpleGAN:
+    """
+    Basic GAN implementation for understanding fundamentals.
+    """
+
+    def __init__(
+        self,
+        data_dim: int,
+        latent_dim: int,
+        hidden_dim: int = 64
+    ):
+        self.data_dim = data_dim
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+
+        # Initialize generator parameters
+        self.G_params = self._init_generator()
+
+        # Initialize discriminator parameters
+        self.D_params = self._init_discriminator()
+
+    def _init_generator(self) -> dict:
+        """Initialize generator weights."""
+        return {
+            'W1': np.random.randn(self.latent_dim, self.hidden_dim) * 0.1,
+            'b1': np.zeros(self.hidden_dim),
+            'W2': np.random.randn(self.hidden_dim, self.hidden_dim) * 0.1,
+            'b2': np.zeros(self.hidden_dim),
+            'W3': np.random.randn(self.hidden_dim, self.data_dim) * 0.1,
+            'b3': np.zeros(self.data_dim)
+        }
+
+    def _init_discriminator(self) -> dict:
+        """Initialize discriminator weights."""
+        return {
+            'W1': np.random.randn(self.data_dim, self.hidden_dim) * 0.1,
+            'b1': np.zeros(self.hidden_dim),
+            'W2': np.random.randn(self.hidden_dim, self.hidden_dim) * 0.1,
+            'b2': np.zeros(self.hidden_dim),
+            'W3': np.random.randn(self.hidden_dim, 1) * 0.1,
+            'b3': np.zeros(1)
+        }
+
+    def relu(self, x: np.ndarray) -> np.ndarray:
+        """ReLU activation."""
+        return np.maximum(0, x)
+
+    def relu_derivative(self, x: np.ndarray) -> np.ndarray:
+        """ReLU derivative."""
+        return (x > 0).astype(float)
+
+    def sigmoid(self, x: np.ndarray) -> np.ndarray:
+        """Sigmoid activation."""
+        return 1 / (1 + np.exp(-np.clip(x, -500, 500)))
+
+    def tanh(self, x: np.ndarray) -> np.ndarray:
+        """Tanh activation."""
+        return np.tanh(x)
+
+    def generator_forward(self, z: np.ndarray) -> Tuple[np.ndarray, dict]:
+        """
+        Generator forward pass.
+
+        Args:
+            z: Latent noise (batch_size, latent_dim)
+
+        Returns:
+            (generated_samples, cache_for_backprop)
+        """
+        # Layer 1
+        h1_pre = z @ self.G_params['W1'] + self.G_params['b1']
+        h1 = self.relu(h1_pre)
+
+        # Layer 2
+        h2_pre = h1 @ self.G_params['W2'] + self.G_params['b2']
+        h2 = self.relu(h2_pre)
+
+        # Output layer (tanh for bounded output)
+        out_pre = h2 @ self.G_params['W3'] + self.G_params['b3']
+        out = self.tanh(out_pre)
+
+        cache = {
+            'z': z, 'h1_pre': h1_pre, 'h1': h1,
+            'h2_pre': h2_pre, 'h2': h2, 'out_pre': out_pre
+        }
+
+        return out, cache
+
+    def discriminator_forward(self, x: np.ndarray) -> Tuple[np.ndarray, dict]:
+        """
+        Discriminator forward pass.
+
+        Args:
+            x: Input samples (batch_size, data_dim)
+
+        Returns:
+            (probability_real, cache_for_backprop)
+        """
+        # Layer 1
+        h1_pre = x @ self.D_params['W1'] + self.D_params['b1']
+        h1 = self.relu(h1_pre)
+
+        # Layer 2
+        h2_pre = h1 @ self.D_params['W2'] + self.D_params['b2']
+        h2 = self.relu(h2_pre)
+
+        # Output layer
+        out_pre = h2 @ self.D_params['W3'] + self.D_params['b3']
+        out = self.sigmoid(out_pre)
+
+        cache = {
+            'x': x, 'h1_pre': h1_pre, 'h1': h1,
+            'h2_pre': h2_pre, 'h2': h2, 'out_pre': out_pre
+        }
+
+        return out, cache
+
+    def generate(self, n_samples: int) -> np.ndarray:
+        """Generate samples from the model."""
+        z = np.random.randn(n_samples, self.latent_dim)
+        samples, _ = self.generator_forward(z)
+        return samples
+```
+
+---
+
+## 2. The Minimax Game
+
+The GAN training objective is a two-player minimax game.
+
+<Definition term="Minimax Equilibrium">
+At equilibrium:
+- D(x) = 0.5 for all x (can't distinguish real from fake)
+- G generates samples from p_data (perfect generation)
+
+The optimal discriminator for fixed G is:
+D*(x) = p_data(x) / (p_data(x) + p_G(x))
+</Definition>
+
+<Tip>
+In practice, instead of minimizing log(1 - D(G(z))), we maximize log(D(G(z))) for the generator. This provides stronger gradients early in training.
+</Tip>
+
+```python
+class GANTrainer:
+    """
+    Training utilities for GANs.
+    """
+
+    def __init__(self, gan: SimpleGAN, learning_rate: float = 0.001):
+        self.gan = gan
+        self.lr = learning_rate
+
+    def discriminator_loss(
+        self,
+        real_data: np.ndarray,
+        fake_data: np.ndarray
+    ) -> Tuple[float, dict]:
+        """
+        Compute discriminator loss.
+
+        L_D = -E[log D(x)] - E[log(1 - D(G(z)))]
+        """
+        # Forward pass on real data
+        D_real, cache_real = self.gan.discriminator_forward(real_data)
+
+        # Forward pass on fake data
+        D_fake, cache_fake = self.gan.discriminator_forward(fake_data)
+
+        # Binary cross-entropy loss
+        eps = 1e-8
+        loss_real = -np.mean(np.log(D_real + eps))
+        loss_fake = -np.mean(np.log(1 - D_fake + eps))
+        total_loss = loss_real + loss_fake
+
+        return total_loss, {'real': cache_real, 'fake': cache_fake,
+                           'D_real': D_real, 'D_fake': D_fake}
+
+    def generator_loss(
+        self,
+        fake_data: np.ndarray,
+        D_fake: np.ndarray
+    ) -> float:
+        """
+        Compute generator loss (non-saturating version).
+
+        L_G = -E[log D(G(z))]
+        """
+        eps = 1e-8
+        return -np.mean(np.log(D_fake + eps))
+
+    def train_discriminator_step(
+        self,
+        real_data: np.ndarray,
+        fake_data: np.ndarray
+    ) -> float:
+        """
+        One training step for discriminator.
+        """
+        loss, cache = self.discriminator_loss(real_data, fake_data)
+
+        # Compute gradients (simplified backprop)
+        grads = self._compute_discriminator_gradients(cache)
+
+        # Update parameters
+        for key in self.gan.D_params:
+            self.gan.D_params[key] -= self.lr * grads[key]
+
+        return loss
+
+    def train_generator_step(
+        self,
+        z: np.ndarray
+    ) -> float:
+        """
+        One training step for generator.
+        """
+        # Generate fake data
+        fake_data, G_cache = self.gan.generator_forward(z)
+
+        # Get discriminator output
+        D_fake, D_cache = self.gan.discriminator_forward(fake_data)
+
+        # Compute loss
+        loss = self.generator_loss(fake_data, D_fake)
+
+        # Compute gradients
+        grads = self._compute_generator_gradients(G_cache, D_cache, D_fake)
+
+        # Update parameters
+        for key in self.gan.G_params:
+            self.gan.G_params[key] -= self.lr * grads[key]
+
+        return loss
+
+    def _compute_discriminator_gradients(self, cache: dict) -> dict:
+        """Compute discriminator gradients via backprop."""
+        grads = {}
+        batch_size = cache['real']['x'].shape[0]
+
+        # Gradients for real samples (want D(x) = 1)
+        D_real = cache['D_real']
+        dL_dout_real = -1 / (D_real + 1e-8) / batch_size
+
+        # Gradients for fake samples (want D(G(z)) = 0)
+        D_fake = cache['D_fake']
+        dL_dout_fake = 1 / (1 - D_fake + 1e-8) / batch_size
+
+        # Backprop through discriminator (simplified)
+        # Full implementation would include complete chain rule
+        grads['W3'] = np.zeros_like(self.gan.D_params['W3'])
+        grads['b3'] = np.zeros_like(self.gan.D_params['b3'])
+        grads['W2'] = np.zeros_like(self.gan.D_params['W2'])
+        grads['b2'] = np.zeros_like(self.gan.D_params['b2'])
+        grads['W1'] = np.zeros_like(self.gan.D_params['W1'])
+        grads['b1'] = np.zeros_like(self.gan.D_params['b1'])
+
+        # Approximate gradients using finite differences
+        eps = 1e-5
+        for key in self.gan.D_params:
+            grad = np.zeros_like(self.gan.D_params[key])
+            flat_param = self.gan.D_params[key].flatten()
+            for i in range(min(len(flat_param), 100)):  # Limit for efficiency
+                flat_param[i] += eps
+                self.gan.D_params[key] = flat_param.reshape(self.gan.D_params[key].shape)
+                loss_plus, _ = self.discriminator_loss(
+                    cache['real']['x'],
+                    cache['fake']['x']
+                )
+                flat_param[i] -= 2 * eps
+                self.gan.D_params[key] = flat_param.reshape(self.gan.D_params[key].shape)
+                loss_minus, _ = self.discriminator_loss(
+                    cache['real']['x'],
+                    cache['fake']['x']
+                )
+                flat_param[i] += eps
+                self.gan.D_params[key] = flat_param.reshape(self.gan.D_params[key].shape)
+                grad.flatten()[i] = (loss_plus - loss_minus) / (2 * eps)
+            grads[key] = grad
+
+        return grads
+
+    def _compute_generator_gradients(
+        self,
+        G_cache: dict,
+        D_cache: dict,
+        D_fake: np.ndarray
+    ) -> dict:
+        """Compute generator gradients."""
+        grads = {}
+
+        # Approximate gradients using finite differences
+        eps = 1e-5
+        z = G_cache['z']
+
+        for key in self.gan.G_params:
+            grad = np.zeros_like(self.gan.G_params[key])
+            flat_param = self.gan.G_params[key].flatten()
+            for i in range(min(len(flat_param), 100)):
+                flat_param[i] += eps
+                self.gan.G_params[key] = flat_param.reshape(self.gan.G_params[key].shape)
+                fake_plus, _ = self.gan.generator_forward(z)
+                D_plus, _ = self.gan.discriminator_forward(fake_plus)
+                loss_plus = self.generator_loss(fake_plus, D_plus)
+
+                flat_param[i] -= 2 * eps
+                self.gan.G_params[key] = flat_param.reshape(self.gan.G_params[key].shape)
+                fake_minus, _ = self.gan.generator_forward(z)
+                D_minus, _ = self.gan.discriminator_forward(fake_minus)
+                loss_minus = self.generator_loss(fake_minus, D_minus)
+
+                flat_param[i] += eps
+                self.gan.G_params[key] = flat_param.reshape(self.gan.G_params[key].shape)
+                grad.flatten()[i] = (loss_plus - loss_minus) / (2 * eps)
+            grads[key] = grad
+
+        return grads
+```
+
+---
+
+## 3. Training Dynamics
+
+Understanding GAN training dynamics is crucial for successful implementation.
+
+<Definition term="Training Procedure">
+Standard GAN training alternates between:
+
+1. **Update D**: Sample real data x, generate fake G(z), update D to maximize V(D,G)
+2. **Update G**: Generate fake G(z), update G to minimize V(D,G) (or maximize log D(G(z)))
+
+Repeat for many iterations until convergence.
+</Definition>
+
+<Warning>
+GAN training is notoriously unstable. Common issues include mode collapse, vanishing gradients, and oscillation between generator and discriminator.
+</Warning>
+
+```python
+def train_gan(
+    gan: SimpleGAN,
+    real_data_generator: Callable,
+    n_iterations: int = 1000,
+    batch_size: int = 32,
+    n_discriminator_steps: int = 1,
+    learning_rate: float = 0.001
+) -> dict:
+    """
+    Full GAN training loop.
+
+    Args:
+        gan: GAN model
+        real_data_generator: Function that returns real data batches
+        n_iterations: Number of training iterations
+        batch_size: Batch size
+        n_discriminator_steps: D updates per G update
+        learning_rate: Learning rate
+
+    Returns:
+        Training history
+    """
+    trainer = GANTrainer(gan, learning_rate)
+    history = {'D_loss': [], 'G_loss': [], 'D_real': [], 'D_fake': []}
+
+    for iteration in range(n_iterations):
+        # Train discriminator
+        D_losses = []
+        for _ in range(n_discriminator_steps):
+            # Sample real data
+            real_batch = real_data_generator(batch_size)
+
+            # Generate fake data
+            z = np.random.randn(batch_size, gan.latent_dim)
+            fake_batch, _ = gan.generator_forward(z)
+
+            # Update discriminator
+            D_loss = trainer.train_discriminator_step(real_batch, fake_batch)
+            D_losses.append(D_loss)
+
+        # Train generator
+        z = np.random.randn(batch_size, gan.latent_dim)
+        G_loss = trainer.train_generator_step(z)
+
+        # Record metrics
+        history['D_loss'].append(np.mean(D_losses))
+        history['G_loss'].append(G_loss)
+
+        # Compute discriminator accuracy
+        z_test = np.random.randn(batch_size, gan.latent_dim)
+        fake_test, _ = gan.generator_forward(z_test)
+        real_test = real_data_generator(batch_size)
+
+        D_real, _ = gan.discriminator_forward(real_test)
+        D_fake, _ = gan.discriminator_forward(fake_test)
+
+        history['D_real'].append(np.mean(D_real))
+        history['D_fake'].append(np.mean(D_fake))
+
+        if iteration % 100 == 0:
+            print(f"Iteration {iteration}: D_loss={np.mean(D_losses):.4f}, "
+                  f"G_loss={G_loss:.4f}, D(real)={np.mean(D_real):.3f}, "
+                  f"D(fake)={np.mean(D_fake):.3f}")
+
+    return history
+```
+
+---
+
+## 4. Mode Collapse and Instabilities
+
+GANs suffer from several well-known training pathologies.
+
+<Definition term="Mode Collapse">
+Mode collapse occurs when the generator produces limited variety, mapping many different z values to the same or similar outputs. The generator "collapses" to generating only a few modes of the data distribution.
+</Definition>
+
+<Definition term="Vanishing Gradients">
+If the discriminator becomes too good, D(G(z)) ≈ 0 for all fake samples, causing log(1 - D(G(z))) ≈ 0 and providing no gradient signal to the generator.
+</Definition>
+
+```python
+class GANDiagnostics:
+    """
+    Tools for diagnosing GAN training issues.
+    """
+
+    def __init__(self, gan: SimpleGAN):
+        self.gan = gan
+
+    def detect_mode_collapse(
+        self,
+        n_samples: int = 1000,
+        threshold: float = 0.1
+    ) -> dict:
+        """
+        Detect mode collapse by analyzing sample diversity.
+
+        Returns:
+            Diagnostic information
+        """
+        # Generate many samples
+        samples = self.gan.generate(n_samples)
+
+        # Compute pairwise distances
+        distances = []
+        for i in range(min(100, n_samples)):
+            for j in range(i + 1, min(100, n_samples)):
+                dist = np.linalg.norm(samples[i] - samples[j])
+                distances.append(dist)
+
+        distances = np.array(distances)
+
+        # Statistics
+        mean_distance = np.mean(distances)
+        std_distance = np.std(distances)
+        min_distance = np.min(distances)
+
+        # Check for collapse indicators
+        is_collapsed = mean_distance < threshold or std_distance < threshold * 0.5
+
+        return {
+            'mean_distance': mean_distance,
+            'std_distance': std_distance,
+            'min_distance': min_distance,
+            'is_collapsed': is_collapsed,
+            'n_unique': len(np.unique(samples.round(2), axis=0))
+        }
+
+    def gradient_health_check(
+        self,
+        z: np.ndarray
+    ) -> dict:
+        """
+        Check gradient magnitudes for training health.
+        """
+        fake_data, G_cache = self.gan.generator_forward(z)
+        D_fake, D_cache = self.gan.discriminator_forward(fake_data)
+
+        # Gradient of loss w.r.t. D output
+        eps = 1e-8
+        dL_dD = -1 / (D_fake + eps)  # For generator loss
+
+        # Check for vanishing gradients
+        vanishing = np.mean(np.abs(dL_dD)) < 1e-6
+
+        # Check discriminator saturation
+        D_saturated = np.mean(D_fake) < 0.01 or np.mean(D_fake) > 0.99
+
+        return {
+            'mean_gradient': float(np.mean(np.abs(dL_dD))),
+            'max_gradient': float(np.max(np.abs(dL_dD))),
+            'vanishing_gradients': vanishing,
+            'discriminator_saturated': D_saturated,
+            'D_fake_mean': float(np.mean(D_fake))
+        }
+
+    def training_balance_check(
+        self,
+        real_data: np.ndarray,
+        n_fake: int = 100
+    ) -> dict:
+        """
+        Check if training is balanced between G and D.
+        """
+        z = np.random.randn(n_fake, self.gan.latent_dim)
+        fake_data, _ = self.gan.generator_forward(z)
+
+        D_real, _ = self.gan.discriminator_forward(real_data)
+        D_fake, _ = self.gan.discriminator_forward(fake_data)
+
+        # Ideal: D_real ≈ 0.5, D_fake ≈ 0.5
+        real_accuracy = np.mean(D_real > 0.5)
+        fake_accuracy = np.mean(D_fake < 0.5)
+
+        # Check balance
+        D_too_strong = real_accuracy > 0.9 and fake_accuracy > 0.9
+        D_too_weak = real_accuracy < 0.6 and fake_accuracy < 0.6
+
+        return {
+            'D_real_mean': float(np.mean(D_real)),
+            'D_fake_mean': float(np.mean(D_fake)),
+            'real_accuracy': real_accuracy,
+            'fake_accuracy': fake_accuracy,
+            'D_too_strong': D_too_strong,
+            'D_too_weak': D_too_weak,
+            'balanced': not D_too_strong and not D_too_weak
+        }
+```
+
+---
+
+## 5. GAN Variants and Improvements
+
+Many GAN variants address training instabilities.
+
+<Definition term="Wasserstein GAN (WGAN)">
+Uses Wasserstein distance instead of JS divergence:
+
+W(p_data, p_G) = sup_{||f||_L ≤ 1} E_{x~p_data}[f(x)] - E_{x~p_G}[f(x)]
+
+This provides smoother gradients and correlates with sample quality.
+</Definition>
+
+```python
+class WassersteinGAN(SimpleGAN):
+    """
+    Wasserstein GAN with gradient penalty.
+    """
+
+    def __init__(
+        self,
+        data_dim: int,
+        latent_dim: int,
+        hidden_dim: int = 64,
+        lambda_gp: float = 10.0
+    ):
+        super().__init__(data_dim, latent_dim, hidden_dim)
+        self.lambda_gp = lambda_gp
+
+    def critic_forward(self, x: np.ndarray) -> Tuple[np.ndarray, dict]:
+        """
+        Critic (replaces discriminator) forward pass.
+        No sigmoid - outputs unbounded score.
+        """
+        h1_pre = x @ self.D_params['W1'] + self.D_params['b1']
+        h1 = self.relu(h1_pre)
+
+        h2_pre = h1 @ self.D_params['W2'] + self.D_params['b2']
+        h2 = self.relu(h2_pre)
+
+        out = h2 @ self.D_params['W3'] + self.D_params['b3']
+
+        cache = {
+            'x': x, 'h1_pre': h1_pre, 'h1': h1,
+            'h2_pre': h2_pre, 'h2': h2
+        }
+
+        return out, cache
+
+    def wasserstein_loss(
+        self,
+        real_data: np.ndarray,
+        fake_data: np.ndarray
+    ) -> Tuple[float, float]:
+        """
+        Compute Wasserstein critic loss.
+
+        L_critic = E[f(G(z))] - E[f(x)] + λ * GP
+        """
+        C_real, _ = self.critic_forward(real_data)
+        C_fake, _ = self.critic_forward(fake_data)
+
+        # Wasserstein distance estimate
+        w_distance = np.mean(C_real) - np.mean(C_fake)
+
+        # Gradient penalty
+        gp = self._gradient_penalty(real_data, fake_data)
+
+        critic_loss = -w_distance + self.lambda_gp * gp
+        generator_loss = -np.mean(C_fake)
+
+        return critic_loss, generator_loss
+
+    def _gradient_penalty(
+        self,
+        real_data: np.ndarray,
+        fake_data: np.ndarray
+    ) -> float:
+        """
+        Compute gradient penalty for Lipschitz constraint.
+        """
+        batch_size = real_data.shape[0]
+
+        # Random interpolation
+        alpha = np.random.uniform(0, 1, (batch_size, 1))
+        interpolated = alpha * real_data + (1 - alpha) * fake_data
+
+        # Compute gradient (using finite differences)
+        eps = 1e-4
+        gradients = np.zeros_like(interpolated)
+
+        for i in range(interpolated.shape[1]):
+            interp_plus = interpolated.copy()
+            interp_plus[:, i] += eps
+            interp_minus = interpolated.copy()
+            interp_minus[:, i] -= eps
+
+            C_plus, _ = self.critic_forward(interp_plus)
+            C_minus, _ = self.critic_forward(interp_minus)
+
+            gradients[:, i] = (C_plus.flatten() - C_minus.flatten()) / (2 * eps)
+
+        # Gradient norm
+        gradient_norms = np.sqrt(np.sum(gradients ** 2, axis=1) + 1e-8)
+
+        # Penalty: (||grad|| - 1)^2
+        penalty = np.mean((gradient_norms - 1) ** 2)
+
+        return penalty
+
+
+class SpectralNormGAN(SimpleGAN):
+    """
+    GAN with spectral normalization for stable training.
+    """
+
+    def __init__(
+        self,
+        data_dim: int,
+        latent_dim: int,
+        hidden_dim: int = 64
+    ):
+        super().__init__(data_dim, latent_dim, hidden_dim)
+
+        # Power iteration vectors for spectral norm
+        self.u_vectors = {
+            key: np.random.randn(val.shape[0])
+            for key, val in self.D_params.items() if 'W' in key
+        }
+
+    def spectral_norm(self, W: np.ndarray, u: np.ndarray, n_power_iter: int = 1) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Apply spectral normalization to weight matrix.
+
+        σ(W) = max singular value
+        W_normalized = W / σ(W)
+        """
+        for _ in range(n_power_iter):
+            # v = W^T u / ||W^T u||
+            v = W.T @ u
+            v = v / (np.linalg.norm(v) + 1e-8)
+
+            # u = W v / ||W v||
+            u = W @ v
+            u = u / (np.linalg.norm(u) + 1e-8)
+
+        # Spectral norm
+        sigma = u @ W @ v
+
+        # Normalized weight
+        W_normalized = W / (sigma + 1e-8)
+
+        return W_normalized, u
+
+    def discriminator_forward_sn(self, x: np.ndarray) -> Tuple[np.ndarray, dict]:
+        """
+        Discriminator forward with spectral normalization.
+        """
+        # Normalize weights
+        W1_norm, self.u_vectors['W1'] = self.spectral_norm(
+            self.D_params['W1'], self.u_vectors['W1']
+        )
+        W2_norm, self.u_vectors['W2'] = self.spectral_norm(
+            self.D_params['W2'], self.u_vectors['W2']
+        )
+        W3_norm, self.u_vectors['W3'] = self.spectral_norm(
+            self.D_params['W3'], self.u_vectors['W3']
+        )
+
+        # Forward pass with normalized weights
+        h1 = self.relu(x @ W1_norm + self.D_params['b1'])
+        h2 = self.relu(h1 @ W2_norm + self.D_params['b2'])
+        out = self.sigmoid(h2 @ W3_norm + self.D_params['b3'])
+
+        return out, {'W1_norm': W1_norm, 'W2_norm': W2_norm, 'W3_norm': W3_norm}
+```
+
+---
+
+## 6. Connection to Quantum GANs
+
+Classical GANs provide the foundation for quantum GANs.
+
+<Definition term="Quantum GAN Motivation">
+Quantum GANs extend classical GANs by:
+- Using quantum circuits as generators
+- Using quantum or classical discriminators
+- Leveraging quantum advantages for specific data types
+
+Particularly promising for generating quantum states and quantum data.
+</Definition>
+
+```python
+class QuantumGANPreview:
+    """
+    Preview of quantum GAN concepts.
+    """
+
+    def __init__(self, n_qubits: int, n_layers: int):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dim = 2 ** n_qubits
+
+        # Placeholder for quantum parameters
+        self.n_params = 3 * n_qubits * n_layers  # Rotations per layer
+
+    def quantum_generator_concept(self) -> str:
+        """
+        Explain quantum generator concept.
+        """
+        return """
+        Quantum Generator:
+        1. Start with |0⟩^n state
+        2. Apply parameterized quantum circuit U(θ)
+        3. Output state |ψ(θ)⟩ = U(θ)|0⟩
+        4. Measurements give samples from quantum distribution
+
+        Advantages:
+        - Can generate genuine quantum states
+        - Potential exponential expressiveness
+        - Natural for quantum data
+        """
+
+    def classical_vs_quantum_comparison(self) -> dict:
+        """
+        Compare classical and quantum GANs.
+        """
+        return {
+            'generator': {
+                'classical': 'Neural network',
+                'quantum': 'Parameterized quantum circuit'
+            },
+            'discriminator': {
+                'classical': 'Neural network',
+                'quantum': 'Quantum circuit or classical NN'
+            },
+            'output': {
+                'classical': 'Classical data samples',
+                'quantum': 'Quantum states or classical samples'
+            },
+            'training': {
+                'classical': 'Backpropagation',
+                'quantum': 'Parameter shift rule'
+            },
+            'advantages': {
+                'classical': 'Mature, well-understood',
+                'quantum': 'Quantum data, expressiveness, potential speedup'
+            }
+        }
+```
+
+---
+
+## Summary
+
+In this lesson, you learned:
+
+1. **GAN Framework**: Generator and discriminator compete in a minimax game
+
+2. **Training Procedure**: Alternating updates to D and G with careful balancing
+
+3. **Training Dynamics**: Understanding loss curves, convergence, and failure modes
+
+4. **Mode Collapse**: Common pathology where generator produces limited diversity
+
+5. **GAN Variants**: WGAN, spectral normalization, and other improvements
+
+6. **Quantum Connection**: Classical GANs provide the foundation for quantum extensions
+
+The next lesson will explore how to build quantum generators using parameterized quantum circuits.

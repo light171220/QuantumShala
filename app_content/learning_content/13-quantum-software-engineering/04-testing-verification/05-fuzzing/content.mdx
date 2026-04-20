@@ -1,0 +1,680 @@
+---
+title: "Fuzz Testing Quantum Circuits"
+description: "Discover edge cases and bugs through random circuit generation and mutation."
+duration: 50
+difficulty: "advanced"
+---
+
+## 1. Fuzz Testing Philosophy
+
+Fuzz testing feeds random or semi-random inputs to discover unexpected behaviors:
+
+```
+Traditional Testing         Fuzz Testing
+-------------------         ------------
+Designed test cases    -->  Random generation
+Known edge cases       -->  Discovered edge cases
+Expected failures      -->  Unexpected crashes
+Manual coverage        -->  Automated exploration
+```
+
+## 2. Random Circuit Generation
+
+```python
+import numpy as np
+from typing import List, Dict, Any, Optional, Callable
+from dataclasses import dataclass
+from enum import Enum
+
+class GateType(Enum):
+    """Available gate types for fuzzing."""
+    H = "hadamard"
+    X = "pauli_x"
+    Y = "pauli_y"
+    Z = "pauli_z"
+    RX = "rx"
+    RY = "ry"
+    RZ = "rz"
+    CNOT = "cnot"
+    CZ = "cz"
+    SWAP = "swap"
+    TOFFOLI = "toffoli"
+
+@dataclass
+class RandomGate:
+    """Represents a randomly generated gate."""
+    gate_type: GateType
+    qubits: List[int]
+    params: List[float]
+
+class CircuitFuzzer:
+    """Generate random quantum circuits for fuzzing."""
+
+    def __init__(self, num_qubits: int,
+                 gate_types: List[GateType] = None,
+                 seed: Optional[int] = None):
+        self.num_qubits = num_qubits
+        self.gate_types = gate_types or list(GateType)
+        if seed is not None:
+            np.random.seed(seed)
+
+        # Gate properties
+        self.gate_qubit_counts = {
+            GateType.H: 1, GateType.X: 1, GateType.Y: 1, GateType.Z: 1,
+            GateType.RX: 1, GateType.RY: 1, GateType.RZ: 1,
+            GateType.CNOT: 2, GateType.CZ: 2, GateType.SWAP: 2,
+            GateType.TOFFOLI: 3
+        }
+        self.parametric_gates = {GateType.RX, GateType.RY, GateType.RZ}
+
+    def random_gate(self) -> RandomGate:
+        """Generate a single random gate."""
+        # Filter gates that fit the qubit count
+        valid_gates = [
+            g for g in self.gate_types
+            if self.gate_qubit_counts[g] <= self.num_qubits
+        ]
+        gate_type = np.random.choice(valid_gates)
+
+        # Select random qubits
+        num_gate_qubits = self.gate_qubit_counts[gate_type]
+        qubits = list(np.random.choice(
+            self.num_qubits, size=num_gate_qubits, replace=False
+        ))
+
+        # Generate parameters if needed
+        params = []
+        if gate_type in self.parametric_gates:
+            params = [np.random.uniform(0, 2 * np.pi)]
+
+        return RandomGate(gate_type, qubits, params)
+
+    def random_circuit(self, depth: int) -> List[RandomGate]:
+        """Generate random circuit of specified depth."""
+        return [self.random_gate() for _ in range(depth)]
+
+    def random_circuit_variable_depth(self, min_depth: int = 1,
+                                      max_depth: int = 100) -> List[RandomGate]:
+        """Generate circuit with random depth."""
+        depth = np.random.randint(min_depth, max_depth + 1)
+        return self.random_circuit(depth)
+
+    def generate_edge_case_circuits(self) -> List[List[RandomGate]]:
+        """Generate circuits that test edge cases."""
+        circuits = []
+
+        # Empty circuit
+        circuits.append([])
+
+        # Single gate on each qubit
+        for q in range(self.num_qubits):
+            circuits.append([RandomGate(GateType.H, [q], [])])
+
+        # Maximum entanglement
+        entangle = []
+        for i in range(self.num_qubits - 1):
+            entangle.append(RandomGate(GateType.CNOT, [i, i + 1], []))
+        circuits.append(entangle)
+
+        # All rotations at extreme angles
+        for angle in [0, np.pi/2, np.pi, 3*np.pi/2, 2*np.pi]:
+            for gate in [GateType.RX, GateType.RY, GateType.RZ]:
+                circuits.append([RandomGate(gate, [0], [angle])])
+
+        # Very deep circuit
+        circuits.append(self.random_circuit(1000))
+
+        return circuits
+```
+
+## 3. Parameter Fuzzing
+
+```python
+class ParameterFuzzer:
+    """Fuzz circuit parameters to find numerical issues."""
+
+    def __init__(self):
+        self.interesting_values = [
+            0.0,                    # Zero
+            np.pi,                  # Pi
+            np.pi / 2,              # Pi/2
+            2 * np.pi,              # 2*Pi
+            1e-10,                  # Very small
+            1e10,                   # Very large
+            -np.pi,                 # Negative
+            float('inf'),           # Infinity
+            float('-inf'),          # Negative infinity
+            float('nan'),           # NaN
+            np.finfo(float).eps,    # Machine epsilon
+            np.finfo(float).max,    # Max float
+            np.finfo(float).min,    # Min positive float
+        ]
+
+    def fuzz_parameters(self, circuit_func: Callable,
+                        num_params: int,
+                        num_trials: int = 1000) -> Dict[str, Any]:
+        """Fuzz parameters of a parameterized circuit."""
+        results = {
+            'successful': 0,
+            'crashes': [],
+            'numerical_issues': [],
+            'unexpected_outputs': []
+        }
+
+        for trial in range(num_trials):
+            # Generate parameters
+            params = self._generate_fuzzed_params(num_params)
+
+            try:
+                output = circuit_func(params)
+
+                # Check for numerical issues
+                if self._has_numerical_issues(output):
+                    results['numerical_issues'].append({
+                        'trial': trial,
+                        'params': params,
+                        'output': str(output)
+                    })
+                else:
+                    results['successful'] += 1
+
+            except Exception as e:
+                results['crashes'].append({
+                    'trial': trial,
+                    'params': params,
+                    'error': str(e),
+                    'error_type': type(e).__name__
+                })
+
+        return results
+
+    def _generate_fuzzed_params(self, num_params: int) -> np.ndarray:
+        """Generate fuzzed parameter values."""
+        params = np.zeros(num_params)
+
+        for i in range(num_params):
+            choice = np.random.random()
+
+            if choice < 0.5:
+                # Random normal value
+                params[i] = np.random.uniform(0, 2 * np.pi)
+            elif choice < 0.8:
+                # Interesting edge value
+                params[i] = np.random.choice(self.interesting_values)
+            else:
+                # Extreme random value
+                params[i] = np.random.uniform(-1e6, 1e6)
+
+        return params
+
+    def _has_numerical_issues(self, output: Any) -> bool:
+        """Check if output has numerical problems."""
+        if isinstance(output, np.ndarray):
+            return (np.any(np.isnan(output)) or
+                    np.any(np.isinf(output)) or
+                    np.any(np.abs(output) > 1e100))
+        elif isinstance(output, (float, complex)):
+            return (np.isnan(output) or
+                    np.isinf(output) or
+                    np.abs(output) > 1e100)
+        return False
+
+    def boundary_value_analysis(self, circuit_func: Callable,
+                                param_ranges: List[tuple]) -> Dict:
+        """Test at parameter boundaries."""
+        results = {'boundary_tests': []}
+
+        for i, (low, high) in enumerate(param_ranges):
+            boundaries = [low, high, low - 1e-10, high + 1e-10,
+                         (low + high) / 2]
+
+            for val in boundaries:
+                params = np.zeros(len(param_ranges))
+                params[i] = val
+
+                try:
+                    output = circuit_func(params)
+                    status = 'success'
+                except Exception as e:
+                    status = f'error: {e}'
+
+                results['boundary_tests'].append({
+                    'param_index': i,
+                    'value': val,
+                    'status': status
+                })
+
+        return results
+```
+
+## 4. Mutation-Based Fuzzing
+
+```python
+class MutationFuzzer:
+    """Mutate valid circuits to find bugs."""
+
+    def __init__(self, num_qubits: int):
+        self.num_qubits = num_qubits
+        self.mutation_weights = {
+            'add_gate': 0.2,
+            'remove_gate': 0.2,
+            'swap_gates': 0.15,
+            'change_qubit': 0.15,
+            'change_param': 0.15,
+            'duplicate_gate': 0.1,
+            'change_gate_type': 0.05
+        }
+
+    def mutate(self, circuit: List[RandomGate]) -> List[RandomGate]:
+        """Apply random mutation to circuit."""
+        if len(circuit) == 0:
+            # Can only add gates to empty circuit
+            return self._add_gate(circuit)
+
+        mutation = np.random.choice(
+            list(self.mutation_weights.keys()),
+            p=list(self.mutation_weights.values())
+        )
+
+        mutations = {
+            'add_gate': self._add_gate,
+            'remove_gate': self._remove_gate,
+            'swap_gates': self._swap_gates,
+            'change_qubit': self._change_qubit,
+            'change_param': self._change_param,
+            'duplicate_gate': self._duplicate_gate,
+            'change_gate_type': self._change_gate_type
+        }
+
+        return mutations[mutation](circuit.copy())
+
+    def _add_gate(self, circuit: List[RandomGate]) -> List[RandomGate]:
+        """Add random gate at random position."""
+        fuzzer = CircuitFuzzer(self.num_qubits)
+        new_gate = fuzzer.random_gate()
+        pos = np.random.randint(0, len(circuit) + 1)
+        circuit.insert(pos, new_gate)
+        return circuit
+
+    def _remove_gate(self, circuit: List[RandomGate]) -> List[RandomGate]:
+        """Remove random gate."""
+        if len(circuit) > 0:
+            pos = np.random.randint(0, len(circuit))
+            circuit.pop(pos)
+        return circuit
+
+    def _swap_gates(self, circuit: List[RandomGate]) -> List[RandomGate]:
+        """Swap two random gates."""
+        if len(circuit) >= 2:
+            i, j = np.random.choice(len(circuit), 2, replace=False)
+            circuit[i], circuit[j] = circuit[j], circuit[i]
+        return circuit
+
+    def _change_qubit(self, circuit: List[RandomGate]) -> List[RandomGate]:
+        """Change target qubit of random gate."""
+        if len(circuit) > 0:
+            idx = np.random.randint(len(circuit))
+            gate = circuit[idx]
+            qubit_idx = np.random.randint(len(gate.qubits))
+
+            # Get new qubit not in current set
+            available = [q for q in range(self.num_qubits)
+                        if q not in gate.qubits]
+            if available:
+                new_qubit = np.random.choice(available)
+                gate.qubits[qubit_idx] = new_qubit
+        return circuit
+
+    def _change_param(self, circuit: List[RandomGate]) -> List[RandomGate]:
+        """Change parameter of parametric gate."""
+        parametric = [i for i, g in enumerate(circuit) if g.params]
+        if parametric:
+            idx = np.random.choice(parametric)
+            param_idx = np.random.randint(len(circuit[idx].params))
+            circuit[idx].params[param_idx] = np.random.uniform(0, 2 * np.pi)
+        return circuit
+
+    def _duplicate_gate(self, circuit: List[RandomGate]) -> List[RandomGate]:
+        """Duplicate a gate."""
+        if len(circuit) > 0:
+            idx = np.random.randint(len(circuit))
+            gate = circuit[idx]
+            new_gate = RandomGate(gate.gate_type,
+                                  gate.qubits.copy(),
+                                  gate.params.copy())
+            circuit.insert(idx + 1, new_gate)
+        return circuit
+
+    def _change_gate_type(self, circuit: List[RandomGate]) -> List[RandomGate]:
+        """Change gate type while keeping qubits."""
+        if len(circuit) > 0:
+            idx = np.random.randint(len(circuit))
+            gate = circuit[idx]
+
+            # Find compatible gate types (same qubit count)
+            qubit_count = len(gate.qubits)
+            compatible = [g for g in GateType
+                         if CircuitFuzzer(self.num_qubits).gate_qubit_counts[g]
+                         == qubit_count]
+
+            if compatible:
+                new_type = np.random.choice(compatible)
+                params = [np.random.uniform(0, 2*np.pi)] if new_type in \
+                         CircuitFuzzer(self.num_qubits).parametric_gates else []
+                circuit[idx] = RandomGate(new_type, gate.qubits, params)
+
+        return circuit
+
+    def evolutionary_fuzz(self, circuit_runner: Callable,
+                          initial_circuit: List[RandomGate],
+                          generations: int = 100,
+                          population_size: int = 20) -> Dict:
+        """Evolutionary fuzzing to find bugs."""
+        population = [initial_circuit.copy() for _ in range(population_size)]
+        crashes_found = []
+
+        for gen in range(generations):
+            # Mutate population
+            new_population = []
+            for circuit in population:
+                mutated = self.mutate(circuit.copy())
+                new_population.append(mutated)
+
+                # Test mutated circuit
+                try:
+                    circuit_runner(mutated)
+                except Exception as e:
+                    crashes_found.append({
+                        'generation': gen,
+                        'circuit': mutated,
+                        'error': str(e)
+                    })
+
+            population = new_population
+
+        return {
+            'generations': generations,
+            'crashes_found': len(crashes_found),
+            'crash_details': crashes_found
+        }
+```
+
+## 5. Coverage-Guided Fuzzing
+
+```python
+class CoverageGuidedFuzzer:
+    """Guide fuzzing based on code coverage."""
+
+    def __init__(self, num_qubits: int):
+        self.num_qubits = num_qubits
+        self.coverage_map: Dict[str, int] = {}
+        self.interesting_inputs: List = []
+
+    def coverage_signature(self, circuit: List[RandomGate]) -> str:
+        """Compute coverage signature for a circuit."""
+        signature_parts = []
+
+        # Gate type distribution
+        gate_counts = {}
+        for gate in circuit:
+            gate_counts[gate.gate_type.value] = \
+                gate_counts.get(gate.gate_type.value, 0) + 1
+        signature_parts.append(str(sorted(gate_counts.items())))
+
+        # Qubit usage pattern
+        qubit_usage = [0] * self.num_qubits
+        for gate in circuit:
+            for q in gate.qubits:
+                qubit_usage[q] += 1
+        signature_parts.append(str(qubit_usage))
+
+        # Circuit depth
+        signature_parts.append(f"depth:{len(circuit)}")
+
+        return "|".join(signature_parts)
+
+    def fuzz_with_coverage(self, circuit_runner: Callable,
+                          num_iterations: int = 10000) -> Dict:
+        """Fuzz with coverage-guided input selection."""
+        fuzzer = CircuitFuzzer(self.num_qubits)
+        mutator = MutationFuzzer(self.num_qubits)
+
+        results = {
+            'total_runs': 0,
+            'new_coverage': 0,
+            'crashes': [],
+            'coverage_growth': []
+        }
+
+        # Start with random circuit
+        current = fuzzer.random_circuit(10)
+
+        for i in range(num_iterations):
+            # Mutate or generate new
+            if np.random.random() < 0.8 and self.interesting_inputs:
+                # Mutate interesting input
+                base = np.random.choice(self.interesting_inputs)
+                circuit = mutator.mutate(base.copy())
+            else:
+                # Generate new random
+                circuit = fuzzer.random_circuit_variable_depth(1, 50)
+
+            # Run circuit
+            results['total_runs'] += 1
+            try:
+                circuit_runner(circuit)
+            except Exception as e:
+                results['crashes'].append({
+                    'iteration': i,
+                    'circuit': circuit,
+                    'error': str(e)
+                })
+
+            # Check coverage
+            sig = self.coverage_signature(circuit)
+            if sig not in self.coverage_map:
+                self.coverage_map[sig] = i
+                self.interesting_inputs.append(circuit)
+                results['new_coverage'] += 1
+
+            # Record coverage growth
+            if i % 100 == 0:
+                results['coverage_growth'].append({
+                    'iteration': i,
+                    'unique_signatures': len(self.coverage_map)
+                })
+
+        return results
+```
+
+## 6. Differential Fuzzing
+
+```python
+class DifferentialFuzzer:
+    """Compare multiple implementations to find discrepancies."""
+
+    def __init__(self, implementations: Dict[str, Callable]):
+        """
+        Args:
+            implementations: Dict mapping name to circuit runner function
+        """
+        self.implementations = implementations
+
+    def fuzz_differential(self, circuit_generator: Callable,
+                          num_circuits: int = 1000) -> Dict:
+        """Find circuits where implementations disagree."""
+        discrepancies = []
+
+        for i in range(num_circuits):
+            circuit = circuit_generator()
+
+            # Run on all implementations
+            results = {}
+            errors = {}
+
+            for name, runner in self.implementations.items():
+                try:
+                    results[name] = runner(circuit)
+                except Exception as e:
+                    errors[name] = str(e)
+
+            # Check for discrepancies
+            if errors:
+                # Some crashed, some didn't
+                if len(errors) < len(self.implementations):
+                    discrepancies.append({
+                        'type': 'partial_crash',
+                        'circuit': circuit,
+                        'errors': errors,
+                        'successes': list(set(results.keys()) - set(errors.keys()))
+                    })
+            elif len(set(str(r) for r in results.values())) > 1:
+                # Different results
+                discrepancies.append({
+                    'type': 'result_mismatch',
+                    'circuit': circuit,
+                    'results': results
+                })
+
+        return {
+            'circuits_tested': num_circuits,
+            'discrepancies_found': len(discrepancies),
+            'discrepancy_details': discrepancies
+        }
+
+    def fuzz_probability_comparison(self, circuit_generator: Callable,
+                                    num_circuits: int = 100,
+                                    shots: int = 10000,
+                                    tolerance: float = 0.05) -> Dict:
+        """Compare measurement probability distributions."""
+        discrepancies = []
+
+        for i in range(num_circuits):
+            circuit = circuit_generator()
+
+            # Get probability distributions from each implementation
+            distributions = {}
+            for name, runner in self.implementations.items():
+                try:
+                    counts = runner(circuit, shots=shots)
+                    total = sum(counts.values())
+                    distributions[name] = {k: v/total for k, v in counts.items()}
+                except Exception as e:
+                    distributions[name] = {'error': str(e)}
+
+            # Compare distributions
+            impl_names = list(distributions.keys())
+            for j, name1 in enumerate(impl_names):
+                for name2 in impl_names[j+1:]:
+                    dist1 = distributions[name1]
+                    dist2 = distributions[name2]
+
+                    if 'error' in dist1 or 'error' in dist2:
+                        continue
+
+                    # Total variation distance
+                    tvd = self._total_variation_distance(dist1, dist2)
+
+                    if tvd > tolerance:
+                        discrepancies.append({
+                            'circuit': circuit,
+                            'impl1': name1,
+                            'impl2': name2,
+                            'tvd': tvd,
+                            'dist1': dist1,
+                            'dist2': dist2
+                        })
+
+        return {
+            'circuits_tested': num_circuits,
+            'discrepancies': discrepancies
+        }
+
+    def _total_variation_distance(self, p: Dict, q: Dict) -> float:
+        """Total variation distance between distributions."""
+        all_keys = set(p.keys()) | set(q.keys())
+        return 0.5 * sum(abs(p.get(k, 0) - q.get(k, 0)) for k in all_keys)
+```
+
+## 7. Crash Analysis and Minimization
+
+```python
+class CrashAnalyzer:
+    """Analyze and minimize crashing inputs."""
+
+    def __init__(self, circuit_runner: Callable):
+        self.runner = circuit_runner
+
+    def minimize_crash(self, crashing_circuit: List[RandomGate]) -> List[RandomGate]:
+        """Find minimal circuit that still crashes."""
+        minimal = crashing_circuit.copy()
+
+        # Try removing each gate
+        changed = True
+        while changed:
+            changed = False
+            for i in range(len(minimal)):
+                candidate = minimal[:i] + minimal[i+1:]
+                if self._still_crashes(candidate):
+                    minimal = candidate
+                    changed = True
+                    break
+
+        return minimal
+
+    def _still_crashes(self, circuit: List[RandomGate]) -> bool:
+        """Check if circuit still triggers the crash."""
+        try:
+            self.runner(circuit)
+            return False
+        except Exception:
+            return True
+
+    def categorize_crashes(self, crashes: List[Dict]) -> Dict[str, List]:
+        """Categorize crashes by error type."""
+        categories = {}
+
+        for crash in crashes:
+            error_type = crash.get('error_type', 'Unknown')
+            if error_type not in categories:
+                categories[error_type] = []
+            categories[error_type].append(crash)
+
+        return categories
+
+    def find_root_cause(self, crashing_circuit: List[RandomGate]) -> Dict:
+        """Attempt to identify root cause of crash."""
+        analysis = {
+            'minimal_circuit': self.minimize_crash(crashing_circuit),
+            'crash_gates': [],
+            'crash_params': []
+        }
+
+        minimal = analysis['minimal_circuit']
+
+        # Check which gates are essential for crash
+        for gate in minimal:
+            analysis['crash_gates'].append(gate.gate_type.value)
+            if gate.params:
+                analysis['crash_params'].extend(gate.params)
+
+        return analysis
+```
+
+## Summary
+
+Fuzz testing quantum circuits helps discover:
+
+| Category | Techniques | Findings |
+|----------|------------|----------|
+| **Random Generation** | Circuit fuzzer, parameter fuzzer | Basic crashes |
+| **Mutation Testing** | Gate mutations, parameter mutations | Regression bugs |
+| **Coverage Guided** | Signature tracking | Deep bugs |
+| **Differential** | Multi-implementation comparison | Implementation bugs |
+
+Best practices:
+1. Start with random generation for broad coverage
+2. Use mutation to explore near existing tests
+3. Track coverage to guide exploration
+4. Minimize crashing inputs for debugging
+5. Compare multiple implementations to find subtle bugs

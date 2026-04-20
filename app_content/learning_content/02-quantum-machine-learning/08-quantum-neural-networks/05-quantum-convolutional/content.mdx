@@ -1,0 +1,851 @@
+---
+title: "Quantum Convolutional Neural Networks"
+description: "Learn about Quantum Convolutional Neural Networks (QCNNs) including quantum convolutional layers, pooling operations, hierarchical architectures, and image classification."
+---
+
+# Quantum Convolutional Neural Networks
+
+Quantum Convolutional Neural Networks (QCNNs) adapt the key principles of classical CNNs to quantum circuits, providing translationally invariant feature extraction with efficient parameter scaling.
+
+## Overview of QCNNs
+
+QCNNs combine local quantum operations with a hierarchical structure.
+
+<Definition>
+**Quantum Convolutional Neural Network (QCNN)**:
+
+A QCNN is a quantum circuit with:
+1. **Convolutional layers**: Local unitaries applied uniformly across qubits
+2. **Pooling layers**: Qubit reduction through measurement or tracing out
+3. **Hierarchical structure**: Progressive dimension reduction
+
+$$U_{QCNN} = U_{FC} \cdot P_L \cdot C_L \cdots P_1 \cdot C_1$$
+
+where $C_l$ are convolutional layers and $P_l$ are pooling layers.
+</Definition>
+
+```python
+import numpy as np
+
+def qcnn_overview():
+    """Overview of QCNN architecture components."""
+
+    components = {
+        'Convolutional Layer': {
+            'description': 'Local 2-qubit unitaries with shared parameters',
+            'key_property': 'Translational invariance',
+            'parameters': 'O(1) per layer (shared across positions)'
+        },
+        'Pooling Layer': {
+            'description': 'Reduces number of active qubits',
+            'methods': ['Measurement-based', 'Parameterized', 'Trace-out'],
+            'effect': 'Halves the number of qubits'
+        },
+        'Fully Connected': {
+            'description': 'Final processing on remaining qubits',
+            'purpose': 'Classification or regression output',
+            'parameters': 'O(remaining qubits)'
+        }
+    }
+
+    print("QCNN Architecture Components")
+    print("=" * 60)
+
+    for name, info in components.items():
+        print(f"\n{name}:")
+        for key, value in info.items():
+            print(f"  {key}: {value}")
+
+    # Scaling analysis
+    print("\n\nQCNN Scaling Properties")
+    print("=" * 60)
+    for n_qubits in [4, 8, 16, 32]:
+        n_layers = int(np.log2(n_qubits))
+        print(f"n={n_qubits}: {n_layers} pooling layers, O({n_layers}) parameters")
+
+qcnn_overview()
+```
+
+## Quantum Convolutional Layers
+
+Convolutional layers apply the same local unitary across the qubit register.
+
+<Formula>
+**Quantum Convolution**:
+
+$$C(\theta) = \prod_{i=0}^{n/2-1} U(\theta)_{2i, 2i+1} \cdot \prod_{i=0}^{n/2-1} U(\theta)_{2i+1, 2i+2}$$
+
+where $U(\theta)$ is a parameterized 2-qubit gate applied with periodic boundary conditions.
+</Formula>
+
+```python
+import numpy as np
+
+class QuantumConvLayer:
+    """Quantum convolutional layer with translational invariance."""
+
+    def __init__(self, n_qubits):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+        # 15 parameters for general 2-qubit unitary
+        self.n_params = 15
+
+    def _build_two_qubit_unitary(self, params):
+        """Build parameterized 2-qubit unitary."""
+        # Simplified: tensor product of single-qubit rotations + entangling
+        # In practice, use more expressive parameterization
+
+        # Single qubit rotations (6 params each = 12 total)
+        def ry(theta):
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            return np.array([[c, -s], [s, c]])
+
+        def rz(theta):
+            return np.array([[np.exp(-1j*theta/2), 0],
+                           [0, np.exp(1j*theta/2)]])
+
+        # Build local unitary
+        U1 = rz(params[0]) @ ry(params[1]) @ rz(params[2])
+        U2 = rz(params[3]) @ ry(params[4]) @ rz(params[5])
+
+        # Tensor product
+        U_local = np.kron(U1, U2)
+
+        # Entangling part: controlled rotation
+        theta_ent = params[6] if len(params) > 6 else np.pi/4
+
+        # CNOT-like entangling
+        CNOT = np.array([[1,0,0,0], [0,1,0,0],
+                        [0,0,0,1], [0,0,1,0]], dtype=complex)
+
+        # Controlled RY
+        cry = np.eye(4, dtype=complex)
+        c, s = np.cos(theta_ent/2), np.sin(theta_ent/2)
+        cry[2:, 2:] = np.array([[c, -s], [s, c]])
+
+        return cry @ CNOT @ U_local
+
+    def _apply_two_qubit_gate(self, state, U, q1, q2):
+        """Apply 2-qubit gate to specific qubits."""
+        new_state = np.zeros_like(state)
+
+        for z in range(self.dim):
+            # Extract bits for q1 and q2
+            b1 = (z >> (self.n_qubits - 1 - q1)) & 1
+            b2 = (z >> (self.n_qubits - 1 - q2)) & 1
+            idx_in = 2 * b1 + b2
+
+            for b1_new in range(2):
+                for b2_new in range(2):
+                    idx_out = 2 * b1_new + b2_new
+
+                    # Construct new basis state index
+                    z_new = z
+                    # Clear old bits
+                    z_new &= ~(1 << (self.n_qubits - 1 - q1))
+                    z_new &= ~(1 << (self.n_qubits - 1 - q2))
+                    # Set new bits
+                    z_new |= (b1_new << (self.n_qubits - 1 - q1))
+                    z_new |= (b2_new << (self.n_qubits - 1 - q2))
+
+                    new_state[z_new] += U[idx_out, idx_in] * state[z]
+
+        return new_state
+
+    def forward(self, state, params):
+        """Apply convolutional layer."""
+        U = self._build_two_qubit_unitary(params)
+
+        # First sublayer: even pairs (0,1), (2,3), ...
+        for i in range(0, self.n_qubits - 1, 2):
+            state = self._apply_two_qubit_gate(state, U, i, i + 1)
+
+        # Second sublayer: odd pairs (1,2), (3,4), ...
+        for i in range(1, self.n_qubits - 1, 2):
+            state = self._apply_two_qubit_gate(state, U, i, i + 1)
+
+        return state
+
+# Example
+print("Quantum Convolutional Layer")
+print("=" * 50)
+
+n_qubits = 4
+conv_layer = QuantumConvLayer(n_qubits)
+
+# Initialize state
+state = np.zeros(2**n_qubits, dtype=complex)
+state[0] = 1  # |0000⟩
+
+params = np.random.uniform(0, 2*np.pi, 7)
+output = conv_layer.forward(state, params)
+
+print(f"Qubits: {n_qubits}")
+print(f"Parameters: {len(params)} (shared across all positions)")
+print(f"Output normalized: {np.isclose(np.sum(np.abs(output)**2), 1)}")
+print("\nNon-zero amplitudes:")
+for z in range(16):
+    if np.abs(output[z]) > 0.05:
+        print(f"  |{format(z, '04b')}⟩: {np.abs(output[z]):.4f}")
+```
+
+## Translational Invariance
+
+Translational invariance is key to the parameter efficiency of QCNNs.
+
+<Tip>
+Translational invariance means the same quantum operation is applied at every spatial position. This mirrors how classical CNN filters scan across an image, reducing parameters from O(n) to O(1) per layer.
+</Tip>
+
+```python
+import numpy as np
+
+def demonstrate_translational_invariance():
+    """Show how translational invariance works in QCNNs."""
+
+    n_qubits = 6
+    dim = 2 ** n_qubits
+
+    # Create a simple 2-qubit unitary (same for all positions)
+    theta = np.pi / 4
+
+    def local_unitary():
+        """The same unitary applied everywhere."""
+        # Simple: RY tensor RY followed by CNOT
+        ry = np.array([[np.cos(theta/2), -np.sin(theta/2)],
+                       [np.sin(theta/2), np.cos(theta/2)]])
+        U = np.kron(ry, ry)
+
+        CNOT = np.array([[1,0,0,0], [0,1,0,0],
+                        [0,0,0,1], [0,0,1,0]], dtype=complex)
+        return CNOT @ U
+
+    U = local_unitary()
+
+    print("Translational Invariance in QCNN")
+    print("=" * 50)
+    print(f"Single 2-qubit unitary (4x4 matrix) applied to all pairs")
+    print(f"Total qubits: {n_qubits}")
+    print(f"Number of pairs: {n_qubits // 2}")
+
+    # Compare parameter counts
+    print("\nParameter Scaling Comparison:")
+    print("-" * 40)
+
+    for n in [4, 8, 16, 32, 64]:
+        # Without translational invariance
+        no_ti_params = 15 * (n // 2)  # Different unitary at each position
+
+        # With translational invariance
+        ti_params = 15  # Same unitary everywhere
+
+        reduction = (1 - ti_params / no_ti_params) * 100
+        print(f"n={n:2d}: Without TI={no_ti_params:4d}, "
+              f"With TI={ti_params:2d}, Reduction={reduction:.1f}%")
+
+demonstrate_translational_invariance()
+```
+
+## Quantum Pooling Operations
+
+Pooling reduces the number of active qubits in the circuit.
+
+<Definition>
+**Quantum Pooling**:
+
+Pooling in QCNNs reduces qubits through:
+1. **Measurement-based**: Measure some qubits, condition on outcomes
+2. **Parameterized**: Apply controlled gates then trace out
+3. **Projection-based**: Project onto subspace
+
+Each pooling layer typically halves the number of active qubits.
+</Definition>
+
+```python
+import numpy as np
+
+class QuantumPoolingLayer:
+    """Quantum pooling operations."""
+
+    def __init__(self, n_qubits_in):
+        self.n_qubits_in = n_qubits_in
+        self.n_qubits_out = n_qubits_in // 2
+        self.dim_in = 2 ** n_qubits_in
+        self.dim_out = 2 ** self.n_qubits_out
+
+    def measurement_based_pooling(self, state, controlled_params=None):
+        """Pool by measuring every other qubit.
+
+        Measure odd qubits, keep even qubits.
+        Optionally apply controlled operations before measurement.
+        """
+        # Apply controlled rotations if parameters provided
+        if controlled_params is not None:
+            state = self._apply_controlled_ops(state, controlled_params)
+
+        # Trace out (measure) odd qubits
+        # This simulates averaging over measurement outcomes
+        rho_out = np.zeros((self.dim_out, self.dim_out), dtype=complex)
+
+        for z_out in range(self.dim_out):
+            for z_out_prime in range(self.dim_out):
+                for traced_bits in range(2 ** self.n_qubits_out):
+                    # Reconstruct full indices
+                    z_full = self._interleave_bits(z_out, traced_bits)
+                    z_full_prime = self._interleave_bits(z_out_prime, traced_bits)
+
+                    rho_out[z_out, z_out_prime] += (
+                        state[z_full] * np.conj(state[z_full_prime])
+                    )
+
+        # Return as pure state approximation (largest eigenvector)
+        eigenvalues, eigenvectors = np.linalg.eigh(rho_out)
+        state_out = eigenvectors[:, -1]  # Largest eigenvalue
+
+        return state_out / np.linalg.norm(state_out)
+
+    def _interleave_bits(self, kept, traced):
+        """Interleave bits: kept go to even positions, traced to odd."""
+        result = 0
+        for i in range(self.n_qubits_out):
+            # Even position (kept qubit)
+            bit_kept = (kept >> (self.n_qubits_out - 1 - i)) & 1
+            result |= (bit_kept << (self.n_qubits_in - 1 - 2*i))
+
+            # Odd position (traced qubit)
+            bit_traced = (traced >> (self.n_qubits_out - 1 - i)) & 1
+            result |= (bit_traced << (self.n_qubits_in - 1 - 2*i - 1))
+
+        return result
+
+    def _apply_controlled_ops(self, state, params):
+        """Apply controlled rotations before pooling."""
+        new_state = state.copy()
+
+        # Apply controlled-RY from odd qubit to even qubit
+        for pair in range(self.n_qubits_out):
+            control = 2 * pair + 1  # Odd qubit
+            target = 2 * pair       # Even qubit
+            theta = params[pair] if pair < len(params) else np.pi/4
+
+            new_state = self._apply_cry(new_state, theta, control, target)
+
+        return new_state
+
+    def _apply_cry(self, state, theta, control, target):
+        """Apply controlled RY gate."""
+        new_state = np.zeros_like(state)
+        c, s = np.cos(theta/2), np.sin(theta/2)
+
+        for z in range(self.dim_in):
+            ctrl_bit = (z >> (self.n_qubits_in - 1 - control)) & 1
+
+            if ctrl_bit == 0:
+                new_state[z] = state[z]
+            else:
+                tgt_bit = (z >> (self.n_qubits_in - 1 - target)) & 1
+                z_flip = z ^ (1 << (self.n_qubits_in - 1 - target))
+
+                if tgt_bit == 0:
+                    new_state[z] += c * state[z] - s * state[z_flip]
+                else:
+                    new_state[z] += s * state[z ^ (1 << (self.n_qubits_in - 1 - target))] + c * state[z]
+
+        return new_state
+
+    def parameterized_pooling(self, state, params):
+        """Pooling with trainable parameters."""
+        # Apply parameterized 2-qubit gates then trace out
+        return self.measurement_based_pooling(state, params)
+
+# Example
+print("Quantum Pooling Operations")
+print("=" * 50)
+
+n_in = 4
+pooling = QuantumPoolingLayer(n_in)
+
+# Create superposition state
+state_in = np.ones(2**n_in, dtype=complex) / np.sqrt(2**n_in)
+
+print(f"Input qubits: {n_in}")
+print(f"Output qubits: {pooling.n_qubits_out}")
+print(f"Input dimension: {pooling.dim_in}")
+print(f"Output dimension: {pooling.dim_out}")
+
+# Measurement-based pooling
+state_out = pooling.measurement_based_pooling(state_in)
+print(f"\nAfter pooling, state normalized: {np.isclose(np.sum(np.abs(state_out)**2), 1)}")
+
+# Parameterized pooling
+params = np.array([np.pi/3, np.pi/4])
+state_out_param = pooling.parameterized_pooling(state_in, params)
+print(f"Parameterized pooling output shape: {state_out_param.shape}")
+```
+
+## Hierarchical QCNN Architecture
+
+The full QCNN alternates convolution and pooling in a hierarchical structure.
+
+<Warning>
+QCNNs require the number of qubits to be a power of 2 for clean hierarchical pooling. For other sizes, padding or modified pooling strategies are needed.
+</Warning>
+
+```python
+import numpy as np
+
+class QCNN:
+    """Complete Quantum Convolutional Neural Network."""
+
+    def __init__(self, n_qubits):
+        if n_qubits & (n_qubits - 1) != 0:
+            raise ValueError("Number of qubits must be power of 2")
+
+        self.n_qubits = n_qubits
+        self.n_layers = int(np.log2(n_qubits))
+
+        # Parameters per layer: 7 for conv + n/2 for pooling
+        self.params_structure = []
+        current_qubits = n_qubits
+        for layer in range(self.n_layers):
+            self.params_structure.append({
+                'conv': 7,
+                'pool': current_qubits // 2
+            })
+            current_qubits //= 2
+
+        self.n_params = sum(p['conv'] + p['pool'] for p in self.params_structure)
+
+    def _conv_layer(self, state, params, n_active):
+        """Apply convolutional layer."""
+        dim = 2 ** n_active
+
+        # Build 2-qubit unitary
+        def ry(theta):
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            return np.array([[c, -s], [s, c]], dtype=complex)
+
+        def rz(theta):
+            return np.array([[np.exp(-1j*theta/2), 0],
+                           [0, np.exp(1j*theta/2)]], dtype=complex)
+
+        U1 = rz(params[0]) @ ry(params[1]) @ rz(params[2])
+        U2 = rz(params[3]) @ ry(params[4]) @ rz(params[5])
+        U_local = np.kron(U1, U2)
+
+        CNOT = np.array([[1,0,0,0], [0,1,0,0],
+                        [0,0,0,1], [0,0,1,0]], dtype=complex)
+
+        c, s = np.cos(params[6]/2), np.sin(params[6]/2)
+        CRY = np.eye(4, dtype=complex)
+        CRY[2:, 2:] = np.array([[c, -s], [s, c]])
+
+        U = CRY @ CNOT @ U_local
+
+        # Apply to even pairs then odd pairs
+        def apply_gate(state, U, q1, q2, n_active):
+            new_state = np.zeros(dim, dtype=complex)
+            for z in range(dim):
+                b1 = (z >> (n_active - 1 - q1)) & 1
+                b2 = (z >> (n_active - 1 - q2)) & 1
+                idx_in = 2 * b1 + b2
+
+                for b1_new in range(2):
+                    for b2_new in range(2):
+                        idx_out = 2 * b1_new + b2_new
+                        z_new = z
+                        z_new &= ~(1 << (n_active - 1 - q1))
+                        z_new &= ~(1 << (n_active - 1 - q2))
+                        z_new |= (b1_new << (n_active - 1 - q1))
+                        z_new |= (b2_new << (n_active - 1 - q2))
+                        new_state[z_new] += U[idx_out, idx_in] * state[z]
+            return new_state
+
+        # Even pairs
+        for i in range(0, n_active - 1, 2):
+            state = apply_gate(state, U, i, i + 1, n_active)
+
+        # Odd pairs
+        for i in range(1, n_active - 1, 2):
+            state = apply_gate(state, U, i, i + 1, n_active)
+
+        return state
+
+    def _pool_layer(self, state, params, n_active):
+        """Apply pooling layer (trace out every other qubit)."""
+        n_out = n_active // 2
+        dim_out = 2 ** n_out
+
+        # First apply controlled operations
+        dim = len(state)
+        for pair in range(n_out):
+            control = 2 * pair + 1
+            target = 2 * pair
+            theta = params[pair]
+
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            new_state = np.zeros_like(state)
+
+            for z in range(dim):
+                ctrl_bit = (z >> (n_active - 1 - control)) & 1
+                if ctrl_bit == 0:
+                    new_state[z] = state[z]
+                else:
+                    z_flip = z ^ (1 << (n_active - 1 - target))
+                    new_state[z] = c * state[z] - s * state[z_flip]
+                    new_state[z_flip] = s * state[z] + c * state[z_flip]
+
+            state = new_state
+
+        # Trace out odd qubits
+        rho_out = np.zeros((dim_out, dim_out), dtype=complex)
+
+        for z_kept in range(dim_out):
+            for z_kept_p in range(dim_out):
+                for z_traced in range(dim_out):
+                    # Interleave: kept to even positions, traced to odd
+                    z_full = 0
+                    z_full_p = 0
+                    for i in range(n_out):
+                        z_full |= ((z_kept >> (n_out - 1 - i)) & 1) << (n_active - 1 - 2*i)
+                        z_full |= ((z_traced >> (n_out - 1 - i)) & 1) << (n_active - 2 - 2*i)
+                        z_full_p |= ((z_kept_p >> (n_out - 1 - i)) & 1) << (n_active - 1 - 2*i)
+                        z_full_p |= ((z_traced >> (n_out - 1 - i)) & 1) << (n_active - 2 - 2*i)
+
+                    rho_out[z_kept, z_kept_p] += state[z_full] * np.conj(state[z_full_p])
+
+        # Extract dominant eigenstate
+        eigenvalues, eigenvectors = np.linalg.eigh(rho_out)
+        state_out = eigenvectors[:, -1]
+
+        return state_out / np.linalg.norm(state_out)
+
+    def forward(self, state, params):
+        """Execute full QCNN."""
+        param_idx = 0
+        n_active = self.n_qubits
+
+        for layer in range(self.n_layers):
+            n_conv = self.params_structure[layer]['conv']
+            n_pool = self.params_structure[layer]['pool']
+
+            # Convolution
+            conv_params = params[param_idx:param_idx + n_conv]
+            state = self._conv_layer(state, conv_params, n_active)
+            param_idx += n_conv
+
+            # Pooling
+            pool_params = params[param_idx:param_idx + n_pool]
+            state = self._pool_layer(state, pool_params, n_active)
+            param_idx += n_pool
+
+            n_active //= 2
+
+        return state
+
+    def get_expectation(self, state):
+        """Get Z expectation value for classification."""
+        probs = np.abs(state) ** 2
+        # For single qubit output: P(0) - P(1)
+        return probs[0] - probs[1] if len(state) == 2 else np.sum(probs[:len(probs)//2]) - np.sum(probs[len(probs)//2:])
+
+# Example
+print("Hierarchical QCNN")
+print("=" * 50)
+
+n_qubits = 8
+qcnn = QCNN(n_qubits)
+
+print(f"Input qubits: {n_qubits}")
+print(f"Number of layers: {qcnn.n_layers}")
+print(f"Total parameters: {qcnn.n_params}")
+print(f"\nLayer structure:")
+for i, p in enumerate(qcnn.params_structure):
+    print(f"  Layer {i+1}: conv={p['conv']} params, pool={p['pool']} params")
+
+# Test forward pass
+state = np.zeros(2**n_qubits, dtype=complex)
+state[0] = 1
+params = np.random.uniform(0, 2*np.pi, qcnn.n_params)
+
+output = qcnn.forward(state, params)
+expectation = qcnn.get_expectation(output)
+
+print(f"\nOutput state dimension: {len(output)}")
+print(f"Z expectation: {expectation:.4f}")
+```
+
+## QCNN for Image Classification
+
+QCNNs can be applied to image classification tasks.
+
+```python
+import numpy as np
+
+class QCNNClassifier:
+    """QCNN for binary image classification."""
+
+    def __init__(self, image_size):
+        """
+        Args:
+            image_size: Size of square image (must be power of 2)
+        """
+        self.image_size = image_size
+        self.n_pixels = image_size * image_size
+        self.n_qubits = int(np.ceil(np.log2(self.n_pixels)))
+
+        # Ensure power of 2
+        self.n_qubits = max(self.n_qubits, 2)
+        if self.n_qubits & (self.n_qubits - 1) != 0:
+            self.n_qubits = 2 ** int(np.ceil(np.log2(self.n_qubits)))
+
+        # Simple QCNN structure
+        self.n_layers = max(1, int(np.log2(self.n_qubits)))
+
+        # Parameters: encoding (1 per pixel) + QCNN
+        self.n_encoding_params = 1  # Scaling factor for encoding
+        self.n_qcnn_params = 10 * self.n_layers  # Simplified
+        self.n_params = self.n_encoding_params + self.n_qcnn_params
+
+    def encode_image(self, image, scale=1.0):
+        """Encode image as quantum state using amplitude encoding."""
+        # Flatten and normalize
+        flat = image.flatten()
+
+        # Pad to power of 2
+        dim = 2 ** self.n_qubits
+        state = np.zeros(dim, dtype=complex)
+        state[:len(flat)] = flat * scale
+
+        # Normalize
+        norm = np.linalg.norm(state)
+        if norm > 1e-10:
+            state = state / norm
+        else:
+            state[0] = 1.0
+
+        return state
+
+    def forward(self, image, params):
+        """Forward pass through QCNN classifier."""
+        # Extract parameters
+        scale = params[0]
+        qcnn_params = params[1:]
+
+        # Encode image
+        state = self.encode_image(image, scale)
+
+        # Apply simplified QCNN layers
+        current_dim = len(state)
+        param_idx = 0
+
+        for layer in range(self.n_layers):
+            if current_dim <= 2:
+                break
+
+            # Simplified convolution (parameterized rotations)
+            n_layer_params = min(10, len(qcnn_params) - param_idx)
+            layer_params = qcnn_params[param_idx:param_idx + n_layer_params]
+            param_idx += n_layer_params
+
+            # Apply rotations
+            state = self._apply_layer(state, layer_params)
+
+            # Pool: reduce dimension by half
+            state = self._pool(state)
+            current_dim = len(state)
+
+        return state
+
+    def _apply_layer(self, state, params):
+        """Apply parameterized layer."""
+        dim = len(state)
+        n_qubits = int(np.log2(dim))
+
+        for i, theta in enumerate(params):
+            if i >= n_qubits:
+                break
+
+            # Apply RY rotation
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            new_state = np.zeros_like(state)
+
+            for z in range(dim):
+                z_flip = z ^ (1 << (n_qubits - 1 - i))
+                if z < z_flip:
+                    new_state[z] = c * state[z] - s * state[z_flip]
+                    new_state[z_flip] = s * state[z] + c * state[z_flip]
+
+            state = new_state
+
+        return state
+
+    def _pool(self, state):
+        """Simple pooling: sum adjacent amplitudes."""
+        dim = len(state)
+        new_dim = dim // 2
+
+        new_state = np.zeros(new_dim, dtype=complex)
+        for i in range(new_dim):
+            new_state[i] = (state[2*i] + state[2*i + 1]) / np.sqrt(2)
+
+        # Renormalize
+        norm = np.linalg.norm(new_state)
+        if norm > 1e-10:
+            new_state = new_state / norm
+
+        return new_state
+
+    def predict(self, image, params):
+        """Get classification prediction."""
+        output = self.forward(image, params)
+
+        # Binary classification based on first amplitude
+        prob_class_0 = np.abs(output[0]) ** 2
+        return 0 if prob_class_0 > 0.5 else 1, prob_class_0
+
+# Example
+print("QCNN Image Classification")
+print("=" * 50)
+
+# Create simple test images
+image_size = 4
+classifier = QCNNClassifier(image_size)
+
+print(f"Image size: {image_size}x{image_size}")
+print(f"Number of qubits: {classifier.n_qubits}")
+print(f"QCNN layers: {classifier.n_layers}")
+print(f"Total parameters: {classifier.n_params}")
+
+# Generate synthetic images
+np.random.seed(42)
+
+# Class 0: More intensity in top-left
+image_0 = np.zeros((image_size, image_size))
+image_0[:2, :2] = np.random.uniform(0.5, 1.0, (2, 2))
+image_0[2:, 2:] = np.random.uniform(0.0, 0.3, (2, 2))
+
+# Class 1: More intensity in bottom-right
+image_1 = np.zeros((image_size, image_size))
+image_1[:2, :2] = np.random.uniform(0.0, 0.3, (2, 2))
+image_1[2:, 2:] = np.random.uniform(0.5, 1.0, (2, 2))
+
+# Random parameters
+params = np.random.uniform(0, 2*np.pi, classifier.n_params)
+params[0] = 1.0  # Scale parameter
+
+print("\nClassification results:")
+pred_0, prob_0 = classifier.predict(image_0, params)
+pred_1, prob_1 = classifier.predict(image_1, params)
+print(f"  Image 0 (top-left heavy): class={pred_0}, P(0)={prob_0:.3f}")
+print(f"  Image 1 (bottom-right heavy): class={pred_1}, P(0)={prob_1:.3f}")
+```
+
+## Comparison with Classical CNNs
+
+Understanding the differences between quantum and classical CNNs.
+
+```python
+import numpy as np
+
+def compare_cnn_qcnn():
+    """Compare classical CNN vs QCNN properties."""
+
+    comparison = {
+        'Parameter Sharing': {
+            'Classical CNN': 'Filter weights shared across spatial positions',
+            'QCNN': 'Unitary parameters shared across qubit positions'
+        },
+        'Nonlinearity': {
+            'Classical CNN': 'ReLU, sigmoid after convolution',
+            'QCNN': 'Measurement collapse and quantum interference'
+        },
+        'Pooling': {
+            'Classical CNN': 'Max/average pooling over spatial regions',
+            'QCNN': 'Qubit measurement or partial trace'
+        },
+        'Feature Maps': {
+            'Classical CNN': 'Multiple feature maps per layer',
+            'QCNN': 'Single quantum state (exponential dimensions)'
+        },
+        'Parameters': {
+            'Classical CNN': 'O(k² × filters × depth) for kernel size k',
+            'QCNN': 'O(log n) for n qubits'
+        },
+        'Expressivity': {
+            'Classical CNN': 'Limited by network width and depth',
+            'QCNN': 'Exponential state space, but limited readout'
+        }
+    }
+
+    print("Classical CNN vs QCNN Comparison")
+    print("=" * 70)
+
+    for aspect, values in comparison.items():
+        print(f"\n{aspect}:")
+        print(f"  Classical: {values['Classical CNN']}")
+        print(f"  Quantum:   {values['QCNN']}")
+
+    # Quantitative comparison
+    print("\n\nParameter Scaling Analysis")
+    print("=" * 70)
+    print(f"{'Input Size':<15} {'Classical CNN':<20} {'QCNN':<20} {'Ratio':<15}")
+    print("-" * 70)
+
+    for size in [16, 64, 256, 1024, 4096]:
+        # Classical CNN: assume 3x3 kernels, 32 filters, 4 conv layers
+        n_classical = 4 * (3 * 3 * 32 * 32)  # ~36K per size
+
+        # QCNN: log2(size) qubits, ~10 params per layer
+        n_qubits = int(np.ceil(np.log2(size)))
+        n_layers = int(np.log2(n_qubits)) if n_qubits > 1 else 1
+        n_quantum = 10 * n_layers
+
+        ratio = n_classical / n_quantum if n_quantum > 0 else float('inf')
+
+        print(f"{size:<15} {n_classical:<20} {n_quantum:<20} {ratio:.1f}x")
+
+compare_cnn_qcnn()
+
+# Demonstrate hierarchical structure visually
+print("\n\nQCNN Hierarchical Structure")
+print("=" * 50)
+
+def visualize_qcnn_structure(n_qubits):
+    """Visualize QCNN layer structure."""
+    print(f"\nQCNN with {n_qubits} input qubits:")
+
+    current = n_qubits
+    layer = 0
+
+    while current > 1:
+        layer += 1
+        qubits_str = "Q " * current
+        print(f"  Layer {layer} (Conv):  [{qubits_str.strip()}]")
+
+        current = current // 2
+        qubits_str = "Q " * current
+        print(f"  Layer {layer} (Pool):  [{qubits_str.strip()}]")
+        print()
+
+    print(f"  Output: Single qubit measurement")
+
+visualize_qcnn_structure(8)
+```
+
+## Summary
+
+Key concepts in Quantum Convolutional Neural Networks:
+
+1. **Translational Invariance**: Same unitary applied across all positions reduces parameters to O(log n)
+2. **Quantum Convolution**: Local 2-qubit unitaries applied in staggered pattern
+3. **Quantum Pooling**: Qubit reduction through measurement or partial trace
+4. **Hierarchical Structure**: Alternating convolution and pooling layers
+5. **Comparison with Classical**: Exponentially fewer parameters but different expressivity trade-offs
+
+QCNNs are particularly promising for:
+- Quantum data classification (e.g., quantum phase recognition)
+- Small-scale image classification on NISQ devices
+- Learning problems with intrinsic translational symmetry
+
+The next lesson covers applications and advanced architectures for quantum neural networks.

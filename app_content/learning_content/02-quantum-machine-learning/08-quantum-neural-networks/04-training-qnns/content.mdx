@@ -1,0 +1,988 @@
+---
+title: "Training Quantum Neural Networks"
+description: "Master the techniques for training QNNs including gradient computation methods, shot noise handling, batch training, and optimizer selection."
+---
+
+# Training Quantum Neural Networks
+
+Training Quantum Neural Networks (QNNs) presents unique challenges compared to classical neural networks. This lesson covers gradient computation methods, noise handling, and optimization strategies.
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Compute gradients using the parameter shift rule
+- Implement finite difference gradients
+- Apply quantum natural gradient descent
+- Handle shot noise in training
+- Implement batch training for QNNs
+- Compare and select appropriate optimizers
+
+## 1. Parameter Shift Rule for Gradient Computation
+
+The parameter shift rule is the gold standard for computing exact gradients on quantum hardware.
+
+<Definition>
+**Parameter Shift Rule**: For a gate $R(\theta) = e^{-i\theta P/2}$ where $P$ is a Pauli operator ($P^2 = I$), the gradient is:
+
+$$\frac{\partial \langle O \rangle}{\partial \theta} = \frac{1}{2}\left[\langle O \rangle_{\theta + \pi/2} - \langle O \rangle_{\theta - \pi/2}\right]$$
+</Definition>
+
+```python
+import numpy as np
+
+class QNNWithParameterShift:
+    """QNN with parameter shift gradient computation."""
+
+    def __init__(self, n_qubits, n_layers):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dim = 2 ** n_qubits
+        self.n_params = 3 * n_qubits * n_layers
+
+    def _apply_ry(self, state, theta, qubit):
+        """Apply RY rotation."""
+        new_state = np.zeros_like(state)
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        for z in range(self.dim):
+            z_flip = z ^ (1 << (self.n_qubits - 1 - qubit))
+            if z < z_flip:
+                new_state[z] += c * state[z] - s * state[z_flip]
+                new_state[z_flip] += s * state[z] + c * state[z_flip]
+        return new_state
+
+    def _apply_rz(self, state, theta, qubit):
+        """Apply RZ rotation."""
+        new_state = np.zeros_like(state)
+        for z in range(self.dim):
+            bit = (z >> (self.n_qubits - 1 - qubit)) & 1
+            phase = np.exp(-1j * theta/2) if bit == 0 else np.exp(1j * theta/2)
+            new_state[z] = phase * state[z]
+        return new_state
+
+    def _apply_rx(self, state, theta, qubit):
+        """Apply RX rotation."""
+        new_state = np.zeros_like(state)
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        for z in range(self.dim):
+            z_flip = z ^ (1 << (self.n_qubits - 1 - qubit))
+            if z < z_flip:
+                new_state[z] += c * state[z] - 1j * s * state[z_flip]
+                new_state[z_flip] += -1j * s * state[z] + c * state[z_flip]
+        return new_state
+
+    def _apply_cnot(self, state, control, target):
+        """Apply CNOT gate."""
+        new_state = np.zeros_like(state)
+        for z in range(self.dim):
+            ctrl_bit = (z >> (self.n_qubits - 1 - control)) & 1
+            if ctrl_bit:
+                z_new = z ^ (1 << (self.n_qubits - 1 - target))
+            else:
+                z_new = z
+            new_state[z_new] += state[z]
+        return new_state
+
+    def forward(self, params, input_state=None):
+        """Execute the QNN circuit."""
+        if input_state is None:
+            state = np.zeros(self.dim, dtype=complex)
+            state[0] = 1
+        else:
+            state = input_state.copy()
+
+        param_idx = 0
+        for layer in range(self.n_layers):
+            # Rotation layer: RX, RY, RZ per qubit
+            for q in range(self.n_qubits):
+                state = self._apply_rx(state, params[param_idx], q)
+                param_idx += 1
+                state = self._apply_ry(state, params[param_idx], q)
+                param_idx += 1
+                state = self._apply_rz(state, params[param_idx], q)
+                param_idx += 1
+
+            # Entangling layer
+            for q in range(self.n_qubits - 1):
+                state = self._apply_cnot(state, q, q + 1)
+
+        return state
+
+    def expectation_z(self, params, qubit=0):
+        """Compute <Z> expectation value for a qubit."""
+        state = self.forward(params)
+        exp_z = 0
+        for z in range(self.dim):
+            prob = np.abs(state[z])**2
+            bit = (z >> (self.n_qubits - 1 - qubit)) & 1
+            exp_z += prob * (1 - 2 * bit)  # +1 for |0>, -1 for |1>
+        return exp_z
+
+    def parameter_shift_gradient(self, params, qubit=0):
+        """Compute gradient using parameter shift rule."""
+        shift = np.pi / 2
+        gradient = np.zeros(len(params))
+
+        for i in range(len(params)):
+            params_plus = params.copy()
+            params_plus[i] += shift
+
+            params_minus = params.copy()
+            params_minus[i] -= shift
+
+            exp_plus = self.expectation_z(params_plus, qubit)
+            exp_minus = self.expectation_z(params_minus, qubit)
+
+            gradient[i] = 0.5 * (exp_plus - exp_minus)
+
+        return gradient
+
+# Demonstration
+print("Parameter Shift Rule Demonstration")
+print("=" * 50)
+
+qnn = QNNWithParameterShift(n_qubits=2, n_layers=2)
+params = np.random.uniform(0, 2*np.pi, qnn.n_params)
+
+print(f"QNN Configuration:")
+print(f"  Qubits: {qnn.n_qubits}")
+print(f"  Layers: {qnn.n_layers}")
+print(f"  Parameters: {qnn.n_params}")
+
+# Compute gradient
+gradient = qnn.parameter_shift_gradient(params)
+print(f"\nGradient (first 5 components):")
+for i in range(min(5, len(gradient))):
+    print(f"  dL/dtheta_{i} = {gradient[i]:.6f}")
+
+# Verify with numerical gradient
+def numerical_gradient(qnn, params, epsilon=1e-5):
+    grad = np.zeros(len(params))
+    for i in range(len(params)):
+        p_plus = params.copy()
+        p_plus[i] += epsilon
+        p_minus = params.copy()
+        p_minus[i] -= epsilon
+        grad[i] = (qnn.expectation_z(p_plus) - qnn.expectation_z(p_minus)) / (2 * epsilon)
+    return grad
+
+num_grad = numerical_gradient(qnn, params)
+print(f"\nNumerical Gradient (first 5):")
+for i in range(min(5, len(num_grad))):
+    print(f"  dL/dtheta_{i} = {num_grad[i]:.6f}")
+
+print(f"\nGradient match: {np.allclose(gradient, num_grad, atol=1e-4)}")
+```
+
+<Tip>
+The parameter shift rule gives exact gradients (up to shot noise) because it exploits the mathematical structure of Pauli rotation gates. This is superior to finite differences which introduce numerical errors.
+</Tip>
+
+## 2. Finite Difference Gradients
+
+When the parameter shift rule cannot be applied, finite differences provide an alternative.
+
+<Formula>
+**Central Finite Difference**:
+
+$$\frac{\partial f}{\partial \theta} \approx \frac{f(\theta + \epsilon) - f(\theta - \epsilon)}{2\epsilon}$$
+
+The error is $O(\epsilon^2)$ for central differences.
+</Formula>
+
+```python
+import numpy as np
+
+class FiniteDifferenceGradient:
+    """Compute gradients using finite differences."""
+
+    def __init__(self, cost_fn, method='central'):
+        """
+        Args:
+            cost_fn: Function that computes cost from parameters
+            method: 'forward', 'backward', or 'central'
+        """
+        self.cost_fn = cost_fn
+        self.method = method
+
+    def gradient(self, params, epsilon=0.01):
+        """Compute gradient using finite differences."""
+        params = np.array(params, dtype=float)
+        grad = np.zeros(len(params))
+
+        if self.method == 'central':
+            for i in range(len(params)):
+                params_plus = params.copy()
+                params_plus[i] += epsilon
+                params_minus = params.copy()
+                params_minus[i] -= epsilon
+
+                grad[i] = (self.cost_fn(params_plus) - self.cost_fn(params_minus)) / (2 * epsilon)
+
+        elif self.method == 'forward':
+            f0 = self.cost_fn(params)
+            for i in range(len(params)):
+                params_plus = params.copy()
+                params_plus[i] += epsilon
+                grad[i] = (self.cost_fn(params_plus) - f0) / epsilon
+
+        elif self.method == 'backward':
+            f0 = self.cost_fn(params)
+            for i in range(len(params)):
+                params_minus = params.copy()
+                params_minus[i] -= epsilon
+                grad[i] = (f0 - self.cost_fn(params_minus)) / epsilon
+
+        return grad
+
+def compare_gradient_methods():
+    """Compare finite difference methods with parameter shift."""
+    print("Finite Difference Methods Comparison")
+    print("=" * 50)
+
+    # Simple quantum-like cost function
+    def cost_fn(params):
+        return np.cos(params[0]) * np.sin(params[1]) + 0.5 * np.cos(params[2])
+
+    def analytical_gradient(params):
+        return np.array([
+            -np.sin(params[0]) * np.sin(params[1]),
+            np.cos(params[0]) * np.cos(params[1]),
+            -0.5 * np.sin(params[2])
+        ])
+
+    params = np.array([0.5, 0.8, 1.2])
+    true_grad = analytical_gradient(params)
+
+    print(f"True gradient: {true_grad.round(6)}")
+    print()
+
+    # Compare methods
+    methods = ['forward', 'backward', 'central']
+    epsilons = [0.1, 0.01, 0.001]
+
+    print(f"{'Method':<12} {'Epsilon':<10} {'Error':<15} {'Evaluations':<12}")
+    print("-" * 50)
+
+    for method in methods:
+        fd = FiniteDifferenceGradient(cost_fn, method)
+        for eps in epsilons:
+            grad = fd.gradient(params, epsilon=eps)
+            error = np.linalg.norm(grad - true_grad)
+            evals = len(params) * 2 if method == 'central' else len(params) + 1
+            print(f"{method:<12} {eps:<10} {error:<15.8f} {evals:<12}")
+        print()
+
+compare_gradient_methods()
+
+# SPSA: Simultaneous Perturbation Stochastic Approximation
+class SPSAGradient:
+    """SPSA gradient estimator - uses only 2 function evaluations."""
+
+    def __init__(self, cost_fn, c=0.1, gamma=0.101):
+        self.cost_fn = cost_fn
+        self.c = c
+        self.gamma = gamma
+        self.k = 0
+
+    def gradient(self, params):
+        """Estimate gradient using SPSA."""
+        self.k += 1
+        ck = self.c / (self.k ** self.gamma)
+
+        # Random perturbation direction (Bernoulli)
+        delta = np.random.choice([-1, 1], size=len(params))
+
+        # Only 2 evaluations regardless of parameter count!
+        f_plus = self.cost_fn(params + ck * delta)
+        f_minus = self.cost_fn(params - ck * delta)
+
+        # Gradient estimate
+        grad = (f_plus - f_minus) / (2 * ck * delta)
+
+        return grad
+
+print("\nSPSA Gradient Estimation")
+print("=" * 50)
+
+def test_cost(params):
+    return np.sum(params**2)
+
+spsa = SPSAGradient(test_cost)
+params = np.array([1.0, 2.0, 3.0, 4.0])
+true_grad = 2 * params
+
+print(f"True gradient: {true_grad}")
+print(f"\nSPSA estimates (10 samples):")
+for i in range(5):
+    spsa.k = 0  # Reset
+    grad_est = spsa.gradient(params)
+    print(f"  Sample {i+1}: {grad_est.round(4)}")
+
+print(f"\nSPSA advantage: Only 2 evaluations for {len(params)} parameters!")
+```
+
+<Warning>
+Finite differences are sensitive to the choice of epsilon. Too large introduces truncation error; too small causes numerical instability, especially with noisy quantum measurements.
+</Warning>
+
+## 3. Quantum Natural Gradient
+
+Quantum natural gradient accounts for the geometry of the parameter space.
+
+<Definition>
+**Quantum Natural Gradient**: The update rule is:
+
+$$\theta_{t+1} = \theta_t - \eta \cdot g^{-1} \nabla L(\theta)$$
+
+where $g$ is the quantum Fisher information matrix (or Fubini-Study metric tensor).
+</Definition>
+
+```python
+import numpy as np
+
+class QuantumNaturalGradient:
+    """Quantum Natural Gradient descent implementation."""
+
+    def __init__(self, qnn, regularization=0.01):
+        self.qnn = qnn
+        self.reg = regularization
+
+    def compute_fubini_study_metric(self, params):
+        """
+        Compute the Fubini-Study metric tensor.
+
+        g_ij = Re[<di psi|dj psi> - <di psi|psi><psi|dj psi>]
+        """
+        n_params = len(params)
+        g = np.zeros((n_params, n_params))
+
+        # Get reference state
+        psi = self.qnn.forward(params)
+
+        # Compute derivatives of state
+        dpsi = []
+        shift = np.pi / 2
+
+        for i in range(n_params):
+            # Parameter shift for state derivative
+            params_plus = params.copy()
+            params_plus[i] += shift
+            params_minus = params.copy()
+            params_minus[i] -= shift
+
+            psi_plus = self.qnn.forward(params_plus)
+            psi_minus = self.qnn.forward(params_minus)
+
+            # Derivative of state (scaled)
+            d_psi_i = 0.5 * (psi_plus - psi_minus)
+            dpsi.append(d_psi_i)
+
+        # Build metric tensor
+        for i in range(n_params):
+            for j in range(i, n_params):
+                # <di psi | dj psi>
+                term1 = np.real(np.vdot(dpsi[i], dpsi[j]))
+
+                # <di psi | psi> <psi | dj psi>
+                term2 = np.real(np.vdot(dpsi[i], psi) * np.vdot(psi, dpsi[j]))
+
+                g[i, j] = term1 - term2
+                g[j, i] = g[i, j]
+
+        return g
+
+    def natural_gradient(self, params, gradient):
+        """
+        Compute natural gradient by solving g @ nat_grad = gradient.
+        """
+        g = self.compute_fubini_study_metric(params)
+
+        # Regularize for numerical stability
+        g_reg = g + self.reg * np.eye(len(params))
+
+        # Solve linear system
+        try:
+            nat_grad = np.linalg.solve(g_reg, gradient)
+        except np.linalg.LinAlgError:
+            nat_grad = gradient  # Fall back to standard gradient
+
+        return nat_grad
+
+# Simplified QNN for demonstration
+class SimpleQNN:
+    def __init__(self, n_qubits):
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+        self.n_params = 2 * n_qubits
+
+    def forward(self, params):
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1
+
+        for q in range(self.n_qubits):
+            # RY rotation
+            theta = params[q]
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            new_state = np.zeros_like(state)
+            for z in range(self.dim):
+                z_flip = z ^ (1 << (self.n_qubits - 1 - q))
+                if z < z_flip:
+                    new_state[z] += c * state[z] - s * state[z_flip]
+                    new_state[z_flip] += s * state[z] + c * state[z_flip]
+            state = new_state
+
+            # RZ rotation
+            phi = params[self.n_qubits + q]
+            new_state = np.zeros_like(state)
+            for z in range(self.dim):
+                bit = (z >> (self.n_qubits - 1 - q)) & 1
+                phase = np.exp(-1j * phi/2) if bit == 0 else np.exp(1j * phi/2)
+                new_state[z] = phase * state[z]
+            state = new_state
+
+        return state
+
+    def cost(self, params, target_state):
+        state = self.forward(params)
+        fidelity = np.abs(np.vdot(target_state, state))**2
+        return 1 - fidelity
+
+# Demonstration
+print("Quantum Natural Gradient Demonstration")
+print("=" * 50)
+
+qnn = SimpleQNN(n_qubits=2)
+qng = QuantumNaturalGradient(qnn)
+
+params = np.random.uniform(0, 2*np.pi, qnn.n_params)
+print(f"Number of parameters: {qnn.n_params}")
+
+# Compute metric tensor
+g = qng.compute_fubini_study_metric(params)
+print(f"\nFubini-Study metric tensor shape: {g.shape}")
+print(f"Metric tensor:\n{g.round(4)}")
+
+# Compare gradients
+std_gradient = np.random.randn(qnn.n_params)  # Simulated gradient
+nat_gradient = qng.natural_gradient(params, std_gradient)
+
+print(f"\nStandard gradient: {std_gradient.round(4)}")
+print(f"Natural gradient:  {nat_gradient.round(4)}")
+print(f"\nGradient magnitudes:")
+print(f"  Standard: {np.linalg.norm(std_gradient):.4f}")
+print(f"  Natural:  {np.linalg.norm(nat_gradient):.4f}")
+```
+
+<Tip>
+Quantum natural gradient can significantly accelerate convergence, especially in the presence of barren plateaus, by accounting for the curvature of the parameter landscape.
+</Tip>
+
+## 4. Shot Noise Handling
+
+Real quantum hardware introduces shot noise that must be managed during training.
+
+<Formula>
+**Shot Noise Variance**: For an expectation value measurement with $N$ shots:
+
+$$\text{Var}[\langle O \rangle] = \frac{\text{Var}[O]}{N} \leq \frac{\|O\|^2}{N}$$
+</Formula>
+
+```python
+import numpy as np
+
+class ShotNoiseSimulator:
+    """Simulate shot noise in quantum measurements."""
+
+    def __init__(self, qnn, n_shots=1000):
+        self.qnn = qnn
+        self.n_shots = n_shots
+
+    def measure_with_shots(self, params, qubit=0):
+        """
+        Simulate measurement with finite shots.
+
+        Returns expectation value with shot noise.
+        """
+        state = self.qnn.forward(params)
+        probs = np.abs(state)**2
+
+        # Simulate shots
+        outcomes = np.random.choice(
+            self.qnn.dim,
+            size=self.n_shots,
+            p=probs
+        )
+
+        # Compute Z expectation from outcomes
+        z_values = []
+        for outcome in outcomes:
+            bit = (outcome >> (self.qnn.n_qubits - 1 - qubit)) & 1
+            z_values.append(1 - 2 * bit)
+
+        return np.mean(z_values)
+
+    def gradient_with_shots(self, params, qubit=0):
+        """Compute gradient with shot noise."""
+        shift = np.pi / 2
+        gradient = np.zeros(len(params))
+
+        for i in range(len(params)):
+            params_plus = params.copy()
+            params_plus[i] += shift
+            params_minus = params.copy()
+            params_minus[i] -= shift
+
+            exp_plus = self.measure_with_shots(params_plus, qubit)
+            exp_minus = self.measure_with_shots(params_minus, qubit)
+
+            gradient[i] = 0.5 * (exp_plus - exp_minus)
+
+        return gradient
+
+def analyze_shot_noise():
+    """Analyze the effect of shot noise on gradient estimation."""
+    print("Shot Noise Analysis")
+    print("=" * 50)
+
+    qnn = SimpleQNN(n_qubits=2)
+    params = np.array([0.5, 1.0, 0.8, 1.2])
+
+    # True gradient (many shots approximation)
+    sim_exact = ShotNoiseSimulator(qnn, n_shots=100000)
+    true_gradient = sim_exact.gradient_with_shots(params)
+
+    print("Gradient variance vs number of shots:")
+    print("-" * 50)
+    print(f"{'Shots':<12} {'Mean Error':<15} {'Std Error':<15}")
+    print("-" * 50)
+
+    for n_shots in [100, 500, 1000, 5000, 10000]:
+        sim = ShotNoiseSimulator(qnn, n_shots=n_shots)
+
+        errors = []
+        for _ in range(20):
+            noisy_gradient = sim.gradient_with_shots(params)
+            error = np.linalg.norm(noisy_gradient - true_gradient)
+            errors.append(error)
+
+        mean_err = np.mean(errors)
+        std_err = np.std(errors)
+        print(f"{n_shots:<12} {mean_err:<15.6f} {std_err:<15.6f}")
+
+    print("\nExpected scaling: error ~ 1/sqrt(shots)")
+
+analyze_shot_noise()
+
+# Gradient averaging strategies
+class GradientAverager:
+    """Strategies for averaging noisy gradients."""
+
+    @staticmethod
+    def simple_average(gradients):
+        """Simple mean of gradient estimates."""
+        return np.mean(gradients, axis=0)
+
+    @staticmethod
+    def exponential_moving_average(gradients, alpha=0.1):
+        """Exponential moving average."""
+        ema = gradients[0].copy()
+        for g in gradients[1:]:
+            ema = alpha * g + (1 - alpha) * ema
+        return ema
+
+    @staticmethod
+    def median_gradient(gradients):
+        """Median (robust to outliers)."""
+        return np.median(gradients, axis=0)
+
+print("\nGradient Averaging Strategies")
+print("=" * 50)
+
+# Simulate noisy gradients
+true_grad = np.array([0.5, -0.3, 0.8, -0.2])
+noisy_grads = [true_grad + np.random.normal(0, 0.3, 4) for _ in range(10)]
+
+print(f"True gradient: {true_grad}")
+print(f"\nAveraging methods:")
+print(f"  Simple mean:  {GradientAverager.simple_average(noisy_grads).round(4)}")
+print(f"  EMA (a=0.3):  {GradientAverager.exponential_moving_average(noisy_grads, 0.3).round(4)}")
+print(f"  Median:       {GradientAverager.median_gradient(noisy_grads).round(4)}")
+```
+
+## 5. Batch Training for QNNs
+
+Batch training improves gradient estimates and training efficiency.
+
+```python
+import numpy as np
+
+class BatchQNNTrainer:
+    """Batch training implementation for QNNs."""
+
+    def __init__(self, qnn, learning_rate=0.1):
+        self.qnn = qnn
+        self.lr = learning_rate
+
+    def prepare_batches(self, X, y, batch_size):
+        """Split data into batches."""
+        n_samples = len(X)
+        indices = np.random.permutation(n_samples)
+
+        batches = []
+        for i in range(0, n_samples, batch_size):
+            batch_idx = indices[i:i + batch_size]
+            batches.append((X[batch_idx], y[batch_idx]))
+
+        return batches
+
+    def compute_batch_gradient(self, params, X_batch, y_batch):
+        """Compute average gradient over a batch."""
+        batch_size = len(X_batch)
+        total_gradient = np.zeros(len(params))
+
+        for x, y in zip(X_batch, y_batch):
+            # Encode input and get prediction
+            input_state = self._encode_input(x)
+
+            # Compute gradient for this sample
+            grad = self._parameter_shift_gradient(params, input_state, y)
+            total_gradient += grad
+
+        return total_gradient / batch_size
+
+    def _encode_input(self, x):
+        """Simple amplitude encoding."""
+        dim = self.qnn.dim
+        state = np.zeros(dim, dtype=complex)
+        n_features = min(len(x), dim)
+        state[:n_features] = x[:n_features]
+        norm = np.linalg.norm(state)
+        if norm > 0:
+            state /= norm
+        else:
+            state[0] = 1
+        return state
+
+    def _parameter_shift_gradient(self, params, input_state, target):
+        """Compute gradient using parameter shift for single sample."""
+        shift = np.pi / 2
+        gradient = np.zeros(len(params))
+
+        for i in range(len(params)):
+            params_plus = params.copy()
+            params_plus[i] += shift
+            params_minus = params.copy()
+            params_minus[i] -= shift
+
+            loss_plus = self._compute_loss(params_plus, input_state, target)
+            loss_minus = self._compute_loss(params_minus, input_state, target)
+
+            gradient[i] = 0.5 * (loss_plus - loss_minus)
+
+        return gradient
+
+    def _compute_loss(self, params, input_state, target):
+        """Compute MSE loss for single sample."""
+        output_state = self.qnn.forward(params, input_state)
+        prediction = self._measure_output(output_state)
+        return (prediction - target) ** 2
+
+    def _measure_output(self, state):
+        """Get prediction from quantum state."""
+        # Simple: return Z expectation of first qubit
+        exp_z = 0
+        for z in range(self.qnn.dim):
+            prob = np.abs(state[z])**2
+            bit = (z >> (self.qnn.n_qubits - 1)) & 1
+            exp_z += prob * (1 - 2 * bit)
+        return exp_z
+
+    def train_epoch(self, params, X, y, batch_size):
+        """Train for one epoch using mini-batches."""
+        batches = self.prepare_batches(X, y, batch_size)
+
+        total_loss = 0
+        for X_batch, y_batch in batches:
+            # Compute batch gradient
+            gradient = self.compute_batch_gradient(params, X_batch, y_batch)
+
+            # Update parameters
+            params = params - self.lr * gradient
+
+            # Compute batch loss for monitoring
+            batch_loss = np.mean([
+                self._compute_loss(params, self._encode_input(x), y_val)
+                for x, y_val in zip(X_batch, y_batch)
+            ])
+            total_loss += batch_loss
+
+        return params, total_loss / len(batches)
+
+# Demonstration
+print("Batch Training Demonstration")
+print("=" * 50)
+
+# Create synthetic dataset
+np.random.seed(42)
+n_samples = 100
+X = np.random.randn(n_samples, 4)
+y = np.sign(X[:, 0] * X[:, 1])  # Simple XOR-like target
+
+# Initialize QNN and trainer
+qnn = QNNWithParameterShift(n_qubits=2, n_layers=2)
+trainer = BatchQNNTrainer(qnn, learning_rate=0.1)
+
+# Initialize parameters
+params = np.random.uniform(0, 2*np.pi, qnn.n_params)
+
+print(f"Dataset size: {n_samples}")
+print(f"Batch sizes to compare: [10, 25, 50]")
+print()
+
+# Compare batch sizes
+for batch_size in [10, 25, 50]:
+    params_test = params.copy()
+
+    print(f"Batch size {batch_size}:")
+    for epoch in range(3):
+        params_test, loss = trainer.train_epoch(params_test, X, y, batch_size)
+        print(f"  Epoch {epoch + 1}: Loss = {loss:.4f}")
+    print()
+```
+
+<Tip>
+Larger batch sizes reduce gradient variance but require more circuit evaluations per update. Start with moderate batch sizes (16-32) and adjust based on your hardware constraints.
+</Tip>
+
+## 6. Optimizer Comparison
+
+Comparing different optimizers for QNN training.
+
+```python
+import numpy as np
+
+class QNNOptimizers:
+    """Collection of optimizers for QNN training."""
+
+    class SGD:
+        """Stochastic Gradient Descent."""
+        def __init__(self, lr=0.01):
+            self.lr = lr
+
+        def step(self, params, gradient):
+            return params - self.lr * gradient
+
+        def reset(self):
+            pass
+
+    class SGDMomentum:
+        """SGD with momentum."""
+        def __init__(self, lr=0.01, momentum=0.9):
+            self.lr = lr
+            self.momentum = momentum
+            self.velocity = None
+
+        def step(self, params, gradient):
+            if self.velocity is None:
+                self.velocity = np.zeros_like(params)
+            self.velocity = self.momentum * self.velocity - self.lr * gradient
+            return params + self.velocity
+
+        def reset(self):
+            self.velocity = None
+
+    class Adam:
+        """Adam optimizer."""
+        def __init__(self, lr=0.001, beta1=0.9, beta2=0.999, epsilon=1e-8):
+            self.lr = lr
+            self.beta1 = beta1
+            self.beta2 = beta2
+            self.epsilon = epsilon
+            self.m = None
+            self.v = None
+            self.t = 0
+
+        def step(self, params, gradient):
+            if self.m is None:
+                self.m = np.zeros_like(params)
+                self.v = np.zeros_like(params)
+
+            self.t += 1
+            self.m = self.beta1 * self.m + (1 - self.beta1) * gradient
+            self.v = self.beta2 * self.v + (1 - self.beta2) * gradient**2
+
+            m_hat = self.m / (1 - self.beta1**self.t)
+            v_hat = self.v / (1 - self.beta2**self.t)
+
+            return params - self.lr * m_hat / (np.sqrt(v_hat) + self.epsilon)
+
+        def reset(self):
+            self.m = None
+            self.v = None
+            self.t = 0
+
+    class SPSA:
+        """Simultaneous Perturbation Stochastic Approximation."""
+        def __init__(self, a=0.1, c=0.1, A=10, alpha=0.602, gamma=0.101):
+            self.a = a
+            self.c = c
+            self.A = A
+            self.alpha = alpha
+            self.gamma = gamma
+            self.k = 0
+
+        def step(self, params, cost_fn):
+            """SPSA computes its own gradient estimate."""
+            self.k += 1
+
+            ak = self.a / (self.k + self.A) ** self.alpha
+            ck = self.c / self.k ** self.gamma
+
+            # Random perturbation
+            delta = np.random.choice([-1, 1], size=len(params))
+
+            # Evaluate at perturbed points
+            f_plus = cost_fn(params + ck * delta)
+            f_minus = cost_fn(params - ck * delta)
+
+            # Gradient estimate
+            gradient = (f_plus - f_minus) / (2 * ck * delta)
+
+            return params - ak * gradient
+
+        def reset(self):
+            self.k = 0
+
+def optimizer_comparison():
+    """Compare optimizer performance on QNN training."""
+    print("Optimizer Comparison for QNN Training")
+    print("=" * 60)
+
+    # Simple VQE-like cost landscape
+    def cost_function(params):
+        """Simulated VQE cost with local minima."""
+        return (np.sin(params[0]) * np.cos(params[1]) +
+                0.5 * np.sin(params[2]) * np.sin(params[3]) +
+                0.1 * np.sum(params**2) + 2)
+
+    def gradient(params):
+        """Compute gradient using parameter shift."""
+        grad = np.zeros(len(params))
+        shift = np.pi / 2
+        for i in range(len(params)):
+            p_plus = params.copy()
+            p_plus[i] += shift
+            p_minus = params.copy()
+            p_minus[i] -= shift
+            grad[i] = 0.5 * (cost_function(p_plus) - cost_function(p_minus))
+        return grad
+
+    n_steps = 100
+    n_params = 4
+    np.random.seed(42)
+    initial_params = np.random.uniform(0, 2*np.pi, n_params)
+
+    optimizers = {
+        'SGD (lr=0.1)': QNNOptimizers.SGD(lr=0.1),
+        'SGD+Momentum': QNNOptimizers.SGDMomentum(lr=0.1, momentum=0.9),
+        'Adam (lr=0.1)': QNNOptimizers.Adam(lr=0.1),
+    }
+
+    results = {}
+
+    print(f"\nInitial cost: {cost_function(initial_params):.4f}")
+    print(f"\nTraining for {n_steps} steps...")
+    print("-" * 60)
+
+    for name, opt in optimizers.items():
+        opt.reset()
+        params = initial_params.copy()
+        history = [cost_function(params)]
+
+        for _ in range(n_steps):
+            grad = gradient(params)
+            params = opt.step(params, grad)
+            history.append(cost_function(params))
+
+        results[name] = {
+            'final_cost': history[-1],
+            'history': history,
+            'final_params': params
+        }
+
+        print(f"{name:<20} Final cost: {history[-1]:.4f}")
+
+    # SPSA (different interface)
+    spsa = QNNOptimizers.SPSA(a=0.5, c=0.1)
+    params = initial_params.copy()
+    history = [cost_function(params)]
+
+    for _ in range(n_steps):
+        params = spsa.step(params, cost_function)
+        history.append(cost_function(params))
+
+    results['SPSA'] = {'final_cost': history[-1], 'history': history}
+    print(f"{'SPSA':<20} Final cost: {history[-1]:.4f}")
+
+    print("\n" + "=" * 60)
+    print("Summary:")
+    print("-" * 60)
+
+    print(f"\n{'Optimizer':<20} {'Final Cost':<15} {'Improvement':<15}")
+    print("-" * 50)
+
+    initial_cost = cost_function(initial_params)
+    for name, result in results.items():
+        improvement = (initial_cost - result['final_cost']) / initial_cost * 100
+        print(f"{name:<20} {result['final_cost']:<15.4f} {improvement:<15.1f}%")
+
+optimizer_comparison()
+
+# Optimizer selection guide
+print("\n" + "=" * 60)
+print("Optimizer Selection Guide")
+print("=" * 60)
+
+guide = """
+| Scenario                    | Recommended Optimizer |
+|-----------------------------|----------------------|
+| Few parameters (<20)        | Adam or L-BFGS       |
+| Many parameters (>50)       | Adam with SPSA       |
+| Very noisy gradients        | Adam with averaging  |
+| Limited circuit evaluations | SPSA                 |
+| Exploring landscape         | SGD with restarts    |
+| Fine-tuning                 | SGD with small lr    |
+
+Key Considerations:
+1. Adam: Best overall for noisy quantum gradients
+2. SPSA: Only 2 evaluations regardless of parameter count
+3. SGD+Momentum: Good when gradients are reliable
+4. Natural Gradient: Best for barren plateau mitigation
+"""
+print(guide)
+```
+
+<Warning>
+Avoid using high learning rates with Adam on QNNs, as the parameter periodicity (0 to 2*pi) can cause instability. Start with lr=0.01-0.1 and adjust based on convergence.
+</Warning>
+
+## Summary
+
+Training Quantum Neural Networks effectively requires:
+
+1. **Parameter Shift Rule**: Exact gradients using shifted circuit evaluations
+2. **Finite Differences**: Alternative when parameter shift doesn't apply
+3. **Quantum Natural Gradient**: Accounts for parameter space geometry
+4. **Shot Noise Handling**: Use sufficient shots and gradient averaging
+5. **Batch Training**: Balance gradient quality with computational cost
+6. **Optimizer Selection**: Adam for general use, SPSA for efficiency
+
+Key takeaways:
+- Parameter shift gives exact gradients (up to shot noise)
+- Natural gradient accelerates convergence in curved landscapes
+- Shot noise scales as 1/sqrt(N) with N shots
+- Adam is robust for noisy quantum optimization
+- SPSA requires only 2 evaluations per step
+
+The next lesson covers QNN expressibility analysis.

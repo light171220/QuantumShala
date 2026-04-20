@@ -1,0 +1,579 @@
+---
+title: "Molecular Hamiltonians"
+description: "Learn how to construct molecular Hamiltonians using second quantization and fermion-to-qubit mappings for quantum chemistry."
+---
+
+# Molecular Hamiltonians
+
+To simulate molecules on quantum computers, we must translate the electronic structure problem into a form suitable for qubits. This involves second quantization and fermion-to-qubit mappings.
+
+## The Electronic Structure Problem
+
+The molecular Hamiltonian in first quantization describes electrons in the field of nuclei.
+
+<Definition>
+**Electronic Hamiltonian**: In atomic units:
+
+$$H = -\sum_i \frac{\nabla_i^2}{2} - \sum_{i,A} \frac{Z_A}{r_{iA}} + \sum_{i<j} \frac{1}{r_{ij}}$$
+
+Where the terms represent kinetic energy, electron-nuclear attraction, and electron-electron repulsion.
+</Definition>
+
+```python
+import numpy as np
+
+# Physical constants (in atomic units)
+class MolecularConstants:
+    """Constants for molecular calculations in atomic units."""
+    BOHR_TO_ANGSTROM = 0.529177
+    HARTREE_TO_EV = 27.2114
+
+    @staticmethod
+    def nuclear_repulsion(charges, positions):
+        """
+        Calculate nuclear-nuclear repulsion energy.
+
+        Args:
+            charges: List of nuclear charges
+            positions: Nx3 array of nuclear positions (Bohr)
+
+        Returns:
+            Nuclear repulsion energy (Hartree)
+        """
+        n_atoms = len(charges)
+        E_nuc = 0.0
+
+        for i in range(n_atoms):
+            for j in range(i+1, n_atoms):
+                r_ij = np.linalg.norm(positions[i] - positions[j])
+                E_nuc += charges[i] * charges[j] / r_ij
+
+        return E_nuc
+
+# Example: H2 molecule
+positions = np.array([
+    [0.0, 0.0, 0.0],
+    [0.0, 0.0, 1.4]  # 1.4 Bohr ≈ 0.74 Å
+])
+charges = [1, 1]
+
+E_nuc = MolecularConstants.nuclear_repulsion(charges, positions)
+print(f"H2 nuclear repulsion: {E_nuc:.6f} Hartree")
+print(f"                    = {E_nuc * MolecularConstants.HARTREE_TO_EV:.4f} eV")
+```
+
+## Second Quantization
+
+Second quantization reformulates the problem in terms of creation and annihilation operators.
+
+<Formula>
+**Fermionic Operators**: Creation (a†) and annihilation (a) operators satisfy:
+
+$$\{a_i, a_j^\dagger\} = \delta_{ij}, \quad \{a_i, a_j\} = 0, \quad \{a_i^\dagger, a_j^\dagger\} = 0$$
+
+The Hamiltonian becomes:
+
+$$H = \sum_{pq} h_{pq} a_p^\dagger a_q + \frac{1}{2}\sum_{pqrs} h_{pqrs} a_p^\dagger a_q^\dagger a_r a_s$$
+</Formula>
+
+```python
+import numpy as np
+
+def compute_one_body_integrals(n_orbitals):
+    """
+    Compute one-body integrals h_pq (kinetic + nuclear attraction).
+    This is a simplified demonstration.
+
+    Args:
+        n_orbitals: Number of spatial orbitals
+
+    Returns:
+        One-body integral matrix
+    """
+    # In practice, use quantum chemistry packages
+    # Here we create a simple model
+    h = np.zeros((n_orbitals, n_orbitals))
+
+    # Diagonal: orbital energies
+    for p in range(n_orbitals):
+        h[p, p] = -1.0 + 0.5 * p  # Simple model
+
+    # Off-diagonal: hopping integrals
+    for p in range(n_orbitals - 1):
+        h[p, p+1] = -0.2
+        h[p+1, p] = -0.2
+
+    return h
+
+def compute_two_body_integrals(n_orbitals):
+    """
+    Compute two-body integrals h_pqrs (electron repulsion).
+
+    Args:
+        n_orbitals: Number of spatial orbitals
+
+    Returns:
+        Two-body integral tensor
+    """
+    # Simplified model
+    g = np.zeros((n_orbitals, n_orbitals, n_orbitals, n_orbitals))
+
+    for p in range(n_orbitals):
+        for q in range(n_orbitals):
+            # Coulomb integrals
+            g[p, p, q, q] = 0.5 / (abs(p - q) + 1)
+            # Exchange integrals
+            if p != q:
+                g[p, q, q, p] = 0.1 / (abs(p - q) + 1)
+
+    return g
+
+# Example
+n_orb = 2
+h1 = compute_one_body_integrals(n_orb)
+h2 = compute_two_body_integrals(n_orb)
+
+print("One-body integrals h_pq:")
+print(h1)
+print("\nTwo-body integrals h_pqrs (selected):")
+print(f"h_0000 = {h2[0,0,0,0]:.4f}")
+print(f"h_0011 = {h2[0,0,1,1]:.4f}")
+print(f"h_0110 = {h2[0,1,1,0]:.4f}")
+```
+
+## Jordan-Wigner Transformation
+
+The Jordan-Wigner transformation maps fermionic operators to Pauli operators.
+
+<Definition>
+**Jordan-Wigner Mapping**: For spin orbital j:
+
+$$a_j^\dagger = \frac{1}{2}(X_j - iY_j) \otimes Z_{j-1} \otimes ... \otimes Z_0$$
+$$a_j = \frac{1}{2}(X_j + iY_j) \otimes Z_{j-1} \otimes ... \otimes Z_0$$
+
+The Z string ensures proper fermionic anticommutation.
+</Definition>
+
+<Warning>
+The Jordan-Wigner transformation introduces long-range interactions (Z strings) that grow with system size, potentially increasing circuit depth.
+</Warning>
+
+```python
+import numpy as np
+from itertools import product
+
+# Pauli matrices
+I = np.array([[1, 0], [0, 1]], dtype=complex)
+X = np.array([[0, 1], [1, 0]], dtype=complex)
+Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+def jordan_wigner_creation(j, n_qubits):
+    """
+    Jordan-Wigner transformation for creation operator a†_j.
+
+    Args:
+        j: Orbital index
+        n_qubits: Total number of qubits
+
+    Returns:
+        Matrix representation of a†_j in qubit space
+    """
+    # Build (X - iY)/2 on qubit j
+    lowering = (X - 1j * Y) / 2  # This is a†
+
+    # Build operator
+    ops = []
+    for k in range(n_qubits):
+        if k < j:
+            ops.append(Z)    # Z string for anticommutation
+        elif k == j:
+            ops.append(lowering)
+        else:
+            ops.append(I)
+
+    # Tensor product (from qubit 0 to n-1)
+    result = ops[0]
+    for op in ops[1:]:
+        result = np.kron(result, op)
+
+    return result
+
+def jordan_wigner_annihilation(j, n_qubits):
+    """
+    Jordan-Wigner transformation for annihilation operator a_j.
+    """
+    return jordan_wigner_creation(j, n_qubits).conj().T
+
+def verify_anticommutation(n_qubits):
+    """Verify fermionic anticommutation relations."""
+    print(f"Verifying anticommutation for {n_qubits} qubits:")
+
+    for i in range(n_qubits):
+        for j in range(n_qubits):
+            ai = jordan_wigner_annihilation(i, n_qubits)
+            aj_dag = jordan_wigner_creation(j, n_qubits)
+
+            # {a_i, a†_j} should equal δ_ij * I
+            anticomm = ai @ aj_dag + aj_dag @ ai
+            expected = np.eye(2**n_qubits) if i == j else np.zeros((2**n_qubits, 2**n_qubits))
+
+            error = np.linalg.norm(anticomm - expected)
+            status = "✓" if error < 1e-10 else "✗"
+            if i == j:
+                print(f"  {{a_{i}, a†_{j}}} = I: {status}")
+
+verify_anticommutation(3)
+```
+
+## Bravyi-Kitaev Transformation
+
+The Bravyi-Kitaev transformation offers a balance between local and non-local operations.
+
+<Definition>
+**Bravyi-Kitaev Mapping**: Uses a binary encoding that stores both occupation and parity information:
+
+- Occupation qubits store whether orbitals are occupied
+- Parity qubits store cumulative parity of sets of orbitals
+
+This reduces the Pauli weight from O(n) to O(log n).
+</Definition>
+
+```python
+import numpy as np
+
+def bravyi_kitaev_matrix(n_qubits):
+    """
+    Construct the Bravyi-Kitaev transformation matrix.
+
+    The BK transformation uses a binary tree structure to encode
+    both occupation and parity information.
+
+    Args:
+        n_qubits: Number of qubits
+
+    Returns:
+        BK transformation matrix
+    """
+    # Build transformation matrix
+    B = np.zeros((n_qubits, n_qubits), dtype=int)
+
+    for j in range(n_qubits):
+        # Each qubit j stores information about a set of orbitals
+        # determined by the binary representation
+        for i in range(j + 1):
+            # Check if orbital i contributes to qubit j
+            if (i & ~j) == 0:  # i is in the "update set" of j
+                B[j, i] = 1
+
+    return B
+
+def bk_update_set(j, n_qubits):
+    """Get the update set U(j) for orbital j."""
+    update = []
+    for k in range(j + 1, n_qubits):
+        if (j & ~k) == 0:
+            update.append(k)
+    return update
+
+def bk_parity_set(j, n_qubits):
+    """Get the parity set P(j) for orbital j."""
+    if j == 0:
+        return []
+    parity = []
+    k = j - 1
+    while k >= 0 and (k & j) == k:
+        parity.append(k)
+        k = k - 1
+    return parity
+
+# Example
+n = 4
+B = bravyi_kitaev_matrix(n)
+print("Bravyi-Kitaev transformation matrix (4 qubits):")
+print(B)
+
+print("\nUpdate and Parity sets:")
+for j in range(n):
+    U = bk_update_set(j, n)
+    P = bk_parity_set(j, n)
+    print(f"  Orbital {j}: U(j)={U}, P(j)={P}")
+```
+
+## Building the Qubit Hamiltonian
+
+The full molecular Hamiltonian is constructed by applying the mapping to all terms.
+
+<Tip>
+The number of Pauli terms in the qubit Hamiltonian scales as O(N⁴) for N orbitals. Symmetry and grouping techniques can significantly reduce measurement overhead.
+</Tip>
+
+```python
+import numpy as np
+
+class MolecularHamiltonian:
+    """
+    Build qubit Hamiltonian from molecular integrals.
+    """
+
+    def __init__(self, n_orbitals, h1, h2, mapping='jordan-wigner'):
+        """
+        Initialize molecular Hamiltonian.
+
+        Args:
+            n_orbitals: Number of spatial orbitals
+            h1: One-body integrals (n_orb x n_orb)
+            h2: Two-body integrals (n_orb x n_orb x n_orb x n_orb)
+            mapping: 'jordan-wigner' or 'bravyi-kitaev'
+        """
+        self.n_orbitals = n_orbitals
+        self.n_qubits = 2 * n_orbitals  # Spin orbitals
+        self.h1 = h1
+        self.h2 = h2
+        self.mapping = mapping
+
+    def get_spin_orbital_integrals(self):
+        """
+        Convert spatial orbital integrals to spin orbital basis.
+        """
+        n_so = self.n_qubits
+
+        # One-body: h_pσ,qτ = h_pq * δ_στ
+        h1_so = np.zeros((n_so, n_so))
+        for p in range(self.n_orbitals):
+            for q in range(self.n_orbitals):
+                # Alpha spin
+                h1_so[2*p, 2*q] = self.h1[p, q]
+                # Beta spin
+                h1_so[2*p+1, 2*q+1] = self.h1[p, q]
+
+        # Two-body: antisymmetrized
+        h2_so = np.zeros((n_so, n_so, n_so, n_so))
+        for p in range(self.n_orbitals):
+            for q in range(self.n_orbitals):
+                for r in range(self.n_orbitals):
+                    for s in range(self.n_orbitals):
+                        # Same spin
+                        h2_so[2*p, 2*q, 2*r, 2*s] = self.h2[p, q, r, s]
+                        h2_so[2*p+1, 2*q+1, 2*r+1, 2*s+1] = self.h2[p, q, r, s]
+                        # Mixed spin
+                        h2_so[2*p, 2*q+1, 2*r+1, 2*s] = self.h2[p, q, r, s]
+                        h2_so[2*p+1, 2*q, 2*r, 2*s+1] = self.h2[p, q, r, s]
+
+        return h1_so, h2_so
+
+    def count_pauli_terms(self):
+        """Estimate number of Pauli terms in the Hamiltonian."""
+        n = self.n_qubits
+
+        # One-body: O(n²) terms
+        one_body_terms = n * n
+
+        # Two-body: O(n⁴) terms
+        two_body_terms = n**4
+
+        # Actual non-zero terms are fewer due to symmetry
+        return {
+            'one_body_estimate': one_body_terms,
+            'two_body_estimate': two_body_terms,
+            'total_estimate': one_body_terms + two_body_terms
+        }
+
+# Example: H2 molecule (minimal basis)
+n_orb = 2
+h1 = np.array([[-1.2, -0.1], [-0.1, -0.8]])
+h2 = np.zeros((2, 2, 2, 2))
+h2[0, 0, 0, 0] = 0.7
+h2[1, 1, 1, 1] = 0.6
+h2[0, 0, 1, 1] = h2[1, 1, 0, 0] = 0.4
+h2[0, 1, 1, 0] = h2[1, 0, 0, 1] = 0.3
+
+mol_ham = MolecularHamiltonian(n_orb, h1, h2)
+h1_so, h2_so = mol_ham.get_spin_orbital_integrals()
+
+print("Molecular Hamiltonian Construction")
+print("=" * 40)
+print(f"Spatial orbitals: {n_orb}")
+print(f"Spin orbitals (qubits): {mol_ham.n_qubits}")
+
+terms = mol_ham.count_pauli_terms()
+print(f"\nEstimated Pauli terms:")
+print(f"  One-body: {terms['one_body_estimate']}")
+print(f"  Two-body: {terms['two_body_estimate']}")
+```
+
+## Hydrogen Molecule Example
+
+Let's construct the full qubit Hamiltonian for H₂.
+
+```python
+import numpy as np
+
+def build_h2_hamiltonian(bond_length=1.4):
+    """
+    Build H2 Hamiltonian in minimal STO-3G basis.
+
+    This is a simplified model; real calculations use
+    quantum chemistry packages like PySCF.
+
+    Args:
+        bond_length: H-H distance in Bohr
+
+    Returns:
+        Qubit Hamiltonian as dict of Pauli strings
+    """
+    # Pre-computed integrals for H2 at ~0.74 Å
+    # In practice, use PySCF or OpenFermion
+
+    # These are approximate values for demonstration
+    # The actual H2 Hamiltonian in STO-3G basis
+    r = bond_length
+
+    # Coefficients depend on bond length
+    # Using simplified model based on known results
+    g0 = -0.81
+    g1 = 0.17
+    g2 = 0.17
+    g3 = -0.22
+    g4 = 0.17
+    g5 = 0.12
+
+    # H2 qubit Hamiltonian (4 qubits, Jordan-Wigner)
+    hamiltonian = {
+        'IIII': g0,
+        'IIIZ': g1,
+        'IIZI': g2,
+        'IZII': g1,
+        'ZIII': g2,
+        'IIZZ': g3,
+        'IZIZ': g4,
+        'ZIIZ': g4,
+        'IZZI': g4,
+        'ZIZI': g4,
+        'ZZII': g3,
+        'XXYY': g5,
+        'XYYX': -g5,
+        'YXXY': -g5,
+        'YYXX': g5
+    }
+
+    return hamiltonian
+
+def hamiltonian_to_matrix(pauli_dict, n_qubits):
+    """Convert Pauli Hamiltonian to matrix form."""
+    I = np.array([[1, 0], [0, 1]], dtype=complex)
+    X = np.array([[0, 1], [1, 0]], dtype=complex)
+    Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+    Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+    pauli_map = {'I': I, 'X': X, 'Y': Y, 'Z': Z}
+
+    dim = 2 ** n_qubits
+    H = np.zeros((dim, dim), dtype=complex)
+
+    for pauli_string, coeff in pauli_dict.items():
+        # Build tensor product
+        ops = [pauli_map[p] for p in pauli_string]
+        P = ops[0]
+        for op in ops[1:]:
+            P = np.kron(P, op)
+        H += coeff * P
+
+    return H
+
+# Build H2 Hamiltonian
+h2_pauli = build_h2_hamiltonian(bond_length=1.4)
+
+print("H2 Qubit Hamiltonian (Jordan-Wigner):")
+print("=" * 40)
+for pauli, coeff in h2_pauli.items():
+    print(f"  {coeff:+.4f} * {pauli}")
+
+# Convert to matrix and find ground state
+H_matrix = hamiltonian_to_matrix(h2_pauli, 4)
+eigenvalues = np.linalg.eigvalsh(H_matrix)
+
+print(f"\nGround state energy: {eigenvalues[0]:.6f} Hartree")
+print(f"First excited state: {eigenvalues[1]:.6f} Hartree")
+print(f"Energy gap: {eigenvalues[1] - eigenvalues[0]:.6f} Hartree")
+```
+
+## Symmetry Considerations
+
+Molecular symmetries can reduce the number of qubits and Hamiltonian terms.
+
+```python
+class SymmetryReduction:
+    """Methods for exploiting molecular symmetries."""
+
+    @staticmethod
+    def particle_number_sectors(n_qubits, n_electrons):
+        """
+        Identify computational basis states with correct particle number.
+
+        Args:
+            n_qubits: Number of qubits
+            n_electrons: Number of electrons
+
+        Returns:
+            List of valid basis state indices
+        """
+        valid_states = []
+        for i in range(2**n_qubits):
+            # Count number of 1s in binary representation
+            n_particles = bin(i).count('1')
+            if n_particles == n_electrons:
+                valid_states.append(i)
+        return valid_states
+
+    @staticmethod
+    def spin_sectors(n_qubits, n_alpha, n_beta):
+        """
+        Find states with correct alpha and beta electrons.
+
+        Args:
+            n_qubits: Number of qubits (even, alternating α/β)
+            n_alpha: Number of alpha electrons
+            n_beta: Number of beta electrons
+
+        Returns:
+            List of valid basis state indices
+        """
+        valid_states = []
+        for i in range(2**n_qubits):
+            bits = format(i, f'0{n_qubits}b')
+            # Count alpha (even indices) and beta (odd indices)
+            alpha_count = sum(int(bits[j]) for j in range(0, n_qubits, 2))
+            beta_count = sum(int(bits[j]) for j in range(1, n_qubits, 2))
+
+            if alpha_count == n_alpha and beta_count == n_beta:
+                valid_states.append(i)
+
+        return valid_states
+
+# Example: H2 with 2 electrons
+n_qubits = 4
+n_electrons = 2
+
+particle_states = SymmetryReduction.particle_number_sectors(n_qubits, n_electrons)
+print(f"H2: {len(particle_states)} states with {n_electrons} electrons")
+print(f"States: {particle_states}")
+print(f"Reduction: {2**n_qubits} → {len(particle_states)} ({len(particle_states)/2**n_qubits*100:.1f}%)")
+
+# With spin restriction
+spin_states = SymmetryReduction.spin_sectors(n_qubits, n_alpha=1, n_beta=1)
+print(f"\nWith spin restriction (1α, 1β): {len(spin_states)} states")
+print(f"States: {spin_states}")
+```
+
+## Summary
+
+Constructing molecular Hamiltonians for VQE involves:
+
+1. **Second quantization** expresses the electronic Hamiltonian in terms of creation/annihilation operators
+2. **Jordan-Wigner** maps fermions to qubits with Z strings
+3. **Bravyi-Kitaev** reduces non-locality to O(log n)
+4. **Spin orbital integrals** expand spatial to spin basis
+5. **Symmetries** can significantly reduce problem size
+
+The next lesson covers ansatz design specifically for quantum chemistry problems.

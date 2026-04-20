@@ -1,0 +1,620 @@
+---
+title: "Quantum Graph Coloring Algorithms"
+description: "Learn quantum approaches to graph coloring problems including k-coloring, chromatic number estimation, and QAOA-based coloring heuristics."
+duration: 45
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the graph coloring problem and its NP-completeness
+- Formulate graph coloring as a QUBO problem
+- Implement QAOA for graph coloring optimization
+- Apply Grover search to find valid colorings
+- Analyze quantum speedups for coloring problems
+- Compare quantum vs classical coloring heuristics
+
+## 1. The Graph Coloring Problem
+
+Graph coloring assigns colors to vertices such that no two adjacent vertices share the same color.
+
+<Definition term="k-Coloring">
+A k-coloring of graph $G = (V, E)$ is a function $c: V \to \{1, 2, \ldots, k\}$ such that $c(u) \neq c(v)$ for all edges $(u, v) \in E$. The chromatic number $\chi(G)$ is the minimum $k$ for which a k-coloring exists.
+</Definition>
+
+<Formula>
+$$\text{Minimize: } k \text{ such that } c(u) \neq c(v) \quad \forall (u,v) \in E$$
+</Formula>
+
+```python
+import numpy as np
+from typing import List, Tuple, Dict, Optional
+from itertools import product
+
+def is_valid_coloring(adj: np.ndarray, coloring: List[int]) -> bool:
+    """Check if a coloring is valid (no adjacent vertices share colors)."""
+    n = adj.shape[0]
+    for i in range(n):
+        for j in range(i + 1, n):
+            if adj[i, j] > 0 and coloring[i] == coloring[j]:
+                return False
+    return True
+
+def count_conflicts(adj: np.ndarray, coloring: List[int]) -> int:
+    """Count number of edge conflicts in a coloring."""
+    n = adj.shape[0]
+    conflicts = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            if adj[i, j] > 0 and coloring[i] == coloring[j]:
+                conflicts += 1
+    return conflicts
+
+def greedy_coloring(adj: np.ndarray) -> List[int]:
+    """Greedy graph coloring algorithm."""
+    n = adj.shape[0]
+    coloring = [-1] * n
+
+    for v in range(n):
+        # Find colors used by neighbors
+        neighbor_colors = set()
+        for u in range(n):
+            if adj[v, u] > 0 and coloring[u] != -1:
+                neighbor_colors.add(coloring[u])
+
+        # Assign smallest available color
+        color = 0
+        while color in neighbor_colors:
+            color += 1
+        coloring[v] = color
+
+    return coloring
+
+def brute_force_chromatic_number(adj: np.ndarray) -> Tuple[int, List[int]]:
+    """Find chromatic number by brute force."""
+    n = adj.shape[0]
+
+    for k in range(1, n + 1):
+        for coloring in product(range(k), repeat=n):
+            if is_valid_coloring(adj, list(coloring)):
+                return k, list(coloring)
+
+    return n, list(range(n))
+
+# Example: Petersen graph (chromatic number = 3)
+def petersen_graph() -> np.ndarray:
+    """Create adjacency matrix for Petersen graph."""
+    n = 10
+    adj = np.zeros((n, n))
+    # Outer pentagon
+    for i in range(5):
+        adj[i, (i + 1) % 5] = adj[(i + 1) % 5, i] = 1
+    # Inner pentagram
+    for i in range(5):
+        adj[5 + i, 5 + (i + 2) % 5] = adj[5 + (i + 2) % 5, 5 + i] = 1
+    # Spokes
+    for i in range(5):
+        adj[i, 5 + i] = adj[5 + i, i] = 1
+    return adj
+
+adj = petersen_graph()
+greedy_colors = greedy_coloring(adj)
+chi, optimal_colors = brute_force_chromatic_number(adj)
+
+print("Petersen Graph Coloring:")
+print(f"  Greedy colors used: {max(greedy_colors) + 1}")
+print(f"  Chromatic number: {chi}")
+print(f"  Optimal coloring: {optimal_colors}")
+```
+
+## 2. QUBO Formulation for Graph Coloring
+
+Graph coloring can be formulated as a Quadratic Unconstrained Binary Optimization (QUBO) problem.
+
+<Definition term="QUBO for k-Coloring">
+For k-coloring, use binary variables $x_{v,c} \in \{0,1\}$ where $x_{v,c} = 1$ if vertex $v$ has color $c$. The QUBO objective penalizes constraint violations.
+</Definition>
+
+<Formula>
+$$H = A \sum_v \left(1 - \sum_c x_{v,c}\right)^2 + A \sum_v \sum_{c < c'} x_{v,c} x_{v,c'} + B \sum_{(u,v) \in E} \sum_c x_{u,c} x_{v,c}$$
+</Formula>
+
+```python
+def coloring_to_qubo(adj: np.ndarray, k: int,
+                      penalty_A: float = 10.0,
+                      penalty_B: float = 1.0) -> np.ndarray:
+    """
+    Build QUBO matrix for k-coloring problem.
+
+    Variables: x_{v,c} for v in {0,...,n-1}, c in {0,...,k-1}
+    Index: i = v * k + c
+    """
+    n = adj.shape[0]
+    num_vars = n * k
+    Q = np.zeros((num_vars, num_vars))
+
+    def idx(v, c):
+        return v * k + c
+
+    # Constraint: each vertex has exactly one color
+    for v in range(n):
+        # (1 - sum_c x_{v,c})^2 = 1 - 2*sum + sum*sum
+        # Linear: -2 * x_{v,c} (absorbed into diagonal)
+        for c in range(k):
+            Q[idx(v, c), idx(v, c)] -= 2 * penalty_A
+
+        # Quadratic: sum_{c < c'} 2 * x_{v,c} * x_{v,c'}
+        for c1 in range(k):
+            for c2 in range(c1 + 1, k):
+                i, j = idx(v, c1), idx(v, c2)
+                Q[i, j] += 2 * penalty_A
+                Q[j, i] += 2 * penalty_A
+
+    # Edge constraint: adjacent vertices different colors
+    for u in range(n):
+        for v in range(u + 1, n):
+            if adj[u, v] > 0:
+                for c in range(k):
+                    i, j = idx(u, c), idx(v, c)
+                    Q[i, j] += penalty_B
+                    Q[j, i] += penalty_B
+
+    return Q
+
+def evaluate_qubo_coloring(Q: np.ndarray, x: np.ndarray) -> float:
+    """Evaluate QUBO objective for binary vector x."""
+    return x @ Q @ x
+
+def decode_coloring(x: np.ndarray, n: int, k: int) -> List[int]:
+    """Decode binary vector to coloring."""
+    coloring = []
+    for v in range(n):
+        color = -1
+        for c in range(k):
+            if x[v * k + c] > 0.5:
+                color = c
+                break
+        coloring.append(color)
+    return coloring
+
+# Build QUBO for small graph
+n = 4
+adj_small = np.array([
+    [0, 1, 1, 0],
+    [1, 0, 1, 1],
+    [1, 1, 0, 1],
+    [0, 1, 1, 0]
+])
+k = 3
+
+Q = coloring_to_qubo(adj_small, k)
+print(f"QUBO matrix shape: {Q.shape}")
+print(f"QUBO matrix (partial):\n{Q[:6, :6]}")
+```
+
+## 3. QAOA for Graph Coloring
+
+QAOA can be applied to the QUBO formulation of graph coloring.
+
+```python
+from qiskit import QuantumCircuit
+from qiskit.quantum_info import Statevector
+from scipy.optimize import minimize
+
+def qaoa_coloring_circuit(adj: np.ndarray, k: int,
+                           gamma: List[float], beta: List[float]) -> QuantumCircuit:
+    """Build QAOA circuit for k-coloring."""
+    n = adj.shape[0]
+    num_qubits = n * k
+    p = len(gamma)
+
+    qc = QuantumCircuit(num_qubits)
+
+    # Initial superposition
+    qc.h(range(num_qubits))
+
+    def idx(v, c):
+        return v * k + c
+
+    for layer in range(p):
+        # Cost layer (edge constraints)
+        for u in range(n):
+            for v in range(u + 1, n):
+                if adj[u, v] > 0:
+                    for c in range(k):
+                        i, j = idx(u, c), idx(v, c)
+                        qc.cx(i, j)
+                        qc.rz(gamma[layer], j)
+                        qc.cx(i, j)
+
+        # One-hot constraint cost (simplified)
+        for v in range(n):
+            for c1 in range(k):
+                for c2 in range(c1 + 1, k):
+                    i, j = idx(v, c1), idx(v, c2)
+                    qc.cx(i, j)
+                    qc.rz(2 * gamma[layer], j)
+                    qc.cx(i, j)
+
+        # Mixer layer
+        for i in range(num_qubits):
+            qc.rx(2 * beta[layer], i)
+
+    return qc
+
+def qaoa_coloring_expectation(adj: np.ndarray, k: int,
+                                gamma: List[float], beta: List[float]) -> float:
+    """Compute expected number of conflicts."""
+    qc = qaoa_coloring_circuit(adj, k, gamma, beta)
+    sv = Statevector.from_instruction(qc)
+    probs = np.abs(sv.data)**2
+
+    n = adj.shape[0]
+    num_qubits = n * k
+
+    expected_conflicts = 0
+    for bits in range(2**num_qubits):
+        x = np.array([(bits >> i) & 1 for i in range(num_qubits)])
+        coloring = decode_coloring(x, n, k)
+        conflicts = count_conflicts(adj, coloring)
+        expected_conflicts += probs[bits] * conflicts
+
+    return expected_conflicts
+
+def run_qaoa_coloring(adj: np.ndarray, k: int, p: int = 1) -> Dict:
+    """Run QAOA for graph coloring."""
+    def objective(params):
+        gamma = params[:p]
+        beta = params[p:]
+        return qaoa_coloring_expectation(adj, k, list(gamma), list(beta))
+
+    # Optimize
+    best_result = None
+    best_value = np.inf
+
+    for _ in range(3):
+        params_init = np.random.uniform(0, np.pi, 2 * p)
+        result = minimize(objective, params_init, method='COBYLA',
+                         options={'maxiter': 200})
+        if result.fun < best_value:
+            best_value = result.fun
+            best_result = result
+
+    return {
+        'expected_conflicts': best_value,
+        'optimal_params': best_result.x
+    }
+
+# Run QAOA on small graph
+result = run_qaoa_coloring(adj_small, k=3, p=1)
+print(f"\nQAOA Coloring Results (k=3, p=1):")
+print(f"  Expected conflicts: {result['expected_conflicts']:.4f}")
+```
+
+## 4. Grover Search for Valid Colorings
+
+Grover's algorithm can search for valid k-colorings with quadratic speedup.
+
+<Formula>
+$$\text{Search space: } k^n \text{ possible colorings}$$
+$$\text{Grover complexity: } O(\sqrt{k^n / M}) \text{ where } M = \text{number of valid colorings}$$
+</Formula>
+
+```python
+def grover_coloring_oracle(adj: np.ndarray, k: int) -> QuantumCircuit:
+    """
+    Build oracle that marks valid k-colorings.
+
+    For small examples, we explicitly construct the oracle.
+    """
+    n = adj.shape[0]
+    num_qubits = n * int(np.ceil(np.log2(k)))
+
+    # Find valid colorings
+    valid_colorings = []
+    for coloring in product(range(k), repeat=n):
+        if is_valid_coloring(adj, list(coloring)):
+            valid_colorings.append(coloring)
+
+    qc = QuantumCircuit(num_qubits)
+
+    # Mark each valid coloring
+    bits_per_vertex = int(np.ceil(np.log2(k)))
+
+    for coloring in valid_colorings:
+        # Convert coloring to binary string
+        binary = ''
+        for color in coloring:
+            binary += format(color, f'0{bits_per_vertex}b')
+
+        # Apply X gates for 0 bits
+        for i, bit in enumerate(reversed(binary)):
+            if bit == '0':
+                qc.x(i)
+
+        # Multi-controlled Z
+        if num_qubits > 1:
+            qc.h(num_qubits - 1)
+            qc.mcx(list(range(num_qubits - 1)), num_qubits - 1)
+            qc.h(num_qubits - 1)
+        else:
+            qc.z(0)
+
+        # Undo X gates
+        for i, bit in enumerate(reversed(binary)):
+            if bit == '0':
+                qc.x(i)
+
+    return qc
+
+def estimate_grover_iterations(n: int, k: int,
+                                num_valid: int) -> Tuple[int, float]:
+    """Estimate optimal Grover iterations and success probability."""
+    N = k**n  # Total colorings
+    M = num_valid  # Valid colorings
+
+    if M == 0:
+        return 0, 0.0
+
+    theta = np.arcsin(np.sqrt(M / N))
+    optimal_iterations = int(np.pi / (4 * theta))
+
+    # Success probability after optimal iterations
+    success_prob = np.sin((2 * optimal_iterations + 1) * theta)**2
+
+    return optimal_iterations, success_prob
+
+# Analyze Grover for coloring
+n = 4
+k = 3
+
+# Count valid 3-colorings
+valid_count = sum(1 for c in product(range(k), repeat=n)
+                  if is_valid_coloring(adj_small, list(c)))
+
+iterations, prob = estimate_grover_iterations(n, k, valid_count)
+
+print(f"\nGrover Search for {k}-Coloring (n={n}):")
+print(f"  Total colorings: {k**n}")
+print(f"  Valid colorings: {valid_count}")
+print(f"  Optimal iterations: {iterations}")
+print(f"  Success probability: {prob:.4f}")
+print(f"  Classical queries: {k**n}")
+print(f"  Quantum queries: ~{iterations}")
+```
+
+## 5. Chromatic Number Estimation
+
+Quantum algorithms can help estimate the chromatic number.
+
+```python
+def quantum_chromatic_search(adj: np.ndarray, max_k: int = None) -> Dict:
+    """
+    Search for chromatic number using quantum-inspired binary search.
+    """
+    n = adj.shape[0]
+    if max_k is None:
+        max_k = n
+
+    results = {}
+
+    for k in range(1, max_k + 1):
+        # Check if k-coloring exists
+        valid_count = sum(1 for c in product(range(k), repeat=n)
+                         if is_valid_coloring(adj, list(c)))
+
+        if valid_count > 0:
+            # Estimate Grover speedup
+            classical = k**n
+            grover_iters, _ = estimate_grover_iterations(n, k, valid_count)
+
+            results[k] = {
+                'valid_colorings': valid_count,
+                'classical_queries': classical,
+                'grover_queries': grover_iters,
+                'speedup': classical / max(1, grover_iters)
+            }
+
+            if k not in results or results[k]['valid_colorings'] > 0:
+                chromatic_number = k
+                break
+
+    return {
+        'chromatic_number': k,
+        'analysis': results
+    }
+
+# Find chromatic number with quantum speedup analysis
+result = quantum_chromatic_search(adj_small, max_k=5)
+
+print(f"\nChromatic Number Search:")
+print(f"  Chromatic number: {result['chromatic_number']}")
+for k, analysis in result['analysis'].items():
+    print(f"\n  k={k}:")
+    print(f"    Valid colorings: {analysis['valid_colorings']}")
+    print(f"    Grover speedup: {analysis['speedup']:.1f}x")
+```
+
+## 6. Constrained Mixer for Graph Coloring
+
+A constrained mixer preserves the one-hot encoding during QAOA evolution.
+
+<Definition term="XY Mixer">
+The XY mixer preserves total Hamming weight by using $XX + YY$ interactions:
+$$H_{XY} = \sum_{(i,j) \in \text{pairs}} (X_i X_j + Y_i Y_j)$$
+</Definition>
+
+```python
+def xy_mixer_coloring_circuit(n: int, k: int, beta: float) -> QuantumCircuit:
+    """
+    XY mixer that preserves one-hot constraint for each vertex.
+
+    For each vertex v, apply XY interactions between color qubits.
+    """
+    num_qubits = n * k
+    qc = QuantumCircuit(num_qubits)
+
+    def idx(v, c):
+        return v * k + c
+
+    for v in range(n):
+        # XY mixer among color qubits for vertex v
+        for c1 in range(k):
+            for c2 in range(c1 + 1, k):
+                i, j = idx(v, c1), idx(v, c2)
+
+                # XX + YY = 2(|01><10| + |10><01|)
+                # Implement as partial swap
+                qc.cx(i, j)
+                qc.cx(j, i)
+                qc.rz(beta, i)
+                qc.cx(j, i)
+                qc.cx(i, j)
+
+    return qc
+
+def qaoa_constrained_coloring(adj: np.ndarray, k: int, p: int = 1) -> Dict:
+    """
+    QAOA with constrained mixer for graph coloring.
+
+    Starts from valid one-hot initialization.
+    """
+    n = adj.shape[0]
+    num_qubits = n * k
+
+    def build_circuit(gamma, beta):
+        qc = QuantumCircuit(num_qubits)
+
+        # Initialize in valid one-hot state (color 0 for all)
+        for v in range(n):
+            qc.x(v * k)  # Set first color qubit
+
+        # Create superposition over valid states
+        for v in range(n):
+            for c in range(k - 1):
+                angle = np.pi / (k - c)
+                qc.ry(angle, v * k + c)
+
+        for layer in range(len(gamma)):
+            # Cost layer
+            for u in range(n):
+                for v in range(u + 1, n):
+                    if adj[u, v] > 0:
+                        for c in range(k):
+                            i, j = u * k + c, v * k + c
+                            qc.cx(i, j)
+                            qc.rz(gamma[layer], j)
+                            qc.cx(i, j)
+
+            # Constrained mixer
+            qc = qc.compose(xy_mixer_coloring_circuit(n, k, beta[layer]))
+
+        return qc
+
+    def objective(params):
+        gamma = params[:p]
+        beta = params[p:]
+        qc = build_circuit(list(gamma), list(beta))
+        sv = Statevector.from_instruction(qc)
+        probs = np.abs(sv.data)**2
+
+        expected_conflicts = 0
+        for bits in range(2**num_qubits):
+            x = np.array([(bits >> i) & 1 for i in range(num_qubits)])
+            coloring = decode_coloring(x, n, k)
+            conflicts = count_conflicts(adj, coloring)
+            expected_conflicts += probs[bits] * conflicts
+
+        return expected_conflicts
+
+    # Optimize
+    params_init = np.random.uniform(0, np.pi/2, 2 * p)
+    result = minimize(objective, params_init, method='COBYLA',
+                     options={'maxiter': 200})
+
+    return {
+        'expected_conflicts': result.fun,
+        'optimal_params': result.x
+    }
+
+# Compare standard vs constrained QAOA
+print("\nConstrained vs Standard QAOA:")
+standard = run_qaoa_coloring(adj_small, k=3, p=1)
+constrained = qaoa_constrained_coloring(adj_small, k=3, p=1)
+
+print(f"  Standard QAOA conflicts: {standard['expected_conflicts']:.4f}")
+print(f"  Constrained QAOA conflicts: {constrained['expected_conflicts']:.4f}")
+```
+
+## 7. Applications and Complexity
+
+Graph coloring has numerous practical applications where quantum speedup could be valuable.
+
+| Application | Graph Structure | Classical | Quantum Potential |
+|-------------|-----------------|-----------|-------------------|
+| Register allocation | Interference graphs | NP-complete | Grover speedup |
+| Scheduling | Conflict graphs | Polynomial for k=2 | Limited benefit |
+| Map coloring | Planar graphs | O(n) for k=4 | No speedup |
+| Frequency assignment | Dense graphs | NP-hard | QAOA heuristic |
+
+```python
+def analyze_coloring_complexity(n: int, k: int) -> Dict:
+    """Analyze classical vs quantum complexity for k-coloring."""
+    # Search space
+    total_colorings = k**n
+
+    # Estimate valid colorings (very rough)
+    # For random graphs, approximately k! * S(n, k) / k^n
+    # where S(n,k) is Stirling number of second kind
+    estimated_valid = total_colorings * 0.1  # Rough estimate
+
+    # Classical: check all colorings
+    classical_worst = total_colorings
+    classical_avg = total_colorings / 2  # Expected for random search
+
+    # Grover: sqrt speedup
+    grover_queries = int(np.sqrt(total_colorings / max(1, estimated_valid)))
+
+    # QAOA: heuristic, depends on landscape
+    qaoa_advantage = "Problem-dependent"
+
+    return {
+        'n_vertices': n,
+        'k_colors': k,
+        'search_space': total_colorings,
+        'classical_worst': classical_worst,
+        'grover_queries': grover_queries,
+        'speedup': classical_worst / max(1, grover_queries)
+    }
+
+print("\nColoring Complexity Analysis:")
+print("=" * 50)
+for n, k in [(5, 3), (10, 3), (10, 4), (15, 3)]:
+    analysis = analyze_coloring_complexity(n, k)
+    print(f"n={n}, k={k}: Space={analysis['search_space']:.2e}, "
+          f"Grover={analysis['grover_queries']:.0f}, "
+          f"Speedup={analysis['speedup']:.1f}x")
+```
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Graph coloring basics**: k-coloring assigns colors to vertices avoiding adjacent conflicts
+2. **QUBO formulation**: Coloring can be encoded as quadratic optimization with penalty terms
+3. **QAOA approach**: Variational optimization over coloring configurations
+4. **Grover search**: Quadratic speedup for finding valid colorings in search space
+5. **Constrained mixers**: XY mixer preserves one-hot encoding structure
+6. **Chromatic number**: Quantum algorithms can help estimate minimum colors needed
+7. **Applications**: Register allocation, scheduling, and frequency assignment benefit from quantum approaches
+
+Graph coloring is an NP-complete problem where quantum heuristics like QAOA show promise for practical instances.
+
+## Further Reading
+
+- Lucas, A. (2014). Ising formulations of many NP problems.
+- Hadfield, S., et al. (2019). From QAOA to quantum alternating operator ansatz.
+- Wang, Z., et al. (2020). XY mixers for constrained optimization.
+- Next: Network Analysis

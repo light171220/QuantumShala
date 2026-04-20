@@ -1,0 +1,773 @@
+---
+title: "Quantum Monte Carlo Methods"
+description: "Comprehensive exploration of quantum Monte Carlo algorithms including integration, expectation estimation, and their quadratic speedup over classical methods. Covers both theoretical foundations and practical implementations."
+duration: 45
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the quantum speedup for Monte Carlo integration
+- Implement quantum mean estimation algorithms
+- Encode classical distributions into quantum states
+- Analyze error scaling and resource requirements
+- Apply quantum Monte Carlo to practical integration problems
+
+## 1. Introduction to Quantum Monte Carlo
+
+Classical Monte Carlo methods estimate expectations by sampling random variables. The fundamental limitation is the $O(1/\sqrt{N})$ convergence rate - to halve the error, you need four times more samples.
+
+<Definition term="Quantum Monte Carlo">
+Quantum algorithms that leverage amplitude estimation to compute expectations and integrals with a quadratic speedup: achieving precision $\epsilon$ requires only $O(1/\epsilon)$ quantum operations instead of $O(1/\epsilon^2)$ classical samples.
+</Definition>
+
+<Formula>
+$$\text{Classical: } \sigma_N = \frac{\sigma}{\sqrt{N}} \implies N = O\left(\frac{1}{\epsilon^2}\right)$$
+$$\text{Quantum: } N = O\left(\frac{1}{\epsilon}\right)$$
+</Formula>
+
+## 2. The Quantum Mean Estimation Problem
+
+Consider estimating the expectation of a function $f: \{0,1\}^n \to [0,1]$:
+
+<Formula>
+$$\mu = \mathbb{E}[f(X)] = \sum_{x} p(x) f(x)$$
+</Formula>
+
+### Classical Approach
+
+Sample $N$ values $x_1, \ldots, x_N$ from distribution $p$ and compute:
+
+<Formula>
+$$\hat{\mu} = \frac{1}{N} \sum_{i=1}^N f(x_i)$$
+</Formula>
+
+The standard error is $\sigma/\sqrt{N}$ where $\sigma^2 = \text{Var}(f(X))$.
+
+### Quantum Approach
+
+Encode the problem into a quantum state and use amplitude estimation:
+
+```python
+import numpy as np
+from typing import Callable, Tuple, Dict
+
+class QuantumMeanEstimator:
+    """
+    Quantum Mean Estimation using amplitude estimation.
+    Simulated implementation for educational purposes.
+    """
+
+    def __init__(
+        self,
+        num_index_qubits: int,
+        num_value_qubits: int
+    ):
+        """
+        Initialize quantum mean estimator.
+
+        Args:
+            num_index_qubits: Qubits for encoding distribution support
+            num_value_qubits: Qubits for encoding function values
+        """
+        self.n_idx = num_index_qubits
+        self.n_val = num_value_qubits
+        self.N = 2 ** num_index_qubits  # Support size
+        self.M = 2 ** num_value_qubits  # Value discretization
+
+    def encode_distribution(
+        self,
+        probabilities: np.ndarray
+    ) -> np.ndarray:
+        """
+        Create quantum state encoding distribution.
+
+        |psi> = sum_x sqrt(p(x)) |x>
+
+        Args:
+            probabilities: Array of probabilities p(x)
+
+        Returns:
+            Quantum state vector
+        """
+        assert len(probabilities) == self.N
+        assert np.abs(probabilities.sum() - 1.0) < 1e-10
+
+        state = np.sqrt(probabilities)
+        return state
+
+    def encode_function(
+        self,
+        func_values: np.ndarray
+    ) -> np.ndarray:
+        """
+        Encode function values into rotation angles.
+
+        For each x, we want to create:
+        |x>|0> -> |x>(sqrt(1-f(x))|0> + sqrt(f(x))|1>)
+
+        Args:
+            func_values: Array of function values f(x) in [0,1]
+
+        Returns:
+            Rotation angles theta_x where sin^2(theta_x) = f(x)
+        """
+        assert len(func_values) == self.N
+        assert np.all(func_values >= 0) and np.all(func_values <= 1)
+
+        angles = np.arcsin(np.sqrt(func_values))
+        return angles
+
+    def prepare_state(
+        self,
+        probabilities: np.ndarray,
+        func_values: np.ndarray
+    ) -> np.ndarray:
+        """
+        Prepare the full quantum state for mean estimation.
+
+        |psi> = sum_x sqrt(p(x)) |x> (sqrt(1-f(x))|0> + sqrt(f(x))|1>)
+
+        The amplitude of |1> in the ancilla is sqrt(E[f(X)]).
+
+        Args:
+            probabilities: Distribution probabilities
+            func_values: Function values
+
+        Returns:
+            Full quantum state vector
+        """
+        state = np.zeros(2 * self.N, dtype=complex)
+
+        for x in range(self.N):
+            sqrt_p = np.sqrt(probabilities[x])
+            sqrt_f = np.sqrt(func_values[x])
+            sqrt_1mf = np.sqrt(1 - func_values[x])
+
+            # |x,0> amplitude
+            state[2 * x] = sqrt_p * sqrt_1mf
+            # |x,1> amplitude
+            state[2 * x + 1] = sqrt_p * sqrt_f
+
+        return state
+
+    def exact_mean(
+        self,
+        probabilities: np.ndarray,
+        func_values: np.ndarray
+    ) -> float:
+        """Compute exact mean for verification."""
+        return np.sum(probabilities * func_values)
+
+    def estimate_mean(
+        self,
+        probabilities: np.ndarray,
+        func_values: np.ndarray,
+        num_precision_qubits: int = 6,
+        num_shots: int = 1000
+    ) -> Dict:
+        """
+        Estimate mean using quantum amplitude estimation.
+
+        Args:
+            probabilities: Distribution probabilities
+            func_values: Function values in [0,1]
+            num_precision_qubits: Precision qubits for AE
+            num_shots: Number of measurement shots
+
+        Returns:
+            Estimation results dictionary
+        """
+        # Prepare state
+        state = self.prepare_state(probabilities, func_values)
+
+        # The amplitude of measuring |1> in ancilla is sqrt(E[f])
+        # Probability = E[f] = sum_x p(x) * f(x)
+        exact_mean = self.exact_mean(probabilities, func_values)
+
+        # Simulate amplitude estimation
+        M = 2 ** num_precision_qubits
+        theta = np.arcsin(np.sqrt(exact_mean))
+
+        # QPE measurement simulation (simplified)
+        # Real implementation would use full QPE circuit
+        probs = np.zeros(M)
+        for y in range(M):
+            for sign in [1, -1]:
+                phi = sign * 2 * theta / (2 * np.pi)
+                phi = phi % 1
+                delta = y / M - phi
+                if abs(delta - round(delta)) < 1e-10:
+                    probs[y] += 0.25
+                else:
+                    probs[y] += 0.25 * (np.sin(np.pi * M * delta) ** 2) / \
+                               (M ** 2 * np.sin(np.pi * delta) ** 2 + 1e-10)
+
+        probs = probs / probs.sum()
+        measurements = np.random.choice(M, size=num_shots, p=probs)
+
+        # Most likely measurement
+        counts = np.bincount(measurements, minlength=M)
+        y_max = np.argmax(counts)
+
+        # Convert to mean estimate
+        theta_est = np.pi * y_max / M
+        mean_est = np.sin(theta_est) ** 2
+
+        return {
+            'estimated_mean': mean_est,
+            'exact_mean': exact_mean,
+            'error': abs(mean_est - exact_mean),
+            'precision_qubits': num_precision_qubits,
+            'num_shots': num_shots
+        }
+
+# Example usage
+np.random.seed(42)
+qme = QuantumMeanEstimator(num_index_qubits=4, num_value_qubits=4)
+
+# Define a simple distribution and function
+probs = np.array([0.1, 0.2, 0.15, 0.05, 0.1, 0.1, 0.1, 0.05,
+                  0.03, 0.02, 0.03, 0.02, 0.02, 0.01, 0.01, 0.01])
+func_vals = np.array([0.1, 0.3, 0.5, 0.7, 0.2, 0.4, 0.6, 0.8,
+                      0.15, 0.35, 0.55, 0.75, 0.25, 0.45, 0.65, 0.85])
+
+result = qme.estimate_mean(probs, func_vals)
+print(f"Exact mean: {result['exact_mean']:.4f}")
+print(f"Estimated: {result['estimated_mean']:.4f}")
+print(f"Error: {result['error']:.6f}")
+```
+
+## 3. Quantum Integration
+
+Quantum Monte Carlo excels at computing integrals:
+
+<Formula>
+$$I = \int_0^1 f(x) dx \approx \mathbb{E}[f(U)]$$
+</Formula>
+
+where $U \sim \text{Uniform}(0,1)$.
+
+### Encoding the Integral
+
+```python
+class QuantumIntegrator:
+    """
+    Quantum numerical integration using Monte Carlo.
+    """
+
+    def __init__(self, num_qubits: int):
+        """
+        Initialize integrator.
+
+        Args:
+            num_qubits: Number of qubits for discretization
+        """
+        self.n = num_qubits
+        self.N = 2 ** num_qubits
+
+    def discretize_function(
+        self,
+        f: Callable[[float], float],
+        domain: Tuple[float, float] = (0, 1)
+    ) -> np.ndarray:
+        """
+        Discretize function on uniform grid.
+
+        Args:
+            f: Function to integrate
+            domain: Integration domain
+
+        Returns:
+            Array of discretized function values
+        """
+        a, b = domain
+        # Midpoint of each interval
+        x_vals = np.array([a + (i + 0.5) * (b - a) / self.N
+                          for i in range(self.N)])
+
+        # Scale function to [0, 1] if needed
+        f_vals = np.array([f(x) for x in x_vals])
+
+        # Normalize to [0, 1]
+        f_min, f_max = f_vals.min(), f_vals.max()
+        if f_max > f_min:
+            f_normalized = (f_vals - f_min) / (f_max - f_min)
+        else:
+            f_normalized = np.zeros_like(f_vals)
+
+        return f_vals, f_normalized, (f_min, f_max)
+
+    def integrate(
+        self,
+        f: Callable[[float], float],
+        domain: Tuple[float, float] = (0, 1),
+        precision_qubits: int = 6
+    ) -> Dict:
+        """
+        Estimate integral using quantum Monte Carlo.
+
+        Args:
+            f: Function to integrate
+            domain: Integration domain (a, b)
+            precision_qubits: Qubits for amplitude estimation
+
+        Returns:
+            Integration results
+        """
+        a, b = domain
+
+        # Discretize function
+        f_vals, f_norm, (f_min, f_max) = self.discretize_function(f, domain)
+
+        # Uniform distribution over grid
+        probs = np.ones(self.N) / self.N
+
+        # Prepare quantum state
+        # |psi> = 1/sqrt(N) sum_i |i>(sqrt(1-f_norm(i))|0> + sqrt(f_norm(i))|1>)
+        state = np.zeros(2 * self.N, dtype=complex)
+
+        for i in range(self.N):
+            sqrt_p = 1 / np.sqrt(self.N)
+            sqrt_f = np.sqrt(f_norm[i])
+            sqrt_1mf = np.sqrt(1 - f_norm[i])
+
+            state[2 * i] = sqrt_p * sqrt_1mf
+            state[2 * i + 1] = sqrt_p * sqrt_f
+
+        # Amplitude of |1> is sqrt(mean(f_norm))
+        mean_f_norm = np.mean(f_norm)
+
+        # Simulate amplitude estimation
+        M = 2 ** precision_qubits
+        theta = np.arcsin(np.sqrt(mean_f_norm))
+
+        # Simplified simulation
+        noise = np.random.normal(0, 1 / M)
+        theta_est = theta + noise
+        mean_est_norm = np.sin(theta_est) ** 2
+
+        # Rescale to original function values
+        mean_est = mean_est_norm * (f_max - f_min) + f_min
+
+        # Integral = mean * (b - a)
+        integral_est = mean_est * (b - a)
+
+        # Exact integral (for comparison)
+        exact_integral = np.mean(f_vals) * (b - a)
+
+        return {
+            'integral_estimate': integral_est,
+            'exact_integral': exact_integral,
+            'error': abs(integral_est - exact_integral),
+            'mean_estimate': mean_est,
+            'domain': domain,
+            'discretization_points': self.N
+        }
+
+# Example: Integrate sin(x) from 0 to pi
+integrator = QuantumIntegrator(num_qubits=8)
+result = integrator.integrate(np.sin, domain=(0, np.pi))
+print(f"Integral of sin(x) from 0 to pi:")
+print(f"  Estimated: {result['integral_estimate']:.4f}")
+print(f"  Exact: {result['exact_integral']:.4f}")
+print(f"  True value: 2.0000")
+```
+
+## 4. Loading Classical Data
+
+A critical component is loading classical probability distributions into quantum states:
+
+### Amplitude Encoding
+
+<Formula>
+$$|p\rangle = \sum_{i=0}^{N-1} \sqrt{p_i} |i\rangle$$
+</Formula>
+
+```python
+def amplitude_encoding_circuit_depth(n_qubits: int) -> Dict:
+    """
+    Analyze the cost of amplitude encoding.
+
+    Args:
+        n_qubits: Number of qubits
+
+    Returns:
+        Resource analysis
+    """
+    N = 2 ** n_qubits
+
+    # Exact amplitude encoding requires O(N) gates in general
+    # Using various techniques can reduce this:
+
+    return {
+        'num_qubits': n_qubits,
+        'state_dimension': N,
+        'general_gate_count': N,  # Worst case
+        'structured_log_linear': n_qubits * N,  # Log-concave
+        'qram_based': n_qubits,  # With QRAM (if available)
+    }
+
+
+class DistributionLoader:
+    """
+    Load classical distributions into quantum states.
+    """
+
+    def __init__(self, num_qubits: int):
+        self.n = num_qubits
+        self.N = 2 ** num_qubits
+
+    def load_uniform(self) -> np.ndarray:
+        """Load uniform distribution using Hadamard gates."""
+        return np.ones(self.N) / np.sqrt(self.N)
+
+    def load_normal_discretized(
+        self,
+        mean: float = 0,
+        std: float = 1,
+        bounds: Tuple[float, float] = (-3, 3)
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Load discretized normal distribution.
+
+        Args:
+            mean: Distribution mean
+            std: Standard deviation
+            bounds: Truncation bounds (in std units from mean)
+
+        Returns:
+            (quantum_state, x_values)
+        """
+        from scipy.stats import norm
+
+        low, high = mean + bounds[0] * std, mean + bounds[1] * std
+        x_vals = np.linspace(low, high, self.N)
+        dx = x_vals[1] - x_vals[0]
+
+        # PDF values (discretized)
+        pdf_vals = norm.pdf(x_vals, loc=mean, scale=std)
+        probs = pdf_vals * dx
+        probs = probs / probs.sum()  # Normalize
+
+        # Quantum state
+        state = np.sqrt(probs)
+
+        return state, x_vals
+
+    def load_log_normal(
+        self,
+        mu: float = 0,
+        sigma: float = 0.5,
+        bounds: Tuple[float, float] = (0.01, 10)
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Load discretized log-normal distribution.
+
+        Important for financial applications.
+        """
+        from scipy.stats import lognorm
+
+        x_vals = np.linspace(bounds[0], bounds[1], self.N)
+        dx = x_vals[1] - x_vals[0]
+
+        # Log-normal PDF
+        pdf_vals = lognorm.pdf(x_vals, s=sigma, scale=np.exp(mu))
+        probs = pdf_vals * dx
+        probs = probs / probs.sum()
+
+        state = np.sqrt(probs)
+
+        return state, x_vals
+
+
+# Example
+loader = DistributionLoader(num_qubits=6)
+state, x_vals = loader.load_normal_discretized(mean=0, std=1)
+
+print("Discretized Normal Distribution:")
+print(f"  State dimension: {len(state)}")
+print(f"  x range: [{x_vals[0]:.2f}, {x_vals[-1]:.2f}]")
+print(f"  Sum of probabilities: {np.sum(state**2):.6f}")
+```
+
+## 5. Error Analysis
+
+### Sources of Error in Quantum Monte Carlo
+
+1. **Discretization Error**: From approximating continuous distributions
+2. **Amplitude Estimation Error**: From finite precision in QAE
+3. **Shot Noise**: From finite measurements
+
+```python
+def analyze_qmc_errors(
+    f: Callable[[float], float],
+    domain: Tuple[float, float],
+    true_integral: float,
+    qubit_configs: list
+) -> Dict:
+    """
+    Analyze error contributions in quantum Monte Carlo.
+
+    Args:
+        f: Function to integrate
+        domain: Integration domain
+        true_integral: Known exact integral
+        qubit_configs: List of (n_discretization, n_precision) pairs
+
+    Returns:
+        Error analysis results
+    """
+    results = []
+    a, b = domain
+
+    for n_disc, n_prec in qubit_configs:
+        N = 2 ** n_disc
+        M = 2 ** n_prec
+
+        # Discretization
+        x_vals = np.linspace(a, b, N + 1)
+        x_mids = (x_vals[:-1] + x_vals[1:]) / 2
+        f_vals = np.array([f(x) for x in x_mids])
+
+        # Discretized integral (Riemann sum)
+        disc_integral = np.mean(f_vals) * (b - a)
+        disc_error = abs(disc_integral - true_integral)
+
+        # AE precision error (theoretical)
+        ae_error = np.pi / M  # Simplified bound
+
+        # Total error bound
+        total_error = disc_error + ae_error * (b - a)
+
+        results.append({
+            'n_discretization': n_disc,
+            'n_precision': n_prec,
+            'discretization_error': disc_error,
+            'ae_error': ae_error,
+            'total_error_bound': total_error,
+            'discretized_integral': disc_integral
+        })
+
+    return {'true_integral': true_integral, 'configurations': results}
+
+
+# Example: Analyze errors for integrating e^(-x^2)
+def gaussian(x):
+    return np.exp(-x**2)
+
+true_value = np.sqrt(np.pi) * 0.842700792949715  # erf(1) * sqrt(pi)/2
+
+analysis = analyze_qmc_errors(
+    gaussian,
+    domain=(-1, 1),
+    true_integral=true_value,
+    qubit_configs=[(4, 4), (6, 6), (8, 8), (10, 10)]
+)
+
+print("Error Analysis for integral of exp(-x^2) from -1 to 1:")
+print(f"True value: {analysis['true_integral']:.6f}\n")
+print(f"{'n_disc':<8} {'n_prec':<8} {'Disc Err':<12} {'AE Err':<12} {'Total':<12}")
+print("-" * 52)
+for cfg in analysis['configurations']:
+    print(f"{cfg['n_discretization']:<8} {cfg['n_precision']:<8} "
+          f"{cfg['discretization_error']:<12.6f} {cfg['ae_error']:<12.6f} "
+          f"{cfg['total_error_bound']:<12.6f}")
+```
+
+## 6. Comparison with Classical Monte Carlo
+
+Let's compare quantum and classical Monte Carlo empirically:
+
+```python
+import time
+
+def classical_monte_carlo(
+    f: Callable[[float], float],
+    domain: Tuple[float, float],
+    num_samples: int
+) -> Tuple[float, float]:
+    """
+    Classical Monte Carlo integration.
+
+    Returns:
+        (estimate, standard_error)
+    """
+    a, b = domain
+    samples = np.random.uniform(a, b, num_samples)
+    f_samples = np.array([f(x) for x in samples])
+
+    estimate = np.mean(f_samples) * (b - a)
+    std_error = np.std(f_samples) * (b - a) / np.sqrt(num_samples)
+
+    return estimate, std_error
+
+
+def compare_mc_methods(
+    f: Callable[[float], float],
+    domain: Tuple[float, float],
+    true_integral: float,
+    target_errors: list
+) -> Dict:
+    """
+    Compare classical and quantum MC resources for target errors.
+
+    Args:
+        f: Function to integrate
+        domain: Integration domain
+        true_integral: Exact integral value
+        target_errors: List of target error levels
+
+    Returns:
+        Comparison results
+    """
+    results = []
+
+    for target_eps in target_errors:
+        # Classical: need O(1/eps^2) samples
+        # Estimate variance from initial samples
+        test_samples = 1000
+        a, b = domain
+        samples = np.random.uniform(a, b, test_samples)
+        f_samples = np.array([f(x) for x in samples])
+        variance = np.var(f_samples) * (b - a) ** 2
+
+        classical_samples = int(np.ceil(variance / target_eps ** 2))
+
+        # Quantum: need O(1/eps) queries
+        # M = 2^m where pi/M < eps => m = ceil(log2(pi/eps))
+        import math
+        m = math.ceil(math.log2(np.pi / target_eps))
+        quantum_queries = 2 ** m
+
+        speedup = classical_samples / quantum_queries if quantum_queries > 0 else 0
+
+        results.append({
+            'target_error': target_eps,
+            'classical_samples': classical_samples,
+            'quantum_queries': quantum_queries,
+            'speedup': speedup
+        })
+
+    return {'true_integral': true_integral, 'comparisons': results}
+
+
+# Compare methods
+def test_func(x):
+    return np.sin(x) ** 2 + 0.5 * np.cos(2 * x)
+
+true_val = 0.5 + 0.25  # Analytical result for sin^2 + 0.5*cos(2x) on [0, pi]
+
+comparison = compare_mc_methods(
+    test_func,
+    domain=(0, np.pi),
+    true_integral=true_val * np.pi,
+    target_errors=[0.1, 0.01, 0.001, 0.0001]
+)
+
+print("Classical vs Quantum Monte Carlo")
+print("=" * 60)
+print(f"{'Target Error':<15} {'Classical':<15} {'Quantum':<12} {'Speedup':<10}")
+print("-" * 60)
+for comp in comparison['comparisons']:
+    print(f"{comp['target_error']:<15.4f} {comp['classical_samples']:<15} "
+          f"{comp['quantum_queries']:<12} {comp['speedup']:.1f}x")
+```
+
+## 7. Practical Considerations
+
+### When is Quantum Monte Carlo Advantageous?
+
+<Tip>
+Quantum Monte Carlo provides advantage when:
+1. High precision is needed (small epsilon)
+2. Function evaluation is expensive (encoded in quantum circuit)
+3. Coherent quantum operations are available
+</Tip>
+
+### Challenges for Near-Term Implementation
+
+```python
+def resource_estimation_qmc(
+    target_precision: float,
+    function_circuit_depth: int,
+    error_rate: float = 0.001
+) -> Dict:
+    """
+    Estimate resources for quantum Monte Carlo.
+
+    Args:
+        target_precision: Target error epsilon
+        function_circuit_depth: Depth of circuit encoding f(x)
+        error_rate: Physical error rate per gate
+
+    Returns:
+        Resource estimates
+    """
+    import math
+
+    # Precision qubits needed
+    m = math.ceil(math.log2(np.pi / target_precision))
+    M = 2 ** m
+
+    # Grover iterations for AE
+    num_grover_iterations = M - 1
+
+    # Total depth
+    # Each Grover iteration: O(function_circuit_depth)
+    total_depth = num_grover_iterations * function_circuit_depth * 4
+
+    # Error accumulation (simplified)
+    total_gates = total_depth * 10  # Rough estimate
+    success_probability = (1 - error_rate) ** total_gates
+
+    # Need error correction?
+    needs_qec = success_probability < 0.5
+
+    return {
+        'precision_qubits': m,
+        'grover_iterations': num_grover_iterations,
+        'estimated_depth': total_depth,
+        'estimated_gates': total_gates,
+        'success_prob_without_qec': success_probability,
+        'needs_error_correction': needs_qec
+    }
+
+
+# Example
+resources = resource_estimation_qmc(
+    target_precision=0.01,
+    function_circuit_depth=50,
+    error_rate=0.001
+)
+
+print("Resource Estimation for QMC with precision 0.01:")
+for key, value in resources.items():
+    if isinstance(value, float):
+        print(f"  {key}: {value:.4f}")
+    else:
+        print(f"  {key}: {value}")
+```
+
+<Warning>
+Current quantum hardware has limited coherence times and high error rates. For many practical problems, quantum Monte Carlo requires fault-tolerant quantum computers. Near-term implementations focus on shallow-depth variants with limited precision advantage.
+</Warning>
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Quantum Speedup**: QMC achieves $O(1/\epsilon)$ vs classical $O(1/\epsilon^2)$
+2. **Mean Estimation**: Encoding distributions and functions into quantum states
+3. **Quantum Integration**: Using QMC for numerical integration
+4. **Data Loading**: Techniques for encoding classical distributions
+5. **Error Analysis**: Understanding discretization, estimation, and shot noise errors
+6. **Practical Considerations**: Resource requirements and near-term challenges
+
+## Further Reading
+
+- Next lesson: Quantum Counting Algorithms
+- Related: Amplitude Estimation
+- Application: Quantum Finance

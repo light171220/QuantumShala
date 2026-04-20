@@ -1,0 +1,601 @@
+---
+title: "BIKE: Bit Flipping Key Encapsulation"
+description: "Master BIKE (Bit Flipping Key Encapsulation), a NIST alternate candidate using quasi-cyclic MDPC codes. Learn how structured codes enable compact keys while maintaining security."
+duration: 70
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand quasi-cyclic code structure and its advantages
+- Implement MDPC (Moderate Density Parity-Check) codes
+- Analyze BIKE's bit-flipping decoder
+- Compare BIKE to Classic McEliece
+- Evaluate decoding failure rate and its security implications
+
+## 1. Motivation: Compact Code-Based Keys
+
+```python
+import numpy as np
+from typing import Tuple, Optional, List
+import secrets
+
+def bike_motivation():
+    """Explain why BIKE was developed."""
+    print("BIKE: COMPACT CODE-BASED CRYPTOGRAPHY")
+    print("=" * 70)
+    
+    motivation = """
+    THE KEY SIZE PROBLEM:
+    ━━━━━━━━━━━━━━━━━━━━━
+    
+    Classic McEliece: Amazing security, but...
+    • 128-bit security: ~261 KB public key
+    • 256-bit security: ~1.3 MB public key
+    
+    Compare to:
+    • Kyber-768: 1,184 bytes
+    • ECDH P-256: 64 bytes
+    
+    BIKE'S SOLUTION: Quasi-Cyclic Structure
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    Key insight: Use codes with CIRCULANT structure
+    
+    Circulant Matrix:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ [a₀ a₁ a₂ ... aₙ₋₁]     ← First row defines entire matrix         │
+    │ [aₙ₋₁ a₀ a₁ ... aₙ₋₂]   ← Each row is cyclic shift                │
+    │ [aₙ₋₂ aₙ₋₁ a₀ ... aₙ₋₃]                                            │
+    │ ...                                                                 │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    Full n×n matrix stored as just n bits!
+    
+    BIKE STRUCTURE:
+    • Parity-check: H = [H₀ | H₁] where H₀, H₁ are circulant
+    • Public key: Just the first rows of H₀, H₁
+    • Key size: 2n bits instead of n² bits!
+    
+    COMPARISON:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Scheme            │ Security │ Public Key  │ Ciphertext            │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ Classic McEliece  │ 128-bit  │ 261,120 B   │ 128 B                 │
+    │ BIKE Level 1      │ 128-bit  │ 1,541 B     │ 1,573 B               │
+    │ Kyber-768         │ 128-bit  │ 1,184 B     │ 1,088 B               │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    Tradeoff: BIKE has ~170× smaller keys than McEliece!
+    But: Larger ciphertext, potential decoding failures
+    """
+    print(motivation)
+
+bike_motivation()
+```
+
+## 2. Quasi-Cyclic Codes
+
+<Definition term="Circulant Matrix">
+An $n \times n$ matrix where each row is a cyclic right shift of the row above it. Fully determined by its first row $(a_0, a_1, \ldots, a_{n-1})$.
+
+Equivalent to polynomial $a(x) = a_0 + a_1 x + \cdots + a_{n-1} x^{n-1}$ in $\mathbb{F}_2[x]/(x^n + 1)$.
+</Definition>
+
+```python
+class CirculantMatrix:
+    """
+    Circulant matrix over F_2.
+    
+    Stored as single row, operations via polynomial arithmetic.
+    """
+    
+    def __init__(self, first_row: np.ndarray):
+        """
+        Initialize circulant matrix from first row.
+        
+        Args:
+            first_row: n-element binary array
+        """
+        self.row = first_row % 2
+        self.n = len(first_row)
+    
+    def to_full_matrix(self) -> np.ndarray:
+        """Convert to full n×n matrix."""
+        matrix = np.zeros((self.n, self.n), dtype=int)
+        for i in range(self.n):
+            matrix[i] = np.roll(self.row, i)
+        return matrix
+    
+    def multiply_vector(self, v: np.ndarray) -> np.ndarray:
+        """
+        Multiply matrix by vector: M·v.
+        
+        Uses polynomial multiplication for efficiency.
+        """
+        # Represent as polynomials and multiply mod (x^n + 1)
+        result = np.zeros(self.n, dtype=int)
+        for i in range(self.n):
+            for j in range(self.n):
+                result[i] ^= self.row[(i - j) % self.n] * v[j]
+        return result
+    
+    def add(self, other: 'CirculantMatrix') -> 'CirculantMatrix':
+        """Add two circulant matrices."""
+        return CirculantMatrix((self.row + other.row) % 2)
+    
+    def weight(self) -> int:
+        """Return Hamming weight of first row."""
+        return int(np.sum(self.row))
+    
+    @classmethod
+    def random_sparse(cls, n: int, weight: int) -> 'CirculantMatrix':
+        """Generate random circulant with given row weight."""
+        row = np.zeros(n, dtype=int)
+        positions = np.random.choice(n, weight, replace=False)
+        row[positions] = 1
+        return cls(row)
+
+
+class QuasiCyclicCode:
+    """
+    Quasi-cyclic [2n, n] code with parity-check H = [H₀ | H₁].
+    
+    H₀ and H₁ are n×n circulant matrices.
+    """
+    
+    def __init__(self, h0: CirculantMatrix, h1: CirculantMatrix):
+        """
+        Initialize QC code.
+        
+        Args:
+            h0, h1: Circulant matrices forming H = [H₀ | H₁]
+        """
+        self.h0 = h0
+        self.h1 = h1
+        self.n = h0.n
+        self.code_length = 2 * self.n
+    
+    def syndrome(self, error: np.ndarray) -> np.ndarray:
+        """
+        Compute syndrome s = H·e^T.
+        
+        For e = [e₀ | e₁]: s = H₀·e₀ + H₁·e₁
+        """
+        e0 = error[:self.n]
+        e1 = error[self.n:]
+        
+        s0 = self.h0.multiply_vector(e0)
+        s1 = self.h1.multiply_vector(e1)
+        
+        return (s0 + s1) % 2
+    
+    def get_public_key(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return compact public key (first rows of H₀, H₁)."""
+        return self.h0.row.copy(), self.h1.row.copy()
+    
+    def public_key_bytes(self) -> int:
+        """Return public key size in bytes."""
+        return (2 * self.n + 7) // 8
+
+
+def demonstrate_qc_code():
+    """Demonstrate quasi-cyclic code structure."""
+    print("\nQUASI-CYCLIC CODE DEMONSTRATION")
+    print("=" * 65)
+    
+    n = 8  # Small for demonstration
+    
+    # Create sparse circulant matrices
+    h0 = CirculantMatrix.random_sparse(n, weight=3)
+    h1 = CirculantMatrix.random_sparse(n, weight=3)
+    
+    print(f"Code parameters:")
+    print(f"  Block size n = {n}")
+    print(f"  Code length = {2*n}")
+    print(f"  Row weight (density) = 3")
+    
+    print(f"\nH₀ first row: {h0.row}")
+    print(f"H₁ first row: {h1.row}")
+    
+    print(f"\nH₀ full matrix:")
+    print(h0.to_full_matrix())
+    
+    # Create code
+    qc = QuasiCyclicCode(h0, h1)
+    
+    # Test syndrome
+    error = np.zeros(2 * n, dtype=int)
+    error[[1, 5, 10]] = 1  # Weight-3 error
+    
+    syndrome = qc.syndrome(error)
+    print(f"\nError positions: {np.where(error == 1)[0]}")
+    print(f"Syndrome: {syndrome}")
+    
+    # Key size
+    print(f"\nPublic key size: {qc.public_key_bytes()} bytes")
+    print(f"  (vs full matrix: {(2*n*n)//8} bytes)")
+
+demonstrate_qc_code()
+```
+
+## 3. MDPC Codes and Bit-Flipping Decoding
+
+<Definition term="MDPC Code">
+Moderate Density Parity-Check code: A linear code where the parity-check matrix has moderate row/column weight (not as sparse as LDPC, not as dense as random codes). Enables iterative bit-flipping decoding.
+</Definition>
+
+```python
+class BitFlippingDecoder:
+    """
+    Bit-flipping decoder for MDPC codes.
+    
+    Iterative algorithm:
+    1. Compute syndrome
+    2. For each bit, count unsatisfied checks it's in
+    3. Flip bits exceeding threshold
+    4. Repeat until syndrome is zero or max iterations
+    """
+    
+    def __init__(self, h0: CirculantMatrix, h1: CirculantMatrix, 
+                 max_iterations: int = 100):
+        """
+        Initialize decoder.
+        
+        Args:
+            h0, h1: Parity-check circulant matrices
+            max_iterations: Maximum decoding iterations
+        """
+        self.h0 = h0
+        self.h1 = h1
+        self.n = h0.n
+        self.max_iter = max_iterations
+        
+        # Precompute full matrices for counter computation
+        self.H0_full = h0.to_full_matrix()
+        self.H1_full = h1.to_full_matrix()
+    
+    def compute_syndrome(self, e: np.ndarray) -> np.ndarray:
+        """Compute syndrome."""
+        e0 = e[:self.n]
+        e1 = e[self.n:]
+        return (self.H0_full @ e0 + self.H1_full @ e1) % 2
+    
+    def count_unsatisfied(self, syndrome: np.ndarray, position: int) -> int:
+        """
+        Count unsatisfied parity checks involving a position.
+        
+        A check is unsatisfied if syndrome bit is 1.
+        """
+        count = 0
+        
+        if position < self.n:
+            # In first block
+            for i in range(self.n):
+                if syndrome[i] == 1 and self.H0_full[i, position] == 1:
+                    count += 1
+        else:
+            # In second block
+            pos = position - self.n
+            for i in range(self.n):
+                if syndrome[i] == 1 and self.H1_full[i, pos] == 1:
+                    count += 1
+        
+        return count
+    
+    def decode(self, syndrome: np.ndarray, 
+               threshold_factor: float = 0.5) -> Tuple[Optional[np.ndarray], int]:
+        """
+        Decode using bit-flipping.
+        
+        Args:
+            syndrome: Target syndrome
+            threshold_factor: Fraction of max count for flipping
+        
+        Returns:
+            (error_vector, iterations) or (None, max_iter) if failed
+        """
+        e = np.zeros(2 * self.n, dtype=int)
+        current_syndrome = syndrome.copy()
+        
+        for iteration in range(self.max_iter):
+            if np.all(current_syndrome == 0):
+                return e, iteration
+            
+            # Count unsatisfied checks for each position
+            counts = np.array([self.count_unsatisfied(current_syndrome, i) 
+                              for i in range(2 * self.n)])
+            
+            if np.max(counts) == 0:
+                break
+            
+            # Determine threshold
+            threshold = int(threshold_factor * np.max(counts))
+            threshold = max(threshold, 1)
+            
+            # Flip bits exceeding threshold
+            flipped = False
+            for i in range(2 * self.n):
+                if counts[i] >= threshold:
+                    e[i] ^= 1
+                    flipped = True
+            
+            if not flipped:
+                # Try flipping the maximum
+                max_idx = np.argmax(counts)
+                e[max_idx] ^= 1
+            
+            # Recompute syndrome
+            current_syndrome = self.compute_syndrome(e)
+        
+        if np.all(current_syndrome == 0):
+            return e, self.max_iter
+        
+        return None, self.max_iter  # Decoding failure
+
+
+def demonstrate_bit_flipping():
+    """Demonstrate bit-flipping decoding."""
+    print("\nBIT-FLIPPING DECODER DEMONSTRATION")
+    print("=" * 65)
+    
+    np.random.seed(42)
+    n = 32
+    row_weight = 5
+    
+    # Create MDPC code
+    h0 = CirculantMatrix.random_sparse(n, row_weight)
+    h1 = CirculantMatrix.random_sparse(n, row_weight)
+    
+    decoder = BitFlippingDecoder(h0, h1, max_iterations=50)
+    
+    # Create random low-weight error
+    error_weight = 4
+    true_error = np.zeros(2 * n, dtype=int)
+    positions = np.random.choice(2 * n, error_weight, replace=False)
+    true_error[positions] = 1
+    
+    print(f"Code: QC-MDPC [{2*n}, {n}]")
+    print(f"Row weight: {row_weight}")
+    print(f"Error weight: {error_weight}")
+    print(f"True error positions: {sorted(positions)}")
+    
+    # Compute syndrome
+    syndrome = decoder.compute_syndrome(true_error)
+    print(f"Syndrome weight: {np.sum(syndrome)}")
+    
+    # Decode
+    decoded_error, iterations = decoder.decode(syndrome)
+    
+    if decoded_error is not None:
+        print(f"\nDecoding succeeded in {iterations} iterations")
+        print(f"Decoded error positions: {np.where(decoded_error == 1)[0]}")
+        print(f"Correct: {np.array_equal(true_error, decoded_error)}")
+    else:
+        print(f"\nDecoding FAILED after {iterations} iterations")
+        print("This is a Decoding Failure Rate (DFR) event")
+
+demonstrate_bit_flipping()
+```
+
+## 4. BIKE KEM Construction
+
+```python
+class BIKE:
+    """
+    BIKE Key Encapsulation Mechanism (simplified).
+    
+    BIKE-1 variant: CPA-secure KEM with FO transform for CCA.
+    """
+    
+    # BIKE Level 1 approximate parameters
+    PARAMS = {
+        'level1': {'n': 12323, 'r': 142, 't': 134},  # Actually r is row weight
+        'level3': {'n': 24659, 'r': 206, 't': 199},
+        'level5': {'n': 40973, 'r': 274, 't': 264}
+    }
+    
+    def __init__(self, level: str = 'level1', seed: int = None):
+        """Initialize BIKE with given security level."""
+        if seed is not None:
+            np.random.seed(seed)
+        
+        params = self.PARAMS.get(level, self.PARAMS['level1'])
+        self.n = params['n']
+        self.row_weight = params['r']
+        self.error_weight = params['t']
+        
+        # For demo, use smaller parameters
+        self.n = 127  # Smaller for demo
+        self.row_weight = 9
+        self.error_weight = 9
+    
+    def keygen(self) -> Tuple[dict, dict]:
+        """
+        Generate BIKE key pair.
+        
+        Returns:
+            (public_key, private_key)
+        """
+        # Generate sparse secret key polynomials
+        h0 = CirculantMatrix.random_sparse(self.n, self.row_weight)
+        h1 = CirculantMatrix.random_sparse(self.n, self.row_weight)
+        
+        # Compute h = h1 * h0^{-1} mod (x^n + 1)
+        # Simplified: just use h0, h1 directly
+        
+        public_key = {
+            'h0_row': h0.row,
+            'h1_row': h1.row,
+            'n': self.n
+        }
+        
+        private_key = {
+            'h0': h0,
+            'h1': h1
+        }
+        
+        return public_key, private_key
+    
+    def encapsulate(self, public_key: dict) -> Tuple[bytes, np.ndarray]:
+        """
+        Encapsulate a random shared secret.
+        
+        Returns:
+            (shared_secret, ciphertext)
+        """
+        n = public_key['n']
+        h0 = CirculantMatrix(public_key['h0_row'])
+        h1 = CirculantMatrix(public_key['h1_row'])
+        
+        # Generate random error of weight t
+        error = np.zeros(2 * n, dtype=int)
+        positions = np.random.choice(2 * n, self.error_weight, replace=False)
+        error[positions] = 1
+        
+        # Ciphertext is syndrome
+        qc = QuasiCyclicCode(h0, h1)
+        ciphertext = qc.syndrome(error)
+        
+        # Shared secret derived from error
+        import hashlib
+        error_bytes = np.packbits(error).tobytes()
+        shared_secret = hashlib.sha256(error_bytes).digest()
+        
+        return shared_secret, ciphertext
+    
+    def decapsulate(self, private_key: dict, ciphertext: np.ndarray) -> Optional[bytes]:
+        """
+        Decapsulate shared secret from ciphertext.
+        
+        Returns:
+            shared_secret or None if decoding fails
+        """
+        h0 = private_key['h0']
+        h1 = private_key['h1']
+        
+        # Decode to find error
+        decoder = BitFlippingDecoder(h0, h1, max_iterations=100)
+        error, _ = decoder.decode(ciphertext)
+        
+        if error is None:
+            return None  # Decoding failure
+        
+        # Derive shared secret
+        import hashlib
+        error_bytes = np.packbits(error).tobytes()
+        shared_secret = hashlib.sha256(error_bytes).digest()
+        
+        return shared_secret
+
+
+def demonstrate_bike():
+    """Demonstrate BIKE KEM."""
+    print("\nBIKE KEM DEMONSTRATION")
+    print("=" * 65)
+    
+    bike = BIKE('level1', seed=42)
+    
+    print(f"Parameters (demo):")
+    print(f"  n = {bike.n}")
+    print(f"  Row weight = {bike.row_weight}")
+    print(f"  Error weight = {bike.error_weight}")
+    
+    # Key generation
+    print("\n1. KEY GENERATION")
+    pk, sk = bike.keygen()
+    print(f"   Public key: 2 × {bike.n} bits = {2*bike.n//8} bytes")
+    
+    # Encapsulation
+    print("\n2. ENCAPSULATION")
+    shared_secret_enc, ciphertext = bike.encapsulate(pk)
+    print(f"   Ciphertext: {len(ciphertext)} bits")
+    print(f"   Shared secret: {shared_secret_enc[:16].hex()}...")
+    
+    # Decapsulation
+    print("\n3. DECAPSULATION")
+    shared_secret_dec = bike.decapsulate(sk, ciphertext)
+    
+    if shared_secret_dec is not None:
+        print(f"   Shared secret: {shared_secret_dec[:16].hex()}...")
+        print(f"   Match: {shared_secret_enc == shared_secret_dec}")
+    else:
+        print("   DECODING FAILURE!")
+
+demonstrate_bike()
+```
+
+## 5. Decoding Failure Rate
+
+```python
+def analyze_dfr():
+    """Analyze Decoding Failure Rate."""
+    print("\nDECODING FAILURE RATE (DFR) ANALYSIS")
+    print("=" * 65)
+    
+    analysis = """
+    THE DFR CHALLENGE:
+    ━━━━━━━━━━━━━━━━━━
+    
+    Unlike Goppa codes, MDPC bit-flipping can FAIL to decode!
+    
+    Decoding failure occurs when:
+    • Error pattern is "adversarial" for the decoder
+    • Iterations don't converge to zero syndrome
+    • More likely for higher error weights
+    
+    SECURITY IMPLICATIONS:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ 1. REACTION ATTACKS                                                │
+    │    If attacker can detect DFR, they may learn secret key info     │
+    │    Mitigation: Constant-time implementation, implicit rejection    │
+    │                                                                     │
+    │ 2. KEY RECOVERY                                                    │
+    │    Guo-Johansson-Stankovski (GJS) attack exploits DFR             │
+    │    Mitigation: Choose parameters with DFR < 2^{-128}              │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    BIKE PARAMETER SELECTION:
+    
+    DFR must be < 2^{-λ} for λ-bit security
+    
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Level  │ n       │ Row wt │ Err wt │ Target DFR   │ PK (bytes)     │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ 1      │ 12,323  │ 142    │ 134    │ 2^{-128}     │ 1,541          │
+    │ 3      │ 24,659  │ 206    │ 199    │ 2^{-192}     │ 3,083          │
+    │ 5      │ 40,973  │ 274    │ 264    │ 2^{-256}     │ 5,122          │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    COMPARISON TO CLASSIC McELIECE:
+    
+    • McEliece: Goppa decoder NEVER fails (algebraic, deterministic)
+    • BIKE: Bit-flipping can fail, but with negligible probability
+    • Trade-off: BIKE has 170× smaller keys but DFR complexity
+    """
+    print(analysis)
+
+analyze_dfr()
+```
+
+## Summary
+
+In this lesson, you learned about BIKE:
+
+1. **Motivation**: Reduce McEliece's huge key sizes
+2. **Quasi-Cyclic Structure**: Circulant matrices enable compact keys
+3. **MDPC Codes**: Moderate density enables bit-flipping decoding
+4. **Bit-Flipping Decoder**: Iterative algorithm flips bits with high counts
+5. **KEM Construction**: Error is message, syndrome is ciphertext
+6. **DFR Challenge**: Must be negligible for security
+7. **Tradeoffs**: 170× smaller keys than McEliece, but DFR concerns
+
+BIKE offers a compelling middle ground between McEliece's security and Kyber's efficiency.
+
+## Further Reading
+
+- Next lesson: Classic McEliece NIST Submission
+- Related: LDPC codes and belief propagation
+- Advanced: GJS attack on BIKE

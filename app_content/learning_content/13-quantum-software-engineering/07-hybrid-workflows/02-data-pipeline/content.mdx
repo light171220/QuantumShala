@@ -1,0 +1,1185 @@
+---
+title: "Data Pipelines for Quantum Computing"
+description: "Build robust data pipelines for quantum-classical hybrid systems."
+duration: 45
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+- Design data preprocessing pipelines for quantum circuit inputs
+- Implement various feature encoding schemes for quantum algorithms
+- Build result post-processing pipelines for quantum measurements
+- Develop batch processing strategies for quantum workloads
+- Handle data validation and transformation across quantum-classical boundaries
+
+## 1. Data Flow in Hybrid Systems
+
+Quantum computing requires careful data management as information flows between classical and quantum domains.
+
+```
+DATA PIPELINE ARCHITECTURE
+==========================
+
+Classical Data                    Quantum Processing
+──────────────                    ──────────────────
+
+┌─────────────┐
+│  Raw Data   │
+│  Sources    │
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
+│   Data      │
+│ Validation  │
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐    ┌─────────────────────────────────┐
+│   Feature   │───►│      Quantum Feature Map         │
+│ Engineering │    │  (Encoding into quantum states)  │
+└─────────────┘    └──────────────┬──────────────────┘
+                                  │
+                   ┌──────────────▼──────────────┐
+                   │    Quantum Circuit          │
+                   │    Execution                │
+                   └──────────────┬──────────────┘
+                                  │
+┌─────────────┐    ┌──────────────▼──────────────┐
+│   Result    │◄───│    Measurement Results      │
+│  Analysis   │    │    (Classical bitstrings)   │
+└──────┬──────┘    └─────────────────────────────┘
+       │
+       ▼
+┌─────────────┐
+│   Output    │
+│   Results   │
+└─────────────┘
+```
+
+## 2. Data Preprocessing Pipeline
+
+```python
+from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional, Callable, Union
+from abc import ABC, abstractmethod
+import numpy as np
+from enum import Enum
+
+class DataType(Enum):
+    """Supported data types for quantum pipelines."""
+    NUMERICAL = "numerical"
+    CATEGORICAL = "categorical"
+    BINARY = "binary"
+    IMAGE = "image"
+    TIME_SERIES = "time_series"
+
+@dataclass
+class DataSchema:
+    """Schema definition for pipeline data."""
+    name: str
+    data_type: DataType
+    shape: tuple
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    categories: Optional[List[str]] = None
+
+@dataclass
+class PipelineConfig:
+    """Configuration for data pipeline."""
+    input_schema: List[DataSchema]
+    num_qubits: int
+    encoding_method: str = "amplitude"
+    normalize: bool = True
+    handle_missing: str = "mean"  # "mean", "median", "drop", "zero"
+    batch_size: int = 100
+
+class DataValidator:
+    """
+    Validates data before quantum processing.
+
+    Ensures data meets requirements for encoding
+    into quantum states.
+    """
+
+    def __init__(self, schema: List[DataSchema]):
+        self.schema = {s.name: s for s in schema}
+
+    def validate(self, data: Dict[str, np.ndarray]) -> Dict[str, Any]:
+        """
+        Validate input data against schema.
+
+        Returns:
+            Validation result with status and any issues found.
+        """
+        issues = []
+
+        for name, schema in self.schema.items():
+            if name not in data:
+                issues.append(f"Missing required field: {name}")
+                continue
+
+            field_data = data[name]
+
+            # Check shape
+            if field_data.shape[1:] != schema.shape:
+                issues.append(
+                    f"Shape mismatch for {name}: "
+                    f"expected {schema.shape}, got {field_data.shape[1:]}"
+                )
+
+            # Check data type constraints
+            if schema.data_type == DataType.NUMERICAL:
+                if not np.issubdtype(field_data.dtype, np.number):
+                    issues.append(f"{name} must be numerical")
+
+                # Check bounds if specified
+                if schema.min_value is not None:
+                    if np.any(field_data < schema.min_value):
+                        issues.append(f"{name} contains values below minimum")
+
+                if schema.max_value is not None:
+                    if np.any(field_data > schema.max_value):
+                        issues.append(f"{name} contains values above maximum")
+
+            elif schema.data_type == DataType.BINARY:
+                unique_vals = np.unique(field_data)
+                if not np.all(np.isin(unique_vals, [0, 1])):
+                    issues.append(f"{name} must contain only 0 and 1")
+
+            # Check for NaN/Inf
+            if np.any(np.isnan(field_data)):
+                issues.append(f"{name} contains NaN values")
+            if np.any(np.isinf(field_data)):
+                issues.append(f"{name} contains Inf values")
+
+        return {
+            "valid": len(issues) == 0,
+            "issues": issues,
+            "data_shape": {k: v.shape for k, v in data.items()}
+        }
+
+
+class DataPreprocessor:
+    """
+    Preprocesses classical data for quantum encoding.
+
+    Handles:
+    - Normalization to valid ranges
+    - Missing value imputation
+    - Feature scaling
+    - Dimensionality adjustment
+    """
+
+    def __init__(self, config: PipelineConfig):
+        self.config = config
+        self.fit_params: Dict[str, Dict] = {}
+
+    def fit(self, data: np.ndarray) -> 'DataPreprocessor':
+        """
+        Fit preprocessor to training data.
+
+        Learns normalization parameters, handles statistics.
+        """
+        self.fit_params = {
+            "mean": np.nanmean(data, axis=0),
+            "std": np.nanstd(data, axis=0),
+            "min": np.nanmin(data, axis=0),
+            "max": np.nanmax(data, axis=0),
+            "median": np.nanmedian(data, axis=0)
+        }
+
+        # Handle zero std
+        self.fit_params["std"] = np.where(
+            self.fit_params["std"] == 0,
+            1.0,
+            self.fit_params["std"]
+        )
+
+        return self
+
+    def transform(self, data: np.ndarray) -> np.ndarray:
+        """
+        Transform data using fitted parameters.
+        """
+        if not self.fit_params:
+            raise ValueError("Preprocessor must be fit before transform")
+
+        result = data.copy()
+
+        # Handle missing values
+        result = self._handle_missing(result)
+
+        # Normalize if configured
+        if self.config.normalize:
+            result = self._normalize(result)
+
+        # Adjust dimensions for quantum encoding
+        result = self._adjust_dimensions(result)
+
+        return result
+
+    def fit_transform(self, data: np.ndarray) -> np.ndarray:
+        """Fit and transform in one step."""
+        return self.fit(data).transform(data)
+
+    def _handle_missing(self, data: np.ndarray) -> np.ndarray:
+        """Handle missing values."""
+        if self.config.handle_missing == "mean":
+            fill_values = self.fit_params["mean"]
+        elif self.config.handle_missing == "median":
+            fill_values = self.fit_params["median"]
+        elif self.config.handle_missing == "zero":
+            fill_values = np.zeros_like(self.fit_params["mean"])
+        else:
+            return data[~np.isnan(data).any(axis=1)]
+
+        # Fill NaN values
+        for i in range(data.shape[1]):
+            mask = np.isnan(data[:, i])
+            data[mask, i] = fill_values[i]
+
+        return data
+
+    def _normalize(self, data: np.ndarray) -> np.ndarray:
+        """
+        Normalize data to [0, 2*pi] range for quantum encoding.
+        """
+        # Min-max normalization
+        data_min = self.fit_params["min"]
+        data_max = self.fit_params["max"]
+        data_range = data_max - data_min
+        data_range = np.where(data_range == 0, 1, data_range)
+
+        normalized = (data - data_min) / data_range
+
+        # Scale to [0, 2*pi] for rotation angles
+        return normalized * 2 * np.pi
+
+    def _adjust_dimensions(self, data: np.ndarray) -> np.ndarray:
+        """
+        Adjust data dimensions to match qubit count.
+        """
+        n_features = data.shape[1]
+        n_qubits = self.config.num_qubits
+
+        if n_features > n_qubits:
+            # Dimensionality reduction via PCA-like approach
+            # (simplified - use sklearn PCA in production)
+            return data[:, :n_qubits]
+        elif n_features < n_qubits:
+            # Pad with zeros
+            padding = np.zeros((data.shape[0], n_qubits - n_features))
+            return np.hstack([data, padding])
+
+        return data
+
+
+# Example usage
+config = PipelineConfig(
+    input_schema=[
+        DataSchema("features", DataType.NUMERICAL, (4,), 0.0, 10.0)
+    ],
+    num_qubits=4,
+    encoding_method="angle",
+    normalize=True
+)
+
+preprocessor = DataPreprocessor(config)
+sample_data = np.random.rand(100, 4) * 10
+
+processed = preprocessor.fit_transform(sample_data)
+print(f"Original shape: {sample_data.shape}")
+print(f"Processed shape: {processed.shape}")
+print(f"Value range: [{processed.min():.4f}, {processed.max():.4f}]")
+```
+
+## 3. Feature Encoding Pipelines
+
+Different quantum algorithms require different encoding strategies for classical data.
+
+```python
+class FeatureEncoder(ABC):
+    """Abstract base class for quantum feature encoders."""
+
+    @abstractmethod
+    def encode(self, data: np.ndarray) -> List[Dict[str, Any]]:
+        """
+        Encode classical data for quantum circuit.
+
+        Returns:
+            List of encoding instructions for circuit construction.
+        """
+        pass
+
+    @abstractmethod
+    def get_circuit_depth(self, n_features: int) -> int:
+        """Get circuit depth for this encoding."""
+        pass
+
+    @abstractmethod
+    def get_num_parameters(self, n_features: int) -> int:
+        """Get number of encoding parameters."""
+        pass
+
+
+class AngleEncoder(FeatureEncoder):
+    """
+    Angle encoding: maps features to rotation angles.
+
+    Each feature x_i becomes a rotation: R_y(x_i) or R_z(x_i)
+    Requires: num_qubits >= num_features
+    Circuit depth: O(1) per feature
+    """
+
+    def __init__(self, rotation_axis: str = "Y", repetitions: int = 1):
+        self.rotation_axis = rotation_axis
+        self.repetitions = repetitions
+
+    def encode(self, data: np.ndarray) -> List[Dict[str, Any]]:
+        """
+        Generate angle encoding instructions.
+
+        Each sample becomes a list of rotation gates.
+        """
+        n_samples, n_features = data.shape
+        instructions = []
+
+        for sample_idx in range(n_samples):
+            sample_instructions = []
+
+            for rep in range(self.repetitions):
+                for qubit_idx, angle in enumerate(data[sample_idx]):
+                    sample_instructions.append({
+                        "gate": f"R{self.rotation_axis}",
+                        "qubit": qubit_idx,
+                        "parameter": float(angle),
+                        "layer": rep
+                    })
+
+            instructions.append(sample_instructions)
+
+        return instructions
+
+    def get_circuit_depth(self, n_features: int) -> int:
+        return self.repetitions
+
+    def get_num_parameters(self, n_features: int) -> int:
+        return n_features * self.repetitions
+
+
+class AmplitudeEncoder(FeatureEncoder):
+    """
+    Amplitude encoding: maps features to state amplitudes.
+
+    Maps 2^n features to n-qubit state amplitudes.
+    Requires: 2^num_qubits >= num_features
+    Circuit depth: O(2^n) in general
+    """
+
+    def __init__(self, normalize: bool = True):
+        self.normalize = normalize
+
+    def encode(self, data: np.ndarray) -> List[Dict[str, Any]]:
+        """
+        Generate amplitude encoding instructions.
+        """
+        n_samples, n_features = data.shape
+        n_qubits = int(np.ceil(np.log2(n_features)))
+
+        # Pad to power of 2
+        padded_size = 2 ** n_qubits
+
+        instructions = []
+
+        for sample_idx in range(n_samples):
+            sample = data[sample_idx]
+
+            # Pad if necessary
+            if len(sample) < padded_size:
+                sample = np.pad(sample, (0, padded_size - len(sample)))
+
+            # Normalize for valid quantum state
+            if self.normalize:
+                norm = np.linalg.norm(sample)
+                if norm > 0:
+                    sample = sample / norm
+
+            instructions.append({
+                "encoding": "amplitude",
+                "num_qubits": n_qubits,
+                "amplitudes": sample.tolist(),
+                "method": "state_preparation"
+            })
+
+        return instructions
+
+    def get_circuit_depth(self, n_features: int) -> int:
+        n_qubits = int(np.ceil(np.log2(n_features)))
+        return 2 ** n_qubits  # Worst case
+
+    def get_num_parameters(self, n_features: int) -> int:
+        return n_features
+
+
+class IQPEncoder(FeatureEncoder):
+    """
+    IQP (Instantaneous Quantum Polynomial) encoding.
+
+    Creates feature maps with:
+    1. Hadamard on all qubits
+    2. ZZ interactions with feature products
+    3. Single-qubit Z rotations
+    """
+
+    def __init__(self, entanglement: str = "full", repetitions: int = 2):
+        self.entanglement = entanglement
+        self.repetitions = repetitions
+
+    def encode(self, data: np.ndarray) -> List[Dict[str, Any]]:
+        """
+        Generate IQP encoding instructions.
+        """
+        n_samples, n_features = data.shape
+        instructions = []
+
+        for sample_idx in range(n_samples):
+            sample = data[sample_idx]
+            sample_instructions = []
+
+            for rep in range(self.repetitions):
+                # Hadamard layer
+                for q in range(n_features):
+                    sample_instructions.append({
+                        "gate": "H",
+                        "qubit": q,
+                        "layer": rep * 3
+                    })
+
+                # Z rotations
+                for q in range(n_features):
+                    sample_instructions.append({
+                        "gate": "RZ",
+                        "qubit": q,
+                        "parameter": float(sample[q]),
+                        "layer": rep * 3 + 1
+                    })
+
+                # ZZ entangling gates
+                if self.entanglement == "full":
+                    for i in range(n_features):
+                        for j in range(i + 1, n_features):
+                            sample_instructions.append({
+                                "gate": "RZZ",
+                                "qubits": [i, j],
+                                "parameter": float(sample[i] * sample[j]),
+                                "layer": rep * 3 + 2
+                            })
+                elif self.entanglement == "linear":
+                    for i in range(n_features - 1):
+                        sample_instructions.append({
+                            "gate": "RZZ",
+                            "qubits": [i, i + 1],
+                            "parameter": float(sample[i] * sample[i + 1]),
+                            "layer": rep * 3 + 2
+                        })
+
+            instructions.append(sample_instructions)
+
+        return instructions
+
+    def get_circuit_depth(self, n_features: int) -> int:
+        return self.repetitions * 3
+
+    def get_num_parameters(self, n_features: int) -> int:
+        if self.entanglement == "full":
+            return n_features + n_features * (n_features - 1) // 2
+        else:
+            return n_features + n_features - 1
+
+
+class FeatureEncodingPipeline:
+    """
+    Complete pipeline for feature encoding.
+
+    Combines preprocessing with encoding strategy selection.
+    """
+
+    ENCODERS = {
+        "angle": AngleEncoder,
+        "amplitude": AmplitudeEncoder,
+        "iqp": IQPEncoder
+    }
+
+    def __init__(
+        self,
+        encoder_type: str,
+        preprocessor: DataPreprocessor,
+        encoder_config: Dict[str, Any] = None
+    ):
+        encoder_config = encoder_config or {}
+        self.encoder = self.ENCODERS[encoder_type](**encoder_config)
+        self.preprocessor = preprocessor
+
+    def process(self, data: np.ndarray) -> List[Dict[str, Any]]:
+        """
+        Full pipeline: preprocess and encode.
+        """
+        # Preprocess
+        processed = self.preprocessor.transform(data)
+
+        # Encode
+        encoded = self.encoder.encode(processed)
+
+        return encoded
+
+    def get_encoding_info(self, n_features: int) -> Dict[str, Any]:
+        """Get encoding metadata."""
+        return {
+            "encoder_type": type(self.encoder).__name__,
+            "circuit_depth": self.encoder.get_circuit_depth(n_features),
+            "num_parameters": self.encoder.get_num_parameters(n_features)
+        }
+
+
+# Example: Create encoding pipeline
+encoding_pipeline = FeatureEncodingPipeline(
+    encoder_type="angle",
+    preprocessor=preprocessor,
+    encoder_config={"rotation_axis": "Y", "repetitions": 2}
+)
+
+# Get encoding info
+info = encoding_pipeline.get_encoding_info(4)
+print(f"\nEncoding info: {info}")
+```
+
+## 4. Result Post-Processing Pipeline
+
+```python
+from typing import Tuple
+from collections import Counter
+
+@dataclass
+class MeasurementResult:
+    """Container for quantum measurement results."""
+    counts: Dict[str, int]
+    num_qubits: int
+    shots: int
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+class ResultPostProcessor:
+    """
+    Post-processes quantum measurement results.
+
+    Handles:
+    - Statistical analysis
+    - Expectation value calculation
+    - Probability extraction
+    - Error mitigation application
+    """
+
+    def __init__(self, error_mitigation: bool = True):
+        self.error_mitigation = error_mitigation
+        self.calibration_matrix: Optional[np.ndarray] = None
+
+    def process(self, result: MeasurementResult) -> Dict[str, Any]:
+        """
+        Complete post-processing pipeline.
+        """
+        # Convert counts to probabilities
+        probabilities = self._counts_to_probabilities(result.counts, result.shots)
+
+        # Apply error mitigation if enabled
+        if self.error_mitigation and self.calibration_matrix is not None:
+            probabilities = self._apply_error_mitigation(probabilities)
+
+        # Calculate statistics
+        statistics = self._calculate_statistics(result.counts, result.shots)
+
+        # Extract expectation values
+        expectations = self._calculate_expectations(probabilities, result.num_qubits)
+
+        return {
+            "probabilities": probabilities,
+            "statistics": statistics,
+            "expectations": expectations,
+            "raw_counts": result.counts,
+            "total_shots": result.shots
+        }
+
+    def _counts_to_probabilities(
+        self,
+        counts: Dict[str, int],
+        shots: int
+    ) -> Dict[str, float]:
+        """Convert measurement counts to probabilities."""
+        return {k: v / shots for k, v in counts.items()}
+
+    def _apply_error_mitigation(
+        self,
+        probabilities: Dict[str, float]
+    ) -> Dict[str, float]:
+        """
+        Apply readout error mitigation using calibration matrix.
+        """
+        if self.calibration_matrix is None:
+            return probabilities
+
+        # Convert probabilities to vector
+        n_qubits = len(list(probabilities.keys())[0])
+        n_states = 2 ** n_qubits
+
+        prob_vector = np.zeros(n_states)
+        for bitstring, prob in probabilities.items():
+            idx = int(bitstring, 2)
+            prob_vector[idx] = prob
+
+        # Apply inverse calibration matrix
+        try:
+            corrected = np.linalg.lstsq(
+                self.calibration_matrix,
+                prob_vector,
+                rcond=None
+            )[0]
+
+            # Clip and renormalize
+            corrected = np.clip(corrected, 0, 1)
+            corrected /= corrected.sum()
+
+            # Convert back to dictionary
+            result = {}
+            for i, prob in enumerate(corrected):
+                if prob > 1e-10:
+                    bitstring = format(i, f'0{n_qubits}b')
+                    result[bitstring] = float(prob)
+
+            return result
+        except np.linalg.LinAlgError:
+            return probabilities
+
+    def _calculate_statistics(
+        self,
+        counts: Dict[str, int],
+        shots: int
+    ) -> Dict[str, float]:
+        """Calculate statistical measures from counts."""
+        probs = np.array(list(counts.values())) / shots
+
+        # Shannon entropy
+        entropy = -np.sum(probs * np.log2(probs + 1e-10))
+
+        # Most likely outcome
+        most_likely = max(counts.items(), key=lambda x: x[1])
+
+        return {
+            "entropy": float(entropy),
+            "most_likely_state": most_likely[0],
+            "most_likely_probability": most_likely[1] / shots,
+            "num_unique_states": len(counts),
+            "uniformity": len(counts) / (2 ** len(most_likely[0]))
+        }
+
+    def _calculate_expectations(
+        self,
+        probabilities: Dict[str, float],
+        num_qubits: int
+    ) -> Dict[str, float]:
+        """
+        Calculate expectation values for standard observables.
+        """
+        expectations = {}
+
+        # Single-qubit Z expectations
+        for q in range(num_qubits):
+            z_exp = 0.0
+            for bitstring, prob in probabilities.items():
+                bit = int(bitstring[num_qubits - 1 - q])
+                z_exp += prob * (1 if bit == 0 else -1)
+            expectations[f"Z_{q}"] = z_exp
+
+        # Parity expectation (all Z)
+        parity_exp = 0.0
+        for bitstring, prob in probabilities.items():
+            parity = 1 if bitstring.count('1') % 2 == 0 else -1
+            parity_exp += prob * parity
+        expectations["parity"] = parity_exp
+
+        return expectations
+
+    def set_calibration_matrix(self, matrix: np.ndarray):
+        """Set the error mitigation calibration matrix."""
+        self.calibration_matrix = matrix
+
+
+class ResultAggregator:
+    """
+    Aggregates results from multiple quantum jobs.
+
+    Useful for:
+    - Combining results from batched executions
+    - Statistical error reduction
+    - Distributed quantum computing
+    """
+
+    def __init__(self):
+        self.results: List[MeasurementResult] = []
+
+    def add_result(self, result: MeasurementResult):
+        """Add a result to the aggregator."""
+        self.results.append(result)
+
+    def aggregate(self) -> MeasurementResult:
+        """
+        Combine all results into single aggregated result.
+        """
+        if not self.results:
+            raise ValueError("No results to aggregate")
+
+        # Combine counts
+        combined_counts: Counter = Counter()
+        total_shots = 0
+
+        for result in self.results:
+            combined_counts.update(result.counts)
+            total_shots += result.shots
+
+        return MeasurementResult(
+            counts=dict(combined_counts),
+            num_qubits=self.results[0].num_qubits,
+            shots=total_shots,
+            metadata={
+                "num_jobs_aggregated": len(self.results),
+                "aggregation_method": "count_sum"
+            }
+        )
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get statistics across all results."""
+        if not self.results:
+            return {}
+
+        shots_per_job = [r.shots for r in self.results]
+
+        return {
+            "num_jobs": len(self.results),
+            "total_shots": sum(shots_per_job),
+            "min_shots_per_job": min(shots_per_job),
+            "max_shots_per_job": max(shots_per_job),
+            "mean_shots_per_job": np.mean(shots_per_job)
+        }
+
+
+# Example usage
+result = MeasurementResult(
+    counts={"00": 480, "01": 25, "10": 22, "11": 497},
+    num_qubits=2,
+    shots=1024
+)
+
+postprocessor = ResultPostProcessor(error_mitigation=False)
+processed = postprocessor.process(result)
+
+print("\nPost-processed results:")
+print(f"  Probabilities: {processed['probabilities']}")
+print(f"  Statistics: {processed['statistics']}")
+print(f"  Expectations: {processed['expectations']}")
+```
+
+## 5. Batch Processing Strategies
+
+```python
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue
+import threading
+import time
+
+@dataclass
+class BatchJob:
+    """Represents a batch of quantum jobs."""
+    batch_id: str
+    circuits: List[Any]  # Circuit representations
+    shots_per_circuit: int
+    priority: int = 0
+    submitted_at: float = field(default_factory=time.time)
+
+@dataclass
+class BatchResult:
+    """Results from a batch execution."""
+    batch_id: str
+    results: List[MeasurementResult]
+    execution_time: float
+    success: bool
+    errors: List[str] = field(default_factory=list)
+
+class BatchProcessor:
+    """
+    Manages batch processing of quantum circuits.
+
+    Strategies:
+    - Parallel execution across multiple backends
+    - Queue-based job management
+    - Priority scheduling
+    - Automatic retry on failure
+    """
+
+    def __init__(
+        self,
+        max_batch_size: int = 100,
+        max_parallel_jobs: int = 5,
+        retry_attempts: int = 3
+    ):
+        self.max_batch_size = max_batch_size
+        self.max_parallel_jobs = max_parallel_jobs
+        self.retry_attempts = retry_attempts
+        self.job_queue: Queue = Queue()
+        self.results: Dict[str, BatchResult] = {}
+        self._lock = threading.Lock()
+
+    def create_batches(
+        self,
+        circuits: List[Any],
+        shots: int
+    ) -> List[BatchJob]:
+        """
+        Split circuits into optimally-sized batches.
+        """
+        batches = []
+
+        for i in range(0, len(circuits), self.max_batch_size):
+            batch_circuits = circuits[i:i + self.max_batch_size]
+            batch = BatchJob(
+                batch_id=f"batch_{i // self.max_batch_size}_{int(time.time())}",
+                circuits=batch_circuits,
+                shots_per_circuit=shots
+            )
+            batches.append(batch)
+
+        return batches
+
+    def submit_batch(self, batch: BatchJob):
+        """Submit a batch to the processing queue."""
+        self.job_queue.put(batch)
+
+    def process_batches(
+        self,
+        batches: List[BatchJob],
+        executor_fn: Callable[[Any, int], MeasurementResult]
+    ) -> List[BatchResult]:
+        """
+        Process multiple batches with parallel execution.
+        """
+        results = []
+
+        with ThreadPoolExecutor(max_workers=self.max_parallel_jobs) as executor:
+            futures = {
+                executor.submit(self._process_single_batch, batch, executor_fn): batch
+                for batch in batches
+            }
+
+            for future in as_completed(futures):
+                batch = futures[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    results.append(BatchResult(
+                        batch_id=batch.batch_id,
+                        results=[],
+                        execution_time=0,
+                        success=False,
+                        errors=[str(e)]
+                    ))
+
+        return results
+
+    def _process_single_batch(
+        self,
+        batch: BatchJob,
+        executor_fn: Callable[[Any, int], MeasurementResult]
+    ) -> BatchResult:
+        """
+        Process a single batch with retry logic.
+        """
+        start_time = time.time()
+        results = []
+        errors = []
+
+        for circuit in batch.circuits:
+            success = False
+
+            for attempt in range(self.retry_attempts):
+                try:
+                    result = executor_fn(circuit, batch.shots_per_circuit)
+                    results.append(result)
+                    success = True
+                    break
+                except Exception as e:
+                    if attempt == self.retry_attempts - 1:
+                        errors.append(f"Circuit failed after {self.retry_attempts} attempts: {e}")
+
+        return BatchResult(
+            batch_id=batch.batch_id,
+            results=results,
+            execution_time=time.time() - start_time,
+            success=len(errors) == 0,
+            errors=errors
+        )
+
+
+class AdaptiveBatcher:
+    """
+    Adaptively adjusts batch sizes based on performance.
+
+    Monitors:
+    - Queue times
+    - Failure rates
+    - Cost per circuit
+
+    Optimizes for throughput or cost.
+    """
+
+    def __init__(
+        self,
+        initial_batch_size: int = 50,
+        min_batch_size: int = 10,
+        max_batch_size: int = 300
+    ):
+        self.current_batch_size = initial_batch_size
+        self.min_batch_size = min_batch_size
+        self.max_batch_size = max_batch_size
+        self.performance_history: List[Dict] = []
+
+    def record_performance(
+        self,
+        batch_size: int,
+        execution_time: float,
+        failure_rate: float,
+        queue_time: float
+    ):
+        """Record batch execution performance."""
+        self.performance_history.append({
+            "batch_size": batch_size,
+            "execution_time": execution_time,
+            "failure_rate": failure_rate,
+            "queue_time": queue_time,
+            "throughput": batch_size / (execution_time + queue_time),
+            "timestamp": time.time()
+        })
+
+        # Keep only recent history
+        if len(self.performance_history) > 100:
+            self.performance_history = self.performance_history[-100:]
+
+    def get_optimal_batch_size(self) -> int:
+        """
+        Calculate optimal batch size based on history.
+        """
+        if len(self.performance_history) < 5:
+            return self.current_batch_size
+
+        recent = self.performance_history[-10:]
+
+        # Calculate average metrics by batch size
+        size_performance: Dict[int, List[float]] = {}
+
+        for entry in recent:
+            size = entry["batch_size"]
+            throughput = entry["throughput"]
+            failure_rate = entry["failure_rate"]
+
+            # Penalize failure rate
+            adjusted_throughput = throughput * (1 - failure_rate)
+
+            if size not in size_performance:
+                size_performance[size] = []
+            size_performance[size].append(adjusted_throughput)
+
+        # Find best performing size
+        best_size = self.current_batch_size
+        best_throughput = 0
+
+        for size, throughputs in size_performance.items():
+            avg_throughput = np.mean(throughputs)
+            if avg_throughput > best_throughput:
+                best_throughput = avg_throughput
+                best_size = size
+
+        # Adjust gradually
+        if best_size > self.current_batch_size:
+            self.current_batch_size = min(
+                self.current_batch_size + 10,
+                self.max_batch_size
+            )
+        elif best_size < self.current_batch_size:
+            self.current_batch_size = max(
+                self.current_batch_size - 10,
+                self.min_batch_size
+            )
+
+        return self.current_batch_size
+
+
+# Example batch processing
+batch_processor = BatchProcessor(
+    max_batch_size=50,
+    max_parallel_jobs=4
+)
+
+# Simulated circuits
+circuits = [f"circuit_{i}" for i in range(200)]
+
+# Create batches
+batches = batch_processor.create_batches(circuits, shots=1024)
+
+print(f"\nCreated {len(batches)} batches from {len(circuits)} circuits")
+for batch in batches[:3]:
+    print(f"  {batch.batch_id}: {len(batch.circuits)} circuits")
+```
+
+## 6. Complete Data Pipeline Example
+
+```python
+class QuantumDataPipeline:
+    """
+    End-to-end data pipeline for quantum machine learning.
+
+    Integrates:
+    - Data validation
+    - Preprocessing
+    - Feature encoding
+    - Circuit generation
+    - Batch execution
+    - Result post-processing
+    """
+
+    def __init__(self, config: PipelineConfig):
+        self.config = config
+        self.validator = DataValidator(config.input_schema)
+        self.preprocessor = DataPreprocessor(config)
+        self.encoder = AngleEncoder(rotation_axis="Y", repetitions=2)
+        self.postprocessor = ResultPostProcessor()
+        self.batch_processor = BatchProcessor()
+
+    def fit(self, training_data: np.ndarray) -> 'QuantumDataPipeline':
+        """Fit pipeline to training data."""
+        self.preprocessor.fit(training_data)
+        return self
+
+    def run(
+        self,
+        data: np.ndarray,
+        circuit_executor: Callable
+    ) -> Dict[str, Any]:
+        """
+        Execute complete pipeline.
+
+        Args:
+            data: Input data array
+            circuit_executor: Function to execute quantum circuits
+
+        Returns:
+            Processed results with metadata
+        """
+        pipeline_start = time.time()
+
+        # Step 1: Validate
+        validation = self.validator.validate({"features": data})
+        if not validation["valid"]:
+            return {"success": False, "errors": validation["issues"]}
+
+        # Step 2: Preprocess
+        processed_data = self.preprocessor.transform(data)
+
+        # Step 3: Encode
+        encoded_data = self.encoder.encode(processed_data)
+
+        # Step 4: Create circuits (simplified representation)
+        circuits = [
+            {"encoding": enc, "shots": self.config.batch_size}
+            for enc in encoded_data
+        ]
+
+        # Step 5: Batch and execute
+        batches = self.batch_processor.create_batches(
+            circuits,
+            shots=1024
+        )
+
+        # Simulate execution for demonstration
+        all_results = []
+        for batch in batches:
+            for circuit in batch.circuits:
+                # In real implementation, this executes on quantum hardware
+                result = MeasurementResult(
+                    counts={"00": 500, "11": 524},
+                    num_qubits=self.config.num_qubits,
+                    shots=1024
+                )
+                all_results.append(result)
+
+        # Step 6: Post-process
+        processed_results = [
+            self.postprocessor.process(result)
+            for result in all_results
+        ]
+
+        pipeline_time = time.time() - pipeline_start
+
+        return {
+            "success": True,
+            "num_samples": len(data),
+            "num_batches": len(batches),
+            "results": processed_results,
+            "pipeline_time": pipeline_time,
+            "metadata": {
+                "encoding": type(self.encoder).__name__,
+                "preprocessing": "normalized_to_2pi"
+            }
+        }
+
+
+# Example complete pipeline execution
+pipeline_config = PipelineConfig(
+    input_schema=[
+        DataSchema("features", DataType.NUMERICAL, (4,))
+    ],
+    num_qubits=4,
+    encoding_method="angle"
+)
+
+pipeline = QuantumDataPipeline(pipeline_config)
+
+# Fit on training data
+training_data = np.random.rand(500, 4) * 10
+pipeline.fit(training_data)
+
+# Run on test data
+test_data = np.random.rand(50, 4) * 10
+results = pipeline.run(test_data, lambda x: x)
+
+print(f"\nPipeline Results:")
+print(f"  Success: {results['success']}")
+print(f"  Samples processed: {results['num_samples']}")
+print(f"  Batches executed: {results['num_batches']}")
+print(f"  Pipeline time: {results['pipeline_time']:.4f}s")
+```
+
+## Summary
+
+Data pipelines for quantum computing bridge classical and quantum domains:
+
+1. **Preprocessing**: Validate, clean, normalize, and dimension-adjust classical data
+2. **Feature Encoding**: Transform classical features into quantum circuit parameters
+3. **Post-Processing**: Convert measurement results into actionable insights
+4. **Batch Processing**: Efficiently manage large workloads across quantum resources
+5. **End-to-End Pipelines**: Integrate all components for production-ready systems
+
+## Further Reading
+
+- Qiskit Machine Learning Documentation
+- PennyLane Data Encoding Tutorial
+- Schuld & Petruccione: "Machine Learning with Quantum Computers"
+- AWS Braket Hybrid Jobs Guide

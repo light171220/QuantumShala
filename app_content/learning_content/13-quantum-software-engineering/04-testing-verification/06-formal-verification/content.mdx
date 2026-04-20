@@ -1,0 +1,895 @@
+---
+title: "Formal Verification of Quantum Programs"
+description: "Mathematical methods for proving quantum circuit correctness."
+duration: 45
+difficulty: "advanced"
+---
+
+## 1. Introduction to Formal Verification
+
+Formal verification provides mathematical guarantees about program correctness:
+
+```
+Testing                          Formal Verification
+--------                         -------------------
+Finds bugs                  -->  Proves absence of bugs
+Sample-based               -->  Exhaustive analysis
+Probabilistic confidence   -->  Mathematical certainty
+Scales with test cases     -->  Scales with proof complexity
+```
+
+### Why Formal Verification for Quantum?
+
+Quantum programs present unique verification challenges:
+
+1. **Superposition**: States exist in multiple configurations simultaneously
+2. **Entanglement**: Correlated states across qubits
+3. **Measurement**: Non-deterministic collapse of quantum states
+4. **No-cloning**: Cannot copy quantum states for debugging
+
+## 2. Quantum Program Logics
+
+### 2.1 Classical Hoare Logic Review
+
+Classical Hoare triples: `{P} C {Q}`
+- **P**: Precondition (what holds before)
+- **C**: Command (program to execute)
+- **Q**: Postcondition (what holds after)
+
+```python
+from dataclasses import dataclass
+from typing import Callable, Optional
+import numpy as np
+
+@dataclass
+class HoareTriple:
+    """Classical Hoare triple representation."""
+    precondition: Callable[[dict], bool]
+    command: Callable[[dict], dict]
+    postcondition: Callable[[dict], bool]
+
+    def verify(self, initial_state: dict) -> bool:
+        """Verify the triple holds for given initial state."""
+        if not self.precondition(initial_state):
+            # Precondition not met, triple vacuously true
+            return True
+
+        final_state = self.command(initial_state)
+        return self.postcondition(final_state)
+
+# Example: {x >= 0} x := x + 1 {x >= 1}
+triple = HoareTriple(
+    precondition=lambda s: s['x'] >= 0,
+    command=lambda s: {**s, 'x': s['x'] + 1},
+    postcondition=lambda s: s['x'] >= 1
+)
+```
+
+### 2.2 Quantum Hoare Logic
+
+Quantum Hoare logic extends classical logic to quantum states:
+
+**Quantum Hoare Triple**: `{P} C {Q}`
+- **P, Q**: Quantum predicates (projectors or density operators)
+- **C**: Quantum operation (unitary or CPTP map)
+
+```python
+class QuantumPredicate:
+    """
+    Quantum predicate as a projector.
+
+    A quantum state |psi> satisfies predicate P if:
+    P|psi> = |psi> (eigenvalue 1)
+    """
+
+    def __init__(self, projector: np.ndarray, name: str = ""):
+        self.projector = projector
+        self.name = name
+        self._validate_projector()
+
+    def _validate_projector(self):
+        """Verify this is a valid projector (P^2 = P, P = P^dag)."""
+        P = self.projector
+        assert np.allclose(P @ P, P), "P^2 != P"
+        assert np.allclose(P, P.conj().T), "P != P^dag"
+
+    def satisfies(self, state: np.ndarray, tolerance: float = 1e-10) -> bool:
+        """Check if quantum state satisfies this predicate."""
+        projected = self.projector @ state
+        return np.allclose(projected, state, atol=tolerance)
+
+    def probability(self, state: np.ndarray) -> float:
+        """Probability that measurement yields this predicate."""
+        return np.real(state.conj().T @ self.projector @ state)
+
+# Common quantum predicates
+def computational_basis_predicate(bitstring: str) -> QuantumPredicate:
+    """Predicate for computational basis state."""
+    n = len(bitstring)
+    dim = 2**n
+    idx = int(bitstring, 2)
+    projector = np.zeros((dim, dim), dtype=complex)
+    projector[idx, idx] = 1
+    return QuantumPredicate(projector, f"|{bitstring}>")
+
+def subspace_predicate(basis_states: list) -> QuantumPredicate:
+    """Predicate for subspace spanned by basis states."""
+    dim = len(basis_states[0])
+    projector = np.zeros((dim, dim), dtype=complex)
+    for state in basis_states:
+        state = np.array(state).reshape(-1, 1)
+        projector += state @ state.conj().T
+    return QuantumPredicate(projector)
+```
+
+### 2.3 Quantum Hoare Logic Rules
+
+```python
+class QuantumHoareLogic:
+    """
+    Quantum Hoare Logic verification system.
+
+    Key rules:
+    1. Skip: {P} skip {P}
+    2. Unitary: {U^dag P U} U {P}
+    3. Sequence: {P} C1 {Q}, {Q} C2 {R} => {P} C1;C2 {R}
+    4. Conditional: Based on measurement outcomes
+    """
+
+    def __init__(self):
+        self.proof_steps = []
+
+    def verify_unitary_triple(self,
+                               precondition: np.ndarray,
+                               unitary: np.ndarray,
+                               postcondition: np.ndarray) -> bool:
+        """
+        Verify quantum Hoare triple for unitary operation.
+
+        Rule: {U^dag Q U} U {Q}
+
+        Given postcondition Q, the weakest precondition is U^dag Q U.
+        """
+        # Compute weakest precondition
+        weakest_pre = unitary.conj().T @ postcondition @ unitary
+
+        # Check if given precondition implies weakest precondition
+        # P => U^dag Q U means P - U^dag Q U is negative semidefinite
+        diff = precondition - weakest_pre
+        eigenvalues = np.linalg.eigvalsh(diff)
+
+        # Precondition is at least as strong as weakest precondition
+        is_valid = np.all(eigenvalues >= -1e-10)
+
+        self.proof_steps.append({
+            'rule': 'unitary',
+            'valid': is_valid,
+            'weakest_precondition': weakest_pre
+        })
+
+        return is_valid
+
+    def verify_sequence(self,
+                        pre: np.ndarray,
+                        unitaries: list,
+                        post: np.ndarray) -> bool:
+        """
+        Verify sequential composition using backward reasoning.
+
+        Start from postcondition, compute weakest preconditions backward.
+        """
+        current_post = post
+
+        for U in reversed(unitaries):
+            # Weakest precondition for this step
+            current_post = U.conj().T @ current_post @ U
+
+        # Check if original precondition implies final weakest precondition
+        diff = pre - current_post
+        eigenvalues = np.linalg.eigvalsh(diff)
+
+        return np.all(eigenvalues >= -1e-10)
+
+    def weakest_precondition(self,
+                             unitary: np.ndarray,
+                             postcondition: np.ndarray) -> np.ndarray:
+        """Compute weakest precondition for unitary and postcondition."""
+        return unitary.conj().T @ postcondition @ unitary
+```
+
+## 3. Equivalence Checking Methods
+
+### 3.1 Symbolic Equivalence Checking
+
+```python
+class SymbolicCircuit:
+    """Symbolic representation for equivalence checking."""
+
+    def __init__(self, n_qubits: int):
+        self.n_qubits = n_qubits
+        self.operations = []
+        self.symbolic_params = {}
+
+    def add_gate(self, gate_type: str, qubits: list, params: list = None):
+        """Add gate with optional symbolic parameters."""
+        self.operations.append({
+            'type': gate_type,
+            'qubits': qubits,
+            'params': params or []
+        })
+
+    def to_symbolic_matrix(self, param_values: dict = None) -> np.ndarray:
+        """Convert to matrix with optional parameter substitution."""
+        dim = 2**self.n_qubits
+        result = np.eye(dim, dtype=complex)
+
+        for op in self.operations:
+            gate_matrix = self._gate_matrix(op, param_values)
+            expanded = self._expand_to_system(gate_matrix, op['qubits'])
+            result = expanded @ result
+
+        return result
+
+    def _gate_matrix(self, op: dict, param_values: dict = None) -> np.ndarray:
+        """Get gate matrix, substituting parameters if needed."""
+        gate_type = op['type']
+        params = op['params']
+
+        if param_values:
+            params = [param_values.get(p, p) if isinstance(p, str) else p
+                     for p in params]
+
+        if gate_type == 'H':
+            return np.array([[1, 1], [1, -1]]) / np.sqrt(2)
+        elif gate_type == 'X':
+            return np.array([[0, 1], [1, 0]])
+        elif gate_type == 'Z':
+            return np.array([[1, 0], [0, -1]])
+        elif gate_type == 'CNOT':
+            return np.array([[1,0,0,0], [0,1,0,0], [0,0,0,1], [0,0,1,0]])
+        elif gate_type == 'RZ':
+            theta = params[0]
+            return np.array([[np.exp(-1j*theta/2), 0],
+                           [0, np.exp(1j*theta/2)]])
+        elif gate_type == 'RY':
+            theta = params[0]
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            return np.array([[c, -s], [s, c]])
+        else:
+            raise ValueError(f"Unknown gate: {gate_type}")
+
+    def _expand_to_system(self, gate: np.ndarray, qubits: list) -> np.ndarray:
+        """Expand gate to full system size."""
+        if len(qubits) == 1:
+            return self._single_qubit_expand(gate, qubits[0])
+        elif len(qubits) == 2:
+            return self._two_qubit_expand(gate, qubits[0], qubits[1])
+        else:
+            raise NotImplementedError("Gates on >2 qubits not implemented")
+
+    def _single_qubit_expand(self, gate: np.ndarray, qubit: int) -> np.ndarray:
+        """Expand single-qubit gate using tensor products."""
+        result = np.array([[1.0]], dtype=complex)
+        I = np.eye(2, dtype=complex)
+
+        for i in range(self.n_qubits):
+            if i == qubit:
+                result = np.kron(result, gate)
+            else:
+                result = np.kron(result, I)
+
+        return result
+
+    def _two_qubit_expand(self, gate: np.ndarray, q1: int, q2: int) -> np.ndarray:
+        """Expand two-qubit gate to system."""
+        dim = 2**self.n_qubits
+        result = np.zeros((dim, dim), dtype=complex)
+
+        for i in range(dim):
+            for j in range(dim):
+                bits_i = [(i >> k) & 1 for k in range(self.n_qubits)]
+                bits_j = [(j >> k) & 1 for k in range(self.n_qubits)]
+
+                # Check if non-target qubits match
+                other_match = all(bits_i[k] == bits_j[k]
+                                 for k in range(self.n_qubits)
+                                 if k not in [q1, q2])
+
+                if other_match:
+                    # Index into 2-qubit gate
+                    gi = bits_i[q1] * 2 + bits_i[q2]
+                    gj = bits_j[q1] * 2 + bits_j[q2]
+                    result[i, j] = gate[gi, gj]
+
+        return result
+
+
+class EquivalenceVerifier:
+    """Verify circuit equivalence using multiple methods."""
+
+    def __init__(self, tolerance: float = 1e-10):
+        self.tolerance = tolerance
+
+    def check_equivalence(self,
+                          circuit1: SymbolicCircuit,
+                          circuit2: SymbolicCircuit,
+                          param_values: dict = None) -> dict:
+        """
+        Check if two circuits are equivalent.
+
+        Returns detailed verification result.
+        """
+        U1 = circuit1.to_symbolic_matrix(param_values)
+        U2 = circuit2.to_symbolic_matrix(param_values)
+
+        # Check equivalence up to global phase
+        product = U1.conj().T @ U2
+
+        # Extract global phase from first non-zero element
+        phase = None
+        for i in range(len(product)):
+            if np.abs(product[i, i]) > self.tolerance:
+                phase = product[i, i]
+                break
+
+        if phase is None:
+            return {'equivalent': False, 'reason': 'No valid phase found'}
+
+        # Normalize by phase
+        normalized = product / phase
+        identity = np.eye(len(product))
+
+        distance = np.linalg.norm(normalized - identity)
+        equivalent = distance < self.tolerance
+
+        return {
+            'equivalent': equivalent,
+            'distance': distance,
+            'global_phase': np.angle(phase),
+            'method': 'unitary_comparison'
+        }
+
+    def verify_identity(self, circuit: SymbolicCircuit,
+                        param_values: dict = None) -> bool:
+        """Check if circuit implements identity (up to global phase)."""
+        U = circuit.to_symbolic_matrix(param_values)
+        identity = np.eye(len(U))
+
+        # Check if U = e^(i*phi) * I
+        if np.abs(U[0, 0]) < self.tolerance:
+            return False
+
+        phase = U[0, 0]
+        normalized = U / phase
+
+        return np.allclose(normalized, identity, atol=self.tolerance)
+```
+
+### 3.2 Compositional Verification
+
+```python
+class CompositionalVerifier:
+    """
+    Verify circuits by decomposing into verified components.
+
+    If we know:
+    - {P1} C1 {Q1}
+    - {P2} C2 {Q2}
+
+    We can derive properties of C1 ; C2
+    """
+
+    def __init__(self):
+        self.verified_components = {}
+
+    def register_component(self, name: str,
+                           precondition: np.ndarray,
+                           circuit: SymbolicCircuit,
+                           postcondition: np.ndarray):
+        """Register a verified circuit component."""
+        self.verified_components[name] = {
+            'precondition': precondition,
+            'circuit': circuit,
+            'postcondition': postcondition
+        }
+
+    def verify_composition(self, component_names: list) -> dict:
+        """
+        Verify sequential composition of components.
+
+        Checks that postcondition of each component
+        implies precondition of the next.
+        """
+        results = []
+
+        for i in range(len(component_names) - 1):
+            curr = self.verified_components[component_names[i]]
+            next_comp = self.verified_components[component_names[i + 1]]
+
+            # Check Q_i => P_{i+1}
+            post_curr = curr['postcondition']
+            pre_next = next_comp['precondition']
+
+            # Implication: Q => P means Q - P is negative semidefinite
+            diff = post_curr - pre_next
+            eigenvalues = np.linalg.eigvalsh(diff)
+
+            compatible = np.all(eigenvalues >= -1e-10)
+            results.append({
+                'from': component_names[i],
+                'to': component_names[i + 1],
+                'compatible': compatible
+            })
+
+        all_compatible = all(r['compatible'] for r in results)
+
+        return {
+            'valid': all_compatible,
+            'steps': results,
+            'overall_precondition': self.verified_components[component_names[0]]['precondition'],
+            'overall_postcondition': self.verified_components[component_names[-1]]['postcondition']
+        }
+```
+
+## 4. Model Checking for Quantum Systems
+
+### 4.1 Quantum State Space Exploration
+
+```python
+class QuantumModelChecker:
+    """
+    Model checker for quantum systems.
+
+    Explores state space to verify temporal properties.
+    """
+
+    def __init__(self, n_qubits: int):
+        self.n_qubits = n_qubits
+        self.dim = 2**n_qubits
+        self.transitions = []
+        self.atomic_props = {}
+
+    def add_transition(self, name: str, operator: np.ndarray):
+        """Add a quantum transition (unitary or measurement)."""
+        self.transitions.append({
+            'name': name,
+            'operator': operator
+        })
+
+    def add_atomic_proposition(self, name: str, predicate: QuantumPredicate):
+        """Add atomic proposition for property specification."""
+        self.atomic_props[name] = predicate
+
+    def check_reachability(self,
+                           initial_state: np.ndarray,
+                           target_predicate: QuantumPredicate,
+                           max_depth: int = 10) -> dict:
+        """
+        Check if target predicate is reachable from initial state.
+
+        Uses breadth-first exploration of quantum state space.
+        """
+        visited = []
+        queue = [(initial_state, [])]  # (state, path)
+
+        while queue and len(visited) < 1000:  # Limit exploration
+            current_state, path = queue.pop(0)
+
+            # Check if current state satisfies target
+            if target_predicate.satisfies(current_state):
+                return {
+                    'reachable': True,
+                    'path': path,
+                    'depth': len(path)
+                }
+
+            # Skip if similar state already visited
+            if self._state_visited(current_state, visited):
+                continue
+
+            visited.append(current_state)
+
+            if len(path) >= max_depth:
+                continue
+
+            # Explore successors
+            for trans in self.transitions:
+                next_state = trans['operator'] @ current_state
+                next_state = next_state / np.linalg.norm(next_state)
+                queue.append((next_state, path + [trans['name']]))
+
+        return {
+            'reachable': False,
+            'explored_states': len(visited),
+            'max_depth_reached': max_depth
+        }
+
+    def _state_visited(self, state: np.ndarray, visited: list,
+                       tolerance: float = 1e-6) -> bool:
+        """Check if state (up to global phase) was already visited."""
+        for v in visited:
+            if self._states_equivalent(state, v, tolerance):
+                return True
+        return False
+
+    def _states_equivalent(self, s1: np.ndarray, s2: np.ndarray,
+                          tolerance: float) -> bool:
+        """Check equivalence up to global phase."""
+        # Find first significant element
+        for i in range(len(s1)):
+            if np.abs(s1[i]) > tolerance:
+                phase = s2[i] / s1[i] if np.abs(s2[i]) > tolerance else 0
+                if np.abs(phase) > tolerance:
+                    return np.allclose(s1, s2 / phase, atol=tolerance)
+        return np.allclose(s1, s2, atol=tolerance)
+
+    def check_invariant(self,
+                        initial_state: np.ndarray,
+                        invariant: QuantumPredicate,
+                        max_depth: int = 10) -> dict:
+        """
+        Check if invariant holds for all reachable states.
+
+        Returns counterexample path if invariant is violated.
+        """
+        visited = []
+        queue = [(initial_state, [])]
+
+        while queue:
+            current_state, path = queue.pop(0)
+
+            # Check invariant
+            if not invariant.satisfies(current_state):
+                return {
+                    'holds': False,
+                    'counterexample': path,
+                    'violating_state': current_state
+                }
+
+            if self._state_visited(current_state, visited):
+                continue
+
+            visited.append(current_state)
+
+            if len(path) >= max_depth:
+                continue
+
+            for trans in self.transitions:
+                next_state = trans['operator'] @ current_state
+                next_state = next_state / np.linalg.norm(next_state)
+                queue.append((next_state, path + [trans['name']]))
+
+        return {
+            'holds': True,
+            'explored_states': len(visited)
+        }
+```
+
+### 4.2 Bounded Model Checking
+
+```python
+class BoundedModelChecker:
+    """
+    Bounded model checking for quantum circuits.
+
+    Unrolls circuit to fixed depth and checks properties.
+    """
+
+    def __init__(self, circuit: SymbolicCircuit):
+        self.circuit = circuit
+        self.n_qubits = circuit.n_qubits
+
+    def check_property_at_depth(self,
+                                 initial_state: np.ndarray,
+                                 property_pred: QuantumPredicate,
+                                 depth: int) -> dict:
+        """
+        Check if property holds after exactly 'depth' circuit applications.
+        """
+        U = self.circuit.to_symbolic_matrix()
+
+        # Apply circuit 'depth' times
+        state = initial_state.copy()
+        for _ in range(depth):
+            state = U @ state
+
+        holds = property_pred.satisfies(state)
+        prob = property_pred.probability(state)
+
+        return {
+            'depth': depth,
+            'property_holds': holds,
+            'probability': prob,
+            'final_state': state
+        }
+
+    def find_violation_depth(self,
+                              initial_state: np.ndarray,
+                              invariant: QuantumPredicate,
+                              max_depth: int = 100) -> Optional[int]:
+        """
+        Find first depth where invariant is violated.
+
+        Returns None if invariant holds up to max_depth.
+        """
+        U = self.circuit.to_symbolic_matrix()
+        state = initial_state.copy()
+
+        for d in range(max_depth):
+            if not invariant.satisfies(state):
+                return d
+            state = U @ state
+
+        return None
+```
+
+## 5. Verification Tools and Frameworks
+
+### 5.1 Verification Framework Architecture
+
+```python
+class QuantumVerificationFramework:
+    """
+    Unified framework for quantum program verification.
+
+    Combines multiple verification techniques.
+    """
+
+    def __init__(self, n_qubits: int):
+        self.n_qubits = n_qubits
+        self.hoare_logic = QuantumHoareLogic()
+        self.model_checker = QuantumModelChecker(n_qubits)
+        self.equivalence_verifier = EquivalenceVerifier()
+        self.verification_results = []
+
+    def verify_circuit(self,
+                       circuit: SymbolicCircuit,
+                       specification: dict) -> dict:
+        """
+        Verify circuit against specification.
+
+        Specification can include:
+        - precondition/postcondition (Hoare logic)
+        - invariants (model checking)
+        - equivalent_to (equivalence checking)
+        """
+        results = {
+            'circuit': circuit,
+            'specification': specification,
+            'checks': []
+        }
+
+        # Hoare logic verification
+        if 'precondition' in specification and 'postcondition' in specification:
+            U = circuit.to_symbolic_matrix()
+            hoare_result = self.hoare_logic.verify_unitary_triple(
+                specification['precondition'],
+                U,
+                specification['postcondition']
+            )
+            results['checks'].append({
+                'type': 'hoare_logic',
+                'passed': hoare_result
+            })
+
+        # Equivalence checking
+        if 'equivalent_to' in specification:
+            equiv_result = self.equivalence_verifier.check_equivalence(
+                circuit,
+                specification['equivalent_to']
+            )
+            results['checks'].append({
+                'type': 'equivalence',
+                'passed': equiv_result['equivalent'],
+                'details': equiv_result
+            })
+
+        # Invariant checking
+        if 'invariant' in specification and 'initial_state' in specification:
+            inv_result = self.model_checker.check_invariant(
+                specification['initial_state'],
+                specification['invariant']
+            )
+            results['checks'].append({
+                'type': 'invariant',
+                'passed': inv_result['holds'],
+                'details': inv_result
+            })
+
+        results['all_passed'] = all(c['passed'] for c in results['checks'])
+        self.verification_results.append(results)
+
+        return results
+
+    def generate_verification_report(self) -> str:
+        """Generate human-readable verification report."""
+        report = ["=" * 50]
+        report.append("QUANTUM VERIFICATION REPORT")
+        report.append("=" * 50)
+
+        total_checks = 0
+        passed_checks = 0
+
+        for result in self.verification_results:
+            report.append(f"\nCircuit verification:")
+
+            for check in result['checks']:
+                total_checks += 1
+                status = "PASS" if check['passed'] else "FAIL"
+                if check['passed']:
+                    passed_checks += 1
+                report.append(f"  [{status}] {check['type']}")
+
+        report.append("\n" + "=" * 50)
+        report.append(f"SUMMARY: {passed_checks}/{total_checks} checks passed")
+        report.append("=" * 50)
+
+        return "\n".join(report)
+```
+
+### 5.2 Automated Proof Generation
+
+```python
+class AutomatedProver:
+    """
+    Automated proof generation for quantum circuits.
+
+    Generates proof objects that can be verified independently.
+    """
+
+    def __init__(self):
+        self.proof_steps = []
+
+    def prove_unitary_property(self,
+                                circuit: SymbolicCircuit,
+                                property_name: str,
+                                postcondition: np.ndarray) -> dict:
+        """
+        Generate proof that circuit establishes postcondition.
+
+        Uses weakest precondition calculus.
+        """
+        U = circuit.to_symbolic_matrix()
+
+        # Compute weakest precondition
+        wp = U.conj().T @ postcondition @ U
+
+        proof = {
+            'property': property_name,
+            'method': 'weakest_precondition',
+            'steps': []
+        }
+
+        # Build proof steps
+        proof['steps'].append({
+            'step': 1,
+            'description': 'Compute circuit unitary U',
+            'result': f'U is {U.shape[0]}x{U.shape[0]} unitary'
+        })
+
+        proof['steps'].append({
+            'step': 2,
+            'description': 'Compute weakest precondition WP = U^dag Q U',
+            'result': 'WP computed'
+        })
+
+        proof['steps'].append({
+            'step': 3,
+            'description': 'Verify WP is valid quantum predicate',
+            'result': self._is_valid_predicate(wp)
+        })
+
+        proof['valid'] = self._is_valid_predicate(wp)
+        proof['weakest_precondition'] = wp
+
+        self.proof_steps.append(proof)
+        return proof
+
+    def _is_valid_predicate(self, P: np.ndarray) -> bool:
+        """Check if P is a valid quantum predicate (0 <= P <= I)."""
+        eigenvalues = np.linalg.eigvalsh(P)
+        return np.all(eigenvalues >= -1e-10) and np.all(eigenvalues <= 1 + 1e-10)
+
+    def export_proof(self, format: str = 'text') -> str:
+        """Export accumulated proofs in specified format."""
+        if format == 'text':
+            return self._export_text()
+        else:
+            raise ValueError(f"Unknown format: {format}")
+
+    def _export_text(self) -> str:
+        """Export proofs as text."""
+        lines = []
+        for i, proof in enumerate(self.proof_steps):
+            lines.append(f"\nProof {i + 1}: {proof['property']}")
+            lines.append(f"Method: {proof['method']}")
+            lines.append("Steps:")
+            for step in proof['steps']:
+                lines.append(f"  {step['step']}. {step['description']}")
+                lines.append(f"     -> {step['result']}")
+            lines.append(f"Valid: {proof['valid']}")
+        return "\n".join(lines)
+```
+
+## 6. Practical Example: Verifying a Quantum Teleportation Circuit
+
+```python
+def verify_teleportation_circuit():
+    """
+    Verify quantum teleportation circuit correctness.
+
+    Teleportation protocol:
+    1. Create Bell pair between Alice and Bob
+    2. Alice performs Bell measurement
+    3. Bob applies corrections based on measurement
+
+    Property: Final state at Bob equals initial state at Alice
+    """
+
+    # Create verification framework
+    framework = QuantumVerificationFramework(n_qubits=3)
+
+    # Build teleportation circuit components
+
+    # 1. Bell pair creation (qubits 1, 2)
+    bell_circuit = SymbolicCircuit(n_qubits=3)
+    bell_circuit.add_gate('H', [1])
+    bell_circuit.add_gate('CNOT', [1, 2])
+
+    # 2. Bell measurement (qubits 0, 1)
+    bell_measure = SymbolicCircuit(n_qubits=3)
+    bell_measure.add_gate('CNOT', [0, 1])
+    bell_measure.add_gate('H', [0])
+
+    # Define predicates
+    # Initial: qubit 0 in state |psi>, qubits 1,2 in |00>
+    # Final: qubit 2 in state |psi>
+
+    print("Verifying teleportation circuit components...")
+
+    # Verify Bell pair creation creates entanglement
+    bell_state_pred = subspace_predicate([
+        np.array([1, 0, 0, 0, 0, 0, 1, 0]) / np.sqrt(2),  # |000> + |011>
+    ])
+
+    initial_000 = np.zeros(8, dtype=complex)
+    initial_000[0] = 1  # |000>
+
+    # Use model checker to verify reachability
+    framework.model_checker.add_transition('bell_create',
+                                           bell_circuit.to_symbolic_matrix())
+
+    reach_result = framework.model_checker.check_reachability(
+        initial_000,
+        bell_state_pred,
+        max_depth=1
+    )
+
+    print(f"Bell state reachable: {reach_result['reachable']}")
+
+    # Verify full teleportation equivalence
+    # After corrections, circuit should act as SWAP between qubits 0 and 2
+
+    return framework.generate_verification_report()
+
+# Run verification
+if __name__ == "__main__":
+    report = verify_teleportation_circuit()
+    print(report)
+```
+
+## Summary
+
+Formal verification of quantum programs provides mathematical guarantees:
+
+1. **Quantum Hoare Logic**: Extends classical program logic with quantum predicates
+2. **Equivalence Checking**: Verifies circuit transformations preserve behavior
+3. **Model Checking**: Explores state space for property violations
+4. **Compositional Verification**: Builds proofs from verified components
+5. **Automated Proving**: Generates machine-checkable proof certificates
+
+Key verification approaches:
+- **Deductive**: Use logic rules to prove properties
+- **Algorithmic**: Exhaustively check state space
+- **Compositional**: Combine verified components
+- **Symbolic**: Reason about parameterized circuits

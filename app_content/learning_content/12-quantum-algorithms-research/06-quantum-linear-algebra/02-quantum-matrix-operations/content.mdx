@@ -1,0 +1,649 @@
+---
+title: "Quantum Matrix Operations: Multiplication and Inversion"
+description: "Learn quantum algorithms for matrix arithmetic including block-encoding, quantum matrix multiplication, and quantum singular value transformation."
+duration: 75
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Implement block-encoding for matrix representation in quantum circuits
+- Understand quantum algorithms for matrix-vector multiplication
+- Analyze quantum matrix inversion techniques beyond HHL
+- Compare complexities of quantum vs classical matrix operations
+- Apply quantum singular value transformation for matrix functions
+
+## 1. The Challenge of Quantum Matrix Operations
+
+Classical matrix operations form the backbone of scientific computing. Can quantum computers perform these faster?
+
+<Definition term="Block-Encoding">
+A unitary $U$ is a block-encoding of matrix $A$ with normalization factor $\alpha$ if:
+$$U = \begin{pmatrix} A/\alpha & \cdot \\ \cdot & \cdot \end{pmatrix}$$
+The matrix $A$ appears as a block in the upper-left corner of a larger unitary.
+</Definition>
+
+Block-encoding is the key technique that enables quantum manipulation of non-unitary matrices.
+
+## 2. Block-Encoding: Making Matrices Quantum-Accessible
+
+Since quantum operations must be unitary, we embed arbitrary matrices in larger unitaries:
+
+<Formula>
+For an $n \times n$ matrix $A$ with $\|A\| \leq \alpha$, we construct:
+$$U_A = \begin{pmatrix} A/\alpha & \sqrt{I - A^\dagger A/\alpha^2} \\ \sqrt{I - AA^\dagger/\alpha^2} & -A^\dagger/\alpha \end{pmatrix}$$
+</Formula>
+
+```python
+import numpy as np
+from qiskit import QuantumCircuit
+from qiskit.quantum_info import Operator
+
+def create_block_encoding(A: np.ndarray, alpha: float = None) -> np.ndarray:
+    """
+    Create block-encoding unitary for matrix A.
+
+    Args:
+        A: Matrix to encode
+        alpha: Normalization factor (default: ||A||)
+
+    Returns:
+        Block-encoding unitary U such that ⟨0|U|0⟩ = A/alpha
+    """
+    n = A.shape[0]
+
+    # Default alpha to spectral norm
+    if alpha is None:
+        alpha = np.linalg.norm(A, ord=2)
+
+    # Normalize
+    A_norm = A / alpha
+
+    # Compute complementary blocks
+    # U = [[A/α, B], [C, D]] must be unitary
+    # Using the standard construction
+
+    I = np.eye(n)
+    AAdag = A_norm @ A_norm.conj().T
+    AdagA = A_norm.conj().T @ A_norm
+
+    # Square roots (using eigendecomposition for stability)
+    sqrt_I_AAdag = np.linalg.cholesky(I - AAdag + 1e-10 * I).T
+    sqrt_I_AdagA = np.linalg.cholesky(I - AdagA + 1e-10 * I).T
+
+    # Construct block-encoding
+    U = np.block([
+        [A_norm, sqrt_I_AdagA],
+        [sqrt_I_AAdag, -A_norm.conj().T]
+    ])
+
+    return U, alpha
+
+# Example: Block-encode a 2x2 matrix
+A = np.array([[0.5, 0.3], [0.2, 0.4]])
+
+U, alpha = create_block_encoding(A)
+
+print("Original matrix A:")
+print(A)
+print(f"\nNormalization factor α = {alpha:.4f}")
+print(f"\nBlock-encoding U (shape {U.shape}):")
+print(np.round(U, 4))
+
+# Verify unitarity
+print(f"\nU is unitary: {np.allclose(U @ U.conj().T, np.eye(U.shape[0]))}")
+
+# Extract A back from block-encoding
+A_recovered = alpha * U[:2, :2]
+print(f"\nRecovered A matches original: {np.allclose(A, A_recovered)}")
+```
+
+## 3. Quantum Matrix-Vector Multiplication
+
+Given block-encoding $U_A$ and state $|b\rangle$, we can compute $A|b\rangle$:
+
+<Example>
+Matrix-Vector Product via Block-Encoding:
+
+```
+          |0⟩ ────[U_A]────⊗───── |0⟩ ⊗ A|b⟩/α + |⊥⟩
+                    │
+          |b⟩ ──────●────────────
+```
+
+Measuring ancilla in $|0\rangle$ projects onto $A|b\rangle$ (up to normalization).
+</Example>
+
+```python
+import numpy as np
+from qiskit import QuantumCircuit, QuantumRegister
+from qiskit.quantum_info import Statevector, Operator
+
+def quantum_matrix_vector_multiply(A: np.ndarray, b: np.ndarray) -> dict:
+    """
+    Perform matrix-vector multiplication A|b⟩ using block-encoding.
+
+    Args:
+        A: Matrix (will be block-encoded)
+        b: Vector (will be prepared as quantum state)
+
+    Returns:
+        Dictionary with result and statistics
+    """
+    n = len(b)
+    n_qubits = int(np.log2(n))
+
+    # Normalize b
+    b_norm = b / np.linalg.norm(b)
+
+    # Create block-encoding of A
+    U_A, alpha = create_block_encoding(A)
+
+    # Create circuit
+    ancilla = QuantumRegister(n_qubits, 'ancilla')
+    system = QuantumRegister(n_qubits, 'system')
+    qc = QuantumCircuit(ancilla, system)
+
+    # Prepare |b⟩ state (for 2D, use rotation)
+    if n == 2:
+        theta = 2 * np.arccos(b_norm[0])
+        qc.ry(theta, system[0])
+
+    # Apply block-encoding
+    U_op = Operator(U_A)
+    qc.append(U_op.to_instruction(), list(ancilla) + list(system))
+
+    # Get statevector
+    sv = Statevector(qc)
+
+    # Extract result (post-select on ancilla |0⟩)
+    full_sv = sv.data
+    n_total = len(full_sv)
+
+    # Ancilla |0⟩ corresponds to first n states
+    result_unnorm = full_sv[:n] * alpha
+
+    # Classical comparison
+    Ab_classical = A @ b
+    Ab_normalized = Ab_classical / np.linalg.norm(Ab_classical)
+
+    # Success probability (probability of ancilla |0⟩)
+    success_prob = np.sum(np.abs(full_sv[:n])**2)
+
+    return {
+        'quantum_result': result_unnorm,
+        'classical_result': Ab_classical,
+        'success_probability': success_prob,
+        'fidelity': np.abs(np.vdot(
+            result_unnorm / np.linalg.norm(result_unnorm),
+            Ab_normalized
+        ))**2
+    }
+
+# Example
+A = np.array([[1, 0.5], [0.5, 1]])
+b = np.array([1, 0])
+
+result = quantum_matrix_vector_multiply(A, b)
+
+print("Quantum Matrix-Vector Multiplication")
+print("=" * 40)
+print(f"A = \n{A}")
+print(f"b = {b}")
+print(f"\nQuantum A|b⟩ = {result['quantum_result']}")
+print(f"Classical A·b = {result['classical_result']}")
+print(f"\nSuccess probability: {result['success_probability']:.4f}")
+print(f"Fidelity: {result['fidelity']:.4f}")
+```
+
+## 4. Quantum Matrix Multiplication
+
+For matrix multiplication $C = AB$, we can use product of block-encodings:
+
+<Formula>
+If $U_A$ block-encodes $A/\alpha_A$ and $U_B$ block-encodes $B/\alpha_B$, then:
+$$(I \otimes U_A)(U_B \otimes I)$$
+approximately block-encodes $AB/(\alpha_A \alpha_B)$ with appropriate ancilla management.
+</Formula>
+
+<Warning>
+Each matrix multiplication doubles the ancilla requirements and the normalization factor. For $k$ matrix multiplications, the success probability scales as $O(1/\alpha^{2k})$.
+</Warning>
+
+```python
+import numpy as np
+
+def quantum_matrix_multiply_complexity(A: np.ndarray, B: np.ndarray) -> dict:
+    """
+    Analyze complexity of quantum matrix multiplication.
+
+    Args:
+        A, B: Matrices to multiply
+
+    Returns:
+        Complexity analysis
+    """
+    n = A.shape[0]
+
+    # Spectral norms
+    alpha_A = np.linalg.norm(A, ord=2)
+    alpha_B = np.linalg.norm(B, ord=2)
+
+    # Combined normalization
+    alpha_total = alpha_A * alpha_B
+
+    # Classical product
+    C = A @ B
+    alpha_C = np.linalg.norm(C, ord=2)
+
+    # Success probability estimation
+    # P(success) ≈ ||C||² / (α_A² α_B²)
+    success_prob = (alpha_C / alpha_total) ** 2
+
+    # Number of trials needed for high probability
+    trials_needed = int(1 / success_prob) if success_prob > 0 else float('inf')
+
+    return {
+        'alpha_A': alpha_A,
+        'alpha_B': alpha_B,
+        'alpha_total': alpha_total,
+        'alpha_C': alpha_C,
+        'success_probability': success_prob,
+        'trials_needed': trials_needed,
+        'classical_complexity': n ** 3,  # Naive
+        'quantum_query_complexity': n ** 2  # Per successful trial
+    }
+
+# Analyze matrix multiplication
+A = np.random.randn(4, 4)
+B = np.random.randn(4, 4)
+
+analysis = quantum_matrix_multiply_complexity(A, B)
+
+print("Quantum Matrix Multiplication Analysis")
+print("=" * 45)
+print(f"||A|| = {analysis['alpha_A']:.4f}")
+print(f"||B|| = {analysis['alpha_B']:.4f}")
+print(f"||A||·||B|| = {analysis['alpha_total']:.4f}")
+print(f"||AB|| = {analysis['alpha_C']:.4f}")
+print(f"\nSuccess probability: {analysis['success_probability']:.4f}")
+print(f"Expected trials: {analysis['trials_needed']}")
+```
+
+## 5. Quantum Singular Value Transformation (QSVT)
+
+QSVT is a powerful generalization that applies polynomial transformations to singular values:
+
+<Definition term="Quantum Singular Value Transformation">
+Given block-encoding of $A$ with SVD $A = \sum_j \sigma_j |u_j\rangle\langle v_j|$, QSVT constructs:
+$$f(A) = \sum_j f(\sigma_j) |u_j\rangle\langle v_j|$$
+for any polynomial $f$ bounded by 1 on $[-1, 1]$.
+</Definition>
+
+<Tip>
+QSVT unifies many quantum algorithms:
+- **HHL**: Use $f(x) = 1/x$ (approximated by polynomial)
+- **Amplitude amplification**: Use Chebyshev polynomials
+- **Phase estimation**: Use polynomial approximation of step function
+</Tip>
+
+```python
+import numpy as np
+from scipy.special import chebyt
+
+def qsvt_polynomial_design(target_func, degree: int, num_points: int = 1000) -> dict:
+    """
+    Design polynomial approximation for QSVT.
+
+    Args:
+        target_func: Target function f(x) to approximate
+        degree: Polynomial degree
+        num_points: Points for fitting
+
+    Returns:
+        Polynomial coefficients and error analysis
+    """
+    # Sample points in [-1, 1]
+    x = np.cos(np.pi * np.arange(num_points) / (num_points - 1))
+    y = np.array([target_func(xi) for xi in x])
+
+    # Fit Chebyshev polynomial
+    coeffs = np.polynomial.chebyshev.chebfit(x, y, degree)
+
+    # Evaluate approximation
+    y_approx = np.polynomial.chebyshev.chebval(x, coeffs)
+
+    # Error analysis
+    max_error = np.max(np.abs(y - y_approx))
+    rms_error = np.sqrt(np.mean((y - y_approx)**2))
+
+    return {
+        'coefficients': coeffs,
+        'degree': degree,
+        'max_error': max_error,
+        'rms_error': rms_error,
+        'x': x,
+        'y_target': y,
+        'y_approx': y_approx
+    }
+
+# Example: Approximate 1/x for HHL (on [0.1, 1])
+def inversion_func(x):
+    if abs(x) < 0.1:
+        return 0
+    return min(1 / (10 * abs(x)), 1)  # Scaled and bounded
+
+result = qsvt_polynomial_design(inversion_func, degree=20)
+
+print("QSVT Polynomial Design for Matrix Inversion")
+print("=" * 45)
+print(f"Polynomial degree: {result['degree']}")
+print(f"Maximum error: {result['max_error']:.6f}")
+print(f"RMS error: {result['rms_error']:.6f}")
+
+# Verify on singular values
+test_sigmas = [0.2, 0.5, 0.8, 1.0]
+print("\nVerification on sample singular values:")
+for sigma in test_sigmas:
+    target = inversion_func(sigma)
+    approx = np.polynomial.chebyshev.chebval(sigma, result['coefficients'])
+    print(f"  σ={sigma:.1f}: target={target:.4f}, approx={approx:.4f}")
+```
+
+## 6. QSVT Circuit Structure
+
+The QSVT circuit alternates between block-encoding and signal processing:
+
+```python
+import numpy as np
+from qiskit import QuantumCircuit, QuantumRegister
+from qiskit.quantum_info import Operator
+
+def create_qsvt_circuit(U_A: np.ndarray, phases: np.ndarray) -> QuantumCircuit:
+    """
+    Create QSVT circuit for polynomial transformation.
+
+    Args:
+        U_A: Block-encoding unitary
+        phases: QSVT phase angles (determines polynomial)
+
+    Returns:
+        QSVT circuit
+    """
+    n = int(np.log2(U_A.shape[0])) // 2  # Ancilla + system qubits
+
+    ancilla = QuantumRegister(n, 'ancilla')
+    system = QuantumRegister(n, 'system')
+    qc = QuantumCircuit(ancilla, system)
+
+    d = len(phases)  # Polynomial degree
+
+    # QSVT alternates between U_A and phase gates
+    U_A_op = Operator(U_A)
+    U_A_dag_op = Operator(U_A.conj().T)
+
+    for i, phi in enumerate(phases):
+        # Signal processing rotation on ancilla
+        qc.rz(2 * phi, ancilla[0])
+
+        # Alternate between U and U†
+        if i % 2 == 0:
+            qc.append(U_A_op.to_instruction(), list(ancilla) + list(system))
+        else:
+            qc.append(U_A_dag_op.to_instruction(), list(ancilla) + list(system))
+
+    return qc
+
+def compute_qsvt_phases(poly_coeffs: np.ndarray) -> np.ndarray:
+    """
+    Compute QSVT phases from polynomial coefficients.
+
+    This is a simplified version; full implementation requires
+    solving a system of nonlinear equations.
+
+    Args:
+        poly_coeffs: Chebyshev polynomial coefficients
+
+    Returns:
+        QSVT phase angles
+    """
+    degree = len(poly_coeffs) - 1
+
+    # Simplified: use coefficient magnitudes as phases
+    # (Real implementation requires careful phase finding)
+    phases = np.arccos(np.clip(poly_coeffs, -1, 1))
+
+    return phases
+
+# Example: Create QSVT for simple transformation
+A = np.array([[0.5, 0], [0, 0.8]])
+U_A, alpha = create_block_encoding(A)
+
+# Design polynomial (e.g., square root)
+def sqrt_func(x):
+    return np.sqrt(abs(x)) if abs(x) > 0.01 else 0
+
+poly_result = qsvt_polynomial_design(sqrt_func, degree=10)
+phases = compute_qsvt_phases(poly_result['coefficients'][:6])
+
+print("QSVT Circuit Creation")
+print("=" * 40)
+print(f"Original matrix singular values: {np.linalg.svd(A)[1]}")
+print(f"Target: compute √A")
+print(f"Polynomial degree: {len(phases) - 1}")
+
+qsvt_circuit = create_qsvt_circuit(U_A, phases)
+print(f"\nQSVT circuit depth: {qsvt_circuit.depth()}")
+print(f"Total gates: {qsvt_circuit.size()}")
+```
+
+## 7. Matrix Inversion Beyond HHL
+
+QSVT provides a more flexible approach to matrix inversion:
+
+<Formula>
+Polynomial approximation of $1/x$ on $[\epsilon, 1]$:
+$$p_d(x) \approx \frac{1}{x}, \quad |p_d(x) - 1/x| \leq \epsilon$$
+with degree $d = O(\kappa \log(1/\epsilon))$ where $\kappa = 1/\epsilon$ is the condition number.
+</Formula>
+
+```python
+import numpy as np
+
+def qsvt_matrix_inversion_analysis(A: np.ndarray, epsilon: float = 0.1) -> dict:
+    """
+    Analyze QSVT-based matrix inversion.
+
+    Args:
+        A: Matrix to invert
+        epsilon: Target precision
+
+    Returns:
+        Analysis results
+    """
+    # SVD
+    U, S, Vh = np.linalg.svd(A)
+
+    # Condition number
+    kappa = S[0] / S[-1]
+
+    # Required polynomial degree
+    poly_degree = int(np.ceil(kappa * np.log(1/epsilon)))
+
+    # Number of queries to block-encoding
+    queries = 2 * poly_degree + 1
+
+    # Success probability (related to normalization)
+    # For 1/x polynomial, need rescaling
+    max_inv = 1 / S[-1]  # Largest inverse singular value
+    success_prob = (1 / max_inv) ** 2  # Rough estimate
+
+    return {
+        'singular_values': S,
+        'condition_number': kappa,
+        'epsilon': epsilon,
+        'polynomial_degree': poly_degree,
+        'block_encoding_queries': queries,
+        'estimated_success_prob': success_prob,
+        'comparison': {
+            'hhl_complexity': f'O(κ² log(N) / ε)',
+            'qsvt_complexity': f'O(κ log(1/ε))'
+        }
+    }
+
+# Compare HHL vs QSVT for inversion
+test_matrices = [
+    ("Well-conditioned", np.array([[2, 0], [0, 1]])),
+    ("Moderate κ", np.array([[5, 0], [0, 1]])),
+    ("Ill-conditioned", np.array([[10, 0], [0, 1]])),
+]
+
+print("QSVT vs HHL Matrix Inversion")
+print("=" * 50)
+
+for name, A in test_matrices:
+    result = qsvt_matrix_inversion_analysis(A, epsilon=0.01)
+    print(f"\n{name}:")
+    print(f"  Condition number: {result['condition_number']:.1f}")
+    print(f"  QSVT polynomial degree: {result['polynomial_degree']}")
+    print(f"  Block-encoding queries: {result['block_encoding_queries']}")
+    print(f"  HHL: {result['comparison']['hhl_complexity']}")
+    print(f"  QSVT: {result['comparison']['qsvt_complexity']}")
+```
+
+## 8. Quantum Access to Matrices
+
+Different matrix representations enable different quantum algorithms:
+
+<Definition term="Quantum Data Structure">
+A matrix $A$ is **quantum-accessible** if we can efficiently:
+1. **Query model**: Access entries $A_{ij}$ in superposition
+2. **Sparse access**: Compute non-zero indices efficiently
+3. **Block-encoding**: Implement unitary containing $A$
+</Definition>
+
+```python
+import numpy as np
+
+def analyze_matrix_access_methods(A: np.ndarray) -> dict:
+    """
+    Analyze different quantum access methods for a matrix.
+
+    Args:
+        A: Matrix to analyze
+
+    Returns:
+        Access method comparison
+    """
+    n = A.shape[0]
+
+    # Sparsity analysis
+    nonzero = np.count_nonzero(A)
+    sparsity = nonzero / (n * n)
+    max_nonzero_per_row = max(np.count_nonzero(A[i]) for i in range(n))
+
+    # Norm analysis
+    spectral_norm = np.linalg.norm(A, ord=2)
+    frobenius_norm = np.linalg.norm(A, ord='fro')
+
+    # Condition number
+    try:
+        cond = np.linalg.cond(A)
+    except:
+        cond = float('inf')
+
+    return {
+        'dimension': n,
+        'sparsity': {
+            'nonzero_fraction': sparsity,
+            'max_per_row': max_nonzero_per_row,
+            'is_sparse': sparsity < 0.1
+        },
+        'norms': {
+            'spectral': spectral_norm,
+            'frobenius': frobenius_norm
+        },
+        'condition_number': cond,
+        'recommended_methods': {
+            'sparse_oracle': max_nonzero_per_row <= np.log2(n),
+            'block_encoding': spectral_norm <= 1 or True,  # Always possible with scaling
+            'qram': sparsity < 0.5  # QRAM for less dense matrices
+        }
+    }
+
+# Analyze different matrix types
+matrices = {
+    'Dense random': np.random.randn(8, 8),
+    'Sparse tridiagonal': np.diag([1]*8) + np.diag([0.5]*7, 1) + np.diag([0.5]*7, -1),
+    'Low-rank': np.outer([1,2,3,4,5,6,7,8], [1,1,1,1,1,1,1,1]) / 8
+}
+
+print("Matrix Access Method Analysis")
+print("=" * 55)
+
+for name, A in matrices.items():
+    result = analyze_matrix_access_methods(A)
+    print(f"\n{name}:")
+    print(f"  Sparsity: {result['sparsity']['nonzero_fraction']:.2%}")
+    print(f"  Max nonzeros/row: {result['sparsity']['max_per_row']}")
+    print(f"  Spectral norm: {result['norms']['spectral']:.4f}")
+    print(f"  Condition number: {result['condition_number']:.2f}")
+    print(f"  Recommended:")
+    for method, suitable in result['recommended_methods'].items():
+        if suitable:
+            print(f"    - {method}")
+```
+
+## 9. Complexity Comparison
+
+<Definition term="Quantum Matrix Operation Complexities">
+| Operation | Classical | Quantum |
+|-----------|-----------|---------|
+| Matrix-vector $Av$ | $O(n^2)$ | $O(s \cdot \text{polylog}(n))$ |
+| Matrix multiply $AB$ | $O(n^{2.37})$ | $O(s^2 \cdot \text{polylog}(n))$ |
+| Matrix inversion | $O(n^3)$ | $O(s^2 \kappa^2 \cdot \text{polylog}(n))$ |
+| SVD | $O(n^3)$ | $O(s^2 \kappa \cdot \text{polylog}(n))$ |
+
+Where $s$ is sparsity and $\kappa$ is condition number.
+</Definition>
+
+<Warning>
+Quantum speedups are in terms of **query complexity** to the matrix. Data loading overhead may dominate for classical data. Quantum advantage is clearest when data is already quantum or has efficient structure.
+</Warning>
+
+## 10. Applications and Practical Considerations
+
+### When Quantum Matrix Operations Help
+
+1. **Large sparse systems**: $n$ exponentially large, $s$ small
+2. **Quantum output sufficient**: Don't need full classical readout
+3. **Repeated operations**: Amortize state preparation cost
+4. **Quantum data**: Input from quantum sensors or other quantum algorithms
+
+### Current Limitations
+
+- Block-encoding overhead
+- Ancilla requirements grow with operations
+- Success probability challenges
+- Limited near-term hardware
+
+## Summary
+
+Quantum matrix operations provide powerful tools for linear algebra:
+
+1. **Block-Encoding**: Embed matrices in unitaries for quantum manipulation
+2. **Matrix-Vector**: Use block-encoding for efficient $A|b\rangle$ computation
+3. **Matrix Multiplication**: Compose block-encodings with ancilla overhead
+4. **QSVT**: Unified framework for polynomial transformations of singular values
+5. **Inversion**: QSVT achieves $O(\kappa \log(1/\epsilon))$ vs HHL's $O(\kappa^2/\epsilon)$
+6. **Data Access**: Query, sparse, and block-encoding models
+
+These techniques form the foundation for quantum machine learning and scientific computing algorithms.
+
+## Further Reading
+
+- Next lesson: Eigenvalue Algorithms (QPE variants and eigensolvers)
+- Related: HHL Algorithm (specific application of matrix inversion)
+- Advanced: Quantum Singular Value Transformation (comprehensive treatment)

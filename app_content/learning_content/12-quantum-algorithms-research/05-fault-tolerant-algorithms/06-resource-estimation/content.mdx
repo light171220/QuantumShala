@@ -1,0 +1,995 @@
+---
+title: "Resource Estimation for Fault-Tolerant Quantum Computing"
+description: "Learn to estimate the physical resources required for fault-tolerant quantum algorithms, including qubit counts, gate counts, runtime analysis, and the trade-offs between different error correction codes."
+duration: 80
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Calculate logical qubit requirements from algorithm specifications
+- Estimate physical qubit overhead for surface code implementations
+- Analyze T-gate costs and magic state distillation requirements
+- Evaluate runtime bounds for fault-tolerant algorithms
+- Compare resource estimates across different error correction schemes
+
+## 1. Introduction to Resource Estimation
+
+Resource estimation is the critical bridge between theoretical quantum algorithms and practical quantum computing. It answers the fundamental question: "How many qubits and how much time do we need to run this algorithm?"
+
+<Definition term="Resource Estimation">
+The process of calculating the physical resources (qubits, gates, time) required to execute a quantum algorithm with a target success probability, accounting for error correction overhead.
+</Definition>
+
+```python
+import numpy as np
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional
+from enum import Enum
+
+class ErrorCorrectionScheme(Enum):
+    SURFACE_CODE = "surface_code"
+    COLOR_CODE = "color_code"
+    CONCATENATED = "concatenated"
+    LDPC = "ldpc"
+
+@dataclass
+class AlgorithmSpecification:
+    """Specification of a quantum algorithm's requirements."""
+    name: str
+    logical_qubits: int
+    t_count: int
+    t_depth: int
+    clifford_count: int
+    measurement_count: int
+    target_error_rate: float
+
+@dataclass
+class ResourceEstimate:
+    """Complete resource estimate for fault-tolerant execution."""
+    physical_qubits: int
+    code_distance: int
+    execution_time_seconds: float
+    magic_state_factories: int
+    total_t_gates: int
+    logical_error_rate: float
+
+class ResourceEstimator:
+    """
+    Estimate resources for fault-tolerant quantum computation.
+    """
+
+    def __init__(
+        self,
+        physical_error_rate: float = 1e-3,
+        scheme: ErrorCorrectionScheme = ErrorCorrectionScheme.SURFACE_CODE
+    ):
+        self.p_phys = physical_error_rate
+        self.scheme = scheme
+
+        # Surface code parameters
+        self.cycle_time_us = 1.0  # Microseconds per syndrome cycle
+        self.threshold = 0.01  # Error threshold
+
+    def estimate(self, spec: AlgorithmSpecification) -> ResourceEstimate:
+        """
+        Generate complete resource estimate.
+        """
+        # Step 1: Determine required code distance
+        code_distance = self.compute_code_distance(
+            spec.target_error_rate,
+            spec.logical_qubits,
+            spec.t_depth
+        )
+
+        # Step 2: Calculate physical qubits per logical qubit
+        qubits_per_logical = self.physical_qubits_per_logical(code_distance)
+
+        # Step 3: Estimate magic state factory requirements
+        factory_qubits, num_factories = self.magic_state_factory_resources(
+            spec.t_count,
+            code_distance
+        )
+
+        # Step 4: Calculate total physical qubits
+        data_qubits = spec.logical_qubits * qubits_per_logical
+        total_physical = data_qubits + factory_qubits
+
+        # Step 5: Estimate execution time
+        exec_time = self.estimate_execution_time(
+            spec.t_depth,
+            spec.clifford_count,
+            code_distance,
+            num_factories
+        )
+
+        # Step 6: Calculate final logical error rate
+        logical_error = self.logical_error_rate(
+            code_distance,
+            spec.logical_qubits,
+            spec.t_depth
+        )
+
+        return ResourceEstimate(
+            physical_qubits=total_physical,
+            code_distance=code_distance,
+            execution_time_seconds=exec_time,
+            magic_state_factories=num_factories,
+            total_t_gates=spec.t_count,
+            logical_error_rate=logical_error
+        )
+
+    def compute_code_distance(
+        self,
+        target_error: float,
+        num_logical: int,
+        circuit_depth: int
+    ) -> int:
+        """
+        Compute minimum code distance for target error rate.
+
+        For surface codes: p_L ~ (p/p_th)^((d+1)/2)
+        """
+        # Total operations ~ num_logical * circuit_depth
+        total_ops = num_logical * circuit_depth
+
+        # Required error per operation
+        error_per_op = target_error / total_ops
+
+        # Solve for d: (p/p_th)^((d+1)/2) < error_per_op
+        ratio = self.p_phys / self.threshold
+
+        # d+1 > 2 * log(error_per_op) / log(ratio)
+        if ratio >= 1:
+            return 100  # Above threshold, need very high distance
+
+        d_float = 2 * np.log(error_per_op) / np.log(ratio) - 1
+
+        # Round up to nearest odd number (surface codes need odd distance)
+        d = int(np.ceil(d_float))
+        if d % 2 == 0:
+            d += 1
+
+        return max(3, d)  # Minimum distance 3
+
+    def physical_qubits_per_logical(self, code_distance: int) -> int:
+        """
+        Calculate physical qubits per logical qubit.
+
+        Surface code: 2d^2 data qubits
+        """
+        if self.scheme == ErrorCorrectionScheme.SURFACE_CODE:
+            return 2 * code_distance ** 2
+        elif self.scheme == ErrorCorrectionScheme.COLOR_CODE:
+            return int(3.5 * code_distance ** 2)
+        else:
+            return 2 * code_distance ** 2  # Default
+
+    def magic_state_factory_resources(
+        self,
+        t_count: int,
+        code_distance: int
+    ) -> Tuple[int, int]:
+        """
+        Estimate magic state factory resources.
+
+        Returns (total_factory_qubits, num_factories)
+        """
+        # Factory production rate
+        cycles_per_magic_state = 15 * code_distance  # Approximate
+
+        # Qubits per factory (15-to-1 distillation)
+        qubits_per_factory = 15 * self.physical_qubits_per_logical(code_distance)
+
+        # Number of factories for reasonable throughput
+        # Target: produce magic states fast enough for T-depth execution
+        num_factories = max(1, min(t_count // 1000 + 1, 10))
+
+        return num_factories * qubits_per_factory, num_factories
+
+    def estimate_execution_time(
+        self,
+        t_depth: int,
+        clifford_count: int,
+        code_distance: int,
+        num_factories: int
+    ) -> float:
+        """
+        Estimate total execution time in seconds.
+        """
+        # Time per error correction cycle
+        cycle_time = self.cycle_time_us * 1e-6
+
+        # Clifford gates: ~1 cycle each (transversal)
+        clifford_time = clifford_count * cycle_time * code_distance
+
+        # T gates: limited by factory production
+        # Each magic state takes ~15d cycles to produce
+        magic_state_cycles = 15 * code_distance
+        t_time_per_layer = magic_state_cycles * cycle_time / num_factories
+        t_time = t_depth * t_time_per_layer
+
+        return clifford_time + t_time
+
+    def logical_error_rate(
+        self,
+        code_distance: int,
+        num_logical: int,
+        circuit_depth: int
+    ) -> float:
+        """
+        Calculate expected logical error rate.
+        """
+        # Error per logical operation
+        error_per_op = 0.1 * (self.p_phys / self.threshold) ** ((code_distance + 1) // 2)
+
+        # Total error (union bound)
+        total_ops = num_logical * circuit_depth
+        return min(1.0, total_ops * error_per_op)
+
+# Example: Estimate resources for a small algorithm
+estimator = ResourceEstimator(physical_error_rate=1e-3)
+
+spec = AlgorithmSpecification(
+    name="Simple VQE",
+    logical_qubits=10,
+    t_count=1000,
+    t_depth=100,
+    clifford_count=5000,
+    measurement_count=100,
+    target_error_rate=0.01
+)
+
+result = estimator.estimate(spec)
+print(f"Resource Estimate for {spec.name}:")
+print(f"  Physical qubits: {result.physical_qubits:,}")
+print(f"  Code distance: {result.code_distance}")
+print(f"  Execution time: {result.execution_time_seconds:.3f} seconds")
+print(f"  Magic state factories: {result.magic_state_factories}")
+print(f"  Logical error rate: {result.logical_error_rate:.2e}")
+```
+
+## 2. Logical Qubit Overhead
+
+The first step in resource estimation is understanding how logical qubits map to physical qubits.
+
+<Formula>
+$$N_{physical} = N_{logical} \times f(d) + N_{factory}$$
+</Formula>
+
+where f(d) depends on the error correction code and d is the code distance.
+
+```python
+class LogicalQubitAnalyzer:
+    """
+    Analyze logical qubit requirements and overhead.
+    """
+
+    def __init__(self):
+        self.code_overheads = {
+            'surface_code': lambda d: 2 * d * d,
+            'rotated_surface': lambda d: d * d + (d-1) * d,
+            'color_code_4.8.8': lambda d: int(3.5 * d * d),
+            'steane_concatenated': lambda level: 7 ** level,
+        }
+
+    def analyze_algorithm(
+        self,
+        algorithm_qubits: int,
+        ancilla_qubits: int,
+        workspace_qubits: int
+    ) -> Dict:
+        """
+        Analyze total logical qubit requirements.
+        """
+        total_logical = algorithm_qubits + ancilla_qubits + workspace_qubits
+
+        return {
+            'algorithm_qubits': algorithm_qubits,
+            'ancilla_qubits': ancilla_qubits,
+            'workspace_qubits': workspace_qubits,
+            'total_logical': total_logical,
+            'breakdown': {
+                'data': algorithm_qubits / total_logical,
+                'ancilla': ancilla_qubits / total_logical,
+                'workspace': workspace_qubits / total_logical
+            }
+        }
+
+    def physical_overhead(
+        self,
+        logical_qubits: int,
+        code_distance: int,
+        code_type: str = 'surface_code'
+    ) -> Dict:
+        """
+        Calculate physical qubit overhead.
+        """
+        overhead_func = self.code_overheads.get(code_type)
+
+        if overhead_func is None:
+            raise ValueError(f"Unknown code type: {code_type}")
+
+        qubits_per_logical = overhead_func(code_distance)
+        total_physical = logical_qubits * qubits_per_logical
+
+        return {
+            'logical_qubits': logical_qubits,
+            'code_distance': code_distance,
+            'code_type': code_type,
+            'qubits_per_logical': qubits_per_logical,
+            'total_physical_data': total_physical,
+            'overhead_ratio': qubits_per_logical
+        }
+
+    def compare_distances(
+        self,
+        logical_qubits: int,
+        distances: List[int]
+    ) -> List[Dict]:
+        """
+        Compare resource requirements across code distances.
+        """
+        results = []
+
+        for d in distances:
+            physical = self.physical_overhead(logical_qubits, d)
+
+            # Estimate logical error rate
+            p_phys = 1e-3
+            p_th = 0.01
+            p_logical = 0.1 * (p_phys / p_th) ** ((d + 1) // 2)
+
+            results.append({
+                'distance': d,
+                'physical_qubits': physical['total_physical_data'],
+                'logical_error': p_logical,
+                'overhead_ratio': physical['overhead_ratio']
+            })
+
+        return results
+
+# Example analysis
+analyzer = LogicalQubitAnalyzer()
+
+# Analyze a quantum chemistry algorithm
+chemistry_analysis = analyzer.analyze_algorithm(
+    algorithm_qubits=50,  # Molecular orbitals
+    ancilla_qubits=20,    # Phase estimation ancillas
+    workspace_qubits=30   # Temporary storage
+)
+
+print("Logical Qubit Analysis:")
+for key, value in chemistry_analysis.items():
+    print(f"  {key}: {value}")
+
+# Compare code distances
+print("\nCode Distance Comparison (100 logical qubits):")
+comparison = analyzer.compare_distances(100, [7, 11, 15, 21, 27])
+for entry in comparison:
+    print(f"  d={entry['distance']:2d}: {entry['physical_qubits']:,} physical, "
+          f"p_L={entry['logical_error']:.2e}")
+```
+
+## 3. T-Gate Factories and Magic State Distillation
+
+T-gates are the bottleneck of fault-tolerant quantum computing. Magic state factories dominate resource requirements.
+
+<Definition term="Magic State Factory">
+A dedicated region of the quantum computer that produces high-fidelity magic states through distillation. Multiple factories can run in parallel to increase T-gate throughput.
+</Definition>
+
+```python
+@dataclass
+class FactoryConfig:
+    """Configuration for a magic state factory."""
+    protocol: str  # '15-to-1' or '20-to-4'
+    levels: int
+    code_distance: int
+
+@dataclass
+class FactoryOutput:
+    """Output characteristics of a factory."""
+    output_fidelity: float
+    qubits_required: int
+    cycles_per_state: int
+    throughput_per_second: float
+
+class MagicStateFactoryDesigner:
+    """
+    Design and analyze magic state factories.
+    """
+
+    def __init__(self, physical_error_rate: float = 1e-3):
+        self.p_phys = physical_error_rate
+        self.cycle_time_us = 1.0
+
+    def design_factory(
+        self,
+        target_fidelity: float,
+        code_distance: int,
+        protocol: str = '15-to-1'
+    ) -> Tuple[FactoryConfig, FactoryOutput]:
+        """
+        Design a factory to achieve target fidelity.
+        """
+        # Input fidelity from physical error rate
+        input_fidelity = 1 - self.p_phys
+
+        # Calculate distillation levels needed
+        if protocol == '15-to-1':
+            output_error_factor = 35
+            error_power = 3
+            states_per_level = 15
+        elif protocol == '20-to-4':
+            output_error_factor = 20
+            error_power = 3
+            states_per_level = 5  # 20/4 = 5 input per output
+        else:
+            raise ValueError(f"Unknown protocol: {protocol}")
+
+        # Calculate levels
+        current_error = 1 - input_fidelity
+        levels = 0
+
+        while (1 - current_error) < target_fidelity and levels < 5:
+            current_error = output_error_factor * (current_error ** error_power)
+            levels += 1
+
+        config = FactoryConfig(
+            protocol=protocol,
+            levels=levels,
+            code_distance=code_distance
+        )
+
+        # Calculate resources
+        output = self.calculate_factory_resources(config)
+
+        return config, output
+
+    def calculate_factory_resources(
+        self,
+        config: FactoryConfig
+    ) -> FactoryOutput:
+        """
+        Calculate resource requirements for a factory.
+        """
+        d = config.code_distance
+
+        # Qubits per logical qubit
+        qubits_per_logical = 2 * d * d
+
+        if config.protocol == '15-to-1':
+            # 15-to-1 protocol resources per level
+            qubits_per_level = 15 * qubits_per_logical
+            cycles_per_level = 15 * d
+
+            # Total (levels cascade)
+            total_qubits = qubits_per_level * (15 ** (config.levels - 1))
+            total_cycles = cycles_per_level * config.levels
+
+        elif config.protocol == '20-to-4':
+            qubits_per_level = 20 * qubits_per_logical
+            cycles_per_level = 20 * d
+
+            total_qubits = qubits_per_level * (5 ** (config.levels - 1))
+            total_cycles = cycles_per_level * config.levels
+
+        # Output fidelity
+        input_error = self.p_phys
+        output_error = input_error
+        for _ in range(config.levels):
+            output_error = 35 * (output_error ** 3)
+
+        # Throughput
+        cycle_time_s = self.cycle_time_us * 1e-6
+        time_per_state = total_cycles * cycle_time_s * d
+        throughput = 1.0 / time_per_state
+
+        return FactoryOutput(
+            output_fidelity=1 - output_error,
+            qubits_required=total_qubits,
+            cycles_per_state=total_cycles,
+            throughput_per_second=throughput
+        )
+
+    def factory_array_design(
+        self,
+        t_count: int,
+        target_time_seconds: float,
+        target_fidelity: float,
+        code_distance: int
+    ) -> Dict:
+        """
+        Design a factory array to meet throughput requirements.
+        """
+        # Design single factory
+        config, output = self.design_factory(
+            target_fidelity,
+            code_distance
+        )
+
+        # Required throughput
+        required_throughput = t_count / target_time_seconds
+
+        # Number of factories needed
+        num_factories = int(np.ceil(required_throughput / output.throughput_per_second))
+
+        return {
+            'single_factory': {
+                'config': config,
+                'output': output
+            },
+            'array': {
+                'num_factories': num_factories,
+                'total_qubits': num_factories * output.qubits_required,
+                'total_throughput': num_factories * output.throughput_per_second,
+                'achieves_target': num_factories * output.throughput_per_second >= required_throughput
+            },
+            'requirements': {
+                't_count': t_count,
+                'target_time': target_time_seconds,
+                'required_throughput': required_throughput
+            }
+        }
+
+# Example: Design factory for Shor's algorithm
+factory_designer = MagicStateFactoryDesigner()
+
+# Design for high-fidelity T gates
+config, output = factory_designer.design_factory(
+    target_fidelity=1 - 1e-12,
+    code_distance=21,
+    protocol='15-to-1'
+)
+
+print("Magic State Factory Design:")
+print(f"  Protocol: {config.protocol}")
+print(f"  Distillation levels: {config.levels}")
+print(f"  Qubits required: {output.qubits_required:,}")
+print(f"  Output fidelity: {output.output_fidelity}")
+print(f"  Throughput: {output.throughput_per_second:.1f} states/second")
+
+# Design array for large algorithm
+array = factory_designer.factory_array_design(
+    t_count=1_000_000,
+    target_time_seconds=3600,  # 1 hour
+    target_fidelity=1 - 1e-12,
+    code_distance=21
+)
+
+print("\nFactory Array Design:")
+print(f"  Number of factories: {array['array']['num_factories']}")
+print(f"  Total factory qubits: {array['array']['total_qubits']:,}")
+print(f"  Meets requirements: {array['array']['achieves_target']}")
+```
+
+## 4. Space-Time Tradeoffs
+
+In fault-tolerant quantum computing, we can often trade space (more qubits) for time (faster execution) and vice versa.
+
+<Warning>
+Space-time tradeoffs are not always linear. Doubling the number of magic state factories does not always halve the execution time due to routing and scheduling constraints.
+</Warning>
+
+```python
+class SpaceTimeAnalyzer:
+    """
+    Analyze space-time tradeoffs in fault-tolerant execution.
+    """
+
+    def __init__(self):
+        self.cycle_time_us = 1.0
+
+    def analyze_tradeoffs(
+        self,
+        t_count: int,
+        t_depth: int,
+        logical_qubits: int,
+        code_distance: int,
+        factory_configs: List[int]  # List of factory counts to try
+    ) -> List[Dict]:
+        """
+        Analyze space-time tradeoffs for different configurations.
+        """
+        results = []
+
+        qubits_per_logical = 2 * code_distance ** 2
+        base_data_qubits = logical_qubits * qubits_per_logical
+
+        # Factory qubits estimate
+        qubits_per_factory = 15 * qubits_per_logical  # Approximate
+
+        for num_factories in factory_configs:
+            # Total qubits
+            factory_qubits = num_factories * qubits_per_factory
+            total_qubits = base_data_qubits + factory_qubits
+
+            # Execution time
+            # T gates limited by factory throughput
+            cycles_per_t = 15 * code_distance  # Production time
+            t_cycles_parallel = (t_depth * cycles_per_t) / num_factories
+
+            # Total time
+            total_cycles = t_cycles_parallel
+            time_seconds = total_cycles * self.cycle_time_us * 1e-6
+
+            # Space-time product (lower is better)
+            space_time_product = total_qubits * time_seconds
+
+            results.append({
+                'num_factories': num_factories,
+                'total_qubits': total_qubits,
+                'time_seconds': time_seconds,
+                'space_time_product': space_time_product,
+                'data_qubit_fraction': base_data_qubits / total_qubits,
+                'factory_qubit_fraction': factory_qubits / total_qubits
+            })
+
+        return results
+
+    def plot_tradeoff_curve(self, results: List[Dict]) -> None:
+        """
+        Display space-time tradeoff analysis.
+        """
+        print("\nSpace-Time Tradeoff Analysis:")
+        print("-" * 70)
+        print(f"{'Factories':>10} {'Qubits':>12} {'Time (s)':>10} {'Space*Time':>15} {'Factory %':>10}")
+        print("-" * 70)
+
+        min_st = min(r['space_time_product'] for r in results)
+
+        for r in results:
+            optimal = " *" if r['space_time_product'] == min_st else ""
+            print(f"{r['num_factories']:>10} {r['total_qubits']:>12,} "
+                  f"{r['time_seconds']:>10.2f} {r['space_time_product']:>15,.0f}"
+                  f"{r['factory_qubit_fraction']*100:>9.1f}%{optimal}")
+
+    def pareto_optimal(self, results: List[Dict]) -> List[Dict]:
+        """
+        Find Pareto-optimal configurations.
+
+        A configuration is Pareto-optimal if no other configuration
+        has both fewer qubits AND less time.
+        """
+        pareto = []
+
+        for r in results:
+            dominated = False
+            for other in results:
+                if (other['total_qubits'] <= r['total_qubits'] and
+                    other['time_seconds'] <= r['time_seconds'] and
+                    (other['total_qubits'] < r['total_qubits'] or
+                     other['time_seconds'] < r['time_seconds'])):
+                    dominated = True
+                    break
+
+            if not dominated:
+                pareto.append(r)
+
+        return pareto
+
+# Analyze tradeoffs
+analyzer = SpaceTimeAnalyzer()
+
+results = analyzer.analyze_tradeoffs(
+    t_count=100_000,
+    t_depth=10_000,
+    logical_qubits=100,
+    code_distance=21,
+    factory_configs=[1, 2, 4, 8, 16, 32]
+)
+
+analyzer.plot_tradeoff_curve(results)
+
+pareto = analyzer.pareto_optimal(results)
+print(f"\nPareto-optimal configurations: {len(pareto)}")
+```
+
+## 5. Resource Estimation Tools and Frameworks
+
+Several tools exist for resource estimation. Understanding their approaches helps interpret results.
+
+```python
+class ResourceEstimationFramework:
+    """
+    Comprehensive resource estimation following industry approaches.
+    """
+
+    def __init__(self):
+        self.default_params = {
+            'physical_error_rate': 1e-3,
+            'cycle_time_us': 1.0,
+            'reaction_time_us': 10.0,  # Classical feedback
+            'magic_state_protocol': '15-to-1',
+        }
+
+    def estimate_shor_factoring(self, n_bits: int) -> Dict:
+        """
+        Estimate resources for Shor's algorithm.
+
+        Based on: Gidney & Ekera, "How to factor 2048 bit RSA integers
+        in 8 hours using 20 million noisy qubits"
+        """
+        # Logical qubits: ~2n for modular exponentiation
+        logical_qubits = 2 * n_bits + 10  # Extra for workspace
+
+        # T-count scaling: O(n^2 log(n)) for optimized implementations
+        t_count = int(4 * n_bits * n_bits * np.log2(n_bits))
+
+        # T-depth: Can be parallelized to O(n log(n))
+        t_depth = int(n_bits * np.log2(n_bits))
+
+        return self._full_estimate(
+            name=f"Shor-{n_bits}",
+            logical_qubits=logical_qubits,
+            t_count=t_count,
+            t_depth=t_depth,
+            target_error=0.01
+        )
+
+    def estimate_quantum_chemistry(
+        self,
+        n_orbitals: int,
+        n_electrons: int,
+        precision: float
+    ) -> Dict:
+        """
+        Estimate resources for quantum chemistry.
+
+        Based on various qubitization approaches.
+        """
+        # Qubits: n orbitals + ancillas for phase estimation
+        pe_bits = int(np.ceil(np.log2(1/precision)))
+        logical_qubits = n_orbitals + pe_bits + 10
+
+        # T-count scales with orbitals and precision
+        lambda_param = n_orbitals * n_electrons  # Rough 1-norm estimate
+        t_count = int(lambda_param * (1/precision) * np.log(1/precision))
+
+        t_depth = int(t_count / 10)  # Moderate parallelization
+
+        return self._full_estimate(
+            name=f"QChem-{n_orbitals}orb",
+            logical_qubits=logical_qubits,
+            t_count=t_count,
+            t_depth=t_depth,
+            target_error=0.1  # Chemistry typically tolerant
+        )
+
+    def estimate_grover_search(
+        self,
+        n_bits: int,
+        num_solutions: int = 1
+    ) -> Dict:
+        """
+        Estimate resources for Grover's algorithm.
+        """
+        # Qubits: n for search space + ancillas for oracle
+        logical_qubits = n_bits + int(np.log2(n_bits)) + 5
+
+        # Iterations
+        N = 2 ** n_bits
+        iterations = int((np.pi/4) * np.sqrt(N/num_solutions))
+
+        # T-count per iteration (oracle + diffusion)
+        t_per_iter = 4 * n_bits  # Simplified
+        t_count = iterations * t_per_iter
+        t_depth = t_count  # Sequential iterations
+
+        return self._full_estimate(
+            name=f"Grover-{n_bits}",
+            logical_qubits=logical_qubits,
+            t_count=t_count,
+            t_depth=t_depth,
+            target_error=0.1
+        )
+
+    def _full_estimate(
+        self,
+        name: str,
+        logical_qubits: int,
+        t_count: int,
+        t_depth: int,
+        target_error: float
+    ) -> Dict:
+        """
+        Generate full resource estimate.
+        """
+        p = self.default_params['physical_error_rate']
+        p_th = 0.01
+
+        # Code distance calculation
+        total_ops = logical_qubits * t_depth
+        error_per_op = target_error / total_ops
+
+        # Solve: (p/p_th)^((d+1)/2) < error_per_op
+        if p < p_th:
+            d_float = 2 * np.log(error_per_op) / np.log(p/p_th) - 1
+            d = int(np.ceil(d_float))
+            if d % 2 == 0:
+                d += 1
+            d = max(7, d)
+        else:
+            d = 50  # Fallback for high error rates
+
+        # Physical qubits
+        qubits_per_logical = 2 * d * d
+        data_qubits = logical_qubits * qubits_per_logical
+
+        # Factory design
+        factory_qubits = 15 * qubits_per_logical  # Per factory
+        num_factories = max(1, min(t_count // 10000, 20))
+
+        total_physical = data_qubits + num_factories * factory_qubits
+
+        # Time estimate
+        cycle_time = self.default_params['cycle_time_us'] * 1e-6
+        time_per_t = 15 * d * cycle_time / num_factories
+        total_time = t_depth * time_per_t
+
+        return {
+            'name': name,
+            'inputs': {
+                'logical_qubits': logical_qubits,
+                't_count': t_count,
+                't_depth': t_depth,
+                'target_error': target_error
+            },
+            'outputs': {
+                'code_distance': d,
+                'physical_qubits': total_physical,
+                'data_qubits': data_qubits,
+                'factory_qubits': num_factories * factory_qubits,
+                'num_factories': num_factories,
+                'execution_time_seconds': total_time,
+                'execution_time_hours': total_time / 3600
+            }
+        }
+
+# Run estimates for various algorithms
+framework = ResourceEstimationFramework()
+
+print("Resource Estimates for Key Algorithms")
+print("=" * 60)
+
+# RSA-2048 factoring
+rsa2048 = framework.estimate_shor_factoring(2048)
+print(f"\n{rsa2048['name']}:")
+print(f"  Logical qubits: {rsa2048['inputs']['logical_qubits']}")
+print(f"  T-count: {rsa2048['inputs']['t_count']:,}")
+print(f"  Code distance: {rsa2048['outputs']['code_distance']}")
+print(f"  Physical qubits: {rsa2048['outputs']['physical_qubits']:,}")
+print(f"  Time: {rsa2048['outputs']['execution_time_hours']:.1f} hours")
+
+# FeMoCo simulation
+femoco = framework.estimate_quantum_chemistry(
+    n_orbitals=100,
+    n_electrons=54,
+    precision=1e-3
+)
+print(f"\n{femoco['name']}:")
+print(f"  Logical qubits: {femoco['inputs']['logical_qubits']}")
+print(f"  T-count: {femoco['inputs']['t_count']:,}")
+print(f"  Code distance: {femoco['outputs']['code_distance']}")
+print(f"  Physical qubits: {femoco['outputs']['physical_qubits']:,}")
+print(f"  Time: {femoco['outputs']['execution_time_hours']:.1f} hours")
+
+# Grover search
+grover = framework.estimate_grover_search(30)
+print(f"\n{grover['name']}:")
+print(f"  Logical qubits: {grover['inputs']['logical_qubits']}")
+print(f"  T-count: {grover['inputs']['t_count']:,}")
+print(f"  Code distance: {grover['outputs']['code_distance']}")
+print(f"  Physical qubits: {grover['outputs']['physical_qubits']:,}")
+print(f"  Time: {grover['outputs']['execution_time_hours']:.1f} hours")
+```
+
+## 6. Practical Considerations
+
+### 6.1 Error Budget Allocation
+
+```python
+def allocate_error_budget(
+    total_error: float,
+    algorithm_stages: Dict[str, int]
+) -> Dict[str, float]:
+    """
+    Allocate error budget across algorithm stages.
+
+    Args:
+        total_error: Total acceptable error probability
+        algorithm_stages: Dict mapping stage name to relative weight
+
+    Returns:
+        Error allocation per stage
+    """
+    total_weight = sum(algorithm_stages.values())
+
+    allocation = {}
+    for stage, weight in algorithm_stages.items():
+        # Proportional allocation
+        allocation[stage] = total_error * (weight / total_weight)
+
+    return allocation
+
+# Example: QPE-based algorithm
+stages = {
+    'state_preparation': 10,
+    'hamiltonian_simulation': 50,
+    'phase_estimation': 30,
+    'measurement': 10
+}
+
+budget = allocate_error_budget(0.01, stages)
+print("Error Budget Allocation:")
+for stage, error in budget.items():
+    print(f"  {stage}: {error:.4f}")
+```
+
+### 6.2 Sensitivity Analysis
+
+```python
+def sensitivity_analysis(
+    base_estimate: Dict,
+    parameter: str,
+    variations: List[float]
+) -> List[Dict]:
+    """
+    Analyze sensitivity of resource estimates to parameter changes.
+    """
+    results = []
+
+    framework = ResourceEstimationFramework()
+
+    for var in variations:
+        # Modify parameter
+        if parameter == 'physical_error_rate':
+            framework.default_params['physical_error_rate'] = var
+        elif parameter == 'cycle_time':
+            framework.default_params['cycle_time_us'] = var
+
+        # Re-estimate
+        new_estimate = framework.estimate_shor_factoring(2048)
+
+        results.append({
+            'parameter_value': var,
+            'physical_qubits': new_estimate['outputs']['physical_qubits'],
+            'time_hours': new_estimate['outputs']['execution_time_hours']
+        })
+
+    return results
+
+# Analyze sensitivity to physical error rate
+print("\nSensitivity to Physical Error Rate:")
+for p in [1e-4, 5e-4, 1e-3, 2e-3, 5e-3]:
+    framework = ResourceEstimationFramework()
+    framework.default_params['physical_error_rate'] = p
+    est = framework.estimate_shor_factoring(2048)
+    print(f"  p={p:.0e}: {est['outputs']['physical_qubits']:,} qubits, "
+          f"d={est['outputs']['code_distance']}")
+```
+
+## Summary
+
+In this lesson, you learned about resource estimation for fault-tolerant quantum computing:
+
+1. **Resource Estimation Framework**: Systematic approach to calculating physical requirements
+2. **Logical Qubit Overhead**: How error correction multiplies qubit counts
+3. **Magic State Factories**: Dominant resource for T-gate production
+4. **Space-Time Tradeoffs**: Balancing qubits against execution time
+5. **Practical Tools**: Estimation approaches for real algorithms
+6. **Error Budgeting**: Allocating errors across algorithm stages
+
+<Tip>
+Resource estimates are highly sensitive to physical error rates. A 10x improvement in physical error rates can reduce qubit requirements by orders of magnitude through lower code distances.
+</Tip>
+
+## Further Reading
+
+- Gidney & Ekera: "How to factor 2048 bit RSA integers in 8 hours"
+- Beverland et al.: "Assessing requirements to scale to practical quantum advantage"
+- Lee et al.: "Even More Efficient Quantum Computations of Chemistry Through Tensor Hypercontraction"
+- Azure Quantum Resource Estimator documentation

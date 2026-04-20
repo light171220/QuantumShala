@@ -1,0 +1,653 @@
+---
+title: "Hash-Based Signature Implementation and Performance"
+description: "Master practical implementation of hash-based signatures. Learn optimization techniques, constant-time programming, and performance benchmarking for XMSS, LMS, and SPHINCS+."
+duration: 70
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Implement constant-time hash-based signature operations
+- Optimize Merkle tree traversal algorithms
+- Benchmark and compare hash-based signature performance
+- Choose appropriate parameters for specific use cases
+- Integrate hash-based signatures into applications
+
+## 1. Implementation Considerations
+
+```python
+import hashlib
+import secrets
+import time
+from typing import List, Tuple, Dict
+import numpy as np
+
+def implementation_overview():
+    """Overview of implementation considerations."""
+    print("HASH-BASED SIGNATURE IMPLEMENTATION")
+    print("=" * 70)
+    
+    considerations = """
+    KEY IMPLEMENTATION CHALLENGES:
+    
+    ┌────────────────────────────────────────────────────────────────────┐
+    │ 1. CONSTANT-TIME OPERATIONS                                        │
+    ├────────────────────────────────────────────────────────────────────┤
+    │ • Hash-based sigs are vulnerable to timing attacks                 │
+    │ • Secret-dependent branches leak information                       │
+    │ • Memory access patterns must be data-independent                  │
+    │ • Use constant-time comparison, selection, and indexing            │
+    └────────────────────────────────────────────────────────────────────┘
+    
+    ┌────────────────────────────────────────────────────────────────────┐
+    │ 2. EFFICIENT TREE TRAVERSAL                                        │
+    ├────────────────────────────────────────────────────────────────────┤
+    │ • Naive: Store entire tree (2^h nodes) - memory intensive          │
+    │ • BDS traversal: O(h) space, O(h) time per signature               │
+    │ • Fractal trees: Even better space-time tradeoffs                  │
+    │ • SPHINCS+: On-demand computation (no persistent tree)             │
+    └────────────────────────────────────────────────────────────────────┘
+    
+    ┌────────────────────────────────────────────────────────────────────┐
+    │ 3. HASH FUNCTION SELECTION                                         │
+    ├────────────────────────────────────────────────────────────────────┤
+    │ • SHA-256: Fast on most platforms, hardware acceleration           │
+    │ • SHA-512: Better on 64-bit platforms                              │
+    │ • SHAKE256: Variable output, simpler domain separation             │
+    │ • Haraka: Optimized for short inputs (AES-NI required)             │
+    └────────────────────────────────────────────────────────────────────┘
+    
+    ┌────────────────────────────────────────────────────────────────────┐
+    │ 4. STATE MANAGEMENT (Stateful schemes)                             │
+    ├────────────────────────────────────────────────────────────────────┤
+    │ • Atomic state updates (crash resilience)                          │
+    │ • Forward secrecy (delete used keys)                               │
+    │ • State synchronization (distributed signing)                      │
+    │ • Recovery procedures                                              │
+    └────────────────────────────────────────────────────────────────────┘
+    """
+    print(considerations)
+
+implementation_overview()
+```
+
+## 2. Constant-Time Programming
+
+<Definition term="Constant-Time Implementation">
+Code that executes in the same amount of time regardless of secret values. This prevents timing side-channel attacks where an adversary measures execution time to learn secret information.
+</Definition>
+
+```python
+class ConstantTimeOperations:
+    """
+    Constant-time primitives for hash-based signatures.
+    
+    WARNING: Python is not ideal for constant-time code due to
+    interpreter overhead. Real implementations use C/assembly.
+    These demonstrate the concepts.
+    """
+    
+    @staticmethod
+    def ct_compare(a: bytes, b: bytes) -> bool:
+        """
+        Constant-time byte comparison.
+        
+        Always examines all bytes, unlike == which short-circuits.
+        """
+        if len(a) != len(b):
+            return False
+        
+        result = 0
+        for x, y in zip(a, b):
+            result |= x ^ y
+        
+        return result == 0
+    
+    @staticmethod
+    def ct_select(condition: bool, a: bytes, b: bytes) -> bytes:
+        """
+        Constant-time selection: return a if condition else b.
+        
+        Both branches are always computed.
+        """
+        # Convert condition to all-1s or all-0s mask
+        mask = -int(condition)  # 0 or -1 (all 1s in two's complement)
+        
+        result = bytearray(len(a))
+        for i in range(len(a)):
+            result[i] = (a[i] & mask) | (b[i] & ~mask)
+        
+        return bytes(result)
+    
+    @staticmethod
+    def ct_conditional_swap(condition: bool, a: bytes, b: bytes) -> Tuple[bytes, bytes]:
+        """
+        Constant-time conditional swap.
+        """
+        mask = bytes([0xFF if condition else 0x00] * len(a))
+        
+        # XOR swap with masking
+        diff = bytes(x ^ y for x, y in zip(a, b))
+        masked_diff = bytes(d & m for d, m in zip(diff, mask))
+        
+        new_a = bytes(x ^ d for x, d in zip(a, masked_diff))
+        new_b = bytes(y ^ d for y, d in zip(b, masked_diff))
+        
+        return new_a, new_b
+
+
+def demonstrate_constant_time():
+    """Demonstrate constant-time operations."""
+    print("\nCONSTANT-TIME OPERATIONS")
+    print("=" * 60)
+    
+    ct = ConstantTimeOperations()
+    
+    # Comparison
+    a = b"secret_value_123"
+    b = b"secret_value_123"
+    c = b"different_value!"
+    
+    print("1. CONSTANT-TIME COMPARISON")
+    
+    # Time regular comparison
+    times_regular = []
+    for _ in range(10000):
+        start = time.perf_counter_ns()
+        _ = a == b
+        times_regular.append(time.perf_counter_ns() - start)
+    
+    times_ct = []
+    for _ in range(10000):
+        start = time.perf_counter_ns()
+        _ = ct.ct_compare(a, b)
+        times_ct.append(time.perf_counter_ns() - start)
+    
+    print(f"   Regular ==: avg {np.mean(times_regular):.1f} ns, std {np.std(times_regular):.1f} ns")
+    print(f"   CT compare: avg {np.mean(times_ct):.1f} ns, std {np.std(times_ct):.1f} ns")
+    
+    # Selection
+    print("\n2. CONSTANT-TIME SELECTION")
+    x = b"value_if_true_"
+    y = b"value_if_false"
+    
+    result_true = ct.ct_select(True, x, y)
+    result_false = ct.ct_select(False, x, y)
+    
+    print(f"   ct_select(True, x, y) = {result_true}")
+    print(f"   ct_select(False, x, y) = {result_false}")
+    
+    # Verify correctness
+    print(f"\n3. VERIFICATION")
+    print(f"   ct_compare(a, b): {ct.ct_compare(a, b)} (should be True)")
+    print(f"   ct_compare(a, c): {ct.ct_compare(a, c)} (should be False)")
+
+demonstrate_constant_time()
+```
+
+## 3. Efficient Merkle Tree Traversal
+
+```python
+class EfficientMerkleTree:
+    """
+    Merkle tree with efficient traversal algorithms.
+    
+    Instead of storing all 2^h nodes, we compute on-demand
+    and cache strategically.
+    """
+    
+    def __init__(self, height: int, n: int = 32):
+        self.height = height
+        self.n = n
+        self.num_leaves = 2 ** height
+        
+        # Cache for authentication path computation
+        self.auth_cache = {}
+        self.current_leaf = 0
+    
+    def _hash(self, data: bytes) -> bytes:
+        return hashlib.sha256(data).digest()[:self.n]
+    
+    def _leaf_hash(self, seed: bytes, idx: int) -> bytes:
+        """Compute leaf hash from seed and index."""
+        return self._hash(seed + idx.to_bytes(4, 'big'))
+    
+    def _compute_node(self, seed: bytes, level: int, index: int) -> bytes:
+        """
+        Compute a specific tree node.
+        
+        Uses recursion with memoization.
+        """
+        cache_key = (level, index)
+        if cache_key in self.auth_cache:
+            return self.auth_cache[cache_key]
+        
+        if level == 0:
+            # Leaf level
+            result = self._leaf_hash(seed, index)
+        else:
+            # Internal node
+            left = self._compute_node(seed, level - 1, 2 * index)
+            right = self._compute_node(seed, level - 1, 2 * index + 1)
+            result = self._hash(left + right)
+        
+        self.auth_cache[cache_key] = result
+        return result
+    
+    def compute_root(self, seed: bytes) -> bytes:
+        """Compute tree root."""
+        return self._compute_node(seed, self.height, 0)
+    
+    def compute_auth_path(self, seed: bytes, leaf_idx: int) -> List[bytes]:
+        """
+        Compute authentication path for a leaf.
+        
+        Path contains sibling at each level.
+        """
+        path = []
+        idx = leaf_idx
+        
+        for level in range(self.height):
+            sibling_idx = idx ^ 1
+            sibling = self._compute_node(seed, level, sibling_idx)
+            path.append(sibling)
+            idx //= 2
+        
+        return path
+    
+    def clear_cache(self):
+        """Clear the computation cache."""
+        self.auth_cache.clear()
+
+
+class BDSTreeTraversal:
+    """
+    BDS (Buchmann-Dahmen-Schneider) tree traversal.
+    
+    Computes authentication paths with:
+    - O(h) space complexity
+    - O(h/2) average hash operations per signature
+    
+    Key insight: Pre-compute and cache strategic nodes.
+    """
+    
+    def __init__(self, height: int, n: int = 32):
+        self.height = height
+        self.n = n
+        self.num_leaves = 2 ** height
+        
+        # Authentication path for current leaf
+        self.auth = [None] * height
+        
+        # Stacks for each level (for upcoming auth nodes)
+        self.stacks = [[] for _ in range(height)]
+        
+        # Keep track of nodes being computed
+        self.retain = {}
+        
+        self.current_leaf = 0
+    
+    def _hash(self, data: bytes) -> bytes:
+        return hashlib.sha256(data).digest()[:self.n]
+    
+    def initialize(self, seed: bytes):
+        """
+        Initialize BDS traversal.
+        
+        Computes initial authentication path and prepares stacks.
+        """
+        # For first leaf, auth path is right siblings at each level
+        self.seed = seed
+        
+        # Simple initialization: compute directly
+        for h in range(self.height):
+            sibling_idx = 1  # Right sibling of leftmost path
+            self.auth[h] = self._compute_node(h, sibling_idx << h)
+    
+    def _compute_node(self, level: int, start_leaf: int) -> bytes:
+        """Compute internal node starting at given leaf range."""
+        if level == 0:
+            return self._hash(self.seed + start_leaf.to_bytes(4, 'big'))
+        
+        left = self._compute_node(level - 1, start_leaf)
+        right = self._compute_node(level - 1, start_leaf + (1 << (level - 1)))
+        return self._hash(left + right)
+    
+    def get_auth_path(self) -> List[bytes]:
+        """Get current authentication path."""
+        return list(self.auth)
+    
+    def advance(self):
+        """
+        Advance to next leaf.
+        
+        Updates authentication path efficiently.
+        """
+        self.current_leaf += 1
+        
+        if self.current_leaf >= self.num_leaves:
+            return  # Exhausted
+        
+        # Find lowest level where leaf index bit flips
+        tau = 0
+        leaf = self.current_leaf
+        while (leaf & 1) == 0:
+            tau += 1
+            leaf >>= 1
+        
+        # Update auth path at level tau and below
+        for h in range(tau):
+            # New auth node is the one we just passed
+            pass  # Simplified - real BDS is more complex
+
+
+def benchmark_tree_traversal():
+    """Benchmark different tree traversal methods."""
+    print("\nTREE TRAVERSAL BENCHMARKS")
+    print("=" * 60)
+    
+    heights = [10, 15, 20]
+    
+    for h in heights:
+        print(f"\nHeight h = {h} ({2**h:,} leaves)")
+        
+        # Efficient tree
+        tree = EfficientMerkleTree(h, 32)
+        seed = secrets.token_bytes(32)
+        
+        # Time root computation
+        start = time.time()
+        root = tree.compute_root(seed)
+        root_time = time.time() - start
+        
+        # Clear cache and time auth path
+        tree.clear_cache()
+        start = time.time()
+        path = tree.compute_auth_path(seed, 0)
+        path_time = time.time() - start
+        
+        print(f"  Root computation: {root_time*1000:.2f} ms")
+        print(f"  Auth path (cold): {path_time*1000:.2f} ms")
+        print(f"  Cache entries: {len(tree.auth_cache)}")
+        
+        # With warm cache
+        start = time.time()
+        path = tree.compute_auth_path(seed, 1)
+        path_time_warm = time.time() - start
+        print(f"  Auth path (warm): {path_time_warm*1000:.4f} ms")
+
+benchmark_tree_traversal()
+```
+
+## 4. Performance Benchmarks
+
+```python
+class HashBasedSignatureBenchmark:
+    """
+    Benchmark suite for hash-based signatures.
+    """
+    
+    def __init__(self):
+        self.results = {}
+    
+    def benchmark_hash_function(self, iterations: int = 10000):
+        """Benchmark underlying hash functions."""
+        print("\nHASH FUNCTION BENCHMARKS")
+        print("=" * 60)
+        
+        data = secrets.token_bytes(64)
+        
+        # SHA-256
+        start = time.time()
+        for _ in range(iterations):
+            hashlib.sha256(data).digest()
+        sha256_time = (time.time() - start) / iterations * 1e6
+        
+        # SHA-512
+        start = time.time()
+        for _ in range(iterations):
+            hashlib.sha512(data).digest()
+        sha512_time = (time.time() - start) / iterations * 1e6
+        
+        # SHA3-256
+        start = time.time()
+        for _ in range(iterations):
+            hashlib.sha3_256(data).digest()
+        sha3_time = (time.time() - start) / iterations * 1e6
+        
+        # SHAKE256 (variable output)
+        start = time.time()
+        for _ in range(iterations):
+            hashlib.shake_256(data).digest(32)
+        shake_time = (time.time() - start) / iterations * 1e6
+        
+        print(f"{'Hash Function':<15} {'Time (μs)':<12} {'Throughput (MB/s)'}")
+        print("-" * 50)
+        print(f"{'SHA-256':<15} {sha256_time:<12.2f} {64/sha256_time:.1f}")
+        print(f"{'SHA-512':<15} {sha512_time:<12.2f} {64/sha512_time:.1f}")
+        print(f"{'SHA3-256':<15} {sha3_time:<12.2f} {64/sha3_time:.1f}")
+        print(f"{'SHAKE256':<15} {shake_time:<12.2f} {64/shake_time:.1f}")
+        
+        self.results['hash'] = {
+            'sha256': sha256_time,
+            'sha512': sha512_time,
+            'sha3_256': sha3_time,
+            'shake256': shake_time
+        }
+    
+    def estimate_wots_operations(self, n: int, w: int):
+        """Estimate WOTS+ operation counts."""
+        import math
+        log_w = int(math.log2(w))
+        l1 = math.ceil(8 * n / log_w)
+        l2 = math.floor(math.log2(l1 * (w - 1)) / log_w) + 1
+        l = l1 + l2
+        
+        # KeyGen: l chains of w-1 hashes
+        keygen_hashes = l * (w - 1)
+        
+        # Sign: l chains of avg (w-1)/2 hashes
+        sign_hashes_avg = l * (w - 1) // 2
+        sign_hashes_max = l * (w - 1)
+        
+        # Verify: l chains of avg (w-1)/2 hashes  
+        verify_hashes_avg = l * (w - 1) // 2
+        
+        return {
+            'l': l,
+            'keygen_hashes': keygen_hashes,
+            'sign_hashes_avg': sign_hashes_avg,
+            'sign_hashes_max': sign_hashes_max,
+            'verify_hashes_avg': verify_hashes_avg
+        }
+    
+    def estimate_sphincs_operations(self, variant: str = '128s'):
+        """Estimate SPHINCS+ operation counts."""
+        params = {
+            '128s': {'n': 16, 'h': 63, 'd': 7, 'a': 12, 'k': 14, 'w': 16},
+            '128f': {'n': 16, 'h': 66, 'd': 22, 'a': 6, 'k': 33, 'w': 16},
+            '256s': {'n': 32, 'h': 64, 'd': 8, 'a': 14, 'k': 22, 'w': 16},
+        }
+        
+        p = params.get(variant, params['128s'])
+        hp = p['h'] // p['d']
+        
+        wots = self.estimate_wots_operations(p['n'], p['w'])
+        
+        # FORS
+        fors_hashes = p['k'] * (1 + p['a'])  # k leaves + k auth paths
+        
+        # Hypertree: d WOTS signatures + d auth paths
+        ht_wots_hashes = p['d'] * wots['sign_hashes_avg']
+        ht_auth_hashes = p['d'] * hp
+        
+        return {
+            'variant': variant,
+            'fors_hashes': fors_hashes,
+            'ht_wots_hashes': ht_wots_hashes,
+            'ht_auth_hashes': ht_auth_hashes,
+            'total_sign_hashes': fors_hashes + ht_wots_hashes + ht_auth_hashes
+        }
+    
+    def display_comparison(self):
+        """Display comprehensive comparison."""
+        print("\nSIGNATURE SCHEME COMPARISON")
+        print("=" * 70)
+        
+        schemes = {
+            'XMSS (h=10)': {
+                'sig_kb': 2.5,
+                'keygen_ms': 100,
+                'sign_ms': 5,
+                'verify_ms': 3,
+                'stateful': True
+            },
+            'XMSS (h=20)': {
+                'sig_kb': 2.8,
+                'keygen_ms': 50000,
+                'sign_ms': 10,
+                'verify_ms': 3,
+                'stateful': True
+            },
+            'LMS (h=10)': {
+                'sig_kb': 1.6,
+                'keygen_ms': 50,
+                'sign_ms': 2,
+                'verify_ms': 1,
+                'stateful': True
+            },
+            'SPHINCS+-128s': {
+                'sig_kb': 7.9,
+                'keygen_ms': 5,
+                'sign_ms': 200,
+                'verify_ms': 8,
+                'stateful': False
+            },
+            'SPHINCS+-128f': {
+                'sig_kb': 17.1,
+                'keygen_ms': 1,
+                'sign_ms': 20,
+                'verify_ms': 3,
+                'stateful': False
+            },
+            'Dilithium3': {
+                'sig_kb': 3.3,
+                'keygen_ms': 0.1,
+                'sign_ms': 0.3,
+                'verify_ms': 0.15,
+                'stateful': False
+            }
+        }
+        
+        print(f"\n{'Scheme':<18} {'Sig(KB)':<10} {'KeyGen':<12} {'Sign':<12} {'Verify':<10} {'State'}")
+        print("-" * 75)
+        
+        for name, props in schemes.items():
+            state = "Yes" if props['stateful'] else "No"
+            print(f"{name:<18} {props['sig_kb']:<10.1f} {props['keygen_ms']:<12.1f} "
+                  f"{props['sign_ms']:<12.1f} {props['verify_ms']:<10.2f} {state}")
+
+
+def run_benchmarks():
+    """Run all benchmarks."""
+    bench = HashBasedSignatureBenchmark()
+    
+    bench.benchmark_hash_function()
+    
+    print("\nWOTS+ OPERATION ESTIMATES")
+    print("=" * 60)
+    for w in [4, 16, 256]:
+        ops = bench.estimate_wots_operations(32, w)
+        print(f"  w={w}: l={ops['l']}, keygen={ops['keygen_hashes']} hashes, "
+              f"sign≈{ops['sign_hashes_avg']} hashes")
+    
+    print("\nSPHINCS+ OPERATION ESTIMATES")
+    print("=" * 60)
+    for variant in ['128s', '128f', '256s']:
+        ops = bench.estimate_sphincs_operations(variant)
+        print(f"  {variant}: ~{ops['total_sign_hashes']} hashes per signature")
+    
+    bench.display_comparison()
+
+run_benchmarks()
+```
+
+## 5. Parameter Selection Guide
+
+```python
+def parameter_selection_guide():
+    """Guide for choosing hash-based signature parameters."""
+    print("\nPARAMETER SELECTION GUIDE")
+    print("=" * 70)
+    
+    guide = """
+    CHOOSING THE RIGHT SCHEME:
+    
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ USE CASE                      │ RECOMMENDED SCHEME                  │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ Firmware signing (HSM)        │ XMSS or LMS (stateful, small sigs)  │
+    │ Code signing                  │ SPHINCS+-128s (small sigs)          │
+    │ TLS certificates              │ SPHINCS+-128f (fast signing)        │
+    │ Document signing              │ SPHINCS+-128s (balance)             │
+    │ High-security government      │ SPHINCS+-256s (max security)        │
+    │ IoT / Embedded                │ LMS (small, simple)                 │
+    │ General purpose               │ SPHINCS+-128f or Dilithium hybrid   │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    SECURITY LEVEL SELECTION:
+    
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ NIST Level │ Classical │ Quantum  │ Use When                       │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ 1 (128s/f) │ 128-bit   │ ~64-bit  │ Most applications              │
+    │ 3 (192s/f) │ 192-bit   │ ~96-bit  │ Sensitive data, long lifetime  │
+    │ 5 (256s/f) │ 256-bit   │ ~128-bit │ Top secret, decades lifetime   │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    FAST vs SMALL TRADEOFFS:
+    
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Variant │ Signature │ Sign Time │ Best For                         │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ -128s   │ ~8 KB     │ ~200 ms   │ Bandwidth-constrained, storage   │
+    │ -128f   │ ~17 KB    │ ~20 ms    │ Interactive, real-time           │
+    │ -256s   │ ~30 KB    │ ~500 ms   │ High security, batch processing  │
+    │ -256f   │ ~50 KB    │ ~50 ms    │ High security, interactive       │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    HYBRID RECOMMENDATIONS:
+    
+    For maximum security confidence, consider hybrid schemes:
+    
+    • TLS: SPHINCS+ + Dilithium (both required to verify)
+    • Certificates: Dual signatures (classical + PQC)
+    • Long-term: SPHINCS+ alone (minimal assumptions)
+    """
+    print(guide)
+
+parameter_selection_guide()
+```
+
+## Summary
+
+In this lesson, you learned about implementing hash-based signatures:
+
+1. **Constant-Time**: Essential for side-channel resistance
+2. **Tree Traversal**: BDS and other algorithms reduce memory/time
+3. **Hash Selection**: SHA-256 for compatibility, SHAKE for flexibility
+4. **Benchmarking**: Hash speed dominates overall performance
+5. **WOTS+ Costs**: w tradeoff between size and hash operations
+6. **SPHINCS+ Costs**: Hundreds to thousands of hashes per signature
+7. **Parameter Selection**: Match scheme to use case requirements
+8. **Hybrid Approaches**: Combine with Dilithium for defense in depth
+
+Hash-based signatures offer the strongest security guarantees but require careful implementation and parameter selection.
+
+## Further Reading
+
+- Next Module: Code-Based Cryptography
+- Related: Side-channel attack mitigation
+- Advanced: BDS traversal algorithm details

@@ -1,0 +1,396 @@
+---
+title: "TLS 1.3 PQC Integration"
+description: "Integrating post-quantum cryptography into TLS 1.3 including key exchange, authentication, and hybrid modes."
+---
+
+# TLS 1.3 PQC Integration
+
+TLS 1.3 is the primary protocol for secure web communications. Integrating PQC into TLS requires updates to key exchange, authentication, and negotiation mechanisms.
+
+## TLS 1.3 Overview
+
+### Current TLS 1.3 Key Exchange
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              TLS 1.3 Handshake (Classical)                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Client                                    Server               │
+│    │                                          │                 │
+│    │  ClientHello                             │                 │
+│    │  + supported_groups: [x25519, p256]      │                 │
+│    │  + key_share: x25519 public key          │                 │
+│    │ ────────────────────────────────────────>│                 │
+│    │                                          │                 │
+│    │                        ServerHello       │                 │
+│    │                 + key_share: x25519 pk   │                 │
+│    │                 Certificate              │                 │
+│    │                 CertificateVerify        │                 │
+│    │                 Finished                 │                 │
+│    │ <────────────────────────────────────────│                 │
+│    │                                          │                 │
+│    │  Finished                                │                 │
+│    │ ────────────────────────────────────────>│                 │
+│    │                                          │                 │
+│    │  ═══════ Application Data ═══════        │                 │
+│    │ <───────────────────────────────────────>│                 │
+│                                                                  │
+│  Key Exchange: X25519 (ECDH)                                    │
+│  Authentication: ECDSA certificate                              │
+│  Bulk Encryption: AES-GCM or ChaCha20-Poly1305                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### PQC Key Exchange in TLS 1.3
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              TLS 1.3 with Hybrid Key Exchange                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Client                                    Server               │
+│    │                                          │                 │
+│    │  ClientHello                             │                 │
+│    │  + supported_groups:                     │                 │
+│    │    [x25519_mlkem768, x25519, mlkem768]  │                 │
+│    │  + key_share: x25519_mlkem768            │                 │
+│    │    (32 bytes X25519 + 1184 bytes ML-KEM) │                 │
+│    │ ────────────────────────────────────────>│                 │
+│    │                                          │                 │
+│    │                        ServerHello       │                 │
+│    │  + key_share: x25519_mlkem768           │                 │
+│    │    (32 bytes + 1088 bytes ciphertext)    │                 │
+│    │                                          │                 │
+│    │  Shared Secret = KDF(X25519_ss || ML-KEM_ss)              │
+│                                                                  │
+│  Key sizes:                                                     │
+│  Classical: 32 bytes public key                                │
+│  Hybrid: 32 + 1184 = 1216 bytes public key                     │
+│  Hybrid CT: 32 + 1088 = 1120 bytes                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Named Groups and Extensions
+
+### PQC Named Groups
+
+```python
+"""
+TLS 1.3 Named Groups for PQC
+"""
+
+from enum import IntEnum
+
+class NamedGroup(IntEnum):
+    """TLS 1.3 supported groups including PQC."""
+
+    # Classical (RFC 8446)
+    secp256r1 = 0x0017
+    secp384r1 = 0x0018
+    secp521r1 = 0x0019
+    x25519 = 0x001D
+    x448 = 0x001E
+
+    # Pure PQC (draft values)
+    MLKEM512 = 0x0200
+    MLKEM768 = 0x0201
+    MLKEM1024 = 0x0202
+
+    # Hybrid (draft-ietf-tls-hybrid)
+    X25519_MLKEM768 = 0x6399  # Currently used in experiments
+    SecP256r1_MLKEM768 = 0x639A
+
+# Group properties
+GROUP_PROPERTIES = {
+    NamedGroup.x25519: {
+        "name": "X25519",
+        "pk_size": 32,
+        "shared_secret_size": 32,
+        "security_level": "~128-bit classical",
+        "pqc": False
+    },
+    NamedGroup.MLKEM768: {
+        "name": "ML-KEM-768",
+        "pk_size": 1184,
+        "ct_size": 1088,
+        "shared_secret_size": 32,
+        "security_level": "Category 3",
+        "pqc": True
+    },
+    NamedGroup.X25519_MLKEM768: {
+        "name": "X25519+ML-KEM-768",
+        "pk_size": 32 + 1184,  # Combined
+        "ct_size": 32 + 1088,  # Combined
+        "shared_secret_size": 32,
+        "security_level": "Hybrid Category 3",
+        "pqc": True,
+        "hybrid": True
+    }
+}
+
+print("TLS 1.3 PQC Named Groups")
+print("=" * 60)
+
+for group, props in GROUP_PROPERTIES.items():
+    print(f"\n{props['name']} (0x{group.value:04x}):")
+    print(f"  Public Key Size: {props['pk_size']} bytes")
+    if 'ct_size' in props:
+        print(f"  Ciphertext Size: {props['ct_size']} bytes")
+    print(f"  Security Level: {props['security_level']}")
+```
+
+### Signature Algorithms
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              TLS 1.3 Signature Algorithms for PQC                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  signature_algorithms Extension:                                │
+│                                                                  │
+│  Classical:                                                     │
+│  ├─ ecdsa_secp256r1_sha256 (0x0403)                            │
+│  ├─ ecdsa_secp384r1_sha384 (0x0503)                            │
+│  └─ rsa_pss_rsae_sha256 (0x0804)                               │
+│                                                                  │
+│  PQC (draft values):                                            │
+│  ├─ mldsa44 (0x0901)                                           │
+│  ├─ mldsa65 (0x0902)                                           │
+│  ├─ mldsa87 (0x0903)                                           │
+│  ├─ slhdsa_sha2_128f (0x0904)                                  │
+│  └─ ... other variants                                         │
+│                                                                  │
+│  Usage:                                                         │
+│  • CertificateVerify message signed with server's key          │
+│  • Certificate chain signatures                                 │
+│  • Client authentication (optional)                            │
+│                                                                  │
+│  Considerations:                                                │
+│  • ML-DSA-65 signature: 3,293 bytes (vs ECDSA: 64 bytes)      │
+│  • Certificate chain has 2-3 signatures                        │
+│  • Total signature data: ~10KB for PQC chain                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Handshake Size Analysis
+
+### ClientHello Size
+
+```python
+"""
+TLS 1.3 Handshake Size Analysis
+"""
+
+from dataclasses import dataclass
+from typing import List
+
+@dataclass
+class HandshakeComponent:
+    """Component of TLS handshake."""
+    name: str
+    classical_size: int
+    hybrid_size: int
+    pqc_only_size: int
+
+# Handshake components
+components = [
+    HandshakeComponent(
+        name="ClientHello (base)",
+        classical_size=200,
+        hybrid_size=200,
+        pqc_only_size=200
+    ),
+    HandshakeComponent(
+        name="Key Share (client)",
+        classical_size=32,  # X25519
+        hybrid_size=1216,   # X25519 + ML-KEM-768
+        pqc_only_size=1184  # ML-KEM-768
+    ),
+    HandshakeComponent(
+        name="ServerHello + Key Share",
+        classical_size=100 + 32,
+        hybrid_size=100 + 1120,  # X25519 + ML-KEM ciphertext
+        pqc_only_size=100 + 1088
+    ),
+    HandshakeComponent(
+        name="Certificate (3-cert chain)",
+        classical_size=3500,   # ECDSA
+        hybrid_size=17300,     # Hybrid
+        pqc_only_size=16700    # ML-DSA-65
+    ),
+    HandshakeComponent(
+        name="CertificateVerify",
+        classical_size=70,     # ECDSA
+        hybrid_size=3360,      # ECDSA + ML-DSA
+        pqc_only_size=3300     # ML-DSA-65
+    ),
+    HandshakeComponent(
+        name="Finished",
+        classical_size=36,
+        hybrid_size=36,
+        pqc_only_size=36
+    ),
+]
+
+def analyze_handshake():
+    """Analyze handshake sizes."""
+    print("TLS 1.3 Handshake Size Analysis")
+    print("=" * 70)
+    print(f"{'Component':<30} {'Classical':>12} {'Hybrid':>12} {'PQC-Only':>12}")
+    print("-" * 70)
+
+    total_c = total_h = total_p = 0
+
+    for comp in components:
+        print(f"{comp.name:<30} {comp.classical_size:>10} B {comp.hybrid_size:>10} B {comp.pqc_only_size:>10} B")
+        total_c += comp.classical_size
+        total_h += comp.hybrid_size
+        total_p += comp.pqc_only_size
+
+    print("-" * 70)
+    print(f"{'TOTAL':<30} {total_c:>10} B {total_h:>10} B {total_p:>10} B")
+    print(f"\nHybrid overhead: {total_h - total_c:,} bytes ({(total_h/total_c - 1)*100:.0f}%)")
+    print(f"PQC-only overhead: {total_p - total_c:,} bytes ({(total_p/total_c - 1)*100:.0f}%)")
+
+analyze_handshake()
+```
+
+## Server Configuration
+
+### Enabling PQC in TLS
+
+```python
+"""
+Example TLS server configuration for PQC
+"""
+
+# Conceptual configuration (syntax varies by library)
+TLS_CONFIG = {
+    # Key exchange groups (priority order)
+    "supported_groups": [
+        "x25519_mlkem768",   # Hybrid first (recommended)
+        "mlkem768",          # Pure PQC
+        "x25519",            # Classical fallback
+    ],
+
+    # Signature algorithms for certificates
+    "signature_algorithms": [
+        "mldsa65",           # PQC
+        "ecdsa_secp256r1_sha256",  # Classical fallback
+    ],
+
+    # Certificate configuration
+    "certificates": {
+        # Primary: Hybrid or PQC certificate
+        "primary": {
+            "cert_file": "/path/to/hybrid-cert.pem",
+            "key_file": "/path/to/hybrid-key.pem",
+            "algorithm": "hybrid_ecdsa_mldsa65"
+        },
+        # Fallback: Classical certificate
+        "fallback": {
+            "cert_file": "/path/to/ecdsa-cert.pem",
+            "key_file": "/path/to/ecdsa-key.pem",
+            "algorithm": "ecdsa_p256"
+        }
+    },
+
+    # Options
+    "options": {
+        "prefer_server_ciphers": True,
+        "compress_certs": True,  # RFC 8879
+        "session_tickets": True,
+    }
+}
+
+print("Example TLS PQC Configuration")
+print("=" * 50)
+
+for section, config in TLS_CONFIG.items():
+    print(f"\n{section}:")
+    if isinstance(config, list):
+        for item in config:
+            print(f"  - {item}")
+    elif isinstance(config, dict):
+        for key, value in config.items():
+            if isinstance(value, dict):
+                print(f"  {key}:")
+                for k, v in value.items():
+                    print(f"    {k}: {v}")
+            else:
+                print(f"  {key}: {value}")
+```
+
+## Performance Considerations
+
+### Latency Impact
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              TLS PQC Performance Impact                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  HANDSHAKE LATENCY                                              │
+│                                                                  │
+│  Factors affecting latency:                                     │
+│  1. Larger messages = more transmission time                   │
+│  2. More crypto operations                                     │
+│  3. Potential MTU fragmentation                                │
+│                                                                  │
+│  Estimated impact (typical network):                           │
+│  ┌────────────────────────────────────────────────────────┐    │
+│  │  Classical TLS:  ~50-100ms handshake                    │    │
+│  │  Hybrid TLS:     ~60-120ms handshake                    │    │
+│  │  Difference:     ~10-20ms (10-20% increase)            │    │
+│  └────────────────────────────────────────────────────────┘    │
+│                                                                  │
+│  CPU IMPACT                                                     │
+│  ├─ ML-KEM operations: Fast (~20-40 μs each)                   │
+│  ├─ ML-DSA verify: ~80 μs (vs ECDSA: ~120 μs)                  │
+│  ├─ ML-DSA sign: ~200 μs (vs ECDSA: ~60 μs)                   │
+│  └─ Overall: Comparable to classical for key exchange         │
+│                                                                  │
+│  BANDWIDTH IMPACT                                               │
+│  ├─ Hybrid handshake: ~22KB vs ~4KB classical                  │
+│  ├─ Per-connection overhead: ~18KB                             │
+│  └─ At 10K connections/sec: ~180 MB/sec additional             │
+│                                                                  │
+│  MITIGATIONS                                                    │
+│  ✓ Session resumption (avoids full handshake)                  │
+│  ✓ Certificate compression (RFC 8879)                          │
+│  ✓ Cached intermediate certificates                            │
+│  ✓ 0-RTT for repeat connections                                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Testing and Debugging
+
+### Testing PQC TLS
+
+```bash
+# Testing with OpenSSL (when PQC support available)
+# Check server PQC support
+openssl s_client -connect example.com:443 -groups x25519_mlkem768
+
+# List supported groups
+openssl s_client -connect example.com:443 -groups x25519 -msg 2>&1 | grep "ServerHello"
+
+# Capture handshake for analysis
+openssl s_client -connect example.com:443 -msg -trace
+
+# Using curl with PQC (when supported)
+curl --curves x25519_mlkem768 https://example.com
+```
+
+## Summary
+
+TLS 1.3 PQC integration involves:
+
+1. **Named Groups**: New group identifiers for PQC and hybrid key exchange
+2. **Signature Algorithms**: ML-DSA and other PQC signature schemes
+3. **Handshake Size**: ~5x larger with PQC certificates
+4. **Performance**: Moderate latency impact, manageable with mitigations
+5. **Configuration**: Support multiple certificates for backward compatibility
+
+Most production deployments should start with hybrid key exchange while maintaining classical authentication as fallback.

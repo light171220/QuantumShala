@@ -1,0 +1,722 @@
+---
+title: "Implementation Attacks"
+description: "Understanding software implementation vulnerabilities and attacks specific to post-quantum cryptographic systems"
+---
+
+# Implementation Attacks on PQC
+
+Beyond mathematical and side-channel attacks, implementation bugs can completely undermine cryptographic security. PQC introduces new implementation challenges.
+
+## Common Implementation Vulnerabilities
+
+```
+PQC Implementation Vulnerability Categories:
+═══════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────┐
+│                 Memory Safety Issues                             │
+├─────────────────────────────────────────────────────────────────┤
+│ • Buffer overflows in polynomial operations                     │
+│ • Use-after-free in key management                              │
+│ • Uninitialized memory exposing secrets                         │
+│ • Stack/heap corruption from large PQC structures               │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+┌─────────────────────────────────────────────────────────────────┐
+│                   API Misuse                                     │
+├─────────────────────────────────────────────────────────────────┤
+│ • Nonce reuse in ML-DSA signing                                 │
+│ • Key/ciphertext type confusion                                 │
+│ • Incorrect parameter selection                                 │
+│ • Missing validation of inputs                                  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+┌─────────────────────────────────────────────────────────────────┐
+│                 Cryptographic Errors                             │
+├─────────────────────────────────────────────────────────────────┤
+│ • Weak random number generation                                 │
+│ • Incomplete secret cleanup                                     │
+│ • Incorrect modular arithmetic                                  │
+│ • Serialization/parsing bugs                                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Memory Safety in PQC
+
+```python
+from typing import List, Optional
+import ctypes
+import gc
+
+class MemorySafetyDemo:
+    """
+    Demonstrate memory safety issues in PQC implementations.
+
+    PQC algorithms use larger keys and intermediate values,
+    increasing the attack surface for memory-related bugs.
+    """
+
+    def demonstrate_secret_exposure(self):
+        """
+        Show how secrets can leak through memory.
+        """
+        vulnerability_analysis = """
+        Secret Exposure Vulnerabilities:
+        ════════════════════════════════════
+
+        1. Uninitialized Memory:
+        ┌─────────────────────────────────────────────────────────┐
+        │  def keygen():                                          │
+        │      # Secret polynomial allocated but not zeroed       │
+        │      secret = bytearray(1024)  # May contain old data!  │
+        │      # If keygen fails early, secret may leak           │
+        │      ...                                                │
+        └─────────────────────────────────────────────────────────┘
+
+        2. Incomplete Zeroization:
+        ┌─────────────────────────────────────────────────────────┐
+        │  def sign(sk, msg):                                     │
+        │      temp = derive_signing_key(sk)                      │
+        │      signature = compute_signature(temp, msg)           │
+        │      # Forgot to zero temp!                             │
+        │      # temp stays in memory until overwritten           │
+        │      return signature                                   │
+        └─────────────────────────────────────────────────────────┘
+
+        3. Copy-on-Swap Exposure:
+        ┌─────────────────────────────────────────────────────────┐
+        │  # Secret in RAM gets copied to swap space              │
+        │  # Swap not encrypted = secret on disk!                 │
+        │  # Also: hibernation, crash dumps                       │
+        └─────────────────────────────────────────────────────────┘
+
+        4. Garbage Collection Timing:
+        ┌─────────────────────────────────────────────────────────┐
+        │  # In Python/Java/Go, when is memory actually freed?    │
+        │  secret_key = load_key()                                │
+        │  del secret_key  # Doesn't immediately zero memory!     │
+        │  # GC decides when to reclaim, secret lingers           │
+        └─────────────────────────────────────────────────────────┘
+        """
+        print(vulnerability_analysis)
+
+
+class SecureMemory:
+    """
+    Secure memory handling for cryptographic secrets.
+
+    Demonstrates proper secret handling practices.
+    """
+
+    def __init__(self, size: int):
+        self.size = size
+        # In practice, use mlock() to prevent swapping
+        self._buffer = bytearray(size)
+        self._is_locked = False
+
+    def write(self, data: bytes, offset: int = 0):
+        """Write data to secure memory."""
+        if offset + len(data) > self.size:
+            raise ValueError("Write exceeds buffer size")
+        self._buffer[offset:offset + len(data)] = data
+
+    def read(self) -> bytes:
+        """Read data from secure memory."""
+        return bytes(self._buffer)
+
+    def secure_zero(self):
+        """
+        Securely zero the memory.
+
+        Must prevent compiler from optimizing this away.
+        """
+        # Multiple overwrites with different patterns
+        for pattern in [0x00, 0xFF, 0xAA, 0x55, 0x00]:
+            for i in range(self.size):
+                self._buffer[i] = pattern
+
+        # Verify zeroing completed
+        if any(b != 0 for b in self._buffer):
+            raise RuntimeError("Secure zeroing failed!")
+
+    def __del__(self):
+        """Destructor ensures cleanup."""
+        try:
+            self.secure_zero()
+        except Exception:
+            pass  # Best effort in destructor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.secure_zero()
+
+
+def demonstrate_buffer_overflow():
+    """
+    Demonstrate buffer overflow risk in PQC.
+
+    PQC structures are large, increasing overflow risk.
+    """
+    vulnerability = """
+    Buffer Overflow in PQC:
+    ════════════════════════════════════
+
+    ML-KEM-1024 sizes:
+    ├─ Public key:  1568 bytes
+    ├─ Secret key:  3168 bytes
+    ├─ Ciphertext:  1568 bytes
+    └─ Total working memory: ~10KB+
+
+    Vulnerable pattern:
+    ┌─────────────────────────────────────────────────────────┐
+    │  // Fixed-size buffer based on wrong assumption         │
+    │  uint8_t pk_buffer[1024];  // Too small for ML-KEM-1024!│
+    │                                                          │
+    │  // Receive public key from network                      │
+    │  recv(socket, pk_buffer, pk_len, 0);                    │
+    │  // If pk_len > 1024, buffer overflow!                   │
+    └─────────────────────────────────────────────────────────┘
+
+    Consequences:
+    ├─ Stack corruption → code execution
+    ├─ Heap corruption → arbitrary write
+    ├─ Secret key overwrite → complete compromise
+    └─ Return address overwrite → control flow hijack
+    """
+    print(vulnerability)
+```
+
+## Nonce Misuse Attacks
+
+```python
+from dataclasses import dataclass
+from typing import Tuple, Optional
+import hashlib
+import os
+
+@dataclass
+class SignatureWithNonce:
+    """Signature with exposed nonce for analysis."""
+    signature: bytes
+    message: bytes
+    nonce_seed: bytes  # Should never be exposed in real implementation!
+
+class NonceMisuseVulnerability:
+    """
+    Demonstrate nonce misuse attacks on ML-DSA.
+
+    Nonce reuse in deterministic signing modes can
+    completely compromise the secret key.
+    """
+
+    def explain_attack(self):
+        """
+        Explain the nonce reuse attack on ML-DSA.
+        """
+        attack_description = """
+        Nonce Reuse Attack on ML-DSA:
+        ════════════════════════════════════
+
+        ML-DSA signing process:
+        1. Generate random y (masking vector)
+        2. Compute w = A·y
+        3. c = H(μ || w₁)  ← Challenge
+        4. z = y + c·s₁    ← Response (leaks s₁ if y reused!)
+        5. If ||z||∞ too large, restart with new y
+
+        Attack when same y used for different messages:
+        ┌─────────────────────────────────────────────────────────┐
+        │  Signature 1: z₁ = y + c₁·s₁   (message m₁)            │
+        │  Signature 2: z₂ = y + c₂·s₁   (message m₂)            │
+        │                                                          │
+        │  Subtract: z₁ - z₂ = (c₁ - c₂)·s₁                       │
+        │                                                          │
+        │  If (c₁ - c₂) is invertible:                            │
+        │      s₁ = (z₁ - z₂) · (c₁ - c₂)⁻¹                       │
+        │                                                          │
+        │  SECRET KEY RECOVERED!                                   │
+        └─────────────────────────────────────────────────────────┘
+
+        Prevention:
+        ├─ Use fresh randomness for each signature
+        ├─ In hedged mode, mix message into nonce derivation
+        ├─ Never expose internal nonce state
+        └─ Use hardware RNG when available
+        """
+        print(attack_description)
+
+    def simulate_attack(
+        self,
+        sig1: SignatureWithNonce,
+        sig2: SignatureWithNonce
+    ) -> Optional[bytes]:
+        """
+        Simulate nonce reuse attack (educational).
+
+        In real ML-DSA, this involves polynomial arithmetic.
+        This is a simplified demonstration.
+        """
+        if sig1.nonce_seed == sig2.nonce_seed:
+            print("WARNING: Nonce reuse detected!")
+            print("In real attack, secret key would be recoverable")
+            return b"[SECRET KEY RECOVERED]"
+        return None
+
+
+class SecureNonceGeneration:
+    """
+    Secure nonce generation for ML-DSA.
+
+    Implements hedged randomness to protect against
+    RNG failures and nonce reuse.
+    """
+
+    def __init__(self, secret_seed: bytes):
+        """
+        Initialize with secret seed for deterministic component.
+
+        secret_seed should be derived from the signing key.
+        """
+        self.secret_seed = secret_seed
+
+    def generate_nonce(
+        self,
+        message: bytes,
+        randomness: Optional[bytes] = None
+    ) -> bytes:
+        """
+        Generate signing nonce with hedged randomness.
+
+        Combines:
+        1. Secret seed (deterministic, key-bound)
+        2. Message hash (binds nonce to message)
+        3. Fresh randomness (when available)
+
+        Even if RNG fails, nonce differs per message.
+        """
+        # Get fresh randomness if not provided
+        if randomness is None:
+            try:
+                randomness = os.urandom(32)
+            except Exception:
+                # RNG failed - use empty (hedging still protects)
+                randomness = b""
+
+        # Combine all inputs
+        nonce_input = b"".join([
+            self.secret_seed,
+            hashlib.sha3_256(message).digest(),
+            randomness
+        ])
+
+        # Derive nonce
+        return hashlib.sha3_256(nonce_input).digest()
+
+    def verify_uniqueness(
+        self,
+        nonces: list
+    ) -> Tuple[bool, int]:
+        """
+        Verify a set of nonces are all unique.
+
+        Returns (all_unique, duplicate_count).
+        """
+        seen = set()
+        duplicates = 0
+
+        for nonce in nonces:
+            nonce_hex = nonce.hex()
+            if nonce_hex in seen:
+                duplicates += 1
+            seen.add(nonce_hex)
+
+        return duplicates == 0, duplicates
+```
+
+## Input Validation Vulnerabilities
+
+```python
+from typing import List, Tuple, Optional
+from dataclasses import dataclass
+from enum import Enum
+
+class ValidationError(Exception):
+    """Raised when input validation fails."""
+    pass
+
+class ParameterSet(Enum):
+    """ML-KEM parameter sets."""
+    ML_KEM_512 = (512, 800, 768, 2)
+    ML_KEM_768 = (768, 1184, 1088, 3)
+    ML_KEM_1024 = (1024, 1568, 1568, 4)
+
+    def __init__(self, n: int, pk_size: int, ct_size: int, k: int):
+        self.n = n
+        self.pk_size = pk_size
+        self.ct_size = ct_size
+        self.k = k
+
+class InputValidation:
+    """
+    Comprehensive input validation for PQC operations.
+
+    Missing validation can lead to crashes, undefined behavior,
+    or security vulnerabilities.
+    """
+
+    def __init__(self, param_set: ParameterSet):
+        self.params = param_set
+
+    def validate_public_key(self, pk: bytes) -> None:
+        """
+        Validate public key format and structure.
+
+        Raises ValidationError if invalid.
+        """
+        # Length check
+        if len(pk) != self.params.pk_size:
+            raise ValidationError(
+                f"Invalid public key length: {len(pk)}, "
+                f"expected {self.params.pk_size}"
+            )
+
+        # Structure validation (simplified)
+        # Real implementation checks polynomial encoding
+        # and matrix structure
+
+        # Check for all-zero key (degenerate)
+        if pk == bytes(len(pk)):
+            raise ValidationError("Degenerate public key (all zeros)")
+
+    def validate_ciphertext(self, ct: bytes) -> None:
+        """
+        Validate ciphertext format.
+
+        Malformed ciphertexts can cause crashes or leakage.
+        """
+        if len(ct) != self.params.ct_size:
+            raise ValidationError(
+                f"Invalid ciphertext length: {len(ct)}, "
+                f"expected {self.params.ct_size}"
+            )
+
+        # Check polynomial coefficient bounds
+        # (In real implementation)
+
+    def validate_signature(
+        self,
+        sig: bytes,
+        expected_len: int
+    ) -> None:
+        """
+        Validate signature format.
+        """
+        # ML-DSA signatures have variable length due to hint encoding
+        if len(sig) > expected_len:
+            raise ValidationError(
+                f"Signature too long: {len(sig)}, max {expected_len}"
+            )
+
+        if len(sig) < 32:  # Minimum reasonable size
+            raise ValidationError("Signature too short")
+
+
+@dataclass
+class MalformedInputAttack:
+    """
+    Document malformed input attack vectors.
+    """
+    name: str
+    input_type: str
+    malformation: str
+    impact: str
+    mitigation: str
+
+class MalformedInputAnalysis:
+    """
+    Analyze malformed input attack vectors.
+    """
+
+    def __init__(self):
+        self.attacks = [
+            MalformedInputAttack(
+                name="Oversized polynomial coefficient",
+                input_type="Ciphertext/Public Key",
+                malformation="Coefficient >= q (modulus)",
+                impact="Integer overflow, incorrect computation",
+                mitigation="Validate all coefficients < q"
+            ),
+            MalformedInputAttack(
+                name="Truncated ciphertext",
+                input_type="Ciphertext",
+                malformation="Ciphertext shorter than expected",
+                impact="Buffer under-read, crash",
+                mitigation="Verify exact length before processing"
+            ),
+            MalformedInputAttack(
+                name="Extended public key",
+                input_type="Public Key",
+                malformation="Extra data appended to key",
+                impact="Ignored data may cause confusion",
+                mitigation="Reject if length != expected"
+            ),
+            MalformedInputAttack(
+                name="Invalid hint encoding",
+                input_type="ML-DSA Signature",
+                malformation="Hint bits don't match claimed count",
+                impact="Verification may incorrectly pass/fail",
+                mitigation="Validate hint structure before use"
+            ),
+            MalformedInputAttack(
+                name="Null public key",
+                input_type="Public Key",
+                malformation="All-zero polynomial matrix",
+                impact="Trivial key recovery possible",
+                mitigation="Check for degenerate keys"
+            ),
+        ]
+
+    def print_analysis(self):
+        """Print malformed input attack analysis."""
+        print("Malformed Input Attack Vectors:")
+        print("=" * 60)
+
+        for attack in self.attacks:
+            print(f"\n{attack.name}")
+            print(f"  Input Type: {attack.input_type}")
+            print(f"  Malformation: {attack.malformation}")
+            print(f"  Impact: {attack.impact}")
+            print(f"  Mitigation: {attack.mitigation}")
+
+analysis = MalformedInputAnalysis()
+analysis.print_analysis()
+```
+
+## Secure Coding Practices
+
+```python
+from typing import TypeVar, Generic, Callable
+from contextlib import contextmanager
+import os
+
+T = TypeVar('T')
+
+class SecureCodingPatterns:
+    """
+    Secure coding patterns for PQC implementations.
+    """
+
+    @staticmethod
+    @contextmanager
+    def secure_memory_context(size: int):
+        """
+        Context manager for secure memory handling.
+
+        Ensures memory is zeroed on exit.
+        """
+        buffer = bytearray(size)
+        try:
+            yield buffer
+        finally:
+            # Secure zeroization
+            for i in range(size):
+                buffer[i] = 0
+            # Memory barrier would go here in C
+
+    @staticmethod
+    def validate_or_raise(
+        condition: bool,
+        error_message: str
+    ) -> None:
+        """
+        Validate condition or raise security error.
+
+        Use for all security-critical checks.
+        """
+        if not condition:
+            raise SecurityError(error_message)
+
+    @staticmethod
+    def constant_time_compare(a: bytes, b: bytes) -> bool:
+        """
+        Constant-time byte comparison.
+
+        Prevents timing attacks on comparison.
+        """
+        if len(a) != len(b):
+            return False
+
+        result = 0
+        for x, y in zip(a, b):
+            result |= x ^ y
+
+        return result == 0
+
+    @staticmethod
+    def secure_random_bytes(n: int) -> bytes:
+        """
+        Generate cryptographically secure random bytes.
+
+        Uses OS-provided CSPRNG.
+        """
+        try:
+            return os.urandom(n)
+        except Exception as e:
+            raise SecurityError(
+                f"Failed to generate secure randomness: {e}"
+            )
+
+
+class SecurityError(Exception):
+    """Security-related error."""
+    pass
+
+
+class SecurePQCWrapper:
+    """
+    Secure wrapper for PQC operations.
+
+    Implements defense-in-depth for cryptographic operations.
+    """
+
+    def __init__(self, implementation):
+        self.impl = implementation
+        self.operations_count = 0
+        self.max_operations = 1_000_000  # Rate limiting
+
+    def keygen(self):
+        """
+        Generate key pair with security checks.
+        """
+        self._check_rate_limit()
+
+        # Generate keys
+        pk, sk = self.impl.keygen()
+
+        # Validate generated keys
+        if not self._validate_keypair(pk, sk):
+            raise SecurityError("Generated keypair validation failed")
+
+        self.operations_count += 1
+        return pk, sk
+
+    def encapsulate(self, pk: bytes):
+        """
+        Encapsulate with input validation.
+        """
+        self._check_rate_limit()
+
+        # Validate public key
+        if not self._validate_public_key(pk):
+            raise SecurityError("Invalid public key")
+
+        # Perform encapsulation
+        ct, ss = self.impl.encapsulate(pk)
+
+        # Validate output
+        if len(ss) != 32:
+            raise SecurityError("Invalid shared secret length")
+
+        self.operations_count += 1
+        return ct, ss
+
+    def decapsulate(self, sk: bytes, ct: bytes):
+        """
+        Decapsulate with input validation.
+        """
+        self._check_rate_limit()
+
+        # Validate inputs
+        if not self._validate_secret_key(sk):
+            raise SecurityError("Invalid secret key format")
+
+        if not self._validate_ciphertext(ct):
+            raise SecurityError("Invalid ciphertext format")
+
+        # Perform decapsulation with implicit rejection
+        ss = self.impl.decapsulate(sk, ct)
+
+        self.operations_count += 1
+        return ss
+
+    def _check_rate_limit(self):
+        """Check operation rate limit."""
+        if self.operations_count >= self.max_operations:
+            raise SecurityError("Operation rate limit exceeded")
+
+    def _validate_public_key(self, pk: bytes) -> bool:
+        """Validate public key structure."""
+        # Implementation-specific validation
+        return len(pk) > 0
+
+    def _validate_secret_key(self, sk: bytes) -> bool:
+        """Validate secret key structure."""
+        return len(sk) > 0
+
+    def _validate_ciphertext(self, ct: bytes) -> bool:
+        """Validate ciphertext structure."""
+        return len(ct) > 0
+
+    def _validate_keypair(self, pk: bytes, sk: bytes) -> bool:
+        """Validate keypair consistency."""
+        # Would verify pk can be derived from sk
+        return True
+```
+
+## Code Review Checklist
+
+```
+PQC Implementation Security Review Checklist:
+═══════════════════════════════════════════════════════════════════
+
+□ Memory Safety
+  □ All buffers sized correctly for algorithm parameters
+  □ No stack-allocated large structures (use heap)
+  □ Bounds checking on all array accesses
+  □ Secrets zeroed after use (verified not optimized away)
+  □ No use-after-free or double-free
+
+□ Input Validation
+  □ All input lengths verified before processing
+  □ Polynomial coefficients checked against bounds
+  □ Ciphertext/signature structure validated
+  □ Public key validity verified
+  □ Reject malformed inputs early
+
+□ Randomness
+  □ Uses OS-provided CSPRNG (urandom, CryptGenRandom)
+  □ Sufficient entropy for key generation
+  □ Hedged randomness for signing
+  □ No predictable seeds or fallbacks
+
+□ Constant-Time Operations
+  □ No secret-dependent branches
+  □ No secret-dependent memory access patterns
+  □ Constant-time comparison for validation checks
+  □ Fixed-iteration loops for rejection sampling
+
+□ API Safety
+  □ Type-safe interfaces (can't confuse pk/sk/ct)
+  □ Clear ownership semantics for key material
+  □ Thread-safety documented and enforced
+  □ Error handling doesn't leak information
+
+□ Cryptographic Correctness
+  □ Known Answer Tests (KAT) pass
+  □ Interoperability tests with reference implementation
+  □ Edge case testing (min/max parameter values)
+  □ Fuzzing for crash bugs
+```
+
+## Summary
+
+Implementation security requires attention to:
+
+1. **Memory safety**: Buffer management, secret cleanup, allocation patterns
+2. **Input validation**: Length checks, structural validation, bounds verification
+3. **Nonce management**: Unique nonces, hedged randomness, no reuse
+4. **Secure coding**: Constant-time operations, proper error handling, defense in depth
+
+PQC's larger data structures and new operations introduce unique implementation challenges.

@@ -1,0 +1,669 @@
+---
+title: "Real-Time Fraud Detection Systems"
+description: "Building production systems for real-time fraud detection with latency constraints and scalability requirements."
+---
+
+# Real-Time Fraud Detection Systems
+
+Production fraud detection must process transactions in milliseconds while maintaining accuracy. This lesson covers architectures and techniques for real-time fraud detection, including hybrid quantum-classical approaches.
+
+## Real-Time Requirements
+
+<Definition term="Real-Time Fraud Detection">
+A system that evaluates transactions for fraud risk within strict latency bounds (typically 50-200ms) while the transaction is being processed, enabling immediate accept/decline decisions.
+</Definition>
+
+### System Architecture
+
+```python
+import numpy as np
+from typing import Dict, List, Any, Optional, Tuple
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from collections import deque
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+
+class TransactionDecision(Enum):
+    """Decision outcomes for transactions."""
+    APPROVE = "approve"
+    DECLINE = "decline"
+    REVIEW = "review"
+    TIMEOUT = "timeout"
+
+
+@dataclass
+class TransactionRequest:
+    """Incoming transaction request."""
+    transaction_id: str
+    customer_id: str
+    amount: float
+    merchant_id: str
+    timestamp: datetime
+    features: Dict[str, float]
+    timeout_ms: int = 100
+
+
+@dataclass
+class TransactionResponse:
+    """Response to transaction request."""
+    transaction_id: str
+    decision: TransactionDecision
+    risk_score: float
+    latency_ms: float
+    model_used: str
+    reasons: List[str] = field(default_factory=list)
+
+
+class RealTimeFraudDetector:
+    """
+    Real-time fraud detection system.
+
+    Features:
+    - Cascading model architecture (fast → slow)
+    - Latency-aware decision making
+    - Fallback mechanisms
+    - Concurrent processing
+    """
+
+    def __init__(
+        self,
+        fast_model,
+        slow_model,
+        fast_threshold: float = 0.7,
+        slow_threshold: float = 0.5,
+        timeout_decision: TransactionDecision = TransactionDecision.REVIEW
+    ):
+        self.fast_model = fast_model  # Rule-based or simple ML
+        self.slow_model = slow_model  # Complex model (could be quantum)
+
+        self.fast_threshold = fast_threshold
+        self.slow_threshold = slow_threshold
+        self.timeout_decision = timeout_decision
+
+        # Metrics tracking
+        self.latencies = deque(maxlen=1000)
+        self.decisions = {'approve': 0, 'decline': 0, 'review': 0, 'timeout': 0}
+
+    def process(self, request: TransactionRequest) -> TransactionResponse:
+        """
+        Process transaction with latency constraints.
+
+        Uses cascading approach:
+        1. Fast model first
+        2. If uncertain, use slow model
+        3. Fall back on timeout
+        """
+        start_time = time.time()
+
+        try:
+            # Stage 1: Fast model
+            fast_score, fast_reasons = self._fast_evaluation(request)
+            fast_latency = (time.time() - start_time) * 1000
+
+            # Clear decision from fast model?
+            if fast_score < 0.3:
+                return self._create_response(
+                    request, TransactionDecision.APPROVE,
+                    fast_score, fast_latency, "fast_model", fast_reasons
+                )
+            elif fast_score > self.fast_threshold:
+                return self._create_response(
+                    request, TransactionDecision.DECLINE,
+                    fast_score, fast_latency, "fast_model", fast_reasons
+                )
+
+            # Stage 2: Slow model for uncertain cases
+            remaining_time = request.timeout_ms - fast_latency
+            if remaining_time < 20:
+                return self._create_response(
+                    request, TransactionDecision.REVIEW,
+                    fast_score, fast_latency, "fast_model", ["timeout_constraint"]
+                )
+
+            slow_score, slow_reasons = self._slow_evaluation(request, remaining_time)
+            total_latency = (time.time() - start_time) * 1000
+
+            # Final decision
+            combined_score = 0.3 * fast_score + 0.7 * slow_score
+            if combined_score > self.slow_threshold:
+                decision = TransactionDecision.DECLINE
+            elif combined_score < 0.3:
+                decision = TransactionDecision.APPROVE
+            else:
+                decision = TransactionDecision.REVIEW
+
+            return self._create_response(
+                request, decision, combined_score,
+                total_latency, "combined", fast_reasons + slow_reasons
+            )
+
+        except TimeoutError:
+            latency = (time.time() - start_time) * 1000
+            return self._create_response(
+                request, self.timeout_decision,
+                0.5, latency, "timeout", ["processing_timeout"]
+            )
+
+    def _fast_evaluation(
+        self,
+        request: TransactionRequest
+    ) -> Tuple[float, List[str]]:
+        """Quick rule-based or simple model evaluation."""
+        return self.fast_model.score(request.features)
+
+    def _slow_evaluation(
+        self,
+        request: TransactionRequest,
+        timeout_ms: float
+    ) -> Tuple[float, List[str]]:
+        """Complex model evaluation with timeout."""
+        return self.slow_model.score(request.features, timeout_ms)
+
+    def _create_response(
+        self,
+        request: TransactionRequest,
+        decision: TransactionDecision,
+        score: float,
+        latency: float,
+        model: str,
+        reasons: List[str]
+    ) -> TransactionResponse:
+        """Create and record response."""
+        self.latencies.append(latency)
+        self.decisions[decision.value] += 1
+
+        return TransactionResponse(
+            transaction_id=request.transaction_id,
+            decision=decision,
+            risk_score=score,
+            latency_ms=latency,
+            model_used=model,
+            reasons=reasons
+        )
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get system performance metrics."""
+        latency_list = list(self.latencies)
+
+        return {
+            'avg_latency_ms': np.mean(latency_list) if latency_list else 0,
+            'p95_latency_ms': np.percentile(latency_list, 95) if latency_list else 0,
+            'p99_latency_ms': np.percentile(latency_list, 99) if latency_list else 0,
+            'total_transactions': sum(self.decisions.values()),
+            'decision_distribution': dict(self.decisions)
+        }
+```
+
+## Streaming Feature Computation
+
+<Tip>
+Pre-compute expensive features incrementally. When a transaction arrives, only calculate the delta rather than reprocessing all history.
+</Tip>
+
+### Incremental Feature Store
+
+```python
+class StreamingFeatureStore:
+    """
+    Maintain features updated in real-time.
+
+    Uses incremental computation for velocity features.
+    """
+
+    def __init__(self, window_seconds: int = 86400):
+        self.window_seconds = window_seconds
+
+        # Customer-level aggregates
+        self.customer_counts: Dict[str, Dict[str, int]] = {}
+        self.customer_sums: Dict[str, Dict[str, float]] = {}
+        self.customer_last_txn: Dict[str, datetime] = {}
+
+        # Time-bucketed data for windowed aggregates
+        self.time_buckets: Dict[str, Dict[int, List]] = {}
+
+    def update(self, customer_id: str, amount: float, timestamp: datetime):
+        """Update features with new transaction."""
+        # Initialize if needed
+        if customer_id not in self.customer_counts:
+            self._init_customer(customer_id)
+
+        # Update running totals
+        bucket = self._get_time_bucket(timestamp)
+
+        if bucket not in self.time_buckets[customer_id]:
+            self.time_buckets[customer_id][bucket] = []
+
+        self.time_buckets[customer_id][bucket].append({
+            'amount': amount,
+            'timestamp': timestamp
+        })
+
+        # Clean old buckets
+        self._cleanup_old_buckets(customer_id, timestamp)
+
+        # Update last transaction
+        self.customer_last_txn[customer_id] = timestamp
+
+    def get_features(
+        self,
+        customer_id: str,
+        current_time: datetime
+    ) -> Dict[str, float]:
+        """Get current features for customer."""
+        if customer_id not in self.time_buckets:
+            return self._default_features()
+
+        # Compute from time buckets
+        buckets = self.time_buckets[customer_id]
+        current_bucket = self._get_time_bucket(current_time)
+
+        # 1 hour window
+        hour_start = current_bucket - 3600
+        txns_1h = self._get_txns_in_range(buckets, hour_start, current_bucket)
+
+        # 24 hour window
+        day_start = current_bucket - 86400
+        txns_24h = self._get_txns_in_range(buckets, day_start, current_bucket)
+
+        features = {
+            'txn_count_1h': len(txns_1h),
+            'txn_count_24h': len(txns_24h),
+            'amount_sum_1h': sum(t['amount'] for t in txns_1h),
+            'amount_sum_24h': sum(t['amount'] for t in txns_24h),
+            'avg_amount_1h': (
+                sum(t['amount'] for t in txns_1h) / len(txns_1h)
+                if txns_1h else 0
+            ),
+            'avg_amount_24h': (
+                sum(t['amount'] for t in txns_24h) / len(txns_24h)
+                if txns_24h else 0
+            ),
+        }
+
+        # Time since last transaction
+        if customer_id in self.customer_last_txn:
+            delta = (current_time - self.customer_last_txn[customer_id]).total_seconds()
+            features['seconds_since_last'] = delta
+        else:
+            features['seconds_since_last'] = 86400  # Default to 1 day
+
+        return features
+
+    def _init_customer(self, customer_id: str):
+        """Initialize customer data structures."""
+        self.customer_counts[customer_id] = {}
+        self.customer_sums[customer_id] = {}
+        self.time_buckets[customer_id] = {}
+
+    def _get_time_bucket(self, timestamp: datetime) -> int:
+        """Get bucket key for timestamp (1-minute buckets)."""
+        return int(timestamp.timestamp()) // 60 * 60
+
+    def _get_txns_in_range(
+        self,
+        buckets: Dict[int, List],
+        start: int,
+        end: int
+    ) -> List[Dict]:
+        """Get transactions in time range."""
+        txns = []
+        for bucket_time, bucket_txns in buckets.items():
+            if start <= bucket_time <= end:
+                txns.extend(bucket_txns)
+        return txns
+
+    def _cleanup_old_buckets(self, customer_id: str, current_time: datetime):
+        """Remove buckets older than window."""
+        cutoff = self._get_time_bucket(current_time) - self.window_seconds
+        old_buckets = [
+            b for b in self.time_buckets[customer_id]
+            if b < cutoff
+        ]
+        for b in old_buckets:
+            del self.time_buckets[customer_id][b]
+
+    def _default_features(self) -> Dict[str, float]:
+        """Default features for unknown customer."""
+        return {
+            'txn_count_1h': 0,
+            'txn_count_24h': 0,
+            'amount_sum_1h': 0,
+            'amount_sum_24h': 0,
+            'avg_amount_1h': 0,
+            'avg_amount_24h': 0,
+            'seconds_since_last': 86400
+        }
+```
+
+## Hybrid Quantum-Classical Pipeline
+
+<Warning>
+Quantum computation has latency constraints. Use quantum models for offline analysis or low-latency approximations in production.
+</Warning>
+
+### Production Pipeline
+
+```python
+class HybridFraudPipeline:
+    """
+    Hybrid quantum-classical fraud detection pipeline.
+
+    Architecture:
+    - Classical fast path: Rules + simple ML (< 20ms)
+    - Classical slow path: Complex ensemble (< 100ms)
+    - Quantum path: For batch scoring and model updates
+    """
+
+    def __init__(
+        self,
+        rule_engine,
+        classical_model,
+        quantum_model=None
+    ):
+        self.rule_engine = rule_engine
+        self.classical_model = classical_model
+        self.quantum_model = quantum_model
+
+        self.use_quantum = quantum_model is not None
+
+        # Async queue for quantum scoring
+        self.quantum_queue = deque(maxlen=1000)
+        self.quantum_results = {}
+
+    def score_realtime(
+        self,
+        features: Dict[str, float],
+        timeout_ms: float = 100
+    ) -> Tuple[float, str]:
+        """
+        Real-time scoring with classical models.
+        """
+        start = time.time()
+
+        # Fast path: rules
+        rule_score, rule_triggered = self.rule_engine.evaluate(features)
+
+        if rule_score > 0.8:
+            return rule_score, "rules_high_risk"
+        if rule_score < 0.2:
+            return rule_score, "rules_low_risk"
+
+        # Slow path: ML model
+        elapsed = (time.time() - start) * 1000
+        if elapsed > timeout_ms * 0.7:
+            return rule_score, "rules_timeout"
+
+        ml_score = self.classical_model.predict_proba(features)
+
+        # Combine
+        combined = 0.3 * rule_score + 0.7 * ml_score
+        return combined, "rules_ml_combined"
+
+    def score_quantum_async(
+        self,
+        transaction_id: str,
+        features: Dict[str, float]
+    ):
+        """Queue transaction for quantum scoring."""
+        if self.use_quantum:
+            self.quantum_queue.append({
+                'id': transaction_id,
+                'features': features,
+                'timestamp': time.time()
+            })
+
+    def process_quantum_batch(self, batch_size: int = 32) -> Dict[str, float]:
+        """
+        Process queued transactions with quantum model.
+
+        Run periodically or when queue reaches threshold.
+        """
+        if not self.use_quantum or len(self.quantum_queue) == 0:
+            return {}
+
+        # Get batch
+        batch = []
+        while len(batch) < batch_size and len(self.quantum_queue) > 0:
+            batch.append(self.quantum_queue.popleft())
+
+        # Score with quantum model
+        features_batch = [item['features'] for item in batch]
+        scores = self.quantum_model.batch_score(features_batch)
+
+        # Store results
+        results = {}
+        for item, score in zip(batch, scores):
+            self.quantum_results[item['id']] = {
+                'score': score,
+                'timestamp': time.time()
+            }
+            results[item['id']] = score
+
+        return results
+
+    def get_quantum_score(self, transaction_id: str) -> Optional[float]:
+        """Get quantum score if available."""
+        if transaction_id in self.quantum_results:
+            return self.quantum_results[transaction_id]['score']
+        return None
+
+
+class LatencyOptimizedQuantumModel:
+    """
+    Quantum model optimized for low latency.
+
+    Uses pre-computed elements where possible.
+    """
+
+    def __init__(self, n_qubits: int = 4):
+        self.n_qubits = n_qubits
+        self.precomputed_gates = self._precompute_gates()
+        self.cached_states = {}
+
+    def _precompute_gates(self) -> Dict[str, np.ndarray]:
+        """Pre-compute common gate matrices."""
+        gates = {}
+
+        # Hadamard
+        gates['H'] = np.array([[1, 1], [1, -1]]) / np.sqrt(2)
+
+        # Common rotation angles
+        for angle in np.linspace(0, np.pi, 32):
+            gates[f'RY_{angle:.3f}'] = np.array([
+                [np.cos(angle/2), -np.sin(angle/2)],
+                [np.sin(angle/2), np.cos(angle/2)]
+            ])
+
+        return gates
+
+    def fast_score(self, features: np.ndarray) -> float:
+        """
+        Fast scoring using pre-computed elements.
+        """
+        # Quantize features to nearest pre-computed angles
+        quantized = np.round(features / np.pi * 31) / 31 * np.pi
+
+        # Check cache
+        cache_key = tuple(quantized)
+        if cache_key in self.cached_states:
+            return self.cached_states[cache_key]
+
+        # Compute (simplified)
+        score = self._compute_circuit(quantized)
+
+        # Cache result
+        if len(self.cached_states) < 10000:
+            self.cached_states[cache_key] = score
+
+        return score
+
+    def _compute_circuit(self, features: np.ndarray) -> float:
+        """Compute circuit output (simplified)."""
+        # Simulate quantum circuit
+        state = np.zeros(2 ** self.n_qubits, dtype=complex)
+        state[0] = 1.0
+
+        # Apply operations (simplified simulation)
+        for i, angle in enumerate(features[:self.n_qubits]):
+            # RY rotation effect on measurement
+            state[0] *= np.cos(angle / 2)
+
+        # Measure probability
+        prob = np.abs(state[0]) ** 2
+        return 1 - prob  # Fraud probability
+
+    def batch_score(self, features_batch: List[Dict[str, float]]) -> List[float]:
+        """Score batch of transactions."""
+        scores = []
+        for features in features_batch:
+            f_array = np.array(list(features.values())[:self.n_qubits])
+            scores.append(self.fast_score(f_array))
+        return scores
+```
+
+## Model Monitoring and Updates
+
+```python
+class ModelMonitor:
+    """
+    Monitor model performance and trigger updates.
+    """
+
+    def __init__(
+        self,
+        performance_threshold: float = 0.05,
+        drift_threshold: float = 0.1
+    ):
+        self.performance_threshold = performance_threshold
+        self.drift_threshold = drift_threshold
+
+        self.predictions = deque(maxlen=10000)
+        self.actuals = deque(maxlen=10000)
+        self.feature_distributions = {}
+
+        self.baseline_performance = None
+        self.baseline_distributions = {}
+
+    def record_prediction(
+        self,
+        prediction: float,
+        features: Dict[str, float]
+    ):
+        """Record prediction for monitoring."""
+        self.predictions.append(prediction)
+
+        for name, value in features.items():
+            if name not in self.feature_distributions:
+                self.feature_distributions[name] = deque(maxlen=10000)
+            self.feature_distributions[name].append(value)
+
+    def record_outcome(self, actual: int):
+        """Record actual outcome (for delayed feedback)."""
+        self.actuals.append(actual)
+
+    def set_baseline(self):
+        """Set current state as baseline."""
+        if len(self.actuals) > 100:
+            self.baseline_performance = self._calculate_auc()
+
+        for name, values in self.feature_distributions.items():
+            if len(values) > 100:
+                self.baseline_distributions[name] = {
+                    'mean': np.mean(list(values)),
+                    'std': np.std(list(values))
+                }
+
+    def check_performance_degradation(self) -> Tuple[bool, float]:
+        """Check if model performance has degraded."""
+        if self.baseline_performance is None or len(self.actuals) < 100:
+            return False, 0.0
+
+        current_auc = self._calculate_auc()
+        degradation = self.baseline_performance - current_auc
+
+        return degradation > self.performance_threshold, degradation
+
+    def check_feature_drift(self) -> Dict[str, float]:
+        """Check for drift in feature distributions."""
+        drift_scores = {}
+
+        for name, values in self.feature_distributions.items():
+            if name not in self.baseline_distributions:
+                continue
+
+            baseline = self.baseline_distributions[name]
+            current_mean = np.mean(list(values))
+            current_std = np.std(list(values))
+
+            # Normalized difference
+            drift = abs(current_mean - baseline['mean']) / (baseline['std'] + 1e-8)
+            drift_scores[name] = drift
+
+        return drift_scores
+
+    def should_retrain(self) -> Tuple[bool, List[str]]:
+        """Determine if model should be retrained."""
+        reasons = []
+
+        # Check performance
+        degraded, amount = self.check_performance_degradation()
+        if degraded:
+            reasons.append(f"Performance degraded by {amount:.3f}")
+
+        # Check drift
+        drift_scores = self.check_feature_drift()
+        drifted_features = [
+            f for f, score in drift_scores.items()
+            if score > self.drift_threshold
+        ]
+        if drifted_features:
+            reasons.append(f"Features drifted: {drifted_features}")
+
+        return len(reasons) > 0, reasons
+
+    def _calculate_auc(self) -> float:
+        """Calculate current AUC."""
+        if len(self.predictions) != len(self.actuals):
+            n = min(len(self.predictions), len(self.actuals))
+            predictions = list(self.predictions)[:n]
+            actuals = list(self.actuals)[:n]
+        else:
+            predictions = list(self.predictions)
+            actuals = list(self.actuals)
+
+        if len(set(actuals)) < 2:
+            return 0.5
+
+        # Simple AUC calculation
+        sorted_pairs = sorted(zip(predictions, actuals), reverse=True)
+        n_pos = sum(actuals)
+        n_neg = len(actuals) - n_pos
+
+        if n_pos == 0 or n_neg == 0:
+            return 0.5
+
+        tp = 0
+        auc = 0
+        for pred, actual in sorted_pairs:
+            if actual == 1:
+                tp += 1
+            else:
+                auc += tp
+
+        return auc / (n_pos * n_neg)
+```
+
+## Key Takeaways
+
+1. **Cascading Architecture**: Fast models first, complex models for uncertain cases
+2. **Latency Budgets**: Allocate time across pipeline stages
+3. **Streaming Features**: Compute incrementally, not from scratch
+4. **Hybrid Approach**: Use quantum for batch/offline, classical for real-time
+5. **Monitoring**: Track performance and drift continuously
+6. **Fallback Strategies**: Have graceful degradation for timeouts
+
+Real-time fraud detection requires careful balance between accuracy and latency. Quantum models can enhance accuracy but require architectural accommodations for their latency characteristics.

@@ -1,0 +1,653 @@
+---
+title: "The McEliece Cryptosystem: Original Code-Based Encryption"
+description: "Master the McEliece cryptosystem, the oldest unbroken public-key encryption scheme. Understand key generation, encryption, decryption, and why 40+ years of cryptanalysis haven't found practical attacks."
+duration: 80
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Implement complete McEliece key generation, encryption, and decryption
+- Understand the role of Goppa codes and their disguise
+- Analyze the security based on syndrome decoding hardness
+- Calculate key sizes and security parameters
+- Compare McEliece to modern variants
+
+## 1. Historical Context and Significance
+
+```python
+import numpy as np
+from typing import Tuple, List, Optional
+import secrets
+
+def mceliece_overview():
+    """Overview of the McEliece cryptosystem."""
+    print("THE McELIECE CRYPTOSYSTEM (1978)")
+    print("=" * 70)
+    
+    overview = """
+    HISTORICAL SIGNIFICANCE:
+    ━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    • Proposed by Robert McEliece in 1978
+    • Same year as RSA, but based on different mathematics
+    • Oldest unbroken public-key encryption scheme
+    • First post-quantum candidate (before "post-quantum" existed!)
+    
+    TIMELINE:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ 1978: McEliece proposes system with n=1024, t=50 Goppa code        │
+    │ 1986: Niederreiter proposes dual variant                           │
+    │ 1988: Stern's attack improves ISD                                  │
+    │ 2008: Bernstein proposes for post-quantum standardization          │
+    │ 2017: NIST PQC competition begins                                  │
+    │ 2022: Classic McEliece advances to NIST Round 4                    │
+    │ 2024: Classic McEliece selected for standardization                │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    SECURITY FOUNDATION:
+    ━━━━━━━━━━━━━━━━━━━━━
+    
+    McEliece security relies on TWO problems:
+    
+    1. SYNDROME DECODING PROBLEM (SDP):
+       Given random H, syndrome s, find low-weight e with H·e = s
+       → NP-complete, no quantum speedup beyond Grover
+    
+    2. GOPPA CODE DISTINGUISHING:
+       Distinguish disguised Goppa code from random code
+       → No efficient algorithm known after 45+ years
+    
+    WHY IT SURVIVED:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ • No algebraic structure exploitable by attackers                  │
+    │ • Best attacks (ISD) have exponential complexity                   │
+    │ • Quantum computers offer only quadratic speedup                   │
+    │ • Simple, well-understood security reduction                       │
+    └─────────────────────────────────────────────────────────────────────┘
+    """
+    print(overview)
+
+mceliece_overview()
+```
+
+## 2. Goppa Codes: The Secret Structure
+
+<Definition term="Binary Goppa Code">
+Let $g(x) \in \mathbb{F}_{2^m}[x]$ be a polynomial of degree $t$ with no roots in $\mathbb{F}_{2^m}$, and let $L = (\alpha_1, \ldots, \alpha_n)$ be distinct elements of $\mathbb{F}_{2^m}$. The binary Goppa code $\Gamma(L, g)$ consists of all binary vectors $(c_1, \ldots, c_n)$ such that:
+
+$$\sum_{i=1}^{n} \frac{c_i}{x - \alpha_i} \equiv 0 \pmod{g(x)}$$
+</Definition>
+
+```python
+class SimplifiedGoppaCode:
+    """
+    Simplified Goppa code implementation.
+    
+    Real Goppa codes use polynomial arithmetic over F_{2^m}.
+    This implementation demonstrates the concepts with simplified operations.
+    """
+    
+    def __init__(self, n: int, t: int, seed: int = None):
+        """
+        Initialize Goppa code.
+        
+        Args:
+            n: Code length
+            t: Error correction capability
+            seed: Random seed
+        """
+        if seed is not None:
+            np.random.seed(seed)
+        
+        self.n = n
+        self.t = t
+        
+        # Approximate parameters
+        self.m = int(np.ceil(np.log2(n)))  # Extension degree
+        self.r = self.m * t  # Redundancy (parity bits)
+        self.k = n - self.r  # Dimension
+        
+        if self.k <= 0:
+            raise ValueError(f"Invalid parameters: n={n}, t={t} gives k={self.k}")
+        
+        # Generate secret parity-check matrix with algebraic structure
+        self.H_secret = self._generate_goppa_parity_check()
+        
+        # Compute generator matrix
+        self.G_secret = self._parity_to_generator(self.H_secret)
+    
+    def _generate_goppa_parity_check(self) -> np.ndarray:
+        """
+        Generate parity-check matrix.
+        
+        For real Goppa codes, H has special structure from the Goppa polynomial.
+        Here we use a random matrix as placeholder.
+        """
+        # In practice: H is constructed from g(x) and support L
+        # H[i,j] = α_j^i / g(α_j) in F_{2^m}
+        
+        # Simplified: random full-rank matrix
+        while True:
+            H = np.random.randint(0, 2, size=(self.r, self.n))
+            if np.linalg.matrix_rank(H.astype(float)) == self.r:
+                return H
+    
+    def _parity_to_generator(self, H: np.ndarray) -> np.ndarray:
+        """Convert parity-check to systematic generator matrix."""
+        r, n = H.shape
+        k = n - r
+        
+        # Put H in form [A | I_r] using Gaussian elimination
+        H_work = H.copy()
+        
+        # Work on last r columns to make them identity
+        for col in range(n - r, n):
+            rel_col = col - (n - r)
+            
+            # Find pivot in this column
+            pivot_row = None
+            for row in range(rel_col, r):
+                if H_work[row, col] == 1:
+                    pivot_row = row
+                    break
+            
+            if pivot_row is None:
+                # Need to swap with earlier column
+                for swap_col in range(col):
+                    if H_work[rel_col, swap_col] == 1:
+                        H_work[:, [col, swap_col]] = H_work[:, [swap_col, col]]
+                        break
+                pivot_row = rel_col
+            
+            # Swap rows
+            H_work[[rel_col, pivot_row]] = H_work[[pivot_row, rel_col]]
+            
+            # Eliminate
+            for row in range(r):
+                if row != rel_col and H_work[row, col] == 1:
+                    H_work[row] = (H_work[row] + H_work[rel_col]) % 2
+        
+        # H is now [A | I_r], so G = [I_k | A^T]
+        A = H_work[:, :k]
+        G = np.hstack([np.eye(k, dtype=int), A.T]) % 2
+        
+        return G
+    
+    def encode(self, message: np.ndarray) -> np.ndarray:
+        """Encode message to codeword."""
+        return (message @ self.G_secret) % 2
+    
+    def decode(self, received: np.ndarray) -> Tuple[Optional[np.ndarray], np.ndarray]:
+        """
+        Decode received word using Patterson's algorithm (simplified).
+        
+        Real implementation uses polynomial factorization over F_{2^m}.
+        """
+        # Compute syndrome
+        syndrome = (self.H_secret @ received) % 2
+        
+        if np.all(syndrome == 0):
+            # No errors
+            return received[:self.k], np.zeros(self.n, dtype=int)
+        
+        # Simplified: syndrome lookup for small codes
+        # Real Patterson algorithm is O(n^2)
+        
+        for weight in range(1, self.t + 1):
+            for error in self._generate_errors(weight):
+                if np.array_equal((self.H_secret @ error) % 2, syndrome):
+                    codeword = (received + error) % 2
+                    return codeword[:self.k], error
+        
+        return None, received  # Decoding failure
+    
+    def _generate_errors(self, weight: int):
+        """Generate all error patterns of given weight."""
+        from itertools import combinations
+        for positions in combinations(range(self.n), weight):
+            error = np.zeros(self.n, dtype=int)
+            for p in positions:
+                error[p] = 1
+            yield error
+    
+    def get_parameters(self) -> dict:
+        """Return code parameters."""
+        return {
+            'n': self.n,
+            'k': self.k,
+            't': self.t,
+            'm': self.m,
+            'r': self.r,
+            'rate': self.k / self.n
+        }
+
+
+def demonstrate_goppa():
+    """Demonstrate Goppa code properties."""
+    print("\nGOPPA CODE DEMONSTRATION")
+    print("=" * 65)
+    
+    # Small Goppa code for demonstration
+    goppa = SimplifiedGoppaCode(n=31, t=3, seed=42)
+    params = goppa.get_parameters()
+    
+    print(f"Goppa Code Parameters:")
+    for key, value in params.items():
+        print(f"  {key}: {value}")
+    
+    # Encode and decode
+    message = np.random.randint(0, 2, size=params['k'])
+    codeword = goppa.encode(message)
+    
+    print(f"\nMessage ({params['k']} bits): {message[:10]}...")
+    print(f"Codeword ({params['n']} bits): {codeword[:10]}...")
+    
+    # Add errors
+    error = np.zeros(params['n'], dtype=int)
+    error_positions = np.random.choice(params['n'], params['t'], replace=False)
+    error[error_positions] = 1
+    received = (codeword + error) % 2
+    
+    print(f"\nError positions: {sorted(error_positions)}")
+    print(f"Error weight: {np.sum(error)}")
+    
+    # Decode
+    decoded, detected_error = goppa.decode(received)
+    if decoded is not None:
+        print(f"Decoding successful: {np.array_equal(message, decoded)}")
+    else:
+        print("Decoding failed")
+
+demonstrate_goppa()
+```
+
+## 3. McEliece Encryption Scheme
+
+```python
+class McElieceCryptosystem:
+    """
+    The McEliece Public-Key Encryption Scheme.
+    
+    Key Generation:
+    1. Generate random Goppa code with generator G and decoder
+    2. Generate random k×k invertible matrix S (scrambling)
+    3. Generate random n×n permutation matrix P
+    4. Public key: G' = S·G·P (disguised generator)
+    5. Secret key: (S, G, P, decoder)
+    
+    Encryption: c = m·G' + e (add t random errors)
+    Decryption: Use P^{-1}, decoder, S^{-1}
+    """
+    
+    def __init__(self, n: int, t: int, seed: int = None):
+        """
+        Initialize McEliece cryptosystem.
+        
+        Args:
+            n: Code length (public key size related)
+            t: Error correction capability (security parameter)
+            seed: Random seed for reproducibility
+        """
+        if seed is not None:
+            np.random.seed(seed)
+        
+        # Generate Goppa code
+        self.goppa = SimplifiedGoppaCode(n, t, seed)
+        self.n = n
+        self.t = t
+        self.k = self.goppa.k
+        
+        # Generate scrambling matrix S (k × k invertible)
+        self.S = self._random_invertible_matrix(self.k)
+        self.S_inv = self._invert_binary_matrix(self.S)
+        
+        # Generate permutation matrix P (n × n)
+        self.perm = np.random.permutation(n)
+        self.P = np.eye(n, dtype=int)[self.perm]
+        self.P_inv = self.P.T  # Permutation inverse is transpose
+        
+        # Compute public key: G' = S · G · P
+        self.G_public = (self.S @ self.goppa.G_secret @ self.P) % 2
+    
+    def _random_invertible_matrix(self, n: int) -> np.ndarray:
+        """Generate random invertible binary matrix."""
+        while True:
+            M = np.random.randint(0, 2, size=(n, n))
+            if self._is_invertible(M):
+                return M
+    
+    def _is_invertible(self, M: np.ndarray) -> bool:
+        """Check if binary matrix is invertible."""
+        try:
+            self._invert_binary_matrix(M)
+            return True
+        except:
+            return False
+    
+    def _invert_binary_matrix(self, M: np.ndarray) -> np.ndarray:
+        """Invert binary matrix using Gaussian elimination."""
+        n = M.shape[0]
+        aug = np.hstack([M.copy(), np.eye(n, dtype=int)]) % 2
+        
+        for col in range(n):
+            # Find pivot
+            pivot = None
+            for row in range(col, n):
+                if aug[row, col] == 1:
+                    pivot = row
+                    break
+            
+            if pivot is None:
+                raise ValueError("Matrix is singular")
+            
+            aug[[col, pivot]] = aug[[pivot, col]]
+            
+            for row in range(n):
+                if row != col and aug[row, col] == 1:
+                    aug[row] = (aug[row] + aug[col]) % 2
+        
+        return aug[:, n:]
+    
+    def get_public_key(self) -> np.ndarray:
+        """Return public key (disguised generator matrix)."""
+        return self.G_public
+    
+    def get_public_key_size(self) -> int:
+        """Return public key size in bits."""
+        return self.k * self.n
+    
+    def encrypt(self, message: np.ndarray, error: np.ndarray = None) -> np.ndarray:
+        """
+        Encrypt a message.
+        
+        Args:
+            message: k-bit message
+            error: n-bit error vector (optional, random if not provided)
+        
+        Returns:
+            n-bit ciphertext
+        """
+        if len(message) != self.k:
+            raise ValueError(f"Message must be {self.k} bits")
+        
+        # Generate random error of weight t if not provided
+        if error is None:
+            error = np.zeros(self.n, dtype=int)
+            error_positions = np.random.choice(self.n, self.t, replace=False)
+            error[error_positions] = 1
+        
+        if np.sum(error) > self.t:
+            raise ValueError(f"Error weight must be at most {self.t}")
+        
+        # Compute ciphertext: c = m·G' + e
+        codeword = (message @ self.G_public) % 2
+        ciphertext = (codeword + error) % 2
+        
+        return ciphertext
+    
+    def decrypt(self, ciphertext: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Decrypt a ciphertext.
+        
+        Steps:
+        1. Apply P^{-1}: c' = c·P^{-1}
+        2. Decode c' using Goppa decoder: get m'·G + e' = c' → m'
+        3. Apply S^{-1}: m = m'·S^{-1}
+        """
+        # Step 1: Remove permutation
+        c_prime = (ciphertext @ self.P_inv) % 2
+        
+        # Step 2: Decode using Goppa code
+        m_prime, error = self.goppa.decode(c_prime)
+        
+        if m_prime is None:
+            return None  # Decoding failure
+        
+        # Step 3: Unscramble
+        message = (m_prime @ self.S_inv) % 2
+        
+        return message
+    
+    def get_parameters(self) -> dict:
+        """Return system parameters."""
+        return {
+            'n': self.n,
+            'k': self.k,
+            't': self.t,
+            'public_key_bits': self.k * self.n,
+            'public_key_bytes': (self.k * self.n) // 8,
+            'ciphertext_bits': self.n,
+            'security_estimate': self._estimate_security()
+        }
+    
+    def _estimate_security(self) -> int:
+        """Estimate security level in bits (simplified)."""
+        # Work factor for ISD is approximately:
+        # W ≈ (n choose t) · (k/n)^t
+        # Simplified estimate
+        import math
+        try:
+            log_work = (self.t * math.log2(self.n / self.t) + 
+                       self.t * math.log2(self.n / self.k))
+            return int(log_work)
+        except:
+            return 0
+
+
+def demonstrate_mceliece():
+    """Demonstrate McEliece encryption."""
+    print("\nMcELIECE CRYPTOSYSTEM DEMONSTRATION")
+    print("=" * 70)
+    
+    # Create McEliece instance with small parameters for demo
+    mce = McElieceCryptosystem(n=31, t=3, seed=42)
+    params = mce.get_parameters()
+    
+    print("System Parameters:")
+    for key, value in params.items():
+        print(f"  {key}: {value}")
+    
+    # Key generation
+    print(f"\nPublic Key (G'): {mce.k}×{mce.n} matrix")
+    print(f"  First row: {mce.G_public[0][:10]}...")
+    
+    # Encryption
+    message = np.random.randint(0, 2, size=mce.k)
+    print(f"\nPlaintext ({mce.k} bits): {message}")
+    
+    ciphertext = mce.encrypt(message)
+    print(f"Ciphertext ({mce.n} bits): {ciphertext}")
+    
+    # Decryption
+    decrypted = mce.decrypt(ciphertext)
+    print(f"\nDecrypted: {decrypted}")
+    print(f"Correct: {np.array_equal(message, decrypted)}")
+    
+    # Security demonstration
+    print("\n--- Security: Public key looks random ---")
+    print(f"Average ones per row: {np.mean(np.sum(mce.G_public, axis=1)):.1f}")
+    print(f"Expected for random: {mce.n/2:.1f}")
+
+demonstrate_mceliece()
+```
+
+## 4. Security Analysis
+
+```python
+def security_analysis():
+    """Analyze McEliece security."""
+    print("\nMcELIECE SECURITY ANALYSIS")
+    print("=" * 70)
+    
+    analysis = """
+    ATTACK VECTORS:
+    ━━━━━━━━━━━━━━━
+    
+    1. KEY RECOVERY ATTACKS:
+       Goal: Recover S, P, or G from public key G' = S·G·P
+    
+       ┌─────────────────────────────────────────────────────────────────┐
+       │ Attack                    │ Complexity  │ Status               │
+       ├─────────────────────────────────────────────────────────────────┤
+       │ Brute force S            │ 2^{k²}      │ Infeasible           │
+       │ Brute force P            │ n!          │ Infeasible           │
+       │ Support splitting (SSA)  │ Polynomial  │ Works for some codes │
+       │ Goppa distinguishing     │ Unknown     │ No efficient algo    │
+       └─────────────────────────────────────────────────────────────────┘
+       
+       Key insight: Binary Goppa codes resist SSA and distinguishing attacks.
+    
+    2. MESSAGE RECOVERY ATTACKS:
+       Goal: Recover m from c = m·G' + e without secret key
+    
+       Best known: Information Set Decoding (ISD)
+       
+       ┌─────────────────────────────────────────────────────────────────┐
+       │ ISD Variant      │ Classical      │ Quantum                    │
+       ├─────────────────────────────────────────────────────────────────┤
+       │ Prange (1962)    │ 2^{0.121n}     │ 2^{0.061n} (Grover)        │
+       │ Lee-Brickell     │ 2^{0.116n}     │ 2^{0.058n}                 │
+       │ Stern (1989)     │ 2^{0.103n}     │ 2^{0.052n}                 │
+       │ BJMM (2012)      │ 2^{0.097n}     │ 2^{0.049n}                 │
+       └─────────────────────────────────────────────────────────────────┘
+    
+    PARAMETER SELECTION:
+    ━━━━━━━━━━━━━━━━━━━━
+    
+    For 128-bit classical security (256-bit quantum):
+    
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Parameter Set     │ n      │ k      │ t   │ PK Size  │ Security   │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ McEliece 460896   │ 3488   │ 2720   │ 64  │ 255 KB   │ 128-bit    │
+    │ McEliece 6688     │ 6688   │ 5024   │ 128 │ 1.04 MB  │ 256-bit    │
+    │ McEliece 8192     │ 8192   │ 6528   │ 128 │ 1.36 MB  │ 256-bit    │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    KEY SIZE PROBLEM:
+    ━━━━━━━━━━━━━━━━━
+    
+    Public key = k × n bits (storing systematic generator)
+    
+    For 128-bit security: ~255 KB public key
+    For 256-bit security: ~1 MB public key
+    
+    Compare to:
+    • RSA-2048: 256 bytes
+    • ECDSA-256: 64 bytes
+    • Kyber-768: 1,184 bytes
+    """
+    print(analysis)
+    
+    # ISD work factor estimation
+    print("\nISD WORK FACTOR ESTIMATES:")
+    print("-" * 50)
+    
+    import math
+    
+    params = [
+        ('mceliece348864', 3488, 2720, 64),
+        ('mceliece460896', 4608, 3360, 96),
+        ('mceliece6688128', 6688, 5024, 128),
+        ('mceliece8192128', 8192, 6528, 128),
+    ]
+    
+    print(f"{'Variant':<20} {'n':<8} {'k':<8} {'t':<6} {'PK (KB)':<10} {'Est. Bits'}")
+    print("-" * 65)
+    
+    for name, n, k, t in params:
+        pk_kb = (k * n) // 8 // 1024
+        # Simplified security estimate
+        log_work = min(t * math.log2(n / t), 0.1 * n)
+        print(f"{name:<20} {n:<8} {k:<8} {t:<6} {pk_kb:<10} ~{int(log_work)}")
+
+security_analysis()
+```
+
+## 5. Classic McEliece (NIST Standard)
+
+```python
+def classic_mceliece_overview():
+    """Overview of Classic McEliece NIST submission."""
+    print("\nCLASSIC McELIECE (NIST SUBMISSION)")
+    print("=" * 70)
+    
+    overview = """
+    STATUS: NIST Post-Quantum Cryptography Round 4 Finalist
+    Selected for standardization alongside Kyber/Dilithium/SPHINCS+
+    
+    IMPROVEMENTS OVER ORIGINAL McELIECE:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    1. Niederreiter Variant (Dual Formulation)
+       • Encrypt by computing syndrome: c = H'·e^T
+       • More efficient for same security
+       • Smaller ciphertexts
+    
+    2. Optimized Goppa Code Parameters
+       • Carefully chosen n, t for efficiency
+       • Binary field operations optimized
+    
+    3. Constant-Time Implementation
+       • Protects against timing side-channels
+       • Patterson's algorithm made constant-time
+    
+    4. KEM Construction (Not Raw Encryption)
+       • Fujisaki-Okamoto transform
+       • IND-CCA2 security from IND-CPA
+    
+    PARAMETER SETS:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Name             │ Security │ PK (KB) │ SK (KB) │ CT (bytes)       │
+    ├─────────────────────────────────────────────────────────────────────┤
+    │ mceliece348864   │ Cat 1    │ 261     │ 6.5     │ 128              │
+    │ mceliece460896   │ Cat 3    │ 524     │ 13      │ 188              │
+    │ mceliece6688128  │ Cat 5    │ 1,044   │ 13.9    │ 240              │
+    │ mceliece8192128  │ Cat 5    │ 1,357   │ 14.1    │ 240              │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    ADVANTAGES:
+    ✓ 40+ years of cryptanalysis, no practical attacks
+    ✓ Conservative security assumptions
+    ✓ Fast encryption and decryption
+    ✓ Small ciphertexts
+    
+    DISADVANTAGES:
+    ✗ Very large public keys (100s KB to MB)
+    ✗ Slow key generation
+    ✗ Not suitable for constrained devices
+    
+    USE CASES:
+    • Long-term secrets requiring maximum security confidence
+    • Key establishment where PK size is acceptable
+    • Hybrid schemes (combine with lattice-based for diversity)
+    • Offline key exchange (can tolerate large PK transfer)
+    """
+    print(overview)
+
+classic_mceliece_overview()
+```
+
+## Summary
+
+In this lesson, you learned about the McEliece cryptosystem:
+
+1. **Historical Significance**: Oldest unbroken public-key scheme (1978)
+2. **Goppa Codes**: Algebraic codes with efficient secret decoding
+3. **Key Disguise**: G' = S·G·P looks random but enables decryption
+4. **Encryption**: c = m·G' + e (add controlled errors)
+5. **Decryption**: Unpermute, decode, unscramble
+6. **Security**: Based on syndrome decoding and code distinguishing
+7. **ISD Attacks**: Best known, still exponential complexity
+8. **Classic McEliece**: NIST standardized, 261KB-1.3MB public keys
+
+McEliece offers the strongest post-quantum security confidence at the cost of large public keys.
+
+## Further Reading
+
+- Next lesson: Niederreiter Variant
+- Related: Patterson's decoding algorithm
+- Advanced: ISD complexity analysis

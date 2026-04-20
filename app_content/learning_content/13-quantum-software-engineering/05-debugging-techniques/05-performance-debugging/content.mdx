@@ -1,0 +1,579 @@
+---
+title: "Performance Debugging"
+description: "Analyze and optimize quantum circuit performance."
+duration: 40
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+By the end of this lesson, you will be able to:
+- Analyze circuit depth and identify the critical path
+- Optimize gate counts for target hardware
+- Debug transpilation issues
+- Identify resource bottlenecks
+- Profile quantum job execution
+
+## 1. Circuit Depth Analysis
+
+Circuit depth directly impacts noise accumulation. Understanding and minimizing depth is crucial for NISQ performance.
+
+```
+Circuit Depth Visualization
+════════════════════════════════════════════════════════════
+
+q0: ──H──●──────────●──H──  Depth contribution: 3
+         │          │
+q1: ─────X──Rz(θ)───X─────  Depth contribution: 4
+                │
+q2: ────────────●─────────  Depth contribution: 1
+
+Critical Path: q1 (determines total depth = 4)
+```
+
+```python
+from qiskit import QuantumCircuit, transpile
+from qiskit.visualization import circuit_drawer
+from typing import Dict, List, Tuple
+import numpy as np
+
+class CircuitDepthAnalyzer:
+    """Analyze quantum circuit depth and critical paths."""
+
+    def __init__(self, circuit: QuantumCircuit):
+        self.circuit = circuit
+        self.qubit_depths = {}
+        self._analyze()
+
+    def _analyze(self):
+        """Compute depth per qubit."""
+        depths = {i: 0 for i in range(self.circuit.num_qubits)}
+
+        for instruction in self.circuit.data:
+            if instruction.operation.name == 'barrier':
+                continue
+
+            qubits = [self.circuit.find_bit(q).index for q in instruction.qubits]
+
+            # Depth increases by 1 for all involved qubits
+            max_current = max(depths[q] for q in qubits)
+            for q in qubits:
+                depths[q] = max_current + 1
+
+        self.qubit_depths = depths
+
+    def get_depth(self) -> int:
+        """Get total circuit depth."""
+        return max(self.qubit_depths.values()) if self.qubit_depths else 0
+
+    def get_critical_path(self) -> List[int]:
+        """Get qubits on the critical path."""
+        max_depth = self.get_depth()
+        return [q for q, d in self.qubit_depths.items() if d == max_depth]
+
+    def get_depth_breakdown(self) -> Dict[str, int]:
+        """Get gate type contribution to depth."""
+        breakdown = {}
+
+        for instruction in self.circuit.data:
+            gate_name = instruction.operation.name
+            if gate_name not in breakdown:
+                breakdown[gate_name] = 0
+            breakdown[gate_name] += 1
+
+        return breakdown
+
+    def suggest_optimizations(self) -> List[str]:
+        """Suggest optimizations based on analysis."""
+        suggestions = []
+        depth = self.get_depth()
+        breakdown = self.get_depth_breakdown()
+
+        # Check for high CNOT count
+        cnot_count = breakdown.get('cx', 0)
+        if cnot_count > depth * 0.5:
+            suggestions.append(
+                f"High CNOT count ({cnot_count}). Consider native gate decomposition."
+            )
+
+        # Check for unbalanced qubits
+        depths = list(self.qubit_depths.values())
+        if max(depths) > 2 * min(depths) and min(depths) > 0:
+            suggestions.append(
+                "Unbalanced qubit utilization. Consider circuit restructuring."
+            )
+
+        # Check for optimization potential
+        if depth > 20:
+            suggestions.append(
+                "Deep circuit. Consider optimization level 3 transpilation."
+            )
+
+        return suggestions
+
+# Example usage
+qc = QuantumCircuit(3)
+qc.h(0)
+qc.cx(0, 1)
+qc.cx(1, 2)
+qc.rz(0.5, 2)
+qc.cx(1, 2)
+qc.cx(0, 1)
+qc.h(0)
+
+analyzer = CircuitDepthAnalyzer(qc)
+print(f"Total depth: {analyzer.get_depth()}")
+print(f"Critical path qubits: {analyzer.get_critical_path()}")
+print(f"Depth per qubit: {analyzer.qubit_depths}")
+print(f"Gate breakdown: {analyzer.get_depth_breakdown()}")
+print(f"Suggestions: {analyzer.suggest_optimizations()}")
+```
+
+## 2. Gate Count Optimization
+
+Minimizing gate count, especially two-qubit gates, improves fidelity:
+
+```python
+from qiskit.transpiler import PassManager
+from qiskit.transpiler.passes import Optimize1qGates, CXCancellation
+from qiskit.transpiler.passes import CommutativeCancellation
+
+class GateCountOptimizer:
+    """Optimize gate counts in quantum circuits."""
+
+    def __init__(self):
+        self.optimization_passes = PassManager([
+            Optimize1qGates(),
+            CXCancellation(),
+            CommutativeCancellation()
+        ])
+
+    def count_gates(self, circuit: QuantumCircuit) -> Dict[str, int]:
+        """Count gates by type."""
+        counts = {}
+        for instruction in circuit.data:
+            name = instruction.operation.name
+            counts[name] = counts.get(name, 0) + 1
+        return counts
+
+    def optimize(self, circuit: QuantumCircuit) -> QuantumCircuit:
+        """Apply optimization passes."""
+        return self.optimization_passes.run(circuit)
+
+    def compare_before_after(self, circuit: QuantumCircuit) -> Dict:
+        """Compare gate counts before and after optimization."""
+        before = self.count_gates(circuit)
+        optimized = self.optimize(circuit)
+        after = self.count_gates(optimized)
+
+        return {
+            'before': before,
+            'after': after,
+            'reduction': {
+                k: before.get(k, 0) - after.get(k, 0)
+                for k in set(before.keys()) | set(after.keys())
+            },
+            'optimized_circuit': optimized
+        }
+
+    def estimate_improvement(self, before: Dict, after: Dict,
+                             error_rates: Dict) -> float:
+        """Estimate fidelity improvement from optimization."""
+        def calc_fidelity(counts):
+            fidelity = 1.0
+            for gate, count in counts.items():
+                if gate in error_rates:
+                    fidelity *= (1 - error_rates[gate]) ** count
+            return fidelity
+
+        fid_before = calc_fidelity(before)
+        fid_after = calc_fidelity(after)
+
+        return fid_after - fid_before
+
+# Example: Circuit with redundant gates
+qc = QuantumCircuit(2)
+qc.h(0)
+qc.cx(0, 1)
+qc.cx(0, 1)  # Redundant - cancels with previous
+qc.rz(0.5, 0)
+qc.rz(0.3, 0)  # Can be merged with previous
+qc.h(0)
+
+optimizer = GateCountOptimizer()
+result = optimizer.compare_before_after(qc)
+
+print(f"Before: {result['before']}")
+print(f"After: {result['after']}")
+print(f"Reduction: {result['reduction']}")
+```
+
+## 3. Transpilation Debugging
+
+Transpilation can introduce unexpected gates. Here's how to debug:
+
+```python
+from qiskit import transpile
+from qiskit.providers.fake_provider import GenericBackendV2
+from qiskit.transpiler import PassManagerConfig
+from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+
+class TranspilationDebugger:
+    """Debug transpilation issues."""
+
+    def __init__(self, backend=None):
+        self.backend = backend or GenericBackendV2(num_qubits=5)
+
+    def compare_transpilation_levels(self, circuit: QuantumCircuit) -> Dict:
+        """Compare results across optimization levels."""
+        results = {}
+
+        for level in range(4):
+            transpiled = transpile(
+                circuit,
+                backend=self.backend,
+                optimization_level=level
+            )
+            results[f'level_{level}'] = {
+                'depth': transpiled.depth(),
+                'gate_count': len(transpiled.data),
+                'cx_count': transpiled.count_ops().get('cx', 0),
+                'circuit': transpiled
+            }
+
+        return results
+
+    def analyze_routing(self, circuit: QuantumCircuit) -> Dict:
+        """Analyze how routing affects the circuit."""
+        # Transpile with routing info
+        transpiled = transpile(
+            circuit,
+            backend=self.backend,
+            optimization_level=1
+        )
+
+        original_cx = circuit.count_ops().get('cx', 0)
+        final_cx = transpiled.count_ops().get('cx', 0)
+        swap_overhead = (final_cx - original_cx) // 3  # Each SWAP = 3 CX
+
+        return {
+            'original_cx': original_cx,
+            'final_cx': final_cx,
+            'estimated_swaps': swap_overhead,
+            'routing_overhead': final_cx / original_cx if original_cx > 0 else 1.0
+        }
+
+    def find_inserted_gates(self, original: QuantumCircuit,
+                            transpiled: QuantumCircuit) -> List[str]:
+        """Identify gates added during transpilation."""
+        original_ops = set(original.count_ops().keys())
+        transpiled_ops = set(transpiled.count_ops().keys())
+
+        return list(transpiled_ops - original_ops)
+
+    def debug_decomposition(self, circuit: QuantumCircuit,
+                            target_gate: str) -> Dict:
+        """Show how a specific gate is decomposed."""
+        # Find instances of target gate
+        instances = []
+        for i, instruction in enumerate(circuit.data):
+            if instruction.operation.name == target_gate:
+                instances.append(i)
+
+        # Transpile and track
+        transpiled = transpile(circuit, backend=self.backend)
+
+        return {
+            'original_instances': len(instances),
+            'basis_gates': self.backend.operation_names,
+            'transpiled_ops': dict(transpiled.count_ops())
+        }
+
+# Example
+qc = QuantumCircuit(3)
+qc.h(0)
+qc.ccx(0, 1, 2)  # Toffoli - will be decomposed
+
+debugger = TranspilationDebugger()
+levels = debugger.compare_transpilation_levels(qc)
+
+print("Transpilation comparison:")
+for level, data in levels.items():
+    print(f"  {level}: depth={data['depth']}, gates={data['gate_count']}, CX={data['cx_count']}")
+
+routing = debugger.analyze_routing(qc)
+print(f"\nRouting analysis:")
+print(f"  Original CX: {routing['original_cx']}")
+print(f"  Final CX: {routing['final_cx']}")
+print(f"  Estimated SWAPs: {routing['estimated_swaps']}")
+```
+
+## 4. Resource Bottleneck Identification
+
+Identify what's limiting your quantum program's performance:
+
+```python
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional
+import time
+
+class BottleneckType(Enum):
+    CIRCUIT_DEPTH = "circuit_depth"
+    GATE_COUNT = "gate_count"
+    QUBIT_CONNECTIVITY = "qubit_connectivity"
+    COMPILATION_TIME = "compilation_time"
+    QUEUE_TIME = "queue_time"
+    SHOT_COUNT = "shot_count"
+
+@dataclass
+class BottleneckReport:
+    bottleneck_type: BottleneckType
+    severity: str  # 'low', 'medium', 'high'
+    current_value: float
+    threshold: float
+    recommendation: str
+
+class ResourceProfiler:
+    """Profile quantum program resource usage."""
+
+    def __init__(self, backend=None):
+        self.backend = backend
+        self.thresholds = {
+            'depth': 100,
+            'cx_count': 50,
+            'compilation_time_s': 10,
+            'shots': 100000
+        }
+
+    def profile_circuit(self, circuit: QuantumCircuit) -> List[BottleneckReport]:
+        """Profile circuit and identify bottlenecks."""
+        bottlenecks = []
+
+        # Check depth
+        depth = circuit.depth()
+        if depth > self.thresholds['depth']:
+            bottlenecks.append(BottleneckReport(
+                bottleneck_type=BottleneckType.CIRCUIT_DEPTH,
+                severity='high' if depth > 2 * self.thresholds['depth'] else 'medium',
+                current_value=depth,
+                threshold=self.thresholds['depth'],
+                recommendation="Reduce circuit depth. Consider approximation or decomposition."
+            ))
+
+        # Check CX count
+        cx_count = circuit.count_ops().get('cx', 0)
+        if cx_count > self.thresholds['cx_count']:
+            bottlenecks.append(BottleneckReport(
+                bottleneck_type=BottleneckType.GATE_COUNT,
+                severity='high' if cx_count > 2 * self.thresholds['cx_count'] else 'medium',
+                current_value=cx_count,
+                threshold=self.thresholds['cx_count'],
+                recommendation="High two-qubit gate count. Use circuit optimization."
+            ))
+
+        return bottlenecks
+
+    def profile_compilation(self, circuit: QuantumCircuit) -> Dict:
+        """Profile compilation time."""
+        if self.backend is None:
+            return {'error': 'No backend specified'}
+
+        start = time.time()
+        transpiled = transpile(circuit, backend=self.backend, optimization_level=3)
+        compilation_time = time.time() - start
+
+        return {
+            'compilation_time_s': compilation_time,
+            'original_depth': circuit.depth(),
+            'transpiled_depth': transpiled.depth(),
+            'depth_change': transpiled.depth() - circuit.depth()
+        }
+
+    def estimate_execution_time(self, circuit: QuantumCircuit,
+                                shots: int = 1000) -> Dict:
+        """Estimate total execution time."""
+        # Typical gate times (ns)
+        gate_times = {
+            'single_qubit': 35,
+            'cx': 300,
+            'measure': 1000
+        }
+
+        ops = circuit.count_ops()
+        single_q = sum(v for k, v in ops.items()
+                      if k not in ['cx', 'cz', 'measure', 'barrier'])
+        two_q = ops.get('cx', 0) + ops.get('cz', 0)
+        measures = ops.get('measure', 0)
+
+        # Circuit execution time per shot
+        time_per_shot_ns = (
+            single_q * gate_times['single_qubit'] +
+            two_q * gate_times['cx'] +
+            measures * gate_times['measure']
+        )
+
+        total_time_s = (time_per_shot_ns * shots) / 1e9
+
+        return {
+            'time_per_shot_us': time_per_shot_ns / 1000,
+            'total_time_s': total_time_s,
+            'shots': shots,
+            'rate_shots_per_s': shots / total_time_s if total_time_s > 0 else 0
+        }
+
+# Example
+qc = QuantumCircuit(4)
+for i in range(4):
+    qc.h(i)
+for _ in range(10):
+    for i in range(3):
+        qc.cx(i, i+1)
+    qc.barrier()
+
+profiler = ResourceProfiler()
+bottlenecks = profiler.profile_circuit(qc)
+
+print("Bottleneck Analysis:")
+for b in bottlenecks:
+    print(f"  {b.bottleneck_type.value}: {b.severity}")
+    print(f"    Current: {b.current_value}, Threshold: {b.threshold}")
+    print(f"    Recommendation: {b.recommendation}")
+
+timing = profiler.estimate_execution_time(qc, shots=10000)
+print(f"\nExecution estimate:")
+print(f"  Time per shot: {timing['time_per_shot_us']:.2f} μs")
+print(f"  Total time: {timing['total_time_s']:.2f} s")
+```
+
+## 5. Performance Profiling Tools
+
+```python
+import time
+from contextlib import contextmanager
+from typing import Callable
+
+class QuantumProfiler:
+    """Profile quantum program execution."""
+
+    def __init__(self):
+        self.timings = {}
+        self.metrics = {}
+
+    @contextmanager
+    def timer(self, name: str):
+        """Context manager for timing code blocks."""
+        start = time.perf_counter()
+        yield
+        elapsed = time.perf_counter() - start
+        if name not in self.timings:
+            self.timings[name] = []
+        self.timings[name].append(elapsed)
+
+    def profile_function(self, func: Callable, *args, **kwargs):
+        """Profile a function call."""
+        with self.timer(func.__name__):
+            result = func(*args, **kwargs)
+        return result
+
+    def get_summary(self) -> Dict:
+        """Get profiling summary."""
+        summary = {}
+        for name, times in self.timings.items():
+            summary[name] = {
+                'total': sum(times),
+                'count': len(times),
+                'mean': np.mean(times),
+                'std': np.std(times) if len(times) > 1 else 0
+            }
+        return summary
+
+    def print_report(self):
+        """Print formatted profiling report."""
+        summary = self.get_summary()
+        print("\n" + "=" * 60)
+        print("QUANTUM PROGRAM PROFILING REPORT")
+        print("=" * 60)
+
+        total_time = sum(s['total'] for s in summary.values())
+
+        for name, stats in sorted(summary.items(),
+                                  key=lambda x: x[1]['total'],
+                                  reverse=True):
+            pct = (stats['total'] / total_time * 100) if total_time > 0 else 0
+            print(f"\n{name}:")
+            print(f"  Total: {stats['total']:.4f}s ({pct:.1f}%)")
+            print(f"  Calls: {stats['count']}")
+            print(f"  Mean: {stats['mean']*1000:.2f}ms ± {stats['std']*1000:.2f}ms")
+
+# Example usage
+profiler = QuantumProfiler()
+
+# Profile different stages
+with profiler.timer('circuit_creation'):
+    qc = QuantumCircuit(4)
+    for i in range(4):
+        qc.h(i)
+    for i in range(3):
+        qc.cx(i, i+1)
+    qc.measure_all()
+
+with profiler.timer('transpilation'):
+    from qiskit.providers.fake_provider import GenericBackendV2
+    backend = GenericBackendV2(num_qubits=5)
+    transpiled = transpile(qc, backend=backend, optimization_level=2)
+
+with profiler.timer('simulation'):
+    from qiskit_aer import AerSimulator
+    sim = AerSimulator()
+    result = sim.run(transpiled, shots=1000).result()
+
+profiler.print_report()
+```
+
+## 6. Debugging Workflow
+
+```
+Performance Debugging Workflow
+════════════════════════════════════════════════════════════
+
+1. MEASURE BASELINE
+   ├─ Record original depth and gate count
+   ├─ Profile compilation time
+   └─ Establish performance targets
+
+2. ANALYZE STRUCTURE
+   ├─ Identify critical path
+   ├─ Find gate count breakdown
+   └─ Check qubit utilization balance
+
+3. PROFILE TRANSPILATION
+   ├─ Compare optimization levels
+   ├─ Analyze routing overhead
+   └─ Check for unexpected decompositions
+
+4. IDENTIFY BOTTLENECKS
+   ├─ Circuit depth vs hardware coherence
+   ├─ Gate count vs error budget
+   └─ Compilation vs execution time
+
+5. OPTIMIZE
+   ├─ Apply circuit transformations
+   ├─ Adjust transpilation settings
+   └─ Re-measure and iterate
+```
+
+## Summary
+
+| Metric | Impact | Optimization Strategy |
+|--------|--------|----------------------|
+| Circuit Depth | Decoherence accumulation | Parallelize gates, reduce critical path |
+| CX Count | Dominant error source | Use native gates, cancel redundant |
+| Routing Overhead | Extra SWAPs needed | Initial layout optimization |
+| Compilation Time | Development velocity | Cache transpiled circuits |
+
+## Further Reading
+
+- Qiskit Transpiler Documentation
+- "Efficient Quantum Circuit Optimization" - arXiv:2003.02303
+- IBM Quantum Best Practices Guide

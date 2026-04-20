@@ -1,0 +1,538 @@
+---
+title: "QAOA Parameter Optimization"
+description: "Learn strategies for optimizing QAOA parameters including classical optimizers, initialization methods, and parameter transfer techniques."
+---
+
+# QAOA Parameter Optimization
+
+Finding optimal parameters (γ, β) is crucial for QAOA performance. This lesson covers optimization strategies, initialization methods, and techniques for navigating the parameter landscape.
+
+## The Optimization Challenge
+
+QAOA optimization is challenging due to noise, local minima, and costly function evaluations.
+
+<Definition>
+**QAOA Objective**:
+
+$$\max_{\gamma, \beta} \langle \psi(\gamma, \beta) | C | \psi(\gamma, \beta) \rangle$$
+
+where each evaluation requires quantum circuit execution and sampling.
+</Definition>
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+
+class QAOAOptimizer:
+    """QAOA parameter optimization framework."""
+
+    def __init__(self, qaoa_circuit, n_shots=1000):
+        self.circuit = qaoa_circuit
+        self.n_shots = n_shots
+        self.history = []
+
+    def objective(self, params):
+        """Evaluate QAOA cost function."""
+        p = len(params) // 2
+        gamma = params[:p]
+        beta = params[p:]
+
+        # Execute circuit and estimate cost
+        cost = self.circuit.execute(gamma, beta, self.n_shots)
+
+        self.history.append({
+            'params': params.copy(),
+            'cost': cost
+        })
+
+        return -cost  # Minimize negative cost
+
+    def optimize(self, p, method='COBYLA', maxiter=100):
+        """Run optimization."""
+        # Initial parameters
+        x0 = np.random.uniform(0, np.pi, 2*p)
+
+        result = minimize(
+            self.objective,
+            x0,
+            method=method,
+            options={'maxiter': maxiter}
+        )
+
+        return result
+
+# Example usage structure
+print("QAOA Optimization Framework")
+print("=" * 40)
+print("1. Define objective function")
+print("2. Choose classical optimizer")
+print("3. Set initialization strategy")
+print("4. Run optimization loop")
+```
+
+## Classical Optimizers for QAOA
+
+Different optimizers have different trade-offs for noisy quantum objectives.
+
+<Tip>
+**Gradient-free methods** like COBYLA and Nelder-Mead are often preferred for QAOA due to their robustness to noise and not requiring gradient estimation.
+</Tip>
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+
+def qaoa_cost_function(params, hamiltonian, n_qubits, p):
+    """Simulate QAOA cost evaluation."""
+    from scipy.linalg import expm
+
+    dim = 2 ** n_qubits
+    gamma = params[:p]
+    beta = params[p:]
+
+    # Build mixer
+    B = np.zeros((dim, dim))
+    for q in range(n_qubits):
+        for z in range(dim):
+            z_flip = z ^ (1 << (n_qubits - 1 - q))
+            B[z, z_flip] += 1
+
+    # Initial state |+⟩^n
+    state = np.ones(dim) / np.sqrt(dim)
+
+    # Apply QAOA layers
+    for layer in range(p):
+        # Cost unitary
+        state = expm(-1j * gamma[layer] * hamiltonian) @ state
+        # Mixer unitary
+        state = expm(-1j * beta[layer] * B) @ state
+
+    # Expectation value
+    cost = np.real(state.conj() @ hamiltonian @ state)
+    return -cost  # Minimize negative
+
+def compare_optimizers(cost_fn, p, n_trials=5):
+    """Compare different optimization methods."""
+
+    methods = ['COBYLA', 'Nelder-Mead', 'Powell']
+    results = {}
+
+    for method in methods:
+        costs = []
+        evals = []
+
+        for trial in range(n_trials):
+            np.random.seed(trial)
+            x0 = np.random.uniform(0, np.pi, 2*p)
+
+            eval_count = [0]
+            def wrapped(x):
+                eval_count[0] += 1
+                return cost_fn(x)
+
+            result = minimize(wrapped, x0, method=method,
+                            options={'maxiter': 200})
+            costs.append(-result.fun)
+            evals.append(eval_count[0])
+
+        results[method] = {
+            'mean_cost': np.mean(costs),
+            'std_cost': np.std(costs),
+            'mean_evals': np.mean(evals)
+        }
+
+    return results
+
+# Example: MaxCut on triangle
+n = 3
+edges = [(0, 1), (1, 2), (0, 2)]
+dim = 2**n
+
+# Cost Hamiltonian
+C = np.zeros((dim, dim))
+for i, j in edges:
+    for z in range(dim):
+        bi = (z >> (n - 1 - i)) & 1
+        bj = (z >> (n - 1 - j)) & 1
+        if bi != bj:
+            C[z, z] += 1
+
+cost_fn = lambda x: qaoa_cost_function(x, C, n, p=2)
+results = compare_optimizers(cost_fn, p=2, n_trials=3)
+
+print("Optimizer Comparison (p=2, MaxCut Triangle)")
+print("=" * 50)
+for method, data in results.items():
+    print(f"{method:15} cost={data['mean_cost']:.3f}±{data['std_cost']:.3f} evals={data['mean_evals']:.0f}")
+```
+
+## Parameter Initialization Strategies
+
+Good initialization can significantly impact convergence.
+
+<Formula>
+**Linear Ramp Initialization**:
+
+$$\gamma_i = \frac{i}{p} \cdot \gamma_{max}, \quad \beta_i = \left(1 - \frac{i}{p}\right) \cdot \beta_{max}$$
+
+This mimics adiabatic evolution: strong mixer early, strong cost late.
+</Formula>
+
+```python
+import numpy as np
+
+class ParameterInitializer:
+    """QAOA parameter initialization strategies."""
+
+    @staticmethod
+    def random(p, gamma_max=np.pi, beta_max=np.pi/2):
+        """Random uniform initialization."""
+        gamma = np.random.uniform(0, gamma_max, p)
+        beta = np.random.uniform(0, beta_max, p)
+        return np.concatenate([gamma, beta])
+
+    @staticmethod
+    def linear_ramp(p, gamma_max=np.pi/4, beta_max=np.pi/4):
+        """Linear ramp inspired by adiabatic evolution."""
+        gamma = np.array([(i+1)/p * gamma_max for i in range(p)])
+        beta = np.array([(1 - i/p) * beta_max for i in range(p)])
+        return np.concatenate([gamma, beta])
+
+    @staticmethod
+    def fixed_angles(p, gamma_val=0.5, beta_val=0.5):
+        """Fixed angle strategy (good for specific problems)."""
+        gamma = np.full(p, gamma_val)
+        beta = np.full(p, beta_val)
+        return np.concatenate([gamma, beta])
+
+    @staticmethod
+    def tqa_inspired(p, T=1.0):
+        """TQA (Trotterized Quantum Annealing) inspired."""
+        dt = T / p
+        gamma = np.array([dt * (i+0.5)/p for i in range(p)])
+        beta = np.array([dt * (1 - (i+0.5)/p) for i in range(p)])
+        return np.concatenate([gamma, beta])
+
+    @staticmethod
+    def fourier(p, q=2, u_max=0.5, v_max=0.5):
+        """FOURIER initialization with smooth parameters."""
+        # Low-frequency Fourier components
+        u = np.random.uniform(-u_max, u_max, q)
+        v = np.random.uniform(-v_max, v_max, q)
+
+        gamma = np.zeros(p)
+        beta = np.zeros(p)
+
+        for i in range(p):
+            for k in range(q):
+                gamma[i] += u[k] * np.sin((k+1) * np.pi * (i+0.5) / p)
+                beta[i] += v[k] * np.cos((k+1) * np.pi * (i+0.5) / p)
+
+        return np.concatenate([gamma, beta])
+
+# Compare initialization strategies
+print("Initialization Strategy Comparison")
+print("=" * 50)
+
+init = ParameterInitializer()
+p = 5
+
+strategies = {
+    'Random': init.random,
+    'Linear Ramp': init.linear_ramp,
+    'Fixed Angles': lambda p: init.fixed_angles(p, 0.4, 0.3),
+    'TQA': init.tqa_inspired,
+    'FOURIER': lambda p: init.fourier(p, q=2)
+}
+
+for name, strategy in strategies.items():
+    params = strategy(p)
+    gamma, beta = params[:p], params[p:]
+    print(f"\n{name}:")
+    print(f"  γ = [{', '.join(f'{g:.3f}' for g in gamma)}]")
+    print(f"  β = [{', '.join(f'{b:.3f}' for b in beta)}]")
+```
+
+## Parameter Transfer
+
+Transfer optimized parameters between problem instances or depths.
+
+<Warning>
+Parameter transfer works best for similar problem structures. Transfer between very different problems may not help or could hurt performance.
+</Warning>
+
+```python
+import numpy as np
+from scipy.interpolate import interp1d
+
+class ParameterTransfer:
+    """Transfer QAOA parameters between instances."""
+
+    @staticmethod
+    def depth_transfer(params_p, target_p):
+        """Transfer parameters from depth p to different depth.
+
+        Uses interpolation to adapt parameters.
+        """
+        source_p = len(params_p) // 2
+        gamma_source = params_p[:source_p]
+        beta_source = params_p[source_p:]
+
+        # Create interpolation functions
+        x_source = np.linspace(0, 1, source_p)
+        x_target = np.linspace(0, 1, target_p)
+
+        gamma_interp = interp1d(x_source, gamma_source, kind='linear',
+                                fill_value='extrapolate')
+        beta_interp = interp1d(x_source, beta_source, kind='linear',
+                              fill_value='extrapolate')
+
+        gamma_target = gamma_interp(x_target)
+        beta_target = beta_interp(x_target)
+
+        return np.concatenate([gamma_target, beta_target])
+
+    @staticmethod
+    def instance_scaling(params, source_edges, target_edges):
+        """Scale parameters based on problem size."""
+        p = len(params) // 2
+        gamma = params[:p]
+        beta = params[p:]
+
+        # Scale gamma by edge ratio
+        scale = np.sqrt(len(target_edges) / len(source_edges))
+        gamma_scaled = gamma / scale
+
+        return np.concatenate([gamma_scaled, beta])
+
+    @staticmethod
+    def optimal_angle_db(problem_type, p):
+        """Retrieve pre-computed optimal angles for common problems."""
+        # Database of optimal angles (example values)
+        db = {
+            'maxcut_regular': {
+                1: (0.616, 0.393),  # (gamma, beta) for p=1
+                2: ([0.45, 0.78], [0.52, 0.26]),
+            },
+            'maxcut_erdos': {
+                1: (0.58, 0.41),
+            }
+        }
+
+        if problem_type in db and p in db[problem_type]:
+            angles = db[problem_type][p]
+            if p == 1:
+                return np.array([angles[0], angles[1]])
+            else:
+                return np.concatenate([angles[0], angles[1]])
+
+        return None
+
+# Example: depth transfer
+print("Parameter Transfer Examples")
+print("=" * 50)
+
+# Simulate optimal p=2 parameters
+params_p2 = np.array([0.3, 0.6, 0.5, 0.3])  # γ1, γ2, β1, β2
+
+# Transfer to p=4
+params_p4 = ParameterTransfer.depth_transfer(params_p2, target_p=4)
+print(f"\nDepth transfer p=2 → p=4:")
+print(f"  Source (p=2): γ=[0.30, 0.60], β=[0.50, 0.30]")
+print(f"  Target (p=4): γ=[{', '.join(f'{g:.2f}' for g in params_p4[:4])}]")
+print(f"                β=[{', '.join(f'{b:.2f}' for b in params_p4[4:])}]")
+
+# Transfer to p=1
+params_p1 = ParameterTransfer.depth_transfer(params_p2, target_p=1)
+print(f"\nDepth transfer p=2 → p=1:")
+print(f"  Target (p=1): γ={params_p1[0]:.3f}, β={params_p1[1]:.3f}")
+```
+
+## Handling the Optimization Landscape
+
+The QAOA landscape has structure that can be exploited.
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def analyze_qaoa_landscape(cost_fn, p=1, resolution=50):
+    """Analyze the QAOA parameter landscape."""
+
+    if p != 1:
+        print("Landscape visualization only for p=1")
+        return
+
+    gamma_range = np.linspace(0, np.pi, resolution)
+    beta_range = np.linspace(0, np.pi/2, resolution)
+
+    landscape = np.zeros((resolution, resolution))
+
+    for i, gamma in enumerate(gamma_range):
+        for j, beta in enumerate(beta_range):
+            landscape[j, i] = -cost_fn(np.array([gamma, beta]))
+
+    # Find optimal
+    max_idx = np.unravel_index(np.argmax(landscape), landscape.shape)
+    optimal_gamma = gamma_range[max_idx[1]]
+    optimal_beta = beta_range[max_idx[0]]
+    optimal_cost = landscape[max_idx]
+
+    results = {
+        'landscape': landscape,
+        'gamma_range': gamma_range,
+        'beta_range': beta_range,
+        'optimal_gamma': optimal_gamma,
+        'optimal_beta': optimal_beta,
+        'optimal_cost': optimal_cost,
+        'smoothness': np.std(np.gradient(landscape))
+    }
+
+    return results
+
+def multistart_optimization(cost_fn, p, n_starts=10, method='COBYLA'):
+    """Multistart optimization to handle local minima."""
+    from scipy.optimize import minimize
+
+    best_result = None
+    best_cost = float('inf')
+    all_results = []
+
+    for _ in range(n_starts):
+        x0 = np.random.uniform(0, np.pi, 2*p)
+
+        result = minimize(cost_fn, x0, method=method,
+                         options={'maxiter': 100})
+
+        all_results.append({
+            'params': result.x,
+            'cost': result.fun,
+            'success': result.success
+        })
+
+        if result.fun < best_cost:
+            best_cost = result.fun
+            best_result = result
+
+    return best_result, all_results
+
+# Analyze landscape for MaxCut
+from scipy.linalg import expm
+
+n = 4
+edges = [(0, 1), (1, 2), (2, 3), (0, 3)]  # 4-cycle
+dim = 2**n
+
+C = np.zeros((dim, dim))
+for i, j in edges:
+    for z in range(dim):
+        bi = (z >> (n - 1 - i)) & 1
+        bj = (z >> (n - 1 - j)) & 1
+        if bi != bj:
+            C[z, z] += 1
+
+cost_fn_p1 = lambda x: qaoa_cost_function(x, C, n, p=1)
+
+print("QAOA Landscape Analysis (p=1, 4-cycle MaxCut)")
+print("=" * 50)
+
+analysis = analyze_qaoa_landscape(cost_fn_p1, p=1, resolution=30)
+print(f"Optimal γ: {analysis['optimal_gamma']:.3f}")
+print(f"Optimal β: {analysis['optimal_beta']:.3f}")
+print(f"Optimal cost: {analysis['optimal_cost']:.3f}")
+print(f"Landscape smoothness: {analysis['smoothness']:.4f}")
+
+# Multistart optimization
+print("\nMultistart Optimization (10 starts):")
+best, all_results = multistart_optimization(cost_fn_p1, p=1, n_starts=10)
+costs = [-r['cost'] for r in all_results]
+print(f"Best cost found: {-best.fun:.3f}")
+print(f"Cost range: [{min(costs):.3f}, {max(costs):.3f}]")
+print(f"Successful runs: {sum(r['success'] for r in all_results)}/10")
+```
+
+## Noise-Aware Optimization
+
+Adapt optimization strategies for noisy quantum devices.
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+
+class NoiseAwareOptimizer:
+    """Optimization strategies for noisy QAOA."""
+
+    def __init__(self, cost_fn, noise_level=0.1):
+        self.cost_fn = cost_fn
+        self.noise_level = noise_level
+        self.eval_count = 0
+
+    def noisy_cost(self, params):
+        """Add simulated noise to cost function."""
+        self.eval_count += 1
+        true_cost = self.cost_fn(params)
+        noise = np.random.normal(0, self.noise_level)
+        return true_cost + noise
+
+    def averaging_cost(self, params, n_samples=5):
+        """Average multiple evaluations for noise reduction."""
+        samples = [self.noisy_cost(params) for _ in range(n_samples)]
+        return np.mean(samples)
+
+    def spsa_step(self, params, a, c, iteration):
+        """SPSA gradient estimate with noise tolerance."""
+        ak = a / (iteration + 1)**0.602
+        ck = c / (iteration + 1)**0.101
+
+        # Random perturbation
+        delta = 2 * np.random.randint(0, 2, len(params)) - 1
+
+        # Gradient estimate
+        f_plus = self.noisy_cost(params + ck * delta)
+        f_minus = self.noisy_cost(params - ck * delta)
+
+        gradient = (f_plus - f_minus) / (2 * ck * delta)
+
+        return params - ak * gradient
+
+    def optimize_spsa(self, x0, n_iter=100, a=0.1, c=0.1):
+        """Run SPSA optimization."""
+        params = x0.copy()
+        history = []
+
+        for i in range(n_iter):
+            params = self.spsa_step(params, a, c, i)
+            cost = self.noisy_cost(params)
+            history.append({'params': params.copy(), 'cost': cost})
+
+        return params, history
+
+# Example
+print("Noise-Aware Optimization")
+print("=" * 50)
+
+# Simple quadratic for demonstration
+true_fn = lambda x: np.sum((x - 0.5)**2)
+optimizer = NoiseAwareOptimizer(true_fn, noise_level=0.1)
+
+x0 = np.random.uniform(0, 1, 4)
+final_params, history = optimizer.optimize_spsa(x0, n_iter=50)
+
+print(f"Initial params: {x0}")
+print(f"Final params: {final_params}")
+print(f"True optimum: [0.5, 0.5, 0.5, 0.5]")
+print(f"Error: {np.linalg.norm(final_params - 0.5):.4f}")
+print(f"Function evaluations: {optimizer.eval_count}")
+```
+
+## Summary
+
+Key strategies for QAOA parameter optimization:
+
+1. **Gradient-free optimizers** (COBYLA, Nelder-Mead) for noise robustness
+2. **Initialization strategies** significantly impact convergence
+3. **Parameter transfer** leverages previous solutions
+4. **Multistart optimization** handles local minima
+5. **SPSA** and averaging for noisy objectives
+
+The next lesson covers QAOA variants and extensions.

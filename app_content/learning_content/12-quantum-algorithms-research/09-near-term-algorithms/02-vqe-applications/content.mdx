@@ -1,0 +1,1021 @@
+---
+title: "VQE Applications for Chemistry and Materials"
+description: "Apply the Variational Quantum Eigensolver to real-world chemistry and materials science problems, including molecular Hamiltonians, ansatz selection strategies, active space methods, and benchmark molecules."
+duration: 45
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Construct molecular Hamiltonians in second quantization and map them to qubit operators
+- Select appropriate ansatz structures for different molecular systems
+- Apply active space selection to reduce computational requirements
+- Implement VQE for benchmark molecules including H2, LiH, and H2O
+- Analyze VQE results and compare with classical chemistry methods
+
+## 1. Introduction to Quantum Chemistry with VQE
+
+The Variational Quantum Eigensolver (VQE) is one of the most promising near-term applications of quantum computing for chemistry. It leverages the variational principle to find ground state energies of molecular systems.
+
+<Definition term="Variational Quantum Eigensolver">
+A hybrid quantum-classical algorithm that uses a parameterized quantum circuit to prepare trial wavefunctions and classical optimization to minimize the energy expectation value, providing upper bounds to the true ground state energy.
+</Definition>
+
+<Formula>
+$$E_{VQE}(\theta) = \langle \psi(\theta) | H | \psi(\theta) \rangle \geq E_0$$
+</Formula>
+
+### The VQE Workflow for Chemistry
+
+```python
+import numpy as np
+from typing import List, Dict, Tuple, Callable
+from dataclasses import dataclass
+
+@dataclass
+class MolecularSystem:
+    """Represents a molecular system for VQE."""
+    name: str
+    n_electrons: int
+    n_orbitals: int
+    nuclear_repulsion: float
+    one_body_integrals: np.ndarray  # h_pq
+    two_body_integrals: np.ndarray  # h_pqrs
+
+class VQEChemistry:
+    """
+    VQE implementation for molecular chemistry problems.
+    """
+
+    def __init__(self, molecule: MolecularSystem):
+        self.molecule = molecule
+        self.n_qubits = 2 * molecule.n_orbitals  # Spin orbitals
+        self.qubit_hamiltonian = None
+
+    def workflow(self) -> Dict:
+        """
+        Complete VQE chemistry workflow.
+        """
+        results = {}
+
+        # Step 1: Build fermionic Hamiltonian
+        results['fermionic_H'] = self.build_fermionic_hamiltonian()
+
+        # Step 2: Map to qubit Hamiltonian
+        results['qubit_H'] = self.fermion_to_qubit_mapping()
+
+        # Step 3: Select ansatz
+        results['ansatz'] = self.select_ansatz()
+
+        # Step 4: Run VQE optimization
+        results['vqe_result'] = self.run_vqe()
+
+        return results
+
+    def build_fermionic_hamiltonian(self) -> Dict:
+        """Build Hamiltonian in second quantization."""
+        # H = sum_pq h_pq a^dag_p a_q + 0.5 * sum_pqrs h_pqrs a^dag_p a^dag_q a_r a_s
+        return {
+            'one_body': self.molecule.one_body_integrals,
+            'two_body': self.molecule.two_body_integrals,
+            'constant': self.molecule.nuclear_repulsion
+        }
+
+    def fermion_to_qubit_mapping(self) -> List[Dict]:
+        """Map fermionic operators to qubit operators using Jordan-Wigner."""
+        # Will be implemented below
+        pass
+
+    def select_ansatz(self) -> Dict:
+        """Select appropriate ansatz for the molecule."""
+        pass
+
+    def run_vqe(self) -> Dict:
+        """Execute VQE optimization."""
+        pass
+```
+
+## 2. Molecular Hamiltonians
+
+The electronic structure Hamiltonian in second quantization describes the interactions of electrons in a molecular system.
+
+<Formula>
+$$H = \sum_{pq} h_{pq} a_p^\dagger a_q + \frac{1}{2} \sum_{pqrs} h_{pqrs} a_p^\dagger a_q^\dagger a_r a_s + E_{nuc}$$
+</Formula>
+
+### 2.1 One-Body and Two-Body Integrals
+
+```python
+class MolecularIntegrals:
+    """
+    Compute and store molecular integrals.
+    """
+
+    def __init__(self, n_orbitals: int):
+        self.n_orbitals = n_orbitals
+        self.n_spin_orbitals = 2 * n_orbitals
+
+    def compute_one_body_integrals(
+        self,
+        kinetic: np.ndarray,
+        nuclear_attraction: np.ndarray
+    ) -> np.ndarray:
+        """
+        Compute one-body integrals h_pq.
+
+        h_pq = <p|T|q> + <p|V_nuc|q>
+
+        Includes kinetic energy and nuclear attraction.
+        """
+        h_pq = kinetic + nuclear_attraction
+
+        # Extend to spin orbitals
+        h_spin = np.zeros((self.n_spin_orbitals, self.n_spin_orbitals))
+
+        for p in range(self.n_orbitals):
+            for q in range(self.n_orbitals):
+                # Alpha-alpha
+                h_spin[2*p, 2*q] = h_pq[p, q]
+                # Beta-beta
+                h_spin[2*p+1, 2*q+1] = h_pq[p, q]
+
+        return h_spin
+
+    def compute_two_body_integrals(
+        self,
+        electron_repulsion: np.ndarray
+    ) -> np.ndarray:
+        """
+        Compute two-body integrals h_pqrs (in physicist's notation).
+
+        h_pqrs = <pq|rs> = integral phi_p(1) phi_q(2) (1/r12) phi_r(1) phi_s(2)
+        """
+        n = self.n_orbitals
+        n_spin = self.n_spin_orbitals
+
+        h_pqrs = np.zeros((n_spin, n_spin, n_spin, n_spin))
+
+        for p in range(n):
+            for q in range(n):
+                for r in range(n):
+                    for s in range(n):
+                        # Only same-spin terms are non-zero
+                        # Alpha-alpha-alpha-alpha
+                        h_pqrs[2*p, 2*q, 2*r, 2*s] = electron_repulsion[p, q, r, s]
+                        # Beta-beta-beta-beta
+                        h_pqrs[2*p+1, 2*q+1, 2*r+1, 2*s+1] = electron_repulsion[p, q, r, s]
+                        # Alpha-beta-alpha-beta
+                        h_pqrs[2*p, 2*q+1, 2*r, 2*s+1] = electron_repulsion[p, q, r, s]
+                        # Beta-alpha-beta-alpha
+                        h_pqrs[2*p+1, 2*q, 2*r+1, 2*s] = electron_repulsion[p, q, r, s]
+
+        return h_pqrs
+
+# Example: H2 molecule integrals (simplified)
+def create_h2_molecule(bond_length: float = 0.74) -> MolecularSystem:
+    """
+    Create H2 molecule with minimal basis (STO-3G).
+
+    Uses pre-computed integrals for simplicity.
+    """
+    # Minimal basis: 2 spatial orbitals (1s on each H)
+    n_orbitals = 2
+    n_electrons = 2
+
+    # Nuclear repulsion: Z_A * Z_B / R_AB
+    nuclear_repulsion = 1.0 / bond_length
+
+    # Simplified one-body integrals (typical values for STO-3G)
+    h_pq = np.array([
+        [-1.25, -0.48],
+        [-0.48, -1.25]
+    ])
+
+    # Simplified two-body integrals
+    h_pqrs = np.zeros((2, 2, 2, 2))
+    h_pqrs[0, 0, 0, 0] = 0.67
+    h_pqrs[1, 1, 1, 1] = 0.67
+    h_pqrs[0, 1, 0, 1] = 0.18
+    h_pqrs[0, 1, 1, 0] = 0.66
+    h_pqrs[1, 0, 0, 1] = 0.66
+    h_pqrs[1, 0, 1, 0] = 0.18
+
+    return MolecularSystem(
+        name="H2",
+        n_electrons=n_electrons,
+        n_orbitals=n_orbitals,
+        nuclear_repulsion=nuclear_repulsion,
+        one_body_integrals=h_pq,
+        two_body_integrals=h_pqrs
+    )
+
+h2 = create_h2_molecule(0.74)
+print(f"H2 molecule: {h2.n_electrons} electrons, {h2.n_orbitals} orbitals")
+print(f"Nuclear repulsion: {h2.nuclear_repulsion:.4f} Ha")
+```
+
+### 2.2 Fermion-to-Qubit Mapping
+
+<Definition term="Jordan-Wigner Transformation">
+A mapping from fermionic creation/annihilation operators to qubit operators that preserves anti-commutation relations using strings of Z operators to track fermion parity.
+</Definition>
+
+<Formula>
+$$a_j^\dagger \rightarrow \frac{1}{2}(X_j - iY_j) \otimes Z_{j-1} \otimes ... \otimes Z_0$$
+</Formula>
+
+```python
+class JordanWignerMapper:
+    """
+    Map fermionic operators to qubit operators using Jordan-Wigner transformation.
+    """
+
+    def __init__(self, n_qubits: int):
+        self.n_qubits = n_qubits
+
+    def creation_operator(self, orbital: int) -> List[Dict]:
+        """
+        Map a^dag_j to qubit operators.
+
+        a^dag_j = (X_j - iY_j)/2 * Z_{j-1} * ... * Z_0
+        """
+        terms = []
+
+        # (X - iY)/2 = |1><0|
+        # = (1/2)(X - iY)
+
+        # X_j term with coefficient 1/2
+        x_term = {'coeff': 0.5, 'paulis': {}}
+        for k in range(orbital):
+            x_term['paulis'][k] = 'Z'
+        x_term['paulis'][orbital] = 'X'
+        terms.append(x_term)
+
+        # -iY_j term with coefficient -i/2
+        y_term = {'coeff': -0.5j, 'paulis': {}}
+        for k in range(orbital):
+            y_term['paulis'][k] = 'Z'
+        y_term['paulis'][orbital] = 'Y'
+        terms.append(y_term)
+
+        return terms
+
+    def annihilation_operator(self, orbital: int) -> List[Dict]:
+        """
+        Map a_j to qubit operators.
+
+        a_j = (X_j + iY_j)/2 * Z_{j-1} * ... * Z_0
+        """
+        terms = []
+
+        # X_j term
+        x_term = {'coeff': 0.5, 'paulis': {}}
+        for k in range(orbital):
+            x_term['paulis'][k] = 'Z'
+        x_term['paulis'][orbital] = 'X'
+        terms.append(x_term)
+
+        # +iY_j term
+        y_term = {'coeff': 0.5j, 'paulis': {}}
+        for k in range(orbital):
+            y_term['paulis'][k] = 'Z'
+        y_term['paulis'][orbital] = 'Y'
+        terms.append(y_term)
+
+        return terms
+
+    def map_hamiltonian(
+        self,
+        one_body: np.ndarray,
+        two_body: np.ndarray,
+        constant: float = 0.0
+    ) -> List[Dict]:
+        """
+        Map full fermionic Hamiltonian to qubit Hamiltonian.
+        """
+        qubit_terms = []
+
+        # Add constant (nuclear repulsion)
+        qubit_terms.append({'coeff': constant, 'paulis': {}})
+
+        n = self.n_qubits
+
+        # One-body terms: sum_pq h_pq a^dag_p a_q
+        for p in range(n):
+            for q in range(n):
+                if abs(one_body[p, q]) > 1e-10:
+                    # Get a^dag_p and a_q operators
+                    terms = self._multiply_fermion_ops(
+                        self.creation_operator(p),
+                        self.annihilation_operator(q),
+                        one_body[p, q]
+                    )
+                    qubit_terms.extend(terms)
+
+        # Two-body terms (simplified - full implementation would include all)
+        # 0.5 * sum_pqrs h_pqrs a^dag_p a^dag_q a_r a_s
+        for p in range(n):
+            for q in range(n):
+                for r in range(n):
+                    for s in range(n):
+                        if abs(two_body[p, q, r, s]) > 1e-10:
+                            # This requires multiplying four fermionic operators
+                            # Full implementation would be more complex
+                            pass
+
+        return self._simplify_terms(qubit_terms)
+
+    def _multiply_fermion_ops(
+        self,
+        ops1: List[Dict],
+        ops2: List[Dict],
+        coeff: complex
+    ) -> List[Dict]:
+        """Multiply two sets of Pauli terms."""
+        result = []
+        for t1 in ops1:
+            for t2 in ops2:
+                new_coeff = coeff * t1['coeff'] * t2['coeff']
+                new_paulis = self._multiply_paulis(t1['paulis'], t2['paulis'])
+                result.append({'coeff': new_coeff, 'paulis': new_paulis[0]})
+                # Adjust coefficient for Pauli multiplication phase
+        return result
+
+    def _multiply_paulis(
+        self,
+        p1: Dict[int, str],
+        p2: Dict[int, str]
+    ) -> Tuple[Dict[int, str], complex]:
+        """Multiply two Pauli strings."""
+        result = {}
+        phase = 1.0
+
+        all_qubits = set(p1.keys()) | set(p2.keys())
+
+        for q in all_qubits:
+            pauli1 = p1.get(q, 'I')
+            pauli2 = p2.get(q, 'I')
+
+            # Pauli multiplication rules
+            product, p = self._pauli_product(pauli1, pauli2)
+            phase *= p
+
+            if product != 'I':
+                result[q] = product
+
+        return result, phase
+
+    def _pauli_product(self, p1: str, p2: str) -> Tuple[str, complex]:
+        """Single Pauli product with phase."""
+        if p1 == 'I':
+            return p2, 1.0
+        if p2 == 'I':
+            return p1, 1.0
+        if p1 == p2:
+            return 'I', 1.0
+
+        # XY = iZ, YZ = iX, ZX = iY, etc.
+        products = {
+            ('X', 'Y'): ('Z', 1j),
+            ('Y', 'X'): ('Z', -1j),
+            ('Y', 'Z'): ('X', 1j),
+            ('Z', 'Y'): ('X', -1j),
+            ('Z', 'X'): ('Y', 1j),
+            ('X', 'Z'): ('Y', -1j),
+        }
+        return products[(p1, p2)]
+
+    def _simplify_terms(self, terms: List[Dict]) -> List[Dict]:
+        """Combine like terms in Hamiltonian."""
+        # Group by Pauli string
+        grouped = {}
+        for term in terms:
+            key = tuple(sorted(term['paulis'].items()))
+            if key in grouped:
+                grouped[key] += term['coeff']
+            else:
+                grouped[key] = term['coeff']
+
+        # Convert back
+        result = []
+        for key, coeff in grouped.items():
+            if abs(coeff) > 1e-10:
+                result.append({
+                    'coeff': coeff,
+                    'paulis': dict(key)
+                })
+
+        return result
+
+# Example usage
+mapper = JordanWignerMapper(n_qubits=4)  # 4 spin orbitals for H2
+print("Jordan-Wigner mapping:")
+print(f"  a^dag_0 -> {mapper.creation_operator(0)}")
+print(f"  a_1 -> {mapper.annihilation_operator(1)}")
+```
+
+## 3. Ansatz Selection Strategies
+
+Choosing the right ansatz is critical for VQE success. The ansatz must balance expressibility (ability to represent the true ground state) with trainability (avoiding barren plateaus) and NISQ-compatibility (shallow depth).
+
+### 3.1 Unitary Coupled Cluster (UCC)
+
+<Definition term="Unitary Coupled Cluster">
+A chemistry-inspired ansatz that applies exponentiated cluster operators to a reference state. UCCSD includes single and double excitations, capturing electron correlation systematically.
+</Definition>
+
+<Formula>
+$$|\psi_{UCCSD}\rangle = e^{T - T^\dagger} |\phi_0\rangle$$
+</Formula>
+
+where $T = T_1 + T_2$ with single and double excitation operators.
+
+```python
+class UCCSDGenerator:
+    """
+    Generate UCCSD ansatz for molecular systems.
+    """
+
+    def __init__(self, n_electrons: int, n_orbitals: int):
+        self.n_electrons = n_electrons
+        self.n_orbitals = n_orbitals
+        self.n_spin_orbitals = 2 * n_orbitals
+        self.occupied = list(range(n_electrons))
+        self.virtual = list(range(n_electrons, self.n_spin_orbitals))
+
+    def generate_single_excitations(self) -> List[Tuple[int, int]]:
+        """
+        Generate all single excitations i -> a.
+
+        Returns list of (occupied_orbital, virtual_orbital) tuples.
+        """
+        excitations = []
+        for i in self.occupied:
+            for a in self.virtual:
+                excitations.append((i, a))
+        return excitations
+
+    def generate_double_excitations(self) -> List[Tuple[int, int, int, int]]:
+        """
+        Generate all double excitations ij -> ab.
+
+        Returns list of (i, j, a, b) tuples.
+        """
+        excitations = []
+        for i, i_idx in enumerate(self.occupied):
+            for j_idx in self.occupied[i+1:]:
+                for a, a_idx in enumerate(self.virtual):
+                    for b_idx in self.virtual[a+1:]:
+                        excitations.append((i_idx, j_idx, a_idx, b_idx))
+        return excitations
+
+    def count_parameters(self) -> Dict[str, int]:
+        """Count number of parameters in UCCSD."""
+        singles = self.generate_single_excitations()
+        doubles = self.generate_double_excitations()
+        return {
+            'singles': len(singles),
+            'doubles': len(doubles),
+            'total': len(singles) + len(doubles)
+        }
+
+    def generate_circuit(self, params: np.ndarray) -> List[Dict]:
+        """
+        Generate UCCSD circuit with given parameters.
+
+        Each excitation operator is implemented as a rotation.
+        """
+        circuit = []
+        param_idx = 0
+
+        # Single excitations
+        for i, a in self.generate_single_excitations():
+            theta = params[param_idx]
+            circuit.extend(self._single_excitation_circuit(i, a, theta))
+            param_idx += 1
+
+        # Double excitations
+        for i, j, a, b in self.generate_double_excitations():
+            theta = params[param_idx]
+            circuit.extend(self._double_excitation_circuit(i, j, a, b, theta))
+            param_idx += 1
+
+        return circuit
+
+    def _single_excitation_circuit(
+        self,
+        i: int,
+        a: int,
+        theta: float
+    ) -> List[Dict]:
+        """
+        Circuit for single excitation exp(theta * (a^dag_a a_i - h.c.)).
+
+        Simplified implementation using Givens rotation.
+        """
+        # In practice, this involves CNOT ladders and rotations
+        return [
+            {'gate': 'RY', 'qubit': i, 'angle': theta},
+            {'gate': 'CX', 'qubits': [i, a]},
+            {'gate': 'RY', 'qubit': a, 'angle': -theta},
+            {'gate': 'CX', 'qubits': [i, a]},
+        ]
+
+    def _double_excitation_circuit(
+        self,
+        i: int,
+        j: int,
+        a: int,
+        b: int,
+        theta: float
+    ) -> List[Dict]:
+        """
+        Circuit for double excitation.
+
+        Full implementation requires 8 CNOT gates and multiple rotations.
+        """
+        # Simplified - actual implementation is more complex
+        return [
+            {'gate': 'CX', 'qubits': [i, j]},
+            {'gate': 'CX', 'qubits': [a, b]},
+            {'gate': 'CX', 'qubits': [j, a]},
+            {'gate': 'RY', 'qubit': a, 'angle': theta},
+            {'gate': 'CX', 'qubits': [j, a]},
+            {'gate': 'CX', 'qubits': [a, b]},
+            {'gate': 'CX', 'qubits': [i, j]},
+        ]
+
+# Example for H2
+uccsd_h2 = UCCSDGenerator(n_electrons=2, n_orbitals=2)
+param_counts = uccsd_h2.count_parameters()
+print(f"H2 UCCSD parameters: {param_counts}")
+```
+
+### 3.2 Hardware-Efficient vs Chemistry-Inspired
+
+```python
+class AnsatzSelector:
+    """
+    Select appropriate ansatz based on molecular properties and hardware constraints.
+    """
+
+    @staticmethod
+    def recommend_ansatz(
+        n_electrons: int,
+        n_orbitals: int,
+        device_max_depth: int,
+        device_connectivity: str = 'linear'
+    ) -> Dict:
+        """
+        Recommend ansatz type based on problem and hardware.
+        """
+        n_qubits = 2 * n_orbitals
+
+        # UCCSD depth estimation (simplified)
+        uccsd = UCCSDGenerator(n_electrons, n_orbitals)
+        n_params = uccsd.count_parameters()['total']
+        uccsd_depth_estimate = n_params * 10  # Rough estimate
+
+        recommendations = []
+
+        # Check if UCCSD is feasible
+        if uccsd_depth_estimate <= device_max_depth:
+            recommendations.append({
+                'type': 'UCCSD',
+                'reason': 'Chemically motivated, captures correlation',
+                'depth': uccsd_depth_estimate,
+                'params': n_params
+            })
+
+        # Hardware-efficient alternative
+        hwe_layers = min(device_max_depth // (n_qubits + 1), 10)
+        hwe_params = n_qubits * 2 * (hwe_layers + 1)
+
+        recommendations.append({
+            'type': 'Hardware-Efficient',
+            'reason': 'NISQ-compatible, flexible',
+            'depth': hwe_layers * (n_qubits + 1),
+            'params': hwe_params
+        })
+
+        # ADAPT-VQE for difficult cases
+        if n_electrons > 4:
+            recommendations.append({
+                'type': 'ADAPT-VQE',
+                'reason': 'Adaptive, avoids barren plateaus',
+                'depth': 'variable',
+                'params': 'grows adaptively'
+            })
+
+        return {
+            'n_qubits': n_qubits,
+            'recommendations': recommendations,
+            'preferred': recommendations[0] if uccsd_depth_estimate <= device_max_depth else recommendations[1]
+        }
+
+# Example
+selector = AnsatzSelector()
+result = selector.recommend_ansatz(
+    n_electrons=2,
+    n_orbitals=2,
+    device_max_depth=100
+)
+print("Ansatz recommendation for H2:")
+for rec in result['recommendations']:
+    print(f"  {rec['type']}: depth~{rec['depth']}, params={rec['params']}")
+```
+
+## 4. Active Space Selection
+
+<Definition term="Active Space">
+A subset of molecular orbitals containing the electrons and orbitals most important for describing the chemistry of interest. Reduces computational cost by freezing core electrons and truncating virtual orbitals.
+</Definition>
+
+```python
+class ActiveSpaceSelector:
+    """
+    Select active space for efficient VQE calculations.
+    """
+
+    def __init__(
+        self,
+        n_electrons: int,
+        n_orbitals: int,
+        orbital_energies: np.ndarray
+    ):
+        self.n_electrons = n_electrons
+        self.n_orbitals = n_orbitals
+        self.orbital_energies = orbital_energies
+
+    def select_by_energy(
+        self,
+        n_active_electrons: int,
+        n_active_orbitals: int
+    ) -> Dict:
+        """
+        Select active space based on orbital energies.
+
+        Selects orbitals closest to the Fermi level.
+        """
+        # HOMO index (0-indexed)
+        homo_idx = self.n_electrons // 2 - 1
+        lumo_idx = homo_idx + 1
+
+        # Select orbitals around HOMO-LUMO gap
+        n_occupied_active = n_active_electrons // 2
+        n_virtual_active = n_active_orbitals - n_occupied_active
+
+        active_occupied = list(range(homo_idx - n_occupied_active + 1, homo_idx + 1))
+        active_virtual = list(range(lumo_idx, lumo_idx + n_virtual_active))
+
+        frozen_core = list(range(0, active_occupied[0]))
+        frozen_virtual = list(range(active_virtual[-1] + 1, self.n_orbitals))
+
+        return {
+            'active_electrons': n_active_electrons,
+            'active_orbitals': n_active_orbitals,
+            'active_occupied': active_occupied,
+            'active_virtual': active_virtual,
+            'frozen_core': frozen_core,
+            'frozen_virtual': frozen_virtual,
+            'n_qubits_required': 2 * n_active_orbitals
+        }
+
+    def cas_reduction(
+        self,
+        one_body: np.ndarray,
+        two_body: np.ndarray,
+        active_space: Dict
+    ) -> Tuple[np.ndarray, np.ndarray, float]:
+        """
+        Reduce integrals to active space.
+
+        Returns modified integrals and frozen core energy.
+        """
+        active_orbs = active_space['active_occupied'] + active_space['active_virtual']
+        n_active = len(active_orbs)
+
+        # Extract active space integrals
+        h_active = np.zeros((n_active, n_active))
+        for i, ai in enumerate(active_orbs):
+            for j, aj in enumerate(active_orbs):
+                h_active[i, j] = one_body[ai, aj]
+
+        g_active = np.zeros((n_active, n_active, n_active, n_active))
+        for i, ai in enumerate(active_orbs):
+            for j, aj in enumerate(active_orbs):
+                for k, ak in enumerate(active_orbs):
+                    for l, al in enumerate(active_orbs):
+                        g_active[i, j, k, l] = two_body[ai, aj, ak, al]
+
+        # Compute frozen core energy
+        frozen_energy = 0.0
+        for i in active_space['frozen_core']:
+            frozen_energy += 2 * one_body[i, i]
+            for j in active_space['frozen_core']:
+                frozen_energy += 2 * two_body[i, j, i, j] - two_body[i, j, j, i]
+
+        # Add frozen-active interaction to one-body
+        for p, ap in enumerate(active_orbs):
+            for q, aq in enumerate(active_orbs):
+                for i in active_space['frozen_core']:
+                    h_active[p, q] += 2 * two_body[ap, i, aq, i] - two_body[ap, i, i, aq]
+
+        return h_active, g_active, frozen_energy
+
+# Example: LiH with active space
+def lih_active_space_example():
+    """Demonstrate active space selection for LiH."""
+    # LiH: 4 electrons, ~6 orbitals in STO-3G basis
+    n_electrons = 4
+    n_orbitals = 6
+
+    # Approximate orbital energies
+    orbital_energies = np.array([-2.5, -0.5, 0.1, 0.8, 1.2, 2.0])
+
+    selector = ActiveSpaceSelector(n_electrons, n_orbitals, orbital_energies)
+
+    # Full space
+    print("LiH full space:")
+    print(f"  Electrons: {n_electrons}, Orbitals: {n_orbitals}")
+    print(f"  Qubits needed: {2 * n_orbitals}")
+
+    # Active space (2 electrons, 2 orbitals)
+    active = selector.select_by_energy(n_active_electrons=2, n_active_orbitals=2)
+    print(f"\nActive space (2e, 2o):")
+    print(f"  Active occupied: {active['active_occupied']}")
+    print(f"  Active virtual: {active['active_virtual']}")
+    print(f"  Frozen core: {active['frozen_core']}")
+    print(f"  Qubits needed: {active['n_qubits_required']}")
+
+lih_active_space_example()
+```
+
+## 5. Benchmark Molecules
+
+<Tip>
+Benchmark molecules provide standardized test cases for VQE implementations. H2, LiH, and H2O are commonly used to validate accuracy and compare with classical methods.
+</Tip>
+
+### 5.1 Complete VQE Implementation
+
+```python
+class VQERunner:
+    """
+    Complete VQE implementation for benchmark molecules.
+    """
+
+    def __init__(
+        self,
+        molecule: MolecularSystem,
+        ansatz_type: str = 'hardware_efficient'
+    ):
+        self.molecule = molecule
+        self.ansatz_type = ansatz_type
+        self.n_qubits = 2 * molecule.n_orbitals
+
+        # Build qubit Hamiltonian
+        self.qubit_hamiltonian = self._build_qubit_hamiltonian()
+
+    def _build_qubit_hamiltonian(self) -> List[Dict]:
+        """Build simplified qubit Hamiltonian for demonstration."""
+        # For H2 in minimal basis, the Hamiltonian has specific form
+        # H = c_0 I + c_1 Z_0 + c_2 Z_1 + c_3 Z_0Z_1 + c_4 X_0X_1 + c_5 Y_0Y_1
+
+        # Coefficients depend on bond length (simplified for R=0.74)
+        terms = [
+            {'coeff': -0.81, 'paulis': {}},  # Identity
+            {'coeff': 0.17, 'paulis': {0: 'Z'}},
+            {'coeff': 0.17, 'paulis': {1: 'Z'}},
+            {'coeff': -0.22, 'paulis': {0: 'Z', 1: 'Z'}},
+            {'coeff': 0.17, 'paulis': {0: 'X', 1: 'X'}},
+            {'coeff': 0.17, 'paulis': {0: 'Y', 1: 'Y'}},
+        ]
+
+        return terms
+
+    def evaluate_energy(
+        self,
+        params: np.ndarray,
+        state_vector: np.ndarray = None
+    ) -> float:
+        """
+        Evaluate energy expectation value.
+        """
+        if state_vector is None:
+            state_vector = self._prepare_state(params)
+
+        energy = 0.0
+        for term in self.qubit_hamiltonian:
+            exp_val = self._expectation_value(state_vector, term['paulis'])
+            energy += term['coeff'] * exp_val
+
+        return np.real(energy)
+
+    def _prepare_state(self, params: np.ndarray) -> np.ndarray:
+        """
+        Prepare quantum state with variational circuit.
+        """
+        # Start with |01> (one electron in each orbital, opposite spins)
+        state = np.zeros(2**self.n_qubits, dtype=complex)
+        state[1] = 1.0  # |01>
+
+        # Apply simple variational circuit
+        # This is simplified - full implementation would use actual gates
+        for i, theta in enumerate(params):
+            state = self._apply_ry(state, i % self.n_qubits, theta)
+
+        return state
+
+    def _apply_ry(self, state: np.ndarray, qubit: int, angle: float) -> np.ndarray:
+        """Apply RY gate to state."""
+        n = self.n_qubits
+        dim = 2**n
+        new_state = np.zeros(dim, dtype=complex)
+
+        c, s = np.cos(angle/2), np.sin(angle/2)
+
+        for i in range(dim):
+            bit = (i >> qubit) & 1
+            partner = i ^ (1 << qubit)
+
+            if bit == 0:
+                new_state[i] += c * state[i] - s * state[partner]
+            else:
+                new_state[i] += s * state[i ^ (1 << qubit)] + c * state[i]
+
+        return new_state
+
+    def _expectation_value(
+        self,
+        state: np.ndarray,
+        paulis: Dict[int, str]
+    ) -> float:
+        """
+        Compute expectation value of Pauli string.
+        """
+        if not paulis:
+            return 1.0  # Identity
+
+        n = self.n_qubits
+        dim = 2**n
+        result = 0.0
+
+        for i in range(dim):
+            # Apply Pauli operators
+            coeff = 1.0
+            j = i
+
+            for qubit, pauli in paulis.items():
+                bit = (i >> qubit) & 1
+
+                if pauli == 'Z':
+                    coeff *= (1 if bit == 0 else -1)
+                elif pauli == 'X':
+                    j ^= (1 << qubit)
+                elif pauli == 'Y':
+                    j ^= (1 << qubit)
+                    coeff *= (1j if bit == 0 else -1j)
+
+            result += coeff * np.conj(state[i]) * state[j]
+
+        return np.real(result)
+
+    def run_vqe(
+        self,
+        n_params: int = 4,
+        max_iterations: int = 100,
+        optimizer: str = 'COBYLA'
+    ) -> Dict:
+        """
+        Run VQE optimization.
+        """
+        from scipy.optimize import minimize
+
+        # Initialize parameters
+        initial_params = np.random.randn(n_params) * 0.1
+        history = []
+
+        def objective(params):
+            energy = self.evaluate_energy(params)
+            history.append(energy)
+            return energy
+
+        # Optimize
+        result = minimize(
+            objective,
+            initial_params,
+            method=optimizer,
+            options={'maxiter': max_iterations}
+        )
+
+        return {
+            'optimal_energy': result.fun,
+            'optimal_params': result.x,
+            'history': history,
+            'n_iterations': len(history),
+            'success': result.success
+        }
+
+# Run VQE on H2
+def benchmark_h2():
+    """Benchmark VQE on H2 molecule."""
+    print("=" * 60)
+    print("VQE Benchmark: H2 Molecule")
+    print("=" * 60)
+
+    bond_lengths = [0.5, 0.7, 0.74, 0.8, 1.0, 1.2, 1.5]
+    exact_energies = {  # From FCI calculations
+        0.5: -0.84,
+        0.7: -1.13,
+        0.74: -1.137,  # Equilibrium
+        0.8: -1.12,
+        1.0: -1.02,
+        1.2: -0.92,
+        1.5: -0.78
+    }
+
+    results = []
+
+    for R in bond_lengths:
+        h2 = create_h2_molecule(R)
+        vqe = VQERunner(h2)
+        result = vqe.run_vqe(n_params=4, max_iterations=100)
+
+        error = abs(result['optimal_energy'] - exact_energies.get(R, -1.0))
+        results.append({
+            'R': R,
+            'vqe_energy': result['optimal_energy'],
+            'exact_energy': exact_energies.get(R, None),
+            'error': error
+        })
+
+        print(f"R = {R:.2f} A: E_VQE = {result['optimal_energy']:.4f} Ha, "
+              f"iterations = {result['n_iterations']}")
+
+    return results
+
+# Uncomment to run benchmark
+# benchmark_h2()
+```
+
+### 5.2 Extending to Larger Molecules
+
+```python
+def create_lih_molecule() -> MolecularSystem:
+    """Create LiH molecule specification."""
+    return MolecularSystem(
+        name="LiH",
+        n_electrons=4,
+        n_orbitals=6,
+        nuclear_repulsion=0.99,
+        one_body_integrals=np.random.randn(6, 6) * 0.5,  # Placeholder
+        two_body_integrals=np.random.randn(6, 6, 6, 6) * 0.1
+    )
+
+def create_h2o_molecule() -> MolecularSystem:
+    """Create H2O molecule specification."""
+    return MolecularSystem(
+        name="H2O",
+        n_electrons=10,
+        n_orbitals=7,
+        nuclear_repulsion=9.19,
+        one_body_integrals=np.random.randn(7, 7) * 0.5,  # Placeholder
+        two_body_integrals=np.random.randn(7, 7, 7, 7) * 0.1
+    )
+
+# Summary of benchmark molecules
+print("\nBenchmark Molecules for VQE:")
+print("-" * 60)
+for mol_creator in [create_h2_molecule, create_lih_molecule, create_h2o_molecule]:
+    mol = mol_creator() if mol_creator != create_h2_molecule else mol_creator(0.74)
+    qubits = 2 * mol.n_orbitals
+    print(f"{mol.name}:")
+    print(f"  Electrons: {mol.n_electrons}")
+    print(f"  Orbitals: {mol.n_orbitals}")
+    print(f"  Qubits: {qubits}")
+    print()
+```
+
+## Summary
+
+In this lesson, you learned how to apply VQE to quantum chemistry problems:
+
+1. **Molecular Hamiltonians**: Second quantization representation with one-body and two-body integrals
+2. **Fermion-to-Qubit Mapping**: Jordan-Wigner transformation to convert fermionic operators
+3. **Ansatz Selection**: UCCSD for chemical accuracy vs hardware-efficient for NISQ compatibility
+4. **Active Space Methods**: Reducing computational cost by focusing on chemically relevant orbitals
+5. **Benchmark Molecules**: H2, LiH, and H2O as standard test cases
+
+<Warning>
+Real quantum chemistry VQE calculations require accurate molecular integrals from classical electronic structure packages (like PySCF or Psi4) and careful error mitigation. The examples here are simplified for educational purposes.
+</Warning>
+
+## Further Reading
+
+- Peruzzo, A. et al. (2014). "A variational eigenvalue solver on a photonic quantum processor"
+- McClean, J. et al. (2016). "The theory of variational hybrid quantum-classical algorithms"
+- Cao, Y. et al. (2019). "Quantum Chemistry in the Age of Quantum Computing"
+- McArdle, S. et al. (2020). "Quantum computational chemistry"

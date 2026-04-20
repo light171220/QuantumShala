@@ -1,0 +1,642 @@
+---
+title: "Global Optimization: Resynthesis and Mapping-Aware Techniques"
+description: "Learn global circuit optimization techniques including full circuit resynthesis and hardware topology-aware optimization."
+duration: 60
+difficulty: "advanced"
+---
+
+## 1. Global vs Local Optimization
+
+Local optimizations (cancellation, merging, peephole) examine small windows. Global optimization considers the entire circuit structure, enabling more aggressive transformations.
+
+### When Global Optimization Helps
+
+- **Distant interactions**: Gates that could cancel are separated by many operations
+- **Topology constraints**: Hardware connectivity limits two-qubit gate placement
+- **Resource allocation**: Trading depth for gate count or vice versa
+- **Full resynthesis**: Recomputing the entire unitary and decomposing optimally
+
+```python
+from dataclasses import dataclass, field
+from typing import List, Tuple, Dict, Set, Optional
+import numpy as np
+from collections import defaultdict
+
+@dataclass
+class Gate:
+    name: str
+    qubits: Tuple[int, ...]
+    params: Tuple[float, ...] = ()
+
+@dataclass
+class CircuitDAG:
+    """
+    Directed Acyclic Graph representation of a quantum circuit.
+
+    Enables global analysis and transformation.
+    """
+    gates: List[Gate]
+    num_qubits: int
+    _edges: Dict[int, List[int]] = field(default_factory=dict)
+    _reverse_edges: Dict[int, List[int]] = field(default_factory=dict)
+
+    def __post_init__(self):
+        self._build_dag()
+
+    def _build_dag(self):
+        """Build dependency edges between gates."""
+        self._edges = defaultdict(list)
+        self._reverse_edges = defaultdict(list)
+
+        # Track last gate on each qubit
+        last_gate_on_qubit = {}
+
+        for i, gate in enumerate(self.gates):
+            for qubit in gate.qubits:
+                if qubit in last_gate_on_qubit:
+                    pred = last_gate_on_qubit[qubit]
+                    self._edges[pred].append(i)
+                    self._reverse_edges[i].append(pred)
+                last_gate_on_qubit[qubit] = i
+
+    def predecessors(self, node: int) -> List[int]:
+        return self._reverse_edges.get(node, [])
+
+    def successors(self, node: int) -> List[int]:
+        return self._edges.get(node, [])
+
+    def depth(self) -> int:
+        """Compute circuit depth using longest path."""
+        depths = {}
+
+        def dfs(node):
+            if node in depths:
+                return depths[node]
+            preds = self.predecessors(node)
+            if not preds:
+                depths[node] = 1
+            else:
+                depths[node] = 1 + max(dfs(p) for p in preds)
+            return depths[node]
+
+        return max(dfs(i) for i in range(len(self.gates))) if self.gates else 0
+```
+
+## 2. Full Unitary Resynthesis
+
+For small circuits, compute the full unitary and resynthesize optimally:
+
+```python
+class UnitaryResynthesis:
+    """
+    Global optimization via full unitary resynthesis.
+
+    Warning: Only practical for small qubit counts (< 6).
+    """
+
+    def __init__(self, max_qubits: int = 5):
+        self.max_qubits = max_qubits
+
+    def optimize(self, gates: List[Gate], num_qubits: int) -> List[Gate]:
+        """Resynthesize circuit from its unitary."""
+        if num_qubits > self.max_qubits:
+            raise ValueError(f"Too many qubits ({num_qubits}) for resynthesis")
+
+        # Compute full unitary
+        U = self._compute_unitary(gates, num_qubits)
+
+        # Decompose to gates
+        return self._decompose_unitary(U, num_qubits)
+
+    def _compute_unitary(
+        self,
+        gates: List[Gate],
+        num_qubits: int
+    ) -> np.ndarray:
+        """Compute the full 2^n x 2^n unitary."""
+        dim = 2 ** num_qubits
+        U = np.eye(dim, dtype=complex)
+
+        for gate in gates:
+            gate_matrix = self._expand_gate(gate, num_qubits)
+            U = gate_matrix @ U
+
+        return U
+
+    def _expand_gate(self, gate: Gate, num_qubits: int) -> np.ndarray:
+        """Expand gate to full system size."""
+        dim = 2 ** num_qubits
+
+        if len(gate.qubits) == 1:
+            # Single-qubit gate
+            qubit = gate.qubits[0]
+            local_matrix = self._gate_matrix(gate)
+
+            # Build tensor product: I ... I x G x I ... I
+            result = np.eye(1, dtype=complex)
+            for q in range(num_qubits):
+                if q == qubit:
+                    result = np.kron(result, local_matrix)
+                else:
+                    result = np.kron(result, np.eye(2))
+            return result
+
+        elif len(gate.qubits) == 2 and gate.name.upper() in ('CX', 'CNOT'):
+            ctrl, targ = gate.qubits
+            return self._cnot_matrix(ctrl, targ, num_qubits)
+
+        raise NotImplementedError(f"Gate {gate.name} not implemented")
+
+    def _gate_matrix(self, gate: Gate) -> np.ndarray:
+        """Get 2x2 matrix for single-qubit gate."""
+        name = gate.name.upper()
+        if name == 'H':
+            return np.array([[1, 1], [1, -1]]) / np.sqrt(2)
+        elif name == 'X':
+            return np.array([[0, 1], [1, 0]])
+        elif name == 'Y':
+            return np.array([[0, -1j], [1j, 0]])
+        elif name == 'Z':
+            return np.array([[1, 0], [0, -1]])
+        elif name == 'RZ':
+            theta = gate.params[0]
+            return np.array([[np.exp(-1j*theta/2), 0],
+                           [0, np.exp(1j*theta/2)]])
+        return np.eye(2)
+
+    def _cnot_matrix(
+        self,
+        ctrl: int,
+        targ: int,
+        num_qubits: int
+    ) -> np.ndarray:
+        """Build CNOT matrix for given control/target."""
+        dim = 2 ** num_qubits
+        result = np.zeros((dim, dim), dtype=complex)
+
+        for i in range(dim):
+            # Get bit values
+            bits = [(i >> q) & 1 for q in range(num_qubits)]
+
+            if bits[ctrl] == 0:
+                # Control is 0: no change
+                result[i, i] = 1
+            else:
+                # Control is 1: flip target
+                j = i ^ (1 << targ)
+                result[j, i] = 1
+
+        return result
+
+    def _decompose_unitary(
+        self,
+        U: np.ndarray,
+        num_qubits: int
+    ) -> List[Gate]:
+        """Decompose unitary to gates (placeholder)."""
+        # Full implementation would use techniques like:
+        # - Quantum Shannon Decomposition
+        # - Cosine-Sine Decomposition
+        # - Optimal two-qubit synthesis for n=2
+
+        # Placeholder: return empty (identity)
+        if np.allclose(U, np.eye(len(U))):
+            return []
+
+        # For now, indicate we need more sophisticated decomposition
+        raise NotImplementedError("Full decomposition not implemented")
+```
+
+## 3. Topology-Aware Optimization
+
+Real hardware has limited qubit connectivity. Optimization must consider this.
+
+```python
+@dataclass
+class HardwareTopology:
+    """
+    Represents hardware qubit connectivity.
+    """
+    num_qubits: int
+    edges: Set[Tuple[int, int]]  # Pairs of connected qubits
+
+    def are_connected(self, q1: int, q2: int) -> bool:
+        """Check if two qubits can interact directly."""
+        return (q1, q2) in self.edges or (q2, q1) in self.edges
+
+    def shortest_path(self, q1: int, q2: int) -> List[int]:
+        """Find shortest path between qubits using BFS."""
+        if q1 == q2:
+            return [q1]
+
+        visited = {q1}
+        queue = [(q1, [q1])]
+
+        while queue:
+            current, path = queue.pop(0)
+
+            for neighbor in self._neighbors(current):
+                if neighbor == q2:
+                    return path + [q2]
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, path + [neighbor]))
+
+        return []  # No path (disconnected)
+
+    def _neighbors(self, qubit: int) -> List[int]:
+        """Get qubits connected to given qubit."""
+        result = []
+        for q1, q2 in self.edges:
+            if q1 == qubit:
+                result.append(q2)
+            elif q2 == qubit:
+                result.append(q1)
+        return result
+
+
+# Common topologies
+def linear_topology(n: int) -> HardwareTopology:
+    """Create linear (chain) topology."""
+    edges = {(i, i+1) for i in range(n-1)}
+    return HardwareTopology(n, edges)
+
+
+def grid_topology(rows: int, cols: int) -> HardwareTopology:
+    """Create 2D grid topology."""
+    n = rows * cols
+    edges = set()
+
+    for r in range(rows):
+        for c in range(cols):
+            q = r * cols + c
+            if c < cols - 1:
+                edges.add((q, q + 1))  # Right neighbor
+            if r < rows - 1:
+                edges.add((q, q + cols))  # Down neighbor
+
+    return HardwareTopology(n, edges)
+
+
+def heavy_hex_topology(n: int) -> HardwareTopology:
+    """IBM heavy-hex topology (simplified)."""
+    # Actual heavy-hex is more complex
+    edges = set()
+    for i in range(n - 1):
+        edges.add((i, i + 1))
+    # Add some vertical connections
+    for i in range(0, n - 2, 2):
+        if i + 2 < n:
+            edges.add((i, i + 2))
+    return HardwareTopology(n, edges)
+```
+
+## 4. Mapping-Aware Optimization
+
+Optimize while considering qubit mapping:
+
+```python
+class MappingAwareOptimizer:
+    """
+    Optimize circuits with awareness of hardware topology.
+
+    Combines gate optimization with smart qubit placement.
+    """
+
+    def __init__(self, topology: HardwareTopology):
+        self.topology = topology
+
+    def optimize(
+        self,
+        gates: List[Gate],
+        initial_mapping: Dict[int, int] = None
+    ) -> Tuple[List[Gate], Dict[int, int]]:
+        """
+        Optimize circuit for topology.
+
+        Returns (optimized_gates, final_qubit_mapping).
+        """
+        # Phase 1: Find good initial mapping
+        if initial_mapping is None:
+            initial_mapping = self._find_initial_mapping(gates)
+
+        # Phase 2: Apply mapping to gates
+        mapped_gates = self._apply_mapping(gates, initial_mapping)
+
+        # Phase 3: Insert SWAPs where needed
+        routed_gates, final_mapping = self._route_circuit(
+            mapped_gates, initial_mapping
+        )
+
+        # Phase 4: Optimize the routed circuit
+        optimized_gates = self._post_routing_optimization(routed_gates)
+
+        return optimized_gates, final_mapping
+
+    def _find_initial_mapping(self, gates: List[Gate]) -> Dict[int, int]:
+        """
+        Find a good initial logical-to-physical qubit mapping.
+
+        Uses interaction frequency heuristic.
+        """
+        # Count two-qubit interactions
+        interactions = defaultdict(int)
+        for gate in gates:
+            if len(gate.qubits) == 2:
+                q1, q2 = gate.qubits
+                key = (min(q1, q2), max(q1, q2))
+                interactions[key] += 1
+
+        # Sort by frequency
+        sorted_pairs = sorted(
+            interactions.items(),
+            key=lambda x: -x[1]
+        )
+
+        # Greedy assignment: place most-interacting pairs on connected qubits
+        mapping = {}
+        used_physical = set()
+
+        for (q1, q2), count in sorted_pairs:
+            if q1 in mapping and q2 in mapping:
+                continue
+
+            # Find best physical pair
+            best_pair = None
+            best_score = -1
+
+            for p1, p2 in self.topology.edges:
+                if p1 in used_physical or p2 in used_physical:
+                    continue
+
+                score = count  # Could add more factors
+                if score > best_score:
+                    best_score = score
+                    best_pair = (p1, p2)
+
+            if best_pair:
+                if q1 not in mapping:
+                    mapping[q1] = best_pair[0]
+                    used_physical.add(best_pair[0])
+                if q2 not in mapping:
+                    mapping[q2] = best_pair[1]
+                    used_physical.add(best_pair[1])
+
+        # Fill remaining qubits
+        logical_qubits = set()
+        for gate in gates:
+            logical_qubits.update(gate.qubits)
+
+        available = [q for q in range(self.topology.num_qubits)
+                    if q not in used_physical]
+
+        for lq in logical_qubits:
+            if lq not in mapping and available:
+                mapping[lq] = available.pop(0)
+
+        return mapping
+
+    def _apply_mapping(
+        self,
+        gates: List[Gate],
+        mapping: Dict[int, int]
+    ) -> List[Gate]:
+        """Apply logical-to-physical mapping to gates."""
+        result = []
+        for gate in gates:
+            new_qubits = tuple(mapping[q] for q in gate.qubits)
+            result.append(Gate(gate.name, new_qubits, gate.params))
+        return result
+
+    def _route_circuit(
+        self,
+        gates: List[Gate],
+        mapping: Dict[int, int]
+    ) -> Tuple[List[Gate], Dict[int, int]]:
+        """
+        Insert SWAP gates for non-adjacent two-qubit operations.
+        """
+        result = []
+        current_mapping = dict(mapping)
+        reverse_mapping = {v: k for k, v in mapping.items()}
+
+        for gate in gates:
+            if len(gate.qubits) != 2:
+                result.append(gate)
+                continue
+
+            p1, p2 = gate.qubits
+
+            if self.topology.are_connected(p1, p2):
+                result.append(gate)
+            else:
+                # Need to route: find path and insert SWAPs
+                path = self.topology.shortest_path(p1, p2)
+
+                # Move p1 towards p2 using SWAPs
+                current_pos = p1
+                for next_pos in path[1:-1]:
+                    result.append(Gate('SWAP', (current_pos, next_pos)))
+                    # Update mappings
+                    if current_pos in reverse_mapping:
+                        lq = reverse_mapping[current_pos]
+                        current_mapping[lq] = next_pos
+                        reverse_mapping[next_pos] = lq
+                        del reverse_mapping[current_pos]
+                    current_pos = next_pos
+
+                # Now apply the gate
+                new_qubits = (current_pos, p2)
+                result.append(Gate(gate.name, new_qubits, gate.params))
+
+        return result, current_mapping
+
+    def _post_routing_optimization(self, gates: List[Gate]) -> List[Gate]:
+        """Optimize after routing (SWAP cancellation, etc.)."""
+        # Cancel consecutive SWAPs on same qubits
+        result = []
+        for gate in gates:
+            if (result and
+                gate.name == 'SWAP' and
+                result[-1].name == 'SWAP' and
+                set(gate.qubits) == set(result[-1].qubits)):
+                result.pop()  # Cancel
+            else:
+                result.append(gate)
+        return result
+```
+
+## 5. Depth Optimization
+
+Minimize circuit depth by parallelizing operations:
+
+```python
+class DepthOptimizer:
+    """
+    Optimize circuit depth by maximizing gate parallelism.
+    """
+
+    def __init__(self):
+        pass
+
+    def optimize(self, gates: List[Gate], num_qubits: int) -> List[Gate]:
+        """Reorder gates to minimize depth."""
+        # Build DAG
+        dag = CircuitDAG(gates, num_qubits)
+
+        # ASAP scheduling (As Soon As Possible)
+        schedule = self._asap_schedule(dag)
+
+        # Reorder based on schedule
+        sorted_indices = sorted(range(len(gates)), key=lambda i: schedule[i])
+
+        return [gates[i] for i in sorted_indices]
+
+    def _asap_schedule(self, dag: CircuitDAG) -> Dict[int, int]:
+        """Compute ASAP (earliest possible) time for each gate."""
+        schedule = {}
+
+        def compute_time(node):
+            if node in schedule:
+                return schedule[node]
+
+            preds = dag.predecessors(node)
+            if not preds:
+                schedule[node] = 0
+            else:
+                schedule[node] = 1 + max(compute_time(p) for p in preds)
+
+            return schedule[node]
+
+        for i in range(len(dag.gates)):
+            compute_time(i)
+
+        return schedule
+
+    def analyze_parallelism(
+        self,
+        gates: List[Gate],
+        num_qubits: int
+    ) -> Dict:
+        """Analyze parallelism opportunities."""
+        dag = CircuitDAG(gates, num_qubits)
+        schedule = self._asap_schedule(dag)
+
+        # Count gates per time step
+        time_slots = defaultdict(list)
+        for gate_idx, time in schedule.items():
+            time_slots[time].append(gate_idx)
+
+        max_parallel = max(len(g) for g in time_slots.values())
+        avg_parallel = len(gates) / (max(schedule.values()) + 1)
+
+        return {
+            'depth': max(schedule.values()) + 1,
+            'max_parallelism': max_parallel,
+            'avg_parallelism': avg_parallel,
+            'utilization': avg_parallel / num_qubits
+        }
+```
+
+## 6. Integrated Global Optimization Pipeline
+
+```python
+class GlobalOptimizer:
+    """
+    Complete global optimization pipeline.
+
+    Combines multiple strategies for comprehensive optimization.
+    """
+
+    def __init__(
+        self,
+        topology: HardwareTopology = None,
+        target_metric: str = 'gate_count'  # or 'depth'
+    ):
+        self.topology = topology
+        self.target_metric = target_metric
+        self.stats = {}
+
+    def optimize(
+        self,
+        gates: List[Gate],
+        num_qubits: int
+    ) -> List[Gate]:
+        """Run full optimization pipeline."""
+        original_count = len(gates)
+        original_depth = CircuitDAG(gates, num_qubits).depth()
+
+        # Phase 1: Local optimization (cancellation, merging)
+        gates = self._local_optimization(gates)
+
+        # Phase 2: Topology-aware optimization
+        if self.topology:
+            gates, _ = MappingAwareOptimizer(
+                self.topology
+            ).optimize(gates)
+
+        # Phase 3: Depth optimization
+        if self.target_metric == 'depth':
+            gates = DepthOptimizer().optimize(gates, num_qubits)
+
+        # Phase 4: Final cleanup
+        gates = self._local_optimization(gates)
+
+        # Record stats
+        self.stats = {
+            'original_gates': original_count,
+            'final_gates': len(gates),
+            'original_depth': original_depth,
+            'final_depth': CircuitDAG(gates, num_qubits).depth(),
+            'gate_reduction': (original_count - len(gates)) / original_count
+        }
+
+        return gates
+
+    def _local_optimization(self, gates: List[Gate]) -> List[Gate]:
+        """Apply local optimizations (cancellation, etc.)."""
+        # Self-inverse cancellation
+        result = []
+        self_inverse = {'H', 'X', 'Y', 'Z', 'CX', 'CNOT', 'SWAP'}
+
+        for gate in gates:
+            if (result and
+                gate.name in self_inverse and
+                result[-1].name == gate.name and
+                result[-1].qubits == gate.qubits):
+                result.pop()
+            else:
+                result.append(gate)
+
+        return result
+
+    def report(self) -> str:
+        """Generate optimization report."""
+        return (
+            f"Global Optimization Report:\n"
+            f"  Gates: {self.stats['original_gates']} -> "
+            f"{self.stats['final_gates']} "
+            f"({self.stats['gate_reduction']:.1%} reduction)\n"
+            f"  Depth: {self.stats['original_depth']} -> "
+            f"{self.stats['final_depth']}"
+        )
+```
+
+## Summary
+
+Global optimization provides:
+
+1. **Full resynthesis**: Optimal decomposition of overall unitary
+2. **Topology awareness**: Optimization respecting hardware connectivity
+3. **Smart mapping**: Initial placement reducing routing overhead
+4. **Depth optimization**: Maximizing parallelism for shorter execution
+
+Key trade-offs:
+- Gate count vs depth
+- Optimization time vs quality
+- Hardware constraints vs ideal optimization
+
+Best practices:
+- Use local optimization before and after global passes
+- Consider hardware topology early in the optimization pipeline
+- Balance optimization metrics based on hardware characteristics

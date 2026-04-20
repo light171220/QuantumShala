@@ -1,0 +1,574 @@
+---
+title: "QAOA Variants and Extensions"
+description: "Learn about QAOA variants including Warm-Start QAOA, Recursive QAOA, Multi-Angle QAOA, and Quantum Alternating Operator Ansatz."
+---
+
+# QAOA Variants and Extensions
+
+Several variants of QAOA have been developed to improve performance, reduce circuit depth, or handle specific problem structures.
+
+## Warm-Start QAOA
+
+Warm-Start QAOA uses classical preprocessing to find a good initial state.
+
+<Definition>
+**Warm-Start QAOA**:
+
+Instead of starting from |+⟩^n, start from a state biased toward a classical solution:
+
+$$|s_0\rangle = \bigotimes_{i=1}^{n} \left(\cos(\theta_i)|0\rangle + \sin(\theta_i)|1\rangle\right)$$
+
+where θ_i encodes a classical approximation.
+</Definition>
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+class WarmStartQAOA:
+    """QAOA with warm-start initialization."""
+
+    def __init__(self, cost_hamiltonian, n_qubits):
+        self.C = cost_hamiltonian
+        self.n = n_qubits
+        self.dim = 2 ** n_qubits
+
+    def classical_approximation(self, method='greedy'):
+        """Get classical approximate solution."""
+        if method == 'greedy':
+            # Simple greedy for MaxCut-like problems
+            solution = np.zeros(self.n, dtype=int)
+            for i in range(self.n):
+                # Try both values
+                solution[i] = 0
+                cost0 = self._eval_classical(solution)
+                solution[i] = 1
+                cost1 = self._eval_classical(solution)
+                solution[i] = 0 if cost0 > cost1 else 1
+            return solution
+        return np.random.randint(0, 2, self.n)
+
+    def _eval_classical(self, solution):
+        """Evaluate classical solution."""
+        idx = sum(b * 2**(self.n-1-i) for i, b in enumerate(solution))
+        return self.C[idx, idx]
+
+    def warm_initial_state(self, classical_sol, epsilon=0.2):
+        """Create warm-start initial state.
+
+        Args:
+            classical_sol: Binary solution array
+            epsilon: How much to bias toward solution (0=uniform, 0.5=pure)
+        """
+        state = np.zeros(self.dim, dtype=complex)
+
+        # Product state biased toward classical solution
+        for z in range(self.dim):
+            amp = 1.0
+            for i in range(self.n):
+                bit = (z >> (self.n - 1 - i)) & 1
+                if bit == classical_sol[i]:
+                    amp *= np.cos(np.pi/4 - epsilon * np.pi/4)
+                else:
+                    amp *= np.sin(np.pi/4 - epsilon * np.pi/4)
+            state[z] = amp
+
+        return state / np.linalg.norm(state)
+
+    def run(self, p, gamma, beta, warm_start=True, epsilon=0.2):
+        """Execute warm-start QAOA."""
+        # Build mixer
+        B = np.zeros((self.dim, self.dim))
+        for q in range(self.n):
+            for z in range(self.dim):
+                z_flip = z ^ (1 << (self.n - 1 - q))
+                B[z, z_flip] += 1
+
+        # Initial state
+        if warm_start:
+            classical_sol = self.classical_approximation()
+            state = self.warm_initial_state(classical_sol, epsilon)
+        else:
+            state = np.ones(self.dim) / np.sqrt(self.dim)
+
+        # QAOA layers
+        for layer in range(p):
+            state = expm(-1j * gamma[layer] * self.C) @ state
+            state = expm(-1j * beta[layer] * B) @ state
+
+        return state
+
+# Example: MaxCut on 4-cycle
+n = 4
+edges = [(0, 1), (1, 2), (2, 3), (0, 3)]
+dim = 2**n
+
+C = np.zeros((dim, dim))
+for i, j in edges:
+    for z in range(dim):
+        bi = (z >> (n - 1 - i)) & 1
+        bj = (z >> (n - 1 - j)) & 1
+        if bi != bj:
+            C[z, z] += 1
+
+ws_qaoa = WarmStartQAOA(C, n)
+classical = ws_qaoa.classical_approximation()
+print(f"Classical approximation: {classical}")
+print(f"Classical cost: {ws_qaoa._eval_classical(classical)}")
+
+# Compare warm-start vs standard
+gamma, beta = [0.5], [0.4]
+
+state_warm = ws_qaoa.run(1, gamma, beta, warm_start=True, epsilon=0.3)
+state_std = ws_qaoa.run(1, gamma, beta, warm_start=False)
+
+cost_warm = np.real(state_warm.conj() @ C @ state_warm)
+cost_std = np.real(state_std.conj() @ C @ state_std)
+
+print(f"\np=1 Expected cost:")
+print(f"  Standard QAOA: {cost_std:.3f}")
+print(f"  Warm-start QAOA: {cost_warm:.3f}")
+```
+
+## Recursive QAOA (RQAOA)
+
+RQAOA iteratively reduces problem size by fixing variables.
+
+<Formula>
+**RQAOA Process**:
+1. Run QAOA to get correlations ⟨Z_iZ_j⟩
+2. Fix variable with strongest correlation
+3. Reduce problem size and repeat
+4. Continue until problem is small enough to solve classically
+</Formula>
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+from scipy.linalg import expm
+
+class RecursiveQAOA:
+    """Recursive QAOA that fixes variables iteratively."""
+
+    def __init__(self, n_qubits, edges, weights=None):
+        self.n = n_qubits
+        self.edges = edges
+        self.weights = weights or {e: 1.0 for e in edges}
+        self.fixed_vars = {}
+
+    def build_hamiltonian(self, active_qubits):
+        """Build cost Hamiltonian for active qubits."""
+        n_active = len(active_qubits)
+        dim = 2 ** n_active
+        C = np.zeros((dim, dim))
+
+        qubit_map = {q: i for i, q in enumerate(active_qubits)}
+
+        for (i, j), w in self.weights.items():
+            if i in active_qubits and j in active_qubits:
+                mi, mj = qubit_map[i], qubit_map[j]
+                for z in range(dim):
+                    bi = (z >> (n_active - 1 - mi)) & 1
+                    bj = (z >> (n_active - 1 - mj)) & 1
+                    if bi != bj:
+                        C[z, z] += w
+            elif i in active_qubits and j in self.fixed_vars:
+                mi = qubit_map[i]
+                bj = self.fixed_vars[j]
+                for z in range(dim):
+                    bi = (z >> (n_active - 1 - mi)) & 1
+                    if bi != bj:
+                        C[z, z] += w
+            elif j in active_qubits and i in self.fixed_vars:
+                mj = qubit_map[j]
+                bi = self.fixed_vars[i]
+                for z in range(dim):
+                    bj = (z >> (n_active - 1 - mj)) & 1
+                    if bi != bj:
+                        C[z, z] += w
+
+        return C
+
+    def compute_correlations(self, state, active_qubits):
+        """Compute ZZ correlations from QAOA state."""
+        n_active = len(active_qubits)
+        correlations = {}
+
+        for i in range(n_active):
+            for j in range(i+1, n_active):
+                corr = 0
+                for z in range(2**n_active):
+                    bi = (z >> (n_active - 1 - i)) & 1
+                    bj = (z >> (n_active - 1 - j)) & 1
+                    sign = 1 if bi == bj else -1
+                    corr += sign * np.abs(state[z])**2
+
+                qi, qj = active_qubits[i], active_qubits[j]
+                if (qi, qj) in self.weights or (qj, qi) in self.weights:
+                    correlations[(qi, qj)] = corr
+
+        return correlations
+
+    def fix_strongest_correlation(self, correlations, active_qubits):
+        """Fix variable based on strongest correlation."""
+        # Find strongest correlation
+        strongest = max(correlations.items(), key=lambda x: abs(x[1]))
+        (i, j), corr = strongest
+
+        # If corr > 0: Z_i = Z_j (same values)
+        # If corr < 0: Z_i = -Z_j (opposite values)
+        if i in self.fixed_vars:
+            self.fixed_vars[j] = self.fixed_vars[i] if corr > 0 else 1 - self.fixed_vars[i]
+        elif j in self.fixed_vars:
+            self.fixed_vars[i] = self.fixed_vars[j] if corr > 0 else 1 - self.fixed_vars[j]
+        else:
+            # Fix one arbitrarily
+            self.fixed_vars[i] = 0
+            self.fixed_vars[j] = 0 if corr > 0 else 1
+
+        return [q for q in active_qubits if q not in self.fixed_vars]
+
+    def solve(self, p=1, threshold=3):
+        """Run recursive QAOA."""
+        active_qubits = list(range(self.n))
+
+        while len(active_qubits) > threshold:
+            # Run QAOA on reduced problem
+            C = self.build_hamiltonian(active_qubits)
+            state = self._run_qaoa(C, len(active_qubits), p)
+
+            # Compute correlations
+            corrs = self.compute_correlations(state, active_qubits)
+
+            # Fix variable
+            active_qubits = self.fix_strongest_correlation(corrs, active_qubits)
+            print(f"Fixed vars: {self.fixed_vars}, remaining: {active_qubits}")
+
+        # Solve remaining classically
+        self._solve_remaining(active_qubits)
+        return self.fixed_vars
+
+    def _run_qaoa(self, C, n_active, p):
+        """Run QAOA on reduced problem."""
+        dim = 2**n_active
+
+        # Mixer
+        B = np.zeros((dim, dim))
+        for q in range(n_active):
+            for z in range(dim):
+                z_flip = z ^ (1 << (n_active - 1 - q))
+                B[z, z_flip] += 1
+
+        # Simple fixed angles for demo
+        gamma = [0.5] * p
+        beta = [0.4] * p
+
+        state = np.ones(dim) / np.sqrt(dim)
+        for layer in range(p):
+            state = expm(-1j * gamma[layer] * C) @ state
+            state = expm(-1j * beta[layer] * B) @ state
+
+        return state
+
+    def _solve_remaining(self, active_qubits):
+        """Brute force remaining variables."""
+        best_cost = float('-inf')
+        best_assignment = {}
+
+        for bits in range(2**len(active_qubits)):
+            assignment = self.fixed_vars.copy()
+            for i, q in enumerate(active_qubits):
+                assignment[q] = (bits >> (len(active_qubits) - 1 - i)) & 1
+
+            cost = self._eval_assignment(assignment)
+            if cost > best_cost:
+                best_cost = cost
+                best_assignment = assignment
+
+        self.fixed_vars = best_assignment
+
+    def _eval_assignment(self, assignment):
+        """Evaluate assignment cost."""
+        cost = 0
+        for (i, j), w in self.weights.items():
+            if assignment[i] != assignment[j]:
+                cost += w
+        return cost
+
+# Example
+print("Recursive QAOA Example")
+print("=" * 50)
+
+rqaoa = RecursiveQAOA(6, [(0,1), (1,2), (2,3), (3,4), (4,5), (5,0)])
+solution = rqaoa.solve(p=1, threshold=2)
+print(f"\nFinal solution: {solution}")
+```
+
+## Multi-Angle QAOA (ma-QAOA)
+
+Multi-Angle QAOA uses different parameters for each term in the Hamiltonians.
+
+<Tip>
+ma-QAOA increases expressibility at the cost of more parameters. It can achieve better solutions at lower depth but requires more optimization effort.
+</Tip>
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+class MultiAngleQAOA:
+    """Multi-angle QAOA with per-term parameters."""
+
+    def __init__(self, n_qubits, edges):
+        self.n = n_qubits
+        self.edges = edges
+        self.dim = 2 ** n_qubits
+
+    def run(self, p, gamma_edges, beta_qubits):
+        """Execute ma-QAOA.
+
+        Args:
+            p: Number of layers
+            gamma_edges: Dict of (edge, layer) -> angle
+            beta_qubits: Dict of (qubit, layer) -> angle
+        """
+        state = np.ones(self.dim, dtype=complex) / np.sqrt(self.dim)
+
+        for layer in range(p):
+            # Apply cost unitary with per-edge angles
+            for (i, j) in self.edges:
+                gamma = gamma_edges.get(((i,j), layer), 0.5)
+                state = self._apply_zz(state, i, j, gamma)
+
+            # Apply mixer with per-qubit angles
+            for q in range(self.n):
+                beta = beta_qubits.get((q, layer), 0.4)
+                state = self._apply_rx(state, q, beta)
+
+        return state
+
+    def _apply_zz(self, state, i, j, gamma):
+        """Apply exp(-i*gamma*Z_iZ_j)."""
+        new_state = state.copy()
+        for z in range(self.dim):
+            bi = (z >> (self.n - 1 - i)) & 1
+            bj = (z >> (self.n - 1 - j)) & 1
+            sign = 1 if bi == bj else -1
+            new_state[z] *= np.exp(-1j * gamma * sign)
+        return new_state
+
+    def _apply_rx(self, state, q, beta):
+        """Apply RX(2*beta) to qubit q."""
+        new_state = np.zeros_like(state)
+        c, s = np.cos(beta), np.sin(beta)
+
+        for z in range(self.dim):
+            z_flip = z ^ (1 << (self.n - 1 - q))
+            new_state[z] += c * state[z] - 1j * s * state[z_flip]
+
+        return new_state
+
+    def count_parameters(self, p):
+        """Count number of parameters in ma-QAOA."""
+        n_gamma = len(self.edges) * p  # Per-edge cost angles
+        n_beta = self.n * p  # Per-qubit mixer angles
+        return n_gamma + n_beta
+
+# Example
+print("Multi-Angle QAOA")
+print("=" * 50)
+
+n = 4
+edges = [(0, 1), (1, 2), (2, 3), (0, 3)]
+
+ma_qaoa = MultiAngleQAOA(n, edges)
+
+# Standard QAOA: 2 params per layer
+# ma-QAOA: 4 edges + 4 qubits = 8 params per layer
+print(f"Parameters per layer (p=1):")
+print(f"  Standard QAOA: 2")
+print(f"  Multi-Angle QAOA: {ma_qaoa.count_parameters(1)}")
+
+# Run with per-term angles
+gamma_edges = {(e, 0): 0.3 + 0.1*i for i, e in enumerate(edges)}
+beta_qubits = {(q, 0): 0.4 + 0.05*q for q in range(n)}
+
+state = ma_qaoa.run(1, gamma_edges, beta_qubits)
+
+# Compute cost
+C = np.zeros((16, 16))
+for i, j in edges:
+    for z in range(16):
+        bi = (z >> (n - 1 - i)) & 1
+        bj = (z >> (n - 1 - j)) & 1
+        if bi != bj:
+            C[z, z] += 1
+
+cost = np.real(state.conj() @ C @ state)
+print(f"\nExpected cost: {cost:.3f}")
+```
+
+## Quantum Alternating Operator Ansatz
+
+The generalized Quantum Alternating Operator Ansatz allows arbitrary phase-separation and mixing operators.
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+class QuantumAlternatingOperatorAnsatz:
+    """Generalized Quantum Alternating Operator Ansatz."""
+
+    def __init__(self, n_qubits):
+        self.n = n_qubits
+        self.dim = 2 ** n_qubits
+
+    def add_phase_separator(self, hamiltonian, name="cost"):
+        """Add a phase-separating operator."""
+        if not hasattr(self, 'phase_separators'):
+            self.phase_separators = []
+        self.phase_separators.append({
+            'hamiltonian': hamiltonian,
+            'name': name
+        })
+
+    def add_mixer(self, hamiltonian, name="mixer"):
+        """Add a mixing operator."""
+        if not hasattr(self, 'mixers'):
+            self.mixers = []
+        self.mixers.append({
+            'hamiltonian': hamiltonian,
+            'name': name
+        })
+
+    def run(self, p, params, initial_state=None):
+        """Execute the ansatz.
+
+        Args:
+            p: Number of alternating layers
+            params: Dict mapping (operator_name, layer) -> angle
+            initial_state: Optional initial state
+        """
+        if initial_state is None:
+            state = np.ones(self.dim, dtype=complex) / np.sqrt(self.dim)
+        else:
+            state = initial_state.copy()
+
+        for layer in range(p):
+            # Apply all phase separators
+            for ps in self.phase_separators:
+                angle = params.get((ps['name'], layer), 0.5)
+                state = expm(-1j * angle * ps['hamiltonian']) @ state
+
+            # Apply all mixers
+            for mx in self.mixers:
+                angle = params.get((mx['name'], layer), 0.4)
+                state = expm(-1j * angle * mx['hamiltonian']) @ state
+
+        return state
+
+# Example: QAOA with multiple objectives
+print("Quantum Alternating Operator Ansatz")
+print("=" * 50)
+
+n = 3
+dim = 2**n
+
+# Build operators
+# Cost 1: Count edges cut
+C1 = np.zeros((dim, dim))
+for i, j in [(0,1), (1,2)]:
+    for z in range(dim):
+        bi = (z >> (n - 1 - i)) & 1
+        bj = (z >> (n - 1 - j)) & 1
+        if bi != bj:
+            C1[z, z] += 1
+
+# Cost 2: Penalize all-same
+C2 = np.zeros((dim, dim))
+C2[0, 0] = -1  # Penalize |000⟩
+C2[dim-1, dim-1] = -1  # Penalize |111⟩
+
+# Standard X-mixer
+B = np.zeros((dim, dim))
+for q in range(n):
+    for z in range(dim):
+        z_flip = z ^ (1 << (n - 1 - q))
+        B[z, z_flip] += 1
+
+qaoa_gen = QuantumAlternatingOperatorAnsatz(n)
+qaoa_gen.add_phase_separator(C1, "maxcut")
+qaoa_gen.add_phase_separator(C2, "diversity")
+qaoa_gen.add_mixer(B, "x_mixer")
+
+params = {
+    ('maxcut', 0): 0.6,
+    ('diversity', 0): 0.2,
+    ('x_mixer', 0): 0.4
+}
+
+state = qaoa_gen.run(1, params)
+
+print("Multi-objective QAOA result:")
+print(f"  MaxCut expectation: {np.real(state.conj() @ C1 @ state):.3f}")
+print(f"  Diversity expectation: {np.real(state.conj() @ C2 @ state):.3f}")
+```
+
+## Choosing the Right Variant
+
+Different variants suit different scenarios:
+
+```python
+def variant_selection_guide():
+    """Guide for choosing QAOA variants."""
+
+    variants = {
+        'Standard QAOA': {
+            'use_when': 'General combinatorial optimization',
+            'advantages': 'Simple, well-studied',
+            'limitations': 'May need high depth for good results'
+        },
+        'Warm-Start QAOA': {
+            'use_when': 'Good classical approximation exists',
+            'advantages': 'Better starting point, faster convergence',
+            'limitations': 'Requires classical preprocessing'
+        },
+        'Recursive QAOA': {
+            'use_when': 'Large problems with strong correlations',
+            'advantages': 'Reduces problem size iteratively',
+            'limitations': 'Multiple QAOA runs, correlation estimation'
+        },
+        'Multi-Angle QAOA': {
+            'use_when': 'Need more expressibility at low depth',
+            'advantages': 'Better solutions at p=1',
+            'limitations': 'More parameters to optimize'
+        },
+        'Generalized QAOA': {
+            'use_when': 'Multiple objectives or constraints',
+            'advantages': 'Flexible operator structure',
+            'limitations': 'Design complexity'
+        }
+    }
+
+    print("QAOA Variant Selection Guide")
+    print("=" * 60)
+
+    for variant, info in variants.items():
+        print(f"\n{variant}:")
+        print(f"  Use when: {info['use_when']}")
+        print(f"  Advantages: {info['advantages']}")
+        print(f"  Limitations: {info['limitations']}")
+
+variant_selection_guide()
+```
+
+## Summary
+
+QAOA variants and extensions:
+
+1. **Warm-Start QAOA**: Uses classical solutions for better initialization
+2. **Recursive QAOA**: Iteratively reduces problem size
+3. **Multi-Angle QAOA**: Per-term parameters for expressibility
+4. **Quantum Alternating Operator Ansatz**: Generalized framework
+
+The next lesson covers practical QAOA applications.

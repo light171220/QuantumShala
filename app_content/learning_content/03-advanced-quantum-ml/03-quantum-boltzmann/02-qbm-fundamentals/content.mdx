@@ -1,0 +1,669 @@
+---
+title: "Quantum Boltzmann Machine Fundamentals"
+description: "Learn the core principles of quantum Boltzmann machines, including quantum thermal states, transverse field dynamics, and the quantum-classical correspondence."
+duration: 70
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand quantum thermal states and Gibbs distributions
+- Define quantum Boltzmann machine Hamiltonians
+- Explain the role of transverse fields in quantum annealing
+- Derive quantum-classical correspondence limits
+- Implement quantum Gibbs state preparation
+- Compare quantum and classical Boltzmann distributions
+
+## 1. Quantum Thermal States
+
+Quantum Boltzmann machines replace classical probability distributions with quantum thermal states.
+
+<Definition term="Quantum Gibbs State">
+The quantum Gibbs state (thermal state) at inverse temperature β = 1/T for a Hamiltonian H is the density matrix ρ = exp(-βH)/Z, where Z = Tr[exp(-βH)] is the partition function. This generalizes the classical Boltzmann distribution to quantum systems.
+</Definition>
+
+<Formula>
+$$\rho_{Gibbs} = \frac{e^{-\beta H}}{Z} = \frac{e^{-\beta H}}{\text{Tr}[e^{-\beta H}]}$$
+</Formula>
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+class QuantumGibbsState:
+    """
+    Quantum Gibbs (thermal) state preparation and analysis.
+    """
+
+    def __init__(self, hamiltonian, temperature=1.0):
+        """
+        Initialize quantum Gibbs state.
+
+        Args:
+            hamiltonian: Hamiltonian matrix (Hermitian)
+            temperature: Temperature T (β = 1/T)
+        """
+        self.H = hamiltonian
+        self.T = temperature
+        self.beta = 1.0 / temperature
+        self.dim = hamiltonian.shape[0]
+
+        # Compute Gibbs state
+        self.rho = self._compute_gibbs_state()
+
+        # Partition function
+        self.Z = np.trace(expm(-self.beta * self.H))
+
+    def _compute_gibbs_state(self):
+        """Compute the Gibbs density matrix."""
+        exp_minus_beta_H = expm(-self.beta * self.H)
+        Z = np.trace(exp_minus_beta_H)
+        return exp_minus_beta_H / Z
+
+    @property
+    def free_energy(self):
+        """Compute free energy F = -T log Z."""
+        return -self.T * np.log(self.Z)
+
+    @property
+    def average_energy(self):
+        """Compute ⟨H⟩ = Tr[ρH]."""
+        return np.real(np.trace(self.rho @ self.H))
+
+    @property
+    def entropy(self):
+        """Compute von Neumann entropy S = -Tr[ρ log ρ]."""
+        eigenvalues = np.linalg.eigvalsh(self.rho)
+        eigenvalues = eigenvalues[eigenvalues > 1e-15]
+        return -np.sum(eigenvalues * np.log(eigenvalues))
+
+    def expectation_value(self, observable):
+        """Compute ⟨O⟩ = Tr[ρO]."""
+        return np.real(np.trace(self.rho @ observable))
+
+    def thermal_average(self, observable):
+        """Alias for expectation_value."""
+        return self.expectation_value(observable)
+
+
+def compare_temperatures(hamiltonian, temperatures):
+    """
+    Compare Gibbs states at different temperatures.
+
+    Returns properties as function of temperature.
+    """
+    results = {
+        'T': temperatures,
+        'energy': [],
+        'entropy': [],
+        'free_energy': []
+    }
+
+    for T in temperatures:
+        gibbs = QuantumGibbsState(hamiltonian, T)
+        results['energy'].append(gibbs.average_energy)
+        results['entropy'].append(gibbs.entropy)
+        results['free_energy'].append(gibbs.free_energy)
+
+    return results
+```
+
+## 2. Quantum Boltzmann Machine Hamiltonian
+
+The QBM Hamiltonian extends the classical Ising model with quantum terms.
+
+<Definition term="Quantum Boltzmann Machine">
+A Quantum Boltzmann Machine (QBM) is defined by a Hamiltonian that includes classical Ising-like terms (diagonal in the computational basis) plus transverse field terms (off-diagonal) that induce quantum fluctuations and superposition.
+</Definition>
+
+<Formula>
+$$H_{QBM} = -\sum_i h_i \sigma_i^z - \sum_{i<j} J_{ij} \sigma_i^z \sigma_j^z - \Gamma \sum_i \sigma_i^x$$
+</Formula>
+
+```python
+import numpy as np
+
+class QuantumBoltzmannMachine:
+    """
+    Quantum Boltzmann Machine implementation.
+    """
+
+    def __init__(self, n_qubits, transverse_field=1.0):
+        """
+        Initialize QBM.
+
+        Args:
+            n_qubits: Number of qubits
+            transverse_field: Strength of quantum fluctuations (Γ)
+        """
+        self.n_qubits = n_qubits
+        self.dim = 2**n_qubits
+        self.gamma = transverse_field
+
+        # Initialize parameters
+        np.random.seed(42)
+
+        # Local fields
+        self.h = np.random.randn(n_qubits) * 0.1
+
+        # Coupling matrix (symmetric)
+        self.J = np.random.randn(n_qubits, n_qubits) * 0.1
+        self.J = (self.J + self.J.T) / 2
+        np.fill_diagonal(self.J, 0)
+
+        # Build Pauli matrices
+        self._build_pauli_operators()
+
+        # Build Hamiltonian
+        self.H = self._build_hamiltonian()
+
+    def _build_pauli_operators(self):
+        """Build Pauli operators for each qubit."""
+        I = np.eye(2, dtype=complex)
+        X = np.array([[0, 1], [1, 0]], dtype=complex)
+        Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        def tensor_at_position(op, pos, n):
+            """Place operator at position pos in n-qubit system."""
+            result = np.eye(1)
+            for i in range(n):
+                if i == pos:
+                    result = np.kron(result, op)
+                else:
+                    result = np.kron(result, I)
+            return result
+
+        self.sigma_x = [tensor_at_position(X, i, self.n_qubits)
+                        for i in range(self.n_qubits)]
+        self.sigma_z = [tensor_at_position(Z, i, self.n_qubits)
+                        for i in range(self.n_qubits)]
+
+    def _build_hamiltonian(self):
+        """Construct the QBM Hamiltonian."""
+        H = np.zeros((self.dim, self.dim), dtype=complex)
+
+        # Local field terms: -h_i σ_i^z
+        for i in range(self.n_qubits):
+            H -= self.h[i] * self.sigma_z[i]
+
+        # Coupling terms: -J_ij σ_i^z σ_j^z
+        for i in range(self.n_qubits):
+            for j in range(i + 1, self.n_qubits):
+                H -= self.J[i, j] * (self.sigma_z[i] @ self.sigma_z[j])
+
+        # Transverse field: -Γ σ_i^x
+        for i in range(self.n_qubits):
+            H -= self.gamma * self.sigma_x[i]
+
+        return H
+
+    def get_gibbs_state(self, temperature=1.0):
+        """Compute Gibbs state at given temperature."""
+        beta = 1.0 / temperature
+        exp_minus_beta_H = expm(-beta * self.H)
+        Z = np.trace(exp_minus_beta_H)
+        return exp_minus_beta_H / Z
+
+    def classical_hamiltonian(self):
+        """Return classical part (Γ = 0)."""
+        H_classical = np.zeros((self.dim, self.dim), dtype=complex)
+
+        for i in range(self.n_qubits):
+            H_classical -= self.h[i] * self.sigma_z[i]
+
+        for i in range(self.n_qubits):
+            for j in range(i + 1, self.n_qubits):
+                H_classical -= self.J[i, j] * (self.sigma_z[i] @ self.sigma_z[j])
+
+        return H_classical
+
+    def quantum_hamiltonian(self):
+        """Return quantum part (transverse field only)."""
+        H_quantum = np.zeros((self.dim, self.dim), dtype=complex)
+
+        for i in range(self.n_qubits):
+            H_quantum -= self.gamma * self.sigma_x[i]
+
+        return H_quantum
+
+    def set_parameters(self, h=None, J=None, gamma=None):
+        """Update model parameters."""
+        if h is not None:
+            self.h = h
+        if J is not None:
+            self.J = J
+        if gamma is not None:
+            self.gamma = gamma
+        self.H = self._build_hamiltonian()
+```
+
+## 3. Transverse Field and Quantum Fluctuations
+
+The transverse field introduces quantum dynamics that can help escape local minima.
+
+<Definition term="Transverse Field">
+The transverse field Γσ^x term in the Hamiltonian introduces quantum fluctuations by mixing computational basis states. At high Γ, the ground state is a uniform superposition; at Γ = 0, classical behavior is recovered.
+</Definition>
+
+<Warning>
+The transverse field strength Γ must be carefully tuned. Too high causes excessive quantum fluctuations that wash out the classical energy landscape; too low fails to provide quantum speedup.
+</Warning>
+
+```python
+def analyze_transverse_field_effect(qbm, gamma_values, temperature=0.1):
+    """
+    Analyze how transverse field affects the Gibbs state.
+
+    Args:
+        qbm: QuantumBoltzmannMachine instance
+        gamma_values: List of Γ values to test
+        temperature: Temperature for Gibbs state
+
+    Returns:
+        Analysis results
+    """
+    original_gamma = qbm.gamma
+    results = {
+        'gamma': gamma_values,
+        'energy': [],
+        'entropy': [],
+        'z_magnetization': [],
+        'x_magnetization': [],
+        'coherence': []
+    }
+
+    for gamma in gamma_values:
+        qbm.set_parameters(gamma=gamma)
+        rho = qbm.get_gibbs_state(temperature)
+
+        # Average energy
+        energy = np.real(np.trace(rho @ qbm.H))
+        results['energy'].append(energy)
+
+        # Entropy
+        eigenvalues = np.linalg.eigvalsh(rho)
+        eigenvalues = eigenvalues[eigenvalues > 1e-15]
+        entropy = -np.sum(eigenvalues * np.log(eigenvalues))
+        results['entropy'].append(entropy)
+
+        # Z magnetization (classical order parameter)
+        m_z = sum(np.real(np.trace(rho @ qbm.sigma_z[i]))
+                  for i in range(qbm.n_qubits)) / qbm.n_qubits
+        results['z_magnetization'].append(m_z)
+
+        # X magnetization (quantum order parameter)
+        m_x = sum(np.real(np.trace(rho @ qbm.sigma_x[i]))
+                  for i in range(qbm.n_qubits)) / qbm.n_qubits
+        results['x_magnetization'].append(m_x)
+
+        # Coherence (off-diagonal elements)
+        coherence = np.sum(np.abs(rho - np.diag(np.diag(rho))))
+        results['coherence'].append(coherence)
+
+    qbm.set_parameters(gamma=original_gamma)
+    return results
+
+
+def quantum_phase_diagram(n_qubits, h_range, gamma_range, temperature=0.1):
+    """
+    Compute quantum phase diagram in (h, Γ) space.
+
+    Returns order parameters on a grid.
+    """
+    h_vals = np.linspace(h_range[0], h_range[1], 20)
+    gamma_vals = np.linspace(gamma_range[0], gamma_range[1], 20)
+
+    z_mag_grid = np.zeros((len(h_vals), len(gamma_vals)))
+    x_mag_grid = np.zeros((len(h_vals), len(gamma_vals)))
+
+    for i, h_uniform in enumerate(h_vals):
+        for j, gamma in enumerate(gamma_vals):
+            qbm = QuantumBoltzmannMachine(n_qubits, transverse_field=gamma)
+            qbm.set_parameters(h=np.ones(n_qubits) * h_uniform)
+
+            rho = qbm.get_gibbs_state(temperature)
+
+            z_mag_grid[i, j] = abs(sum(
+                np.real(np.trace(rho @ qbm.sigma_z[k]))
+                for k in range(n_qubits)
+            ) / n_qubits)
+
+            x_mag_grid[i, j] = abs(sum(
+                np.real(np.trace(rho @ qbm.sigma_x[k]))
+                for k in range(n_qubits)
+            ) / n_qubits)
+
+    return {
+        'h_vals': h_vals,
+        'gamma_vals': gamma_vals,
+        'z_magnetization': z_mag_grid,
+        'x_magnetization': x_mag_grid
+    }
+```
+
+## 4. Quantum-Classical Correspondence
+
+Understanding when quantum effects vanish is crucial for QBM design.
+
+<Formula>
+$$\lim_{\Gamma \to 0} \rho_{QBM} = \sum_s \frac{e^{-\beta E_s}}{Z_{classical}} |s\rangle\langle s|$$
+</Formula>
+
+```python
+def verify_classical_limit(n_qubits, temperature=1.0, tolerance=1e-6):
+    """
+    Verify that QBM reduces to classical BM when Γ → 0.
+
+    Returns comparison of quantum and classical distributions.
+    """
+    # Create QBM with small transverse field
+    qbm = QuantumBoltzmannMachine(n_qubits, transverse_field=0.001)
+
+    # Quantum Gibbs state
+    rho_quantum = qbm.get_gibbs_state(temperature)
+
+    # Classical Boltzmann distribution
+    # Diagonal elements should match classical probabilities
+    classical_probs = np.zeros(qbm.dim)
+    beta = 1.0 / temperature
+
+    for s in range(qbm.dim):
+        # Compute classical energy for configuration s
+        bits = format(s, f'0{n_qubits}b')
+        spins = np.array([1 - 2 * int(b) for b in bits])  # 0 → +1, 1 → -1
+
+        E_s = 0
+        for i in range(n_qubits):
+            E_s -= qbm.h[i] * spins[i]
+        for i in range(n_qubits):
+            for j in range(i + 1, n_qubits):
+                E_s -= qbm.J[i, j] * spins[i] * spins[j]
+
+        classical_probs[s] = np.exp(-beta * E_s)
+
+    classical_probs /= np.sum(classical_probs)
+
+    # Compare diagonal of quantum state with classical
+    quantum_diag = np.real(np.diag(rho_quantum))
+
+    difference = np.max(np.abs(quantum_diag - classical_probs))
+
+    # Check off-diagonal elements are small
+    off_diag_norm = np.sum(np.abs(rho_quantum - np.diag(np.diag(rho_quantum))))
+
+    return {
+        'max_diagonal_difference': difference,
+        'off_diagonal_norm': off_diag_norm,
+        'is_classical': difference < tolerance and off_diag_norm < tolerance,
+        'quantum_diagonal': quantum_diag,
+        'classical_probs': classical_probs
+    }
+
+
+def high_temperature_limit(qbm, temperatures):
+    """
+    Verify high-temperature limit: ρ → I/d.
+
+    At infinite temperature, all states are equally probable.
+    """
+    results = []
+
+    uniform_state = np.eye(qbm.dim) / qbm.dim
+
+    for T in temperatures:
+        rho = qbm.get_gibbs_state(T)
+        distance = np.linalg.norm(rho - uniform_state, 'fro')
+        results.append({
+            'temperature': T,
+            'distance_from_uniform': distance
+        })
+
+    return results
+```
+
+<Tip>
+The classical limit (Γ → 0) recovers standard Boltzmann machine behavior, while the high-temperature limit (T → ∞) gives a uniform distribution. The interesting QBM regime is at intermediate temperatures and transverse field strengths.
+</Tip>
+
+## 5. Quantum Gibbs State Preparation
+
+Preparing quantum Gibbs states is a key challenge for practical QBMs.
+
+```python
+class GibbsStatePreparation:
+    """
+    Methods for preparing quantum Gibbs states.
+    """
+
+    @staticmethod
+    def exact_preparation(hamiltonian, temperature):
+        """
+        Exact preparation by computing exp(-βH).
+
+        Only feasible for small systems.
+        """
+        beta = 1.0 / temperature
+        exp_minus_beta_H = expm(-beta * hamiltonian)
+        Z = np.trace(exp_minus_beta_H)
+        return exp_minus_beta_H / Z
+
+    @staticmethod
+    def imaginary_time_evolution(hamiltonian, temperature, n_steps=100):
+        """
+        Prepare Gibbs state via imaginary time evolution.
+
+        |ψ(β)⟩ ∝ exp(-βH/2)|ψ_0⟩
+
+        Starting from uniform superposition.
+        """
+        dim = hamiltonian.shape[0]
+        beta = 1.0 / temperature
+        dt = beta / n_steps
+
+        # Start with uniform superposition
+        psi = np.ones(dim, dtype=complex) / np.sqrt(dim)
+
+        # Imaginary time evolution: exp(-H dt)
+        U_step = expm(-hamiltonian * dt / 2)
+
+        for _ in range(n_steps):
+            psi = U_step @ psi
+            # Renormalize
+            psi /= np.linalg.norm(psi)
+
+        # Convert to density matrix
+        rho = np.outer(psi, psi.conj())
+
+        return rho
+
+    @staticmethod
+    def quantum_metropolis(hamiltonian, temperature, n_steps=1000):
+        """
+        Quantum Metropolis algorithm (simplified).
+
+        Mixes classical and quantum updates.
+        """
+        dim = hamiltonian.shape[0]
+        n_qubits = int(np.log2(dim))
+        beta = 1.0 / temperature
+
+        # Start with random computational basis state
+        current_state = np.random.randint(0, dim)
+
+        samples = []
+
+        for step in range(n_steps):
+            # Classical move: flip random bit
+            bit_to_flip = np.random.randint(0, n_qubits)
+            proposed_state = current_state ^ (1 << bit_to_flip)
+
+            # Energy difference
+            E_current = np.real(hamiltonian[current_state, current_state])
+            E_proposed = np.real(hamiltonian[proposed_state, proposed_state])
+            delta_E = E_proposed - E_current
+
+            # Metropolis acceptance
+            if delta_E < 0 or np.random.random() < np.exp(-beta * delta_E):
+                current_state = proposed_state
+
+            samples.append(current_state)
+
+        # Construct density matrix from samples
+        rho = np.zeros((dim, dim), dtype=complex)
+        for s in samples[n_steps // 2:]:  # Discard burn-in
+            rho[s, s] += 1
+        rho /= np.trace(rho)
+
+        return rho
+
+    @staticmethod
+    def variational_gibbs(hamiltonian, temperature, n_layers=4):
+        """
+        Variational preparation of Gibbs state.
+
+        Uses parameterized circuit to minimize free energy.
+        """
+        dim = hamiltonian.shape[0]
+        n_qubits = int(np.log2(dim))
+        beta = 1.0 / temperature
+
+        # Simplified variational ansatz
+        # In practice, this would use a quantum circuit
+
+        def free_energy(params):
+            # Construct variational state from parameters
+            # This is a placeholder for actual variational circuit
+            psi = np.exp(1j * params[:dim]) / np.sqrt(dim)
+            rho = np.outer(psi, psi.conj())
+
+            # Free energy: F = ⟨H⟩ - TS
+            energy = np.real(np.trace(rho @ hamiltonian))
+
+            eigenvalues = np.linalg.eigvalsh(rho)
+            eigenvalues = eigenvalues[eigenvalues > 1e-15]
+            entropy = -np.sum(eigenvalues * np.log(eigenvalues))
+
+            return energy - entropy / beta
+
+        # Optimize (simplified)
+        from scipy.optimize import minimize
+
+        params_init = np.random.randn(dim)
+        result = minimize(free_energy, params_init, method='L-BFGS-B')
+
+        psi = np.exp(1j * result.x) / np.sqrt(dim)
+        rho = np.outer(psi, psi.conj())
+
+        return rho
+```
+
+## 6. Comparing Quantum and Classical Distributions
+
+Understanding the differences between quantum and classical thermal distributions.
+
+```python
+def compare_quantum_classical(n_qubits, h, J, gamma, temperature):
+    """
+    Compare quantum Gibbs state with classical Boltzmann distribution.
+
+    Returns analysis of the differences.
+    """
+    # Create QBM
+    qbm = QuantumBoltzmannMachine(n_qubits, transverse_field=gamma)
+    qbm.set_parameters(h=h, J=J)
+
+    # Quantum Gibbs state
+    rho_quantum = qbm.get_gibbs_state(temperature)
+
+    # Classical Boltzmann distribution (Γ = 0)
+    qbm_classical = QuantumBoltzmannMachine(n_qubits, transverse_field=0)
+    qbm_classical.set_parameters(h=h, J=J)
+    rho_classical = qbm_classical.get_gibbs_state(temperature)
+
+    # Compute differences
+    quantum_diag = np.real(np.diag(rho_quantum))
+    classical_diag = np.real(np.diag(rho_classical))
+
+    # Probability differences
+    prob_difference = np.linalg.norm(quantum_diag - classical_diag, 1)
+
+    # Off-diagonal coherence (unique to quantum)
+    off_diag = rho_quantum - np.diag(np.diag(rho_quantum))
+    coherence = np.sum(np.abs(off_diag))
+
+    # Quantum purity vs classical
+    quantum_purity = np.real(np.trace(rho_quantum @ rho_quantum))
+    classical_purity = np.real(np.trace(rho_classical @ rho_classical))
+
+    # Entropy difference
+    q_eig = np.linalg.eigvalsh(rho_quantum)
+    q_eig = q_eig[q_eig > 1e-15]
+    quantum_entropy = -np.sum(q_eig * np.log(q_eig))
+
+    c_eig = np.linalg.eigvalsh(rho_classical)
+    c_eig = c_eig[c_eig > 1e-15]
+    classical_entropy = -np.sum(c_eig * np.log(c_eig))
+
+    return {
+        'probability_difference_L1': prob_difference,
+        'quantum_coherence': coherence,
+        'quantum_purity': quantum_purity,
+        'classical_purity': classical_purity,
+        'quantum_entropy': quantum_entropy,
+        'classical_entropy': classical_entropy,
+        'entropy_difference': quantum_entropy - classical_entropy
+    }
+
+
+def quantum_advantage_indicator(qbm, temperatures, gammas):
+    """
+    Identify regimes where quantum effects are significant.
+
+    Returns "quantum-ness" measure across parameter space.
+    """
+    results = np.zeros((len(temperatures), len(gammas)))
+
+    for i, T in enumerate(temperatures):
+        for j, gamma in enumerate(gammas):
+            qbm.set_parameters(gamma=gamma)
+
+            # Compare with classical (γ = 0)
+            comparison = compare_quantum_classical(
+                qbm.n_qubits, qbm.h, qbm.J, gamma, T
+            )
+
+            # Quantum advantage indicator combines several metrics
+            indicator = (
+                comparison['probability_difference_L1'] +
+                comparison['quantum_coherence'] / qbm.dim
+            )
+
+            results[i, j] = indicator
+
+    return results
+```
+
+<Warning>
+Quantum effects are most pronounced at low temperatures and intermediate transverse field strengths. At high temperatures, thermal fluctuations dominate over quantum fluctuations, washing out quantum advantages.
+</Warning>
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Quantum Gibbs states** generalize classical Boltzmann distributions to quantum systems
+2. **QBM Hamiltonians** include classical Ising terms plus transverse field
+3. **Transverse field** induces quantum fluctuations enabling tunneling
+4. **Classical limit** (Γ → 0) recovers standard Boltzmann machines
+5. **Gibbs state preparation** methods include imaginary time evolution and variational approaches
+6. **Quantum-classical comparison** reveals unique quantum features like coherence
+
+These fundamentals prepare us for training and applying quantum Boltzmann machines.
+
+## Further Reading
+
+- Next lesson: From RBMs to Quantum Boltzmann Machines
+- Related: Quantum Annealing Theory
+- Application: Quantum Sampling Algorithms

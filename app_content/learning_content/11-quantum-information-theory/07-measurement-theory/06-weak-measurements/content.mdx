@@ -1,0 +1,528 @@
+---
+title: "Weak Measurements: Gentle Probing of Quantum Systems"
+description: "Master weak measurements - a powerful technique for extracting partial information from quantum systems with minimal disturbance. Learn about weak values, amplification effects, and applications to quantum foundations and metrology."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand the weak measurement formalism and interaction model
+- Calculate weak values for pre- and post-selected systems
+- Explain weak value amplification and its applications
+- Implement continuous weak measurement protocols
+- Analyze the role of weak measurements in quantum foundations
+- Design weak measurement experiments for metrology
+
+## 1. Introduction to Weak Measurements
+
+Standard projective measurements completely collapse quantum states. But what if we want to extract just a little information while preserving most of the quantum coherence?
+
+<Definition term="Weak Measurement">
+A weak measurement is a quantum measurement performed with a weak system-meter coupling, extracting partial information about the system while causing minimal disturbance. The measurement strength can be tuned from zero (no measurement) to maximum (projective measurement).
+</Definition>
+
+<Tip>
+Weak measurements are not "poor quality" measurements - they are deliberately gentle probes that trade information gain for reduced state disturbance. This trade-off enables unique applications impossible with strong measurements!
+</Tip>
+
+### The von Neumann Measurement Model
+
+<Formula>
+**Measurement Interaction Hamiltonian:**
+
+$$H_{\text{int}} = g(t) \cdot A \otimes P$$
+
+where $A$ is the measured observable, $P$ is the meter momentum, and $g(t)$ controls the interaction strength.
+</Formula>
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+def von_neumann_measurement(psi_system: np.ndarray,
+                             A: np.ndarray,
+                             coupling: float,
+                             meter_width: float = 1.0) -> dict:
+    """
+    Simulate von Neumann measurement model.
+
+    Args:
+        psi_system: System state vector
+        A: Observable being measured
+        coupling: Measurement coupling strength g
+        meter_width: Initial meter state width (Gaussian)
+
+    Returns:
+        Dictionary with measurement results
+    """
+    # Eigendecomposition of A
+    eigenvalues, eigenvectors = np.linalg.eigh(A)
+    d = len(eigenvalues)
+
+    # System state in A eigenbasis
+    coeffs = eigenvectors.conj().T @ psi_system
+
+    # Meter readout distribution
+    # After interaction: meter shifts by g*eigenvalue for each eigenstate
+    # Gaussian meter centered at 0 with given width
+
+    x_points = np.linspace(-5, 5, 1000)
+    dx = x_points[1] - x_points[0]
+
+    # Total meter distribution (sum over system eigenstates)
+    p_meter = np.zeros_like(x_points)
+    for i in range(d):
+        weight = np.abs(coeffs[i])**2
+        shift = coupling * eigenvalues[i]
+        # Gaussian centered at shift
+        gaussian = np.exp(-(x_points - shift)**2 / (2 * meter_width**2))
+        gaussian /= np.sqrt(2 * np.pi * meter_width**2)
+        p_meter += weight * gaussian
+
+    # Weak vs strong measurement
+    # Weak: coupling << meter_width (Gaussians overlap)
+    # Strong: coupling >> meter_width (Gaussians separate)
+
+    overlap = 0
+    if d >= 2:
+        separation = np.abs(coupling * (eigenvalues[1] - eigenvalues[0]))
+        overlap = np.exp(-separation**2 / (4 * meter_width**2))
+
+    return {
+        'coupling': coupling,
+        'meter_width': meter_width,
+        'eigenvalues': eigenvalues,
+        'x_points': x_points,
+        'p_meter': p_meter,
+        'overlap': overlap,
+        'is_weak': overlap > 0.5
+    }
+
+# Example: measure Z on |+> state
+psi_plus = np.array([1, 1], dtype=complex) / np.sqrt(2)
+Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+# Strong measurement
+strong = von_neumann_measurement(psi_plus, Z, coupling=3.0, meter_width=1.0)
+print(f"Strong measurement: overlap = {strong['overlap']:.4f}, is_weak = {strong['is_weak']}")
+
+# Weak measurement
+weak = von_neumann_measurement(psi_plus, Z, coupling=0.3, meter_width=1.0)
+print(f"Weak measurement: overlap = {weak['overlap']:.4f}, is_weak = {weak['is_weak']}")
+```
+
+## 2. Weak Measurement Kraus Operators
+
+<Definition term="Weak Measurement Operators">
+For a weak Z measurement with strength parameter $g \in [0, 1]$:
+
+$$M_0 = \begin{pmatrix} \sqrt{\frac{1+g}{2}} & 0 \\ 0 & \sqrt{\frac{1-g}{2}} \end{pmatrix}, \quad
+M_1 = \begin{pmatrix} \sqrt{\frac{1-g}{2}} & 0 \\ 0 & \sqrt{\frac{1+g}{2}} \end{pmatrix}$$
+
+These satisfy $M_0^\dagger M_0 + M_1^\dagger M_1 = I$.
+</Definition>
+
+```python
+import numpy as np
+
+def weak_measurement_operators(strength: float) -> tuple:
+    """
+    Create Kraus operators for weak Z measurement.
+
+    Args:
+        strength: Measurement strength g in [0, 1]
+                  g=0: identity (no measurement)
+                  g=1: projective measurement
+
+    Returns:
+        (M0, M1) Kraus operators
+    """
+    g = np.clip(strength, 0, 1)
+
+    c = np.sqrt((1 + g) / 2)
+    s = np.sqrt((1 - g) / 2)
+
+    M0 = np.array([[c, 0], [0, s]], dtype=complex)
+    M1 = np.array([[s, 0], [0, c]], dtype=complex)
+
+    return M0, M1
+
+def apply_weak_measurement(psi: np.ndarray, strength: float) -> dict:
+    """
+    Apply weak measurement to a state.
+
+    Returns:
+        Outcomes with probabilities and post-measurement states
+    """
+    M0, M1 = weak_measurement_operators(strength)
+
+    results = []
+    for i, M in enumerate([M0, M1]):
+        # Probability of outcome i
+        psi_post_unnorm = M @ psi
+        prob = np.real(np.vdot(psi_post_unnorm, psi_post_unnorm))
+
+        # Normalized post-measurement state
+        if prob > 1e-10:
+            psi_post = psi_post_unnorm / np.sqrt(prob)
+        else:
+            psi_post = psi
+
+        # Fidelity with original
+        fidelity = np.abs(np.vdot(psi, psi_post))**2
+
+        results.append({
+            'outcome': i,
+            'probability': prob,
+            'post_state': psi_post,
+            'fidelity': fidelity,
+            'disturbance': 1 - fidelity
+        })
+
+    return {
+        'strength': strength,
+        'outcomes': results,
+        'avg_disturbance': sum(r['probability'] * r['disturbance'] for r in results)
+    }
+
+# Compare weak and strong measurements
+psi = np.array([1, 1], dtype=complex) / np.sqrt(2)
+
+for g in [0.1, 0.5, 0.9, 1.0]:
+    result = apply_weak_measurement(psi, g)
+    print(f"Strength {g:.1f}: avg_disturbance = {result['avg_disturbance']:.4f}")
+```
+
+## 3. Weak Values
+
+The most remarkable feature of weak measurements appears with pre- and post-selection.
+
+<Definition term="Weak Value">
+For a system pre-selected in state $|\psi_i\rangle$ and post-selected in state $|\psi_f\rangle$, the weak value of observable $A$ is:
+
+$$A_w = \frac{\langle\psi_f|A|\psi_i\rangle}{\langle\psi_f|\psi_i\rangle}$$
+
+The weak value can be complex and can lie outside the eigenvalue spectrum of $A$!
+</Definition>
+
+<Warning>
+Weak values are not expectation values! They represent the average meter shift conditioned on successful post-selection. When $|\langle\psi_f|\psi_i\rangle|$ is small, weak values can become arbitrarily large - this is weak value amplification.
+</Warning>
+
+<Formula>
+**Meter Shift with Pre/Post-Selection:**
+
+The meter reading, conditioned on successful post-selection, shifts by:
+
+$$\langle x \rangle_{\text{post}} = g \cdot \text{Re}(A_w)$$
+
+in the weak coupling limit.
+</Formula>
+
+```python
+import numpy as np
+
+def weak_value(A: np.ndarray, psi_i: np.ndarray, psi_f: np.ndarray) -> complex:
+    """
+    Calculate weak value of observable A.
+
+    Args:
+        A: Observable operator
+        psi_i: Pre-selected state
+        psi_f: Post-selected state
+
+    Returns:
+        Weak value (complex number)
+    """
+    numerator = np.vdot(psi_f, A @ psi_i)
+    denominator = np.vdot(psi_f, psi_i)
+
+    if np.abs(denominator) < 1e-15:
+        return np.inf + 1j * np.inf
+
+    return numerator / denominator
+
+# Example: Z weak value
+Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+# Case 1: Standard (no amplification)
+psi_i = np.array([1, 0], dtype=complex)  # |0>
+psi_f = np.array([1, 1], dtype=complex) / np.sqrt(2)  # |+>
+wv1 = weak_value(Z, psi_i, psi_f)
+print(f"Z weak value (|0> -> |+>): {wv1:.4f}")
+
+# Case 2: Near-orthogonal (amplification)
+theta = 0.1  # Small angle
+psi_i = np.array([1, 0], dtype=complex)  # |0>
+psi_f = np.array([np.sin(theta), np.cos(theta)], dtype=complex)  # Nearly |1>
+wv2 = weak_value(Z, psi_i, psi_f)
+print(f"Z weak value (|0> -> near |1>): {wv2:.4f}")
+print(f"  (Eigenvalues of Z are +1, -1, but weak value = {np.real(wv2):.2f}!)")
+
+# Case 3: Imaginary weak value
+X = np.array([[0, 1], [1, 0]], dtype=complex)
+psi_i = np.array([1, 0], dtype=complex)  # |0>
+psi_f = np.array([1, 1j], dtype=complex) / np.sqrt(2)  # (|0> + i|1>)/sqrt(2)
+wv3 = weak_value(X, psi_i, psi_f)
+print(f"X weak value (|0> -> |+i>): {wv3}")
+print(f"  Real part: {np.real(wv3):.4f}, Imaginary part: {np.imag(wv3):.4f}")
+```
+
+## 4. Weak Value Amplification
+
+<Definition term="Weak Value Amplification">
+When the pre- and post-selected states are nearly orthogonal, the weak value can become very large (amplified). This amplifies the meter shift, enabling detection of tiny effects that would otherwise be unmeasurable.
+</Definition>
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def weak_value_amplification_analysis(A: np.ndarray, psi_i: np.ndarray,
+                                       angles: np.ndarray) -> dict:
+    """
+    Analyze weak value amplification as post-selection angle varies.
+
+    Args:
+        A: Observable
+        psi_i: Pre-selected state
+        angles: Post-selection angles (0 = parallel, pi/2 = orthogonal)
+
+    Returns:
+        Analysis results
+    """
+    weak_values = []
+    post_probs = []
+
+    for theta in angles:
+        # Post-selected state at angle theta from psi_i on Bloch sphere
+        psi_f = np.cos(theta/2) * psi_i + np.sin(theta/2) * np.array([0, 1], dtype=complex)
+        psi_f = psi_f / np.linalg.norm(psi_f)
+
+        wv = weak_value(A, psi_i, psi_f)
+        weak_values.append(wv)
+
+        # Post-selection probability
+        p_post = np.abs(np.vdot(psi_f, psi_i))**2
+        post_probs.append(p_post)
+
+    return {
+        'angles': angles,
+        'weak_values': np.array(weak_values),
+        'post_probs': np.array(post_probs),
+        'amplification': np.abs(weak_values) / np.max(np.abs(np.linalg.eigvalsh(A)))
+    }
+
+# Analyze Z measurement amplification
+Z = np.array([[1, 0], [0, -1]], dtype=complex)
+psi_i = np.array([1, 0], dtype=complex)
+angles = np.linspace(0.01, np.pi - 0.01, 100)
+
+result = weak_value_amplification_analysis(Z, psi_i, angles)
+
+print("Weak Value Amplification Analysis")
+print("=" * 50)
+
+# Find maximum amplification
+max_idx = np.argmax(np.abs(result['weak_values']))
+print(f"Maximum |Aw| = {np.abs(result['weak_values'][max_idx]):.2f}")
+print(f"  at angle = {result['angles'][max_idx]:.4f} rad")
+print(f"  Post-selection prob = {result['post_probs'][max_idx]:.6f}")
+print(f"  (Z eigenvalues are +/-1)")
+
+# Key insight: trade-off
+print("\nTrade-off: Large Aw comes with low post-selection probability")
+```
+
+<Tip>
+Weak value amplification was famously used to measure the spin Hall effect of light, detecting beam deflections of angstroms using centimeter-scale detectors. The amplification factor can exceed 100x!
+</Tip>
+
+## 5. Continuous Weak Measurements
+
+Repeatedly applying weak measurements leads to continuous monitoring of quantum systems.
+
+<Definition term="Continuous Weak Measurement">
+A sequence of infinitesimally weak measurements with rate $\Gamma$ leads to a stochastic evolution:
+
+$$d\rho = -\frac{\Gamma}{2}[A, [A, \rho]]dt + \sqrt{\Gamma}(A\rho + \rho A - 2\langle A \rangle\rho)dW$$
+
+where $dW$ is a Wiener increment (Gaussian white noise).
+</Definition>
+
+```python
+import numpy as np
+
+def continuous_weak_measurement(psi0: np.ndarray, A: np.ndarray,
+                                  dt: float, n_steps: int,
+                                  gamma: float = 1.0) -> dict:
+    """
+    Simulate continuous weak measurement using quantum trajectories.
+
+    Args:
+        psi0: Initial state
+        A: Measured observable
+        dt: Time step
+        n_steps: Number of steps
+        gamma: Measurement rate
+
+    Returns:
+        Trajectory data
+    """
+    psi = psi0.copy()
+    times = [0]
+    states = [psi.copy()]
+    measurements = []
+    expectation_A = [np.real(np.vdot(psi, A @ psi))]
+
+    for i in range(n_steps):
+        # Expected value
+        exp_A = np.real(np.vdot(psi, A @ psi))
+
+        # Measurement result with noise
+        dW = np.sqrt(dt) * np.random.randn()
+        dm = exp_A * dt + np.sqrt(1 / (4 * gamma)) * dW
+
+        # State update (simplified stochastic Schrodinger equation)
+        # Continuous measurement back-action
+        M = np.eye(2, dtype=complex) - gamma * dt * (A - exp_A * np.eye(2))**2 / 2
+        M += np.sqrt(gamma) * (A - exp_A * np.eye(2)) * dW
+
+        psi_new = M @ psi
+        psi = psi_new / np.linalg.norm(psi_new)
+
+        times.append((i + 1) * dt)
+        states.append(psi.copy())
+        measurements.append(dm / dt)  # Instantaneous measurement signal
+        expectation_A.append(np.real(np.vdot(psi, A @ psi)))
+
+    return {
+        'times': np.array(times),
+        'states': states,
+        'measurements': np.array(measurements),
+        'expectation_A': np.array(expectation_A)
+    }
+
+# Simulate continuous Z measurement on |+> state
+np.random.seed(42)
+psi0 = np.array([1, 1], dtype=complex) / np.sqrt(2)
+Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+result = continuous_weak_measurement(psi0, Z, dt=0.01, n_steps=500, gamma=1.0)
+
+print("Continuous Weak Measurement Simulation")
+print("=" * 50)
+print(f"Initial <Z> = {result['expectation_A'][0]:.4f}")
+print(f"Final <Z> = {result['expectation_A'][-1]:.4f}")
+print(f"State collapsed towards: {'|0>' if result['expectation_A'][-1] > 0 else '|1>'}")
+```
+
+## 6. Applications
+
+### Quantum State Tomography
+
+Weak measurements enable tomography with minimal state disturbance:
+
+```python
+def weak_tomography(rho: np.ndarray, n_measurements: int,
+                     strength: float = 0.1) -> np.ndarray:
+    """
+    Estimate density matrix using weak measurements.
+
+    Args:
+        rho: True density matrix
+        n_measurements: Number of measurements
+        strength: Weak measurement strength
+
+    Returns:
+        Estimated density matrix
+    """
+    # Measure in X, Y, Z bases
+    X = np.array([[0, 1], [1, 0]], dtype=complex)
+    Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+    Z = np.array([[1, 0], [0, -1]], dtype=complex)
+    I = np.eye(2, dtype=complex)
+
+    paulis = [X, Y, Z]
+
+    exp_values = []
+    for P in paulis:
+        # Weak measurement gives biased estimator
+        M0, M1 = weak_measurement_operators(strength)
+
+        # For each Pauli, measure in its eigenbasis
+        # Simplified: use expectation value estimate
+        measurements = []
+        for _ in range(n_measurements // 3):
+            # True expectation
+            true_exp = np.real(np.trace(P @ rho))
+
+            # Noisy measurement (add weak measurement noise)
+            noise_std = np.sqrt((1 - strength**2) / (strength**2 * n_measurements / 3))
+            measured = true_exp + np.random.randn() * noise_std
+            measurements.append(measured)
+
+        exp_values.append(np.mean(measurements))
+
+    # Reconstruct density matrix
+    rho_est = (I + exp_values[0] * X + exp_values[1] * Y + exp_values[2] * Z) / 2
+
+    # Ensure valid density matrix
+    eigenvalues, eigenvectors = np.linalg.eigh(rho_est)
+    eigenvalues = np.maximum(eigenvalues, 0)
+    eigenvalues /= np.sum(eigenvalues)
+    rho_est = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.conj().T
+
+    return rho_est
+
+# Test weak tomography
+psi = np.array([np.cos(0.3), np.exp(1j*0.7) * np.sin(0.3)], dtype=complex)
+rho_true = np.outer(psi, psi.conj())
+
+np.random.seed(42)
+rho_est = weak_tomography(rho_true, n_measurements=1000, strength=0.1)
+
+fid = np.abs(np.trace(np.sqrt(np.sqrt(rho_true) @ rho_est @ np.sqrt(rho_true))))**2
+print(f"Weak Tomography Fidelity: {fid:.4f}")
+```
+
+### Leggett-Garg Inequalities
+
+Weak measurements test temporal quantum correlations:
+
+<Definition term="Leggett-Garg Inequality">
+For a macroscopic realist system with non-invasive measurability:
+
+$$K = \langle Q_1 Q_2 \rangle + \langle Q_2 Q_3 \rangle - \langle Q_1 Q_3 \rangle \leq 1$$
+
+Weak measurements can violate this bound, demonstrating quantum behavior.
+</Definition>
+
+## Summary
+
+In this lesson, you mastered weak measurements:
+
+1. **Formalism**: Weak measurements use small coupling, trading information for reduced disturbance
+
+2. **Kraus Operators**: Parameterized operators interpolate between identity and projective measurement
+
+3. **Weak Values**: $A_w = \langle\psi_f|A|\psi_i\rangle / \langle\psi_f|\psi_i\rangle$ can exceed eigenvalue bounds
+
+4. **Amplification**: Near-orthogonal pre/post-selection amplifies meter shifts (with lower post-selection probability)
+
+5. **Continuous Measurement**: Repeated weak measurements lead to stochastic quantum trajectories
+
+6. **Applications**: Enhanced metrology, quantum tomography, tests of quantum foundations
+
+<Tip>
+Weak measurements bridge the gap between "no measurement" and "full collapse." They reveal that quantum measurement is a continuous process, not an instantaneous jump, and enable experimental access to previously hidden quantum phenomena!
+</Tip>
+
+## Further Reading
+
+- Related: Quantum Trajectories and Open Systems
+- Application: Precision Metrology with Weak Values
+- Advanced: Three-Box Paradox and Quantum Counterfactuals

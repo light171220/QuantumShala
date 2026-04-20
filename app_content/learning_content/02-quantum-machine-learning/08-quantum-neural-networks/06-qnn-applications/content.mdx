@@ -1,0 +1,933 @@
+---
+title: "QNN Applications"
+description: "Explore practical applications of Quantum Neural Networks including classification, regression, generative modeling, quantum data analysis, and benchmarking against classical methods."
+---
+
+# QNN Applications
+
+Quantum Neural Networks find applications across various machine learning tasks. This lesson explores practical implementations for classification, regression, generative modeling, and quantum data analysis.
+
+## QNN for Binary Classification
+
+Binary classification is a fundamental task where QNNs can demonstrate quantum advantage.
+
+<Definition>
+**Quantum Binary Classifier**:
+
+A QNN classifier maps input data to class probabilities:
+
+$$P(y=1|x) = |\langle 1|U(\theta)|\psi(x)\rangle|^2$$
+
+where $|\psi(x)\rangle$ encodes the input and $U(\theta)$ is the trainable circuit.
+</Definition>
+
+```python
+import numpy as np
+
+class QNNBinaryClassifier:
+    """Quantum Neural Network for binary classification."""
+
+    def __init__(self, n_qubits, n_layers):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dim = 2 ** n_qubits
+        self.n_params = 3 * n_qubits * n_layers
+
+    def _ry(self, theta, qubit, state):
+        """Apply RY rotation."""
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        new_state = np.zeros_like(state)
+
+        for z in range(self.dim):
+            z_flip = z ^ (1 << (self.n_qubits - 1 - qubit))
+            new_state[z] += c * state[z] - s * state[z_flip]
+
+        return new_state
+
+    def _rz(self, theta, qubit, state):
+        """Apply RZ rotation."""
+        new_state = np.zeros_like(state)
+
+        for z in range(self.dim):
+            bit = (z >> (self.n_qubits - 1 - qubit)) & 1
+            phase = np.exp(-1j * theta/2) if bit == 0 else np.exp(1j * theta/2)
+            new_state[z] = phase * state[z]
+
+        return new_state
+
+    def _cnot(self, control, target, state):
+        """Apply CNOT gate."""
+        new_state = np.zeros_like(state)
+
+        for z in range(self.dim):
+            ctrl_bit = (z >> (self.n_qubits - 1 - control)) & 1
+            if ctrl_bit:
+                z_new = z ^ (1 << (self.n_qubits - 1 - target))
+            else:
+                z_new = z
+            new_state[z_new] += state[z]
+
+        return new_state
+
+    def encode_data(self, x):
+        """Encode classical data into quantum state using angle encoding."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1
+
+        # Angle encoding: apply RY(x_i) for each feature
+        for q in range(min(len(x), self.n_qubits)):
+            theta = np.pi * x[q]  # Scale to [0, pi]
+            state = self._ry(theta, q, state)
+
+        return state
+
+    def forward(self, x, params):
+        """Forward pass of the QNN classifier."""
+        # Encode data
+        state = self.encode_data(x)
+
+        # Apply parameterized layers
+        param_idx = 0
+        for layer in range(self.n_layers):
+            # Rotation layer
+            for q in range(self.n_qubits):
+                state = self._ry(params[param_idx], q, state)
+                param_idx += 1
+                state = self._rz(params[param_idx], q, state)
+                param_idx += 1
+                state = self._ry(params[param_idx], q, state)
+                param_idx += 1
+
+            # Entangling layer
+            for q in range(self.n_qubits - 1):
+                state = self._cnot(q, q + 1, state)
+
+        return state
+
+    def predict_proba(self, x, params):
+        """Get probability of class 1."""
+        state = self.forward(x, params)
+
+        # Measure first qubit - probability of |1>
+        prob_1 = 0
+        for z in range(self.dim):
+            if (z >> (self.n_qubits - 1)) & 1:
+                prob_1 += np.abs(state[z])**2
+
+        return prob_1
+
+    def predict(self, x, params, threshold=0.5):
+        """Predict class label."""
+        return 1 if self.predict_proba(x, params) > threshold else 0
+
+    def compute_loss(self, X, y, params):
+        """Binary cross-entropy loss."""
+        loss = 0
+        for xi, yi in zip(X, y):
+            p = np.clip(self.predict_proba(xi, params), 1e-10, 1 - 1e-10)
+            loss -= yi * np.log(p) + (1 - yi) * np.log(1 - p)
+        return loss / len(X)
+
+    def compute_gradient(self, X, y, params, shift=np.pi/2):
+        """Compute gradient using parameter shift rule."""
+        gradient = np.zeros_like(params)
+
+        for i in range(len(params)):
+            params_plus = params.copy()
+            params_minus = params.copy()
+            params_plus[i] += shift
+            params_minus[i] -= shift
+
+            loss_plus = self.compute_loss(X, y, params_plus)
+            loss_minus = self.compute_loss(X, y, params_minus)
+
+            gradient[i] = (loss_plus - loss_minus) / (2 * np.sin(shift))
+
+        return gradient
+
+# Generate simple classification dataset
+np.random.seed(42)
+
+def generate_circle_data(n_samples=50):
+    """Generate data with circular decision boundary."""
+    X = []
+    y = []
+
+    for _ in range(n_samples):
+        x = np.random.uniform(-1, 1, 2)
+        label = 1 if np.sum(x**2) < 0.5 else 0
+        X.append(x)
+        y.append(label)
+
+    return np.array(X), np.array(y)
+
+X_train, y_train = generate_circle_data(40)
+X_test, y_test = generate_circle_data(20)
+
+# Train classifier
+classifier = QNNBinaryClassifier(n_qubits=2, n_layers=2)
+params = np.random.uniform(0, 2*np.pi, classifier.n_params)
+
+print("QNN Binary Classifier Training")
+print("=" * 50)
+print(f"Qubits: {classifier.n_qubits}")
+print(f"Layers: {classifier.n_layers}")
+print(f"Parameters: {classifier.n_params}")
+
+# Simple training loop
+learning_rate = 0.5
+for epoch in range(20):
+    gradient = classifier.compute_gradient(X_train, y_train, params)
+    params -= learning_rate * gradient
+
+    if epoch % 5 == 0:
+        loss = classifier.compute_loss(X_train, y_train, params)
+        acc = np.mean([classifier.predict(x, params) == y for x, y in zip(X_train, y_train)])
+        print(f"Epoch {epoch}: Loss={loss:.4f}, Accuracy={acc:.2%}")
+
+# Test accuracy
+test_acc = np.mean([classifier.predict(x, params) == y for x, y in zip(X_test, y_test)])
+print(f"\nTest Accuracy: {test_acc:.2%}")
+```
+
+<Tip>
+For classification tasks, measuring a single qubit provides a natural binary output. For multi-class problems, measure multiple qubits or use post-processing of measurement outcomes.
+</Tip>
+
+## Quantum Regression Models
+
+QNNs can also perform regression by mapping the expectation value to continuous outputs.
+
+<Formula>
+**Quantum Regression Output**:
+
+$$f(x) = \langle\psi(x,\theta)|O|\psi(x,\theta)\rangle$$
+
+where $O$ is an observable (typically a Pauli operator) that produces a continuous output in $[-1, 1]$.
+</Formula>
+
+```python
+import numpy as np
+
+class QNNRegressor:
+    """Quantum Neural Network for regression tasks."""
+
+    def __init__(self, n_qubits, n_layers):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dim = 2 ** n_qubits
+        self.n_params = 2 * n_qubits * n_layers
+
+        # Classical post-processing parameters
+        self.scale = 1.0
+        self.bias = 0.0
+
+    def _apply_rotation(self, state, theta, qubit, gate_type='ry'):
+        """Apply rotation gate."""
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        new_state = np.zeros_like(state)
+
+        for z in range(self.dim):
+            z_flip = z ^ (1 << (self.n_qubits - 1 - qubit))
+            if gate_type == 'ry':
+                new_state[z] += c * state[z] - s * state[z_flip]
+            elif gate_type == 'rx':
+                new_state[z] += c * state[z] - 1j * s * state[z_flip]
+
+        return new_state
+
+    def _apply_cnot(self, state, control, target):
+        """Apply CNOT gate."""
+        new_state = np.zeros_like(state)
+
+        for z in range(self.dim):
+            ctrl_bit = (z >> (self.n_qubits - 1 - control)) & 1
+            z_new = z ^ (1 << (self.n_qubits - 1 - target)) if ctrl_bit else z
+            new_state[z_new] += state[z]
+
+        return new_state
+
+    def encode_and_process(self, x, params):
+        """Data re-uploading encoding with processing."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1
+
+        param_idx = 0
+        for layer in range(self.n_layers):
+            # Encode data
+            for q in range(min(len(x), self.n_qubits)):
+                state = self._apply_rotation(state, np.pi * x[q], q, 'ry')
+
+            # Trainable rotations
+            for q in range(self.n_qubits):
+                state = self._apply_rotation(state, params[param_idx], q, 'ry')
+                param_idx += 1
+                state = self._apply_rotation(state, params[param_idx], q, 'rx')
+                param_idx += 1
+
+            # Entanglement
+            for q in range(self.n_qubits - 1):
+                state = self._apply_cnot(state, q, q + 1)
+
+        return state
+
+    def expectation_z(self, state, qubit=0):
+        """Compute <Z> expectation value for given qubit."""
+        exp_z = 0
+        for z in range(self.dim):
+            bit = (z >> (self.n_qubits - 1 - qubit)) & 1
+            sign = 1 - 2 * bit
+            exp_z += sign * np.abs(state[z])**2
+        return np.real(exp_z)
+
+    def predict(self, x, params):
+        """Predict continuous value."""
+        state = self.encode_and_process(x, params)
+        exp_val = self.expectation_z(state, qubit=0)
+        return self.scale * exp_val + self.bias
+
+    def mse_loss(self, X, y, params):
+        """Mean squared error loss."""
+        predictions = [self.predict(xi, params) for xi in X]
+        return np.mean((np.array(predictions) - y)**2)
+
+    def compute_gradient(self, X, y, params, shift=np.pi/2):
+        """Parameter shift gradient for MSE loss."""
+        gradient = np.zeros_like(params)
+
+        for i in range(len(params)):
+            params_plus = params.copy()
+            params_minus = params.copy()
+            params_plus[i] += shift
+            params_minus[i] -= shift
+
+            gradient[i] = (self.mse_loss(X, y, params_plus) -
+                          self.mse_loss(X, y, params_minus)) / (2 * np.sin(shift))
+
+        return gradient
+
+# Generate regression dataset
+np.random.seed(42)
+
+def target_function(x):
+    """Target function to learn."""
+    return np.sin(2 * np.pi * x[0]) * np.cos(np.pi * x[1])
+
+X_train = np.random.uniform(0, 1, (30, 2))
+y_train = np.array([target_function(x) for x in X_train])
+
+X_test = np.random.uniform(0, 1, (15, 2))
+y_test = np.array([target_function(x) for x in X_test])
+
+# Train regressor
+regressor = QNNRegressor(n_qubits=2, n_layers=3)
+params = np.random.uniform(0, 2*np.pi, regressor.n_params)
+
+print("\nQNN Regression Training")
+print("=" * 50)
+print(f"Parameters: {regressor.n_params}")
+print(f"Training samples: {len(X_train)}")
+
+learning_rate = 0.3
+for epoch in range(25):
+    gradient = regressor.compute_gradient(X_train, y_train, params)
+    params -= learning_rate * gradient
+
+    if epoch % 5 == 0:
+        mse = regressor.mse_loss(X_train, y_train, params)
+        print(f"Epoch {epoch}: MSE={mse:.4f}")
+
+# Evaluate
+test_mse = regressor.mse_loss(X_test, y_test, params)
+print(f"\nTest MSE: {test_mse:.4f}")
+
+# Show predictions
+print("\nSample Predictions:")
+for i in range(5):
+    pred = regressor.predict(X_test[i], params)
+    print(f"  True: {y_test[i]:.3f}, Predicted: {pred:.3f}")
+```
+
+## Quantum Generative Models (Born Machines)
+
+Born machines use quantum measurement probabilities as a generative model.
+
+<Definition>
+**Born Machine**:
+
+A quantum generative model that produces samples from the distribution:
+
+$$P(x) = |\langle x|U(\theta)|0\rangle|^2$$
+
+The quantum state encodes a probability distribution directly through the Born rule.
+</Definition>
+
+```python
+import numpy as np
+
+class BornMachine:
+    """Quantum Born Machine for generative modeling."""
+
+    def __init__(self, n_qubits, n_layers):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dim = 2 ** n_qubits
+        self.n_params = 2 * n_qubits * n_layers
+
+    def _apply_ry(self, state, theta, qubit):
+        """Apply RY gate."""
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        new_state = np.zeros_like(state)
+
+        for z in range(self.dim):
+            z_flip = z ^ (1 << (self.n_qubits - 1 - qubit))
+            new_state[z] += c * state[z] - s * state[z_flip]
+
+        return new_state
+
+    def _apply_rz(self, state, theta, qubit):
+        """Apply RZ gate."""
+        new_state = np.zeros_like(state)
+
+        for z in range(self.dim):
+            bit = (z >> (self.n_qubits - 1 - qubit)) & 1
+            phase = np.exp(-1j * theta/2) if bit == 0 else np.exp(1j * theta/2)
+            new_state[z] = phase * state[z]
+
+        return new_state
+
+    def _apply_cz(self, state, q1, q2):
+        """Apply CZ gate."""
+        new_state = state.copy()
+
+        for z in range(self.dim):
+            bit1 = (z >> (self.n_qubits - 1 - q1)) & 1
+            bit2 = (z >> (self.n_qubits - 1 - q2)) & 1
+            if bit1 and bit2:
+                new_state[z] *= -1
+
+        return new_state
+
+    def generate_state(self, params):
+        """Generate quantum state from parameters."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1
+
+        param_idx = 0
+        for layer in range(self.n_layers):
+            # Rotation layer
+            for q in range(self.n_qubits):
+                state = self._apply_ry(state, params[param_idx], q)
+                param_idx += 1
+                state = self._apply_rz(state, params[param_idx], q)
+                param_idx += 1
+
+            # Entangling layer
+            for q in range(self.n_qubits - 1):
+                state = self._apply_cz(state, q, q + 1)
+            if self.n_qubits > 2:
+                state = self._apply_cz(state, self.n_qubits - 1, 0)
+
+        return state
+
+    def get_distribution(self, params):
+        """Get probability distribution from Born machine."""
+        state = self.generate_state(params)
+        return np.abs(state)**2
+
+    def sample(self, params, n_samples=100):
+        """Sample from the Born machine distribution."""
+        probs = self.get_distribution(params)
+        samples = np.random.choice(self.dim, size=n_samples, p=probs)
+        return samples
+
+    def kl_divergence(self, params, target_dist):
+        """KL divergence from target distribution."""
+        model_dist = self.get_distribution(params)
+        model_dist = np.clip(model_dist, 1e-10, 1)
+
+        kl = 0
+        for i in range(len(target_dist)):
+            if target_dist[i] > 1e-10:
+                kl += target_dist[i] * np.log(target_dist[i] / model_dist[i])
+
+        return kl
+
+    def train_mmd(self, target_dist, params, n_epochs=50, lr=0.2):
+        """Train using Maximum Mean Discrepancy."""
+
+        def mmd_loss(params):
+            model_dist = self.get_distribution(params)
+            # Simplified MMD using L2 distance
+            return np.sum((model_dist - target_dist)**2)
+
+        losses = []
+        for epoch in range(n_epochs):
+            # Compute gradient numerically
+            gradient = np.zeros_like(params)
+            eps = 0.01
+
+            for i in range(len(params)):
+                params_plus = params.copy()
+                params_minus = params.copy()
+                params_plus[i] += eps
+                params_minus[i] -= eps
+                gradient[i] = (mmd_loss(params_plus) - mmd_loss(params_minus)) / (2 * eps)
+
+            params -= lr * gradient
+
+            if epoch % 10 == 0:
+                loss = mmd_loss(params)
+                losses.append(loss)
+
+        return params, losses
+
+# Example: Learn a bimodal distribution
+np.random.seed(42)
+
+n_qubits = 3
+dim = 2 ** n_qubits
+
+# Target: bimodal distribution peaked at |000> and |111>
+target_dist = np.zeros(dim)
+target_dist[0] = 0.4   # |000>
+target_dist[7] = 0.4   # |111>
+target_dist[3] = 0.1   # |011>
+target_dist[5] = 0.1   # |101>
+target_dist /= target_dist.sum()
+
+print("\nBorn Machine Training")
+print("=" * 50)
+print(f"Qubits: {n_qubits}")
+print(f"Output dimension: {dim}")
+
+# Initialize and train
+born_machine = BornMachine(n_qubits=n_qubits, n_layers=4)
+params = np.random.uniform(0, 2*np.pi, born_machine.n_params)
+
+print(f"Parameters: {born_machine.n_params}")
+print("\nTarget distribution:")
+for z in range(dim):
+    if target_dist[z] > 0.01:
+        print(f"  |{format(z, '03b')}>: {target_dist[z]:.3f}")
+
+# Train
+params, losses = born_machine.train_mmd(target_dist, params, n_epochs=100, lr=0.3)
+
+print("\nLearned distribution:")
+learned_dist = born_machine.get_distribution(params)
+for z in range(dim):
+    if learned_dist[z] > 0.01 or target_dist[z] > 0.01:
+        print(f"  |{format(z, '03b')}>: {learned_dist[z]:.3f} (target: {target_dist[z]:.3f})")
+
+# Sample from trained model
+samples = born_machine.sample(params, n_samples=100)
+print("\nSampled distribution (100 samples):")
+for z in range(dim):
+    count = np.sum(samples == z)
+    if count > 0:
+        print(f"  |{format(z, '03b')}>: {count/100:.2f}")
+```
+
+<Warning>
+Born machines face the challenge of measuring the full distribution, which requires exponentially many measurements. For practical applications, use techniques like gradient estimation with limited samples.
+</Warning>
+
+## Quantum Data Analysis
+
+QNNs can be used to analyze inherently quantum data, such as quantum states or quantum process outputs.
+
+```python
+import numpy as np
+
+class QuantumDataAnalyzer:
+    """QNN for analyzing quantum data."""
+
+    def __init__(self, n_qubits, n_layers):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dim = 2 ** n_qubits
+        self.n_params = 2 * n_qubits * n_layers
+
+    def _apply_unitary_layer(self, state, params, layer):
+        """Apply parameterized unitary layer."""
+        param_idx = layer * 2 * self.n_qubits
+
+        # Single qubit rotations
+        for q in range(self.n_qubits):
+            # RY
+            theta = params[param_idx]
+            c, s = np.cos(theta/2), np.sin(theta/2)
+            new_state = np.zeros_like(state)
+            for z in range(self.dim):
+                z_flip = z ^ (1 << (self.n_qubits - 1 - q))
+                new_state[z] += c * state[z] - s * state[z_flip]
+            state = new_state
+            param_idx += 1
+
+            # RZ
+            theta = params[param_idx]
+            new_state = np.zeros_like(state)
+            for z in range(self.dim):
+                bit = (z >> (self.n_qubits - 1 - q)) & 1
+                phase = np.exp(-1j * theta/2) if bit == 0 else np.exp(1j * theta/2)
+                new_state[z] = phase * state[z]
+            state = new_state
+            param_idx += 1
+
+        # CNOT chain
+        for q in range(self.n_qubits - 1):
+            new_state = np.zeros_like(state)
+            for z in range(self.dim):
+                ctrl_bit = (z >> (self.n_qubits - 1 - q)) & 1
+                z_new = z ^ (1 << (self.n_qubits - 1 - (q + 1))) if ctrl_bit else z
+                new_state[z_new] += state[z]
+            state = new_state
+
+        return state
+
+    def process_quantum_state(self, input_state, params):
+        """Process quantum state through QNN."""
+        state = input_state.copy()
+
+        for layer in range(self.n_layers):
+            state = self._apply_unitary_layer(state, params, layer)
+
+        return state
+
+    def extract_features(self, input_state, params):
+        """Extract features from quantum state."""
+        output_state = self.process_quantum_state(input_state, params)
+
+        features = {}
+
+        # Measurement probabilities
+        probs = np.abs(output_state)**2
+        features['probabilities'] = probs
+
+        # Z expectations for each qubit
+        z_expectations = []
+        for q in range(self.n_qubits):
+            z_exp = 0
+            for z in range(self.dim):
+                bit = (z >> (self.n_qubits - 1 - q)) & 1
+                z_exp += (1 - 2 * bit) * probs[z]
+            z_expectations.append(z_exp)
+        features['z_expectations'] = np.array(z_expectations)
+
+        # Purity estimate
+        features['purity'] = np.sum(probs**2)
+
+        return features
+
+    def classify_quantum_state(self, input_state, params):
+        """Classify quantum state based on measurement."""
+        output_state = self.process_quantum_state(input_state, params)
+        probs = np.abs(output_state)**2
+
+        # Classify based on first qubit measurement
+        prob_0 = sum(probs[z] for z in range(self.dim)
+                    if not ((z >> (self.n_qubits - 1)) & 1))
+
+        return 0 if prob_0 > 0.5 else 1
+
+# Example: Quantum state classification
+np.random.seed(42)
+
+n_qubits = 3
+dim = 2 ** n_qubits
+
+def generate_ghz_state(n_qubits):
+    """Generate GHZ state: (|00...0> + |11...1>) / sqrt(2)"""
+    state = np.zeros(2**n_qubits, dtype=complex)
+    state[0] = 1/np.sqrt(2)
+    state[-1] = 1/np.sqrt(2)
+    return state
+
+def generate_w_state(n_qubits):
+    """Generate W state: (|100..0> + |010..0> + ... + |00..01>) / sqrt(n)"""
+    state = np.zeros(2**n_qubits, dtype=complex)
+    for i in range(n_qubits):
+        idx = 1 << (n_qubits - 1 - i)
+        state[idx] = 1/np.sqrt(n_qubits)
+    return state
+
+def generate_random_state(n_qubits):
+    """Generate random quantum state."""
+    state = np.random.randn(2**n_qubits) + 1j * np.random.randn(2**n_qubits)
+    return state / np.linalg.norm(state)
+
+print("\nQuantum Data Analysis")
+print("=" * 50)
+
+analyzer = QuantumDataAnalyzer(n_qubits=n_qubits, n_layers=2)
+params = np.random.uniform(0, 2*np.pi, analyzer.n_params)
+
+# Analyze different quantum states
+states = {
+    'GHZ': generate_ghz_state(n_qubits),
+    'W': generate_w_state(n_qubits),
+    'Random': generate_random_state(n_qubits)
+}
+
+for name, state in states.items():
+    features = analyzer.extract_features(state, params)
+
+    print(f"\n{name} State Analysis:")
+    print(f"  Z expectations: {[f'{z:.3f}' for z in features['z_expectations']]}")
+    print(f"  Purity estimate: {features['purity']:.4f}")
+
+    # Show dominant measurement outcomes
+    probs = features['probabilities']
+    top_indices = np.argsort(probs)[-3:][::-1]
+    print(f"  Top outcomes: ", end="")
+    for idx in top_indices:
+        if probs[idx] > 0.01:
+            print(f"|{format(idx, f'0{n_qubits}b')}>:{probs[idx]:.3f} ", end="")
+    print()
+```
+
+## Benchmarking QNNs Against Classical Methods
+
+Systematic comparison is essential for understanding when QNNs provide advantages.
+
+<Formula>
+**Quantum vs Classical Comparison Metrics**:
+
+- **Accuracy**: Classification/regression performance
+- **Sample Complexity**: Training samples needed
+- **Parameter Efficiency**: Parameters vs performance
+- **Computational Cost**: Training and inference time
+</Formula>
+
+```python
+import numpy as np
+from collections import defaultdict
+
+class ClassicalNeuralNetwork:
+    """Simple classical neural network for comparison."""
+
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        self.W1 = np.random.randn(input_dim, hidden_dim) * 0.5
+        self.b1 = np.zeros(hidden_dim)
+        self.W2 = np.random.randn(hidden_dim, output_dim) * 0.5
+        self.b2 = np.zeros(output_dim)
+        self.n_params = (input_dim * hidden_dim + hidden_dim +
+                        hidden_dim * output_dim + output_dim)
+
+    def relu(self, x):
+        return np.maximum(0, x)
+
+    def sigmoid(self, x):
+        return 1 / (1 + np.exp(-np.clip(x, -500, 500)))
+
+    def forward(self, x):
+        h = self.relu(x @ self.W1 + self.b1)
+        return self.sigmoid(h @ self.W2 + self.b2)
+
+    def predict(self, x):
+        return 1 if self.forward(x)[0] > 0.5 else 0
+
+    def train_step(self, X, y, lr=0.1):
+        """Simple gradient descent step."""
+        for xi, yi in zip(X, y):
+            # Forward
+            h = self.relu(xi @ self.W1 + self.b1)
+            out = self.sigmoid(h @ self.W2 + self.b2)
+
+            # Backward (simplified)
+            error = out - yi
+            dW2 = np.outer(h, error)
+            db2 = error
+
+            dh = error @ self.W2.T
+            dh[h <= 0] = 0  # ReLU gradient
+
+            dW1 = np.outer(xi, dh)
+            db1 = dh
+
+            # Update
+            self.W2 -= lr * dW2
+            self.b2 -= lr * db2.flatten()
+            self.W1 -= lr * dW1
+            self.b1 -= lr * db1.flatten()
+
+class QNNSimple:
+    """Simplified QNN for benchmarking."""
+
+    def __init__(self, n_qubits, n_layers):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dim = 2 ** n_qubits
+        self.n_params = 2 * n_qubits * n_layers
+        self.params = np.random.uniform(0, 2*np.pi, self.n_params)
+
+    def forward(self, x):
+        """Simplified forward pass."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1
+
+        param_idx = 0
+        for layer in range(self.n_layers):
+            # Encode data
+            for q in range(min(len(x), self.n_qubits)):
+                theta = np.pi * x[q]
+                c, s = np.cos(theta/2), np.sin(theta/2)
+                new_state = np.zeros_like(state)
+                for z in range(self.dim):
+                    z_flip = z ^ (1 << (self.n_qubits - 1 - q))
+                    new_state[z] += c * state[z] - s * state[z_flip]
+                state = new_state
+
+            # Trainable rotations
+            for q in range(self.n_qubits):
+                for _ in range(2):
+                    theta = self.params[param_idx]
+                    c, s = np.cos(theta/2), np.sin(theta/2)
+                    new_state = np.zeros_like(state)
+                    for z in range(self.dim):
+                        z_flip = z ^ (1 << (self.n_qubits - 1 - q))
+                        new_state[z] += c * state[z] - s * state[z_flip]
+                    state = new_state
+                    param_idx += 1
+
+        return state
+
+    def predict_proba(self, x):
+        state = self.forward(x)
+        prob_1 = sum(np.abs(state[z])**2 for z in range(self.dim)
+                    if (z >> (self.n_qubits - 1)) & 1)
+        return prob_1
+
+    def predict(self, x):
+        return 1 if self.predict_proba(x) > 0.5 else 0
+
+    def train_step(self, X, y, lr=0.3):
+        """Parameter shift training step."""
+        gradient = np.zeros_like(self.params)
+
+        for i in range(len(self.params)):
+            loss_plus = 0
+            loss_minus = 0
+
+            self.params[i] += np.pi/2
+            for xi, yi in zip(X, y):
+                p = np.clip(self.predict_proba(xi), 1e-10, 1-1e-10)
+                loss_plus -= yi * np.log(p) + (1-yi) * np.log(1-p)
+
+            self.params[i] -= np.pi
+            for xi, yi in zip(X, y):
+                p = np.clip(self.predict_proba(xi), 1e-10, 1-1e-10)
+                loss_minus -= yi * np.log(p) + (1-yi) * np.log(1-p)
+
+            self.params[i] += np.pi/2
+            gradient[i] = (loss_plus - loss_minus) / (2 * len(X))
+
+        self.params -= lr * gradient
+
+def benchmark_comparison(n_trials=3):
+    """Benchmark QNN vs classical NN."""
+
+    results = defaultdict(list)
+
+    # Generate dataset
+    np.random.seed(42)
+
+    def generate_data(n_samples, noise=0.1):
+        X = np.random.uniform(-1, 1, (n_samples, 2))
+        y = ((X[:, 0]**2 + X[:, 1]**2) < 0.5).astype(int)
+        # Add noise
+        flip_mask = np.random.random(n_samples) < noise
+        y[flip_mask] = 1 - y[flip_mask]
+        return X, y
+
+    X_train, y_train = generate_data(40)
+    X_test, y_test = generate_data(20)
+
+    print("Benchmarking QNN vs Classical NN")
+    print("=" * 60)
+    print(f"Training samples: {len(X_train)}")
+    print(f"Test samples: {len(X_test)}")
+
+    for trial in range(n_trials):
+        # Classical NN
+        cnn = ClassicalNeuralNetwork(input_dim=2, hidden_dim=8, output_dim=1)
+        for _ in range(50):
+            cnn.train_step(X_train, y_train, lr=0.1)
+
+        cnn_acc = np.mean([cnn.predict(x) == y for x, y in zip(X_test, y_test)])
+        results['classical_acc'].append(cnn_acc)
+        results['classical_params'].append(cnn.n_params)
+
+        # QNN
+        qnn = QNNSimple(n_qubits=2, n_layers=2)
+        for _ in range(20):
+            qnn.train_step(X_train, y_train, lr=0.5)
+
+        qnn_acc = np.mean([qnn.predict(x) == y for x, y in zip(X_test, y_test)])
+        results['qnn_acc'].append(qnn_acc)
+        results['qnn_params'].append(qnn.n_params)
+
+    print("\nResults Summary:")
+    print("-" * 60)
+    print(f"{'Model':<20} {'Accuracy':<15} {'Parameters':<15}")
+    print("-" * 60)
+
+    print(f"{'Classical NN':<20} {np.mean(results['classical_acc']):.2%} +/- {np.std(results['classical_acc']):.2%}"
+          f"  {results['classical_params'][0]}")
+    print(f"{'QNN':<20} {np.mean(results['qnn_acc']):.2%} +/- {np.std(results['qnn_acc']):.2%}"
+          f"  {results['qnn_params'][0]}")
+
+    return results
+
+# Run benchmark
+results = benchmark_comparison(n_trials=3)
+
+# Parameter efficiency analysis
+print("\n\nParameter Efficiency Analysis")
+print("=" * 60)
+
+def analyze_scaling():
+    """Analyze how performance scales with parameters."""
+
+    configurations = [
+        ('QNN-2q-1L', 2, 1),
+        ('QNN-2q-2L', 2, 2),
+        ('QNN-3q-2L', 3, 2),
+        ('QNN-4q-2L', 4, 2),
+    ]
+
+    print(f"{'Configuration':<15} {'Qubits':<8} {'Layers':<8} {'Params':<8}")
+    print("-" * 50)
+
+    for name, n_qubits, n_layers in configurations:
+        n_params = 2 * n_qubits * n_layers
+        print(f"{name:<15} {n_qubits:<8} {n_layers:<8} {n_params:<8}")
+
+    print("\nClassical NN scaling:")
+    for hidden_dim in [4, 8, 16, 32]:
+        n_params = 2 * hidden_dim + hidden_dim + hidden_dim * 1 + 1
+        print(f"  Hidden={hidden_dim}: {n_params} parameters")
+
+analyze_scaling()
+```
+
+<Tip>
+When benchmarking, consider not just accuracy but also the number of training samples needed (sample complexity) and the interpretability of the learned model. QNNs may excel in low-data regimes for certain problem structures.
+</Tip>
+
+## Summary
+
+Key takeaways for QNN applications:
+
+1. **Binary Classification**: QNNs naturally produce probabilistic outputs suitable for classification through qubit measurements.
+
+2. **Regression**: Use expectation values of observables for continuous outputs; post-processing scales results to desired range.
+
+3. **Generative Models**: Born machines leverage quantum measurement probabilities for sampling; face challenges with distribution estimation.
+
+4. **Quantum Data Analysis**: QNNs are natural for processing quantum data without classical intermediate representations.
+
+5. **Benchmarking**: Fair comparison requires considering parameter count, sample complexity, and computational resources; QNN advantages are problem-dependent.
+
+The next lesson covers advanced topics in QNN optimization and deployment strategies.

@@ -1,0 +1,551 @@
+---
+title: "Fisher Information: Classical and Quantum"
+description: "Deep dive into Fisher information theory - the mathematical foundation of precision bounds in parameter estimation. Master both classical and quantum formulations, understand their geometric interpretations, and explore multiparameter extensions."
+duration: 55
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Derive the classical Fisher information from first principles
+- Understand the geometric interpretation of Fisher information as a metric
+- Compute the Quantum Fisher Information matrix for multiparameter estimation
+- Prove the hierarchy: Classical FI <= QFI
+- Apply the Symmetric Logarithmic Derivative formalism
+- Analyze the role of incompatibility in multiparameter quantum estimation
+
+## 1. Classical Fisher Information Revisited
+
+Fisher information quantifies how much information a random variable carries about an unknown parameter.
+
+<Definition term="Classical Fisher Information">
+For a probability distribution $p(x|\theta)$ depending on parameter $\theta$:
+
+$$F(\theta) = \mathbb{E}\left[\left(\frac{\partial \ln p(x|\theta)}{\partial \theta}\right)^2\right] = \int p(x|\theta) \left(\frac{\partial \ln p(x|\theta)}{\partial \theta}\right)^2 dx$$
+
+This is equivalently:
+
+$$F(\theta) = -\mathbb{E}\left[\frac{\partial^2 \ln p(x|\theta)}{\partial \theta^2}\right]$$
+</Definition>
+
+<Formula>
+**Score Function:**
+
+The score function is $s(x,\theta) = \frac{\partial \ln p(x|\theta)}{\partial \theta}$
+
+Fisher information is the variance of the score: $F(\theta) = \text{Var}(s)$
+</Formula>
+
+```python
+import numpy as np
+from scipy.stats import norm, poisson
+from typing import Callable
+
+def classical_fisher_info(log_prob: Callable, theta: float,
+                          samples: np.ndarray) -> float:
+    """
+    Estimate Fisher information from samples using score variance.
+
+    Args:
+        log_prob: Function log_p(x, theta)
+        theta: Parameter value
+        samples: Sample data
+
+    Returns:
+        Estimated Fisher information
+    """
+    delta = 1e-6
+    scores = []
+
+    for x in samples:
+        # Score = d(log p)/d(theta)
+        lp_plus = log_prob(x, theta + delta)
+        lp_minus = log_prob(x, theta - delta)
+        score = (lp_plus - lp_minus) / (2 * delta)
+        scores.append(score)
+
+    scores = np.array(scores)
+
+    # Fisher info = Var(score)
+    return np.var(scores)
+
+# Example: Gaussian with unknown mean
+def gaussian_log_prob(x, mu, sigma=1.0):
+    return -0.5 * ((x - mu) / sigma)**2 - 0.5 * np.log(2 * np.pi * sigma**2)
+
+# Generate samples
+np.random.seed(42)
+true_mu = 2.0
+sigma = 1.0
+samples = np.random.normal(true_mu, sigma, 1000)
+
+# Estimate Fisher information
+fi_estimate = classical_fisher_info(
+    lambda x, mu: gaussian_log_prob(x, mu, sigma),
+    true_mu, samples
+)
+
+print(f"Estimated Fisher Information: {fi_estimate:.4f}")
+print(f"Theoretical (1/sigma^2): {1/sigma**2:.4f}")
+```
+
+### Information Inequality
+
+<Warning>
+The Fisher information satisfies a fundamental inequality connecting likelihood curvature to score variance. This duality is the mathematical heart of the Cramer-Rao bound.
+</Warning>
+
+## 2. Geometric Interpretation
+
+Fisher information has a beautiful geometric interpretation as a Riemannian metric on the space of probability distributions.
+
+<Definition term="Fisher-Rao Metric">
+The Fisher information defines a metric tensor on the statistical manifold:
+
+$$g_{ij}(\theta) = F_{ij}(\theta) = \mathbb{E}\left[\frac{\partial \ln p}{\partial \theta_i}\frac{\partial \ln p}{\partial \theta_j}\right]$$
+
+The distance between nearby distributions is:
+
+$$ds^2 = \sum_{ij} g_{ij} d\theta_i d\theta_j$$
+</Definition>
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def fisher_distance(theta1: float, theta2: float,
+                    fisher_func: Callable, n_steps: int = 100) -> float:
+    """
+    Compute geodesic distance using Fisher metric.
+
+    For a single parameter: ds = sqrt(F(theta)) d_theta
+    """
+    thetas = np.linspace(theta1, theta2, n_steps)
+    delta = thetas[1] - thetas[0]
+
+    distance = 0
+    for theta in thetas[:-1]:
+        F = fisher_func(theta)
+        distance += np.sqrt(F) * np.abs(delta)
+
+    return distance
+
+# Fisher information for Bernoulli(p)
+def bernoulli_fisher(p):
+    if p <= 0 or p >= 1:
+        return np.inf
+    return 1 / (p * (1 - p))
+
+# Distance between p=0.3 and p=0.7
+dist = fisher_distance(0.3, 0.7, bernoulli_fisher)
+print(f"Fisher distance between Bernoulli(0.3) and Bernoulli(0.7): {dist:.4f}")
+
+# For Bernoulli: geodesic distance = 2 * arcsin(sqrt(|p1-p2|))
+# This is related to Hellinger distance
+```
+
+<Tip>
+The Fisher-Rao metric is the unique Riemannian metric on probability distributions that is invariant under sufficient statistics. This makes it the natural geometry for statistical inference!
+</Tip>
+
+## 3. Quantum Fisher Information
+
+In quantum mechanics, we optimize over all possible measurements, leading to the Quantum Fisher Information (QFI).
+
+<Definition term="Quantum Fisher Information">
+For a parametrized density matrix $\rho_\theta$, the QFI is defined via the Symmetric Logarithmic Derivative (SLD) $L_\theta$:
+
+$$\frac{\partial \rho_\theta}{\partial \theta} = \frac{1}{2}(L_\theta \rho_\theta + \rho_\theta L_\theta)$$
+
+$$F_Q(\theta) = \text{Tr}(\rho_\theta L_\theta^2)$$
+</Definition>
+
+### Computing the SLD
+
+<Formula>
+**SLD in Eigenbasis:**
+
+If $\rho = \sum_i \lambda_i |i\rangle\langle i|$, then:
+
+$$\langle i|L|j\rangle = \frac{2\langle i|\partial_\theta \rho|j\rangle}{\lambda_i + \lambda_j}$$
+
+for $\lambda_i + \lambda_j > 0$
+</Formula>
+
+```python
+import numpy as np
+from scipy.linalg import sqrtm
+
+def compute_sld(rho: np.ndarray, drho: np.ndarray,
+                tol: float = 1e-12) -> np.ndarray:
+    """
+    Compute the Symmetric Logarithmic Derivative.
+
+    Args:
+        rho: Density matrix
+        drho: Derivative of rho w.r.t. parameter
+
+    Returns:
+        SLD operator L
+    """
+    d = rho.shape[0]
+
+    # Eigendecomposition
+    eigenvalues, eigenvectors = np.linalg.eigh(rho)
+
+    # Build SLD in eigenbasis
+    L_eigen = np.zeros((d, d), dtype=complex)
+
+    for i in range(d):
+        for j in range(d):
+            denom = eigenvalues[i] + eigenvalues[j]
+            if denom > tol:
+                vi = eigenvectors[:, i]
+                vj = eigenvectors[:, j]
+                drho_ij = vi.conj() @ drho @ vj
+                L_eigen[i, j] = 2 * drho_ij / denom
+
+    # Transform back
+    L = eigenvectors @ L_eigen @ eigenvectors.conj().T
+
+    return L
+
+def quantum_fisher_info_from_sld(rho: np.ndarray, L: np.ndarray) -> float:
+    """
+    Compute QFI from SLD: F_Q = Tr(rho L^2)
+    """
+    return np.real(np.trace(rho @ L @ L))
+
+# Example: Thermal state with temperature parameter
+def thermal_state(beta: float, H: np.ndarray) -> np.ndarray:
+    """Thermal state rho = exp(-beta*H) / Z"""
+    exp_H = np.exp(-beta * np.linalg.eigvalsh(H))
+    Z = np.sum(exp_H)
+    return np.diag(exp_H / Z)
+
+# Two-level system
+H = np.diag([0, 1])  # Energy gap = 1
+beta = 1.0
+delta = 1e-6
+
+rho = thermal_state(beta, H)
+rho_plus = thermal_state(beta + delta, H)
+rho_minus = thermal_state(beta - delta, H)
+drho = (rho_plus - rho_minus) / (2 * delta)
+
+L = compute_sld(rho, drho)
+qfi = quantum_fisher_info_from_sld(rho, L)
+
+print(f"QFI for thermal state at beta={beta}: {qfi:.6f}")
+```
+
+## 4. The Hierarchy of Fisher Informations
+
+<Definition term="Fisher Information Hierarchy">
+For any measurement yielding probability distribution $p(x|\theta)$:
+
+$$F_{\text{classical}}(\theta) \leq F_Q(\theta)$$
+
+Equality holds when measuring in the SLD eigenbasis.
+</Definition>
+
+```python
+import numpy as np
+
+def compare_fisher_informations(rho: np.ndarray, drho: np.ndarray,
+                                 povm: list) -> dict:
+    """
+    Compare classical and quantum Fisher information.
+
+    Args:
+        rho: Density matrix
+        drho: Derivative
+        povm: List of POVM elements
+
+    Returns:
+        Dictionary with both Fisher informations
+    """
+    # Quantum Fisher Information
+    L = compute_sld(rho, drho)
+    qfi = quantum_fisher_info_from_sld(rho, L)
+
+    # Classical Fisher Information for this POVM
+    probs = [np.real(np.trace(E @ rho)) for E in povm]
+    dprobs = [np.real(np.trace(E @ drho)) for E in povm]
+
+    cfi = 0
+    for p, dp in zip(probs, dprobs):
+        if p > 1e-12:
+            cfi += dp**2 / p
+
+    return {
+        'qfi': qfi,
+        'cfi': cfi,
+        'ratio': cfi / qfi if qfi > 0 else 0,
+        'optimal_povm': np.allclose(cfi, qfi, rtol=0.01)
+    }
+
+# Example: Phase estimation
+theta = 0.5
+psi = np.array([1, np.exp(1j * theta)]) / np.sqrt(2)
+rho = np.outer(psi, psi.conj())
+
+dpsi = np.array([0, 1j * np.exp(1j * theta)]) / np.sqrt(2)
+drho = np.outer(dpsi, psi.conj()) + np.outer(psi, dpsi.conj())
+
+# Non-optimal measurement: Z basis
+Z_povm = [
+    np.array([[1, 0], [0, 0]], dtype=complex),
+    np.array([[0, 0], [0, 1]], dtype=complex)
+]
+
+# Optimal measurement: SLD eigenbasis (X basis for this state)
+X_povm = [
+    np.array([[0.5, 0.5], [0.5, 0.5]], dtype=complex),
+    np.array([[0.5, -0.5], [-0.5, 0.5]], dtype=complex)
+]
+
+print("Z-basis measurement:")
+result_Z = compare_fisher_informations(rho, drho, Z_povm)
+print(f"  QFI: {result_Z['qfi']:.4f}, CFI: {result_Z['cfi']:.4f}, Ratio: {result_Z['ratio']:.4f}")
+
+print("\nX-basis measurement:")
+result_X = compare_fisher_informations(rho, drho, X_povm)
+print(f"  QFI: {result_X['qfi']:.4f}, CFI: {result_X['cfi']:.4f}, Ratio: {result_X['ratio']:.4f}")
+```
+
+## 5. Multiparameter Estimation
+
+When estimating multiple parameters simultaneously, Fisher information becomes a matrix.
+
+<Definition term="Quantum Fisher Information Matrix">
+For parameters $\boldsymbol{\theta} = (\theta_1, ..., \theta_k)$:
+
+$$[F_Q]_{ij} = \frac{1}{2}\text{Tr}(\rho\{L_i, L_j\})$$
+
+where $L_i$ is the SLD for parameter $\theta_i$.
+</Definition>
+
+<Formula>
+**Multiparameter Cramer-Rao Bound:**
+
+$$\text{Cov}(\hat{\boldsymbol{\theta}}) \geq \frac{1}{n} F_Q^{-1}$$
+
+in the matrix sense (A >= B means A - B is positive semidefinite).
+</Formula>
+
+```python
+import numpy as np
+
+def qfi_matrix(rho: np.ndarray, drhos: list) -> np.ndarray:
+    """
+    Compute Quantum Fisher Information matrix.
+
+    Args:
+        rho: Density matrix
+        drhos: List of derivatives [d_rho/d_theta_1, ...]
+
+    Returns:
+        QFI matrix
+    """
+    n_params = len(drhos)
+    F = np.zeros((n_params, n_params), dtype=complex)
+
+    # Compute SLDs
+    Ls = [compute_sld(rho, drho) for drho in drhos]
+
+    # QFI matrix elements: F_ij = (1/2) Tr(rho {L_i, L_j})
+    for i in range(n_params):
+        for j in range(n_params):
+            anticomm = Ls[i] @ Ls[j] + Ls[j] @ Ls[i]
+            F[i, j] = 0.5 * np.trace(rho @ anticomm)
+
+    return np.real(F)
+
+# Example: Estimating both amplitude and phase
+# State: |psi(r, phi)> = sqrt(1-r)|0> + sqrt(r)*e^{i*phi}|1>
+def two_param_state(r: float, phi: float) -> np.ndarray:
+    psi = np.array([np.sqrt(1-r), np.sqrt(r) * np.exp(1j * phi)], dtype=complex)
+    return np.outer(psi, psi.conj())
+
+r, phi = 0.5, 0.3
+delta = 1e-6
+
+rho = two_param_state(r, phi)
+
+# Numerical derivatives
+drho_r = (two_param_state(r + delta, phi) - two_param_state(r - delta, phi)) / (2 * delta)
+drho_phi = (two_param_state(r, phi + delta) - two_param_state(r, phi - delta)) / (2 * delta)
+
+F = qfi_matrix(rho, [drho_r, drho_phi])
+
+print("QFI Matrix for (r, phi) estimation:")
+print(np.round(F, 4))
+print(f"\nDeterminant: {np.linalg.det(F):.4f}")
+print(f"Eigenvalues: {np.linalg.eigvalsh(F)}")
+```
+
+## 6. Incompatibility in Multiparameter Estimation
+
+<Warning>
+Unlike classical statistics, optimal measurements for different quantum parameters may be incompatible! You cannot always achieve the QFI for all parameters simultaneously.
+</Warning>
+
+<Definition term="Parameter Incompatibility">
+Parameters $\theta_i$ and $\theta_j$ are compatible if and only if:
+
+$$[L_i, L_j] = 0$$
+
+where $L_i, L_j$ are the corresponding SLDs. When this fails, no single measurement achieves the QFI for both parameters.
+</Definition>
+
+```python
+def check_compatibility(rho: np.ndarray, drhos: list) -> dict:
+    """
+    Check compatibility of multiple parameters.
+
+    Args:
+        rho: Density matrix
+        drhos: List of parameter derivatives
+
+    Returns:
+        Dictionary with compatibility analysis
+    """
+    n = len(drhos)
+    Ls = [compute_sld(rho, drho) for drho in drhos]
+
+    # Check commutators
+    commutators = np.zeros((n, n))
+    for i in range(n):
+        for j in range(i+1, n):
+            comm = Ls[i] @ Ls[j] - Ls[j] @ Ls[i]
+            commutators[i, j] = np.linalg.norm(comm)
+            commutators[j, i] = commutators[i, j]
+
+    # Parameters are compatible if all commutators vanish
+    is_compatible = np.allclose(commutators, 0)
+
+    return {
+        'slds': Ls,
+        'commutator_norms': commutators,
+        'is_compatible': is_compatible
+    }
+
+# Example: 3D rotation estimation (incompatible)
+# State: R(alpha, beta, gamma)|0> where R is a general rotation
+
+def rotation_state(alpha: float, beta: float) -> np.ndarray:
+    """Simplified: rotation around X and Z axes."""
+    # R_x(alpha) R_z(beta) |0>
+    Rx = np.array([
+        [np.cos(alpha/2), -1j*np.sin(alpha/2)],
+        [-1j*np.sin(alpha/2), np.cos(alpha/2)]
+    ], dtype=complex)
+
+    Rz = np.array([
+        [np.exp(-1j*beta/2), 0],
+        [0, np.exp(1j*beta/2)]
+    ], dtype=complex)
+
+    psi = Rz @ Rx @ np.array([1, 0], dtype=complex)
+    return np.outer(psi, psi.conj())
+
+alpha, beta = 0.3, 0.5
+delta = 1e-6
+
+rho = rotation_state(alpha, beta)
+drho_alpha = (rotation_state(alpha + delta, beta) - rotation_state(alpha - delta, beta)) / (2 * delta)
+drho_beta = (rotation_state(alpha, beta + delta) - rotation_state(alpha, beta - delta)) / (2 * delta)
+
+result = check_compatibility(rho, [drho_alpha, drho_beta])
+
+print("Compatibility analysis for rotation parameters:")
+print(f"SLD commutator norm: {result['commutator_norms'][0,1]:.6f}")
+print(f"Parameters compatible: {result['is_compatible']}")
+```
+
+## 7. Applications and Extensions
+
+### Right Logarithmic Derivative
+
+For some problems, the Right Logarithmic Derivative (RLD) gives tighter bounds:
+
+<Formula>
+**RLD Definition:**
+
+$$\frac{\partial \rho}{\partial \theta} = \rho R_\theta$$
+
+RLD Fisher Information: $F_R = \text{Tr}(\partial_\theta \rho \cdot R_\theta^\dagger)$
+</Formula>
+
+### Holevo Bound
+
+For multiparameter estimation, the Holevo bound gives the tightest achievable precision:
+
+<Formula>
+**Holevo Cramer-Rao Bound:**
+
+$$\text{Cov}(\hat{\boldsymbol{\theta}}) \geq \frac{1}{n}[F_Q + iD]^{-1}$$
+
+where $D_{ij} = -\frac{i}{2}\text{Tr}(\rho[L_i, L_j])$ is the incompatibility matrix.
+</Formula>
+
+```python
+def holevo_bound(rho: np.ndarray, drhos: list) -> np.ndarray:
+    """
+    Compute the Holevo Cramer-Rao bound matrix.
+    """
+    n = len(drhos)
+    Ls = [compute_sld(rho, drho) for drho in drhos]
+
+    # QFI matrix
+    F = np.zeros((n, n), dtype=complex)
+    D = np.zeros((n, n), dtype=complex)
+
+    for i in range(n):
+        for j in range(n):
+            anticomm = Ls[i] @ Ls[j] + Ls[j] @ Ls[i]
+            F[i, j] = 0.5 * np.trace(rho @ anticomm)
+
+            comm = Ls[i] @ Ls[j] - Ls[j] @ Ls[i]
+            D[i, j] = -0.5j * np.trace(rho @ comm)
+
+    # Holevo bound: [F + iD]^{-1}
+    holevo_matrix = F + 1j * D
+    bound = np.linalg.inv(holevo_matrix)
+
+    return np.real(bound)
+
+# For the rotation example
+bound = holevo_bound(rho, [drho_alpha, drho_beta])
+print("\nHolevo bound matrix:")
+print(np.round(bound, 4))
+```
+
+## Summary
+
+In this lesson, you mastered Fisher information theory:
+
+1. **Classical FI**: $F = \mathbb{E}[(\partial \ln p / \partial \theta)^2]$ - variance of the score function
+
+2. **Geometric View**: Fisher information defines a natural Riemannian metric on probability distributions
+
+3. **Quantum FI**: $F_Q = \text{Tr}(\rho L^2)$ where $L$ is the Symmetric Logarithmic Derivative
+
+4. **Hierarchy**: Classical FI $\leq$ QFI, with equality for SLD-optimal measurements
+
+5. **Multiparameter**: QFI becomes a matrix; incompatible parameters cannot be optimally estimated simultaneously
+
+6. **Holevo Bound**: The tightest achievable bound when parameters are incompatible
+
+<Tip>
+Fisher information is the Rosetta Stone connecting statistics, information theory, and quantum mechanics. Mastering it opens doors to understanding precision limits across all these fields!
+</Tip>
+
+## Further Reading
+
+- Next lesson: Measurement Disturbance (trade-offs in quantum measurement)
+- Related: Quantum Metrology (practical applications)
+- Advanced: Quantum Information Geometry

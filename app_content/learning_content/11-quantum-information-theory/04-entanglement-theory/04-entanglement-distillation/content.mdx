@@ -1,0 +1,486 @@
+---
+title: "Entanglement Distillation"
+description: "Learn protocols for purifying noisy entangled states into high-fidelity Bell pairs using LOCC."
+duration: 50
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Explain the need for entanglement distillation in realistic scenarios
+- Implement the BBPSSW two-copy distillation protocol
+- Analyze the DEJMPS recurrence protocol
+- Calculate distillation rates and thresholds
+- Connect distillation to quantum error correction
+- Understand one-way vs two-way distillation
+
+## 1. The Need for Entanglement Distillation
+
+Real quantum channels introduce noise that degrades entanglement. Shared entangled pairs become mixed states with reduced fidelity. Distillation recovers high-quality entanglement from many noisy copies.
+
+<Definition term="Entanglement Distillation">
+A protocol that takes n copies of a noisy entangled state rho and produces m < n copies of a state closer to the maximally entangled Bell state, using only LOCC (Local Operations and Classical Communication).
+</Definition>
+
+<Formula>
+$$\rho^{\otimes n} \xrightarrow{\text{LOCC}} |\Phi^+\rangle\langle\Phi^+|^{\otimes m}$$
+</Formula>
+
+```python
+import numpy as np
+
+def werner_state(p):
+    """
+    Create a Werner state: p|Phi+><Phi+| + (1-p)I/4
+
+    Represents a Bell state mixed with white noise.
+    """
+    bell = np.array([1, 0, 0, 1]) / np.sqrt(2)
+    rho_bell = np.outer(bell, bell.conj())
+    return p * rho_bell + (1 - p) * np.eye(4) / 4
+
+def fidelity_to_bell(rho):
+    """
+    Calculate fidelity F = <Phi+|rho|Phi+> to the Bell state.
+    """
+    bell = np.array([1, 0, 0, 1]) / np.sqrt(2)
+    return np.real(bell.conj() @ rho @ bell)
+
+# Demonstrate need for distillation
+print("Need for Entanglement Distillation:")
+print("=" * 50)
+
+for p in [1.0, 0.9, 0.8, 0.7, 0.5]:
+    rho = werner_state(p)
+    F = fidelity_to_bell(rho)
+    print(f"Werner p={p:.1f}: Fidelity F = {F:.4f}")
+
+print("\nFor teleportation, F > 0.5 is required.")
+print("For high-quality QKD, F > 0.9 is desirable.")
+```
+
+## 2. The BBPSSW Protocol
+
+The Bennett-Brassard-Popescu-Schumacher-Smolin-Wootters protocol uses two noisy pairs to potentially create one better pair.
+
+<Definition term="BBPSSW Protocol">
+1. Alice and Bob each hold one qubit of two Werner states
+2. Both apply bilateral CNOT (each uses their qubit from pair 1 as control, pair 2 as target)
+3. Both measure their target qubits in the Z basis
+4. If measurements agree, keep the control pair (now improved); if they disagree, discard
+</Definition>
+
+```python
+import numpy as np
+
+def bilateral_cnot(rho_two_pairs):
+    """
+    Apply bilateral CNOT on two pairs.
+
+    Pair 1: qubits 0 (Alice) and 2 (Bob)
+    Pair 2: qubits 1 (Alice) and 3 (Bob)
+
+    CNOT: qubit 0 controls 1 (Alice's side)
+          qubit 2 controls 3 (Bob's side)
+    """
+    # CNOT gate
+    cnot = np.array([
+        [1, 0, 0, 0],
+        [0, 1, 0, 0],
+        [0, 0, 0, 1],
+        [0, 0, 1, 0]
+    ])
+
+    # Build 16x16 bilateral CNOT
+    # Alice's CNOT on qubits 0,1
+    alice_cnot = np.kron(cnot, np.eye(4))  # Acts on qubits 0,1
+
+    # Bob's CNOT on qubits 2,3 - need to reorder
+    # Full system is (A1, A2, B1, B2), but CNOTs are (A1->A2) and (B1->B2)
+
+    # Actually: system is (A1, B1, A2, B2) for two pairs
+    # Let's use a clearer representation
+
+    dim = 16  # 4 qubits
+
+    # Construct the operation properly
+    # This is complex - use a simplified approach
+    return apply_bilateral_cnot_simplified(rho_two_pairs)
+
+def apply_bilateral_cnot_simplified(rho):
+    """
+    Simplified bilateral CNOT for 4-qubit system.
+    """
+    dim = 16
+
+    # CNOT as a permutation matrix for computational basis
+    # |a, b, c, d> -> |a, a XOR b, c, c XOR d>
+
+    # Build permutation
+    U = np.zeros((dim, dim))
+    for i in range(dim):
+        # Extract bits: i = 8*a + 4*b + 2*c + d
+        a = (i >> 3) & 1
+        b = (i >> 2) & 1
+        c = (i >> 1) & 1
+        d = i & 1
+
+        # Apply CNOTs
+        b_new = a ^ b  # Alice's CNOT
+        d_new = c ^ d  # Bob's CNOT
+
+        j = 8*a + 4*b_new + 2*c + d_new
+        U[j, i] = 1
+
+    return U @ rho @ U.T
+
+def measure_and_postselect(rho_after_cnot):
+    """
+    Measure target qubits (qubits 1 and 3) in Z basis.
+    Keep only if outcomes agree.
+    """
+    # Project onto |00> and |11> for target qubits
+    dim = 16
+
+    # Success projectors: target qubits both 0 or both 1
+    P_success = np.zeros((dim, dim))
+
+    for i in range(dim):
+        b = (i >> 2) & 1  # Alice's target
+        d = i & 1         # Bob's target
+        if b == d:  # Outcomes agree
+            P_success[i, i] = 1
+
+    # Apply projector
+    rho_success = P_success @ rho_after_cnot @ P_success
+
+    # Probability of success
+    p_success = np.real(np.trace(rho_success))
+
+    if p_success < 1e-10:
+        return None, 0
+
+    # Normalize
+    rho_success = rho_success / p_success
+
+    # Trace out target qubits to get remaining pair
+    # Remaining qubits are 0 and 2 (control qubits)
+    rho_final = partial_trace_targets(rho_success)
+
+    return rho_final, p_success
+
+def partial_trace_targets(rho_4qubit):
+    """
+    Trace out qubits 1 and 3 (targets), keeping 0 and 2 (controls).
+    """
+    # Reshape: 16x16 -> (2,2,2,2, 2,2,2,2)
+    rho_tensor = rho_4qubit.reshape([2]*8)
+
+    # Trace over axes 1 and 3 (Alice's target) and 5 and 7 (Bob's target)
+    # Actually need careful index tracking
+
+    # Simpler approach: direct calculation
+    rho_2qubit = np.zeros((4, 4), dtype=complex)
+
+    for i in range(4):  # Control qubit state (A0, B0)
+        for j in range(4):
+            # i = 2*a0 + c0, j = 2*a0' + c0'
+            a0 = (i >> 1) & 1
+            c0 = i & 1
+            a0p = (j >> 1) & 1
+            c0p = j & 1
+
+            val = 0
+            for b in range(2):  # Trace over target qubits
+                for d in range(2):
+                    # Full index for ket
+                    idx_ket = 8*a0 + 4*b + 2*c0 + d
+                    # Full index for bra
+                    idx_bra = 8*a0p + 4*b + 2*c0p + d
+                    val += rho_4qubit[idx_ket, idx_bra]
+
+            rho_2qubit[i, j] = val
+
+    return rho_2qubit
+
+def bbpssw_round(p_input):
+    """
+    One round of BBPSSW distillation on Werner states.
+
+    Returns: (p_output, success_probability)
+    """
+    # Create two Werner states (as tensor product)
+    rho1 = werner_state(p_input)
+    rho2 = werner_state(p_input)
+
+    # Reorder to (A1, A2, B1, B2) format
+    # Original: rho1 = (A1, B1), rho2 = (A2, B2)
+    # We need (A1, B1) x (A2, B2) but stored as (A1, A2, B1, B2)
+
+    # For Werner states, there's an analytical formula:
+    # p_out = p^2 + (1-p)^2/9 + (2*p*(1-p)/3) * ... (complex)
+
+    # Simplified analytical result for Werner states:
+    p = p_input
+    numerator = p**2 + ((1-p)/3)**2
+    denominator = p**2 + 2*p*(1-p)/3 + 5*((1-p)/3)**2
+
+    p_output = numerator / denominator
+    success_prob = denominator
+
+    return p_output, success_prob
+
+# Demonstrate BBPSSW
+print("\nBBPSSW Distillation Protocol:")
+print("=" * 50)
+
+p = 0.7
+print(f"Starting fidelity: {(p + (1-p)/4):.4f} (Werner p={p})")
+
+for round in range(5):
+    p_new, p_success = bbpssw_round(p)
+    F = p_new + (1-p_new)/4  # Fidelity for Werner state
+    print(f"Round {round+1}: F = {F:.4f}, Success prob = {p_success:.4f}")
+    p = p_new
+
+print(f"\nFinal fidelity after 5 rounds: {F:.4f}")
+```
+
+## 3. The DEJMPS Recurrence Protocol
+
+The Deutsch-Ekert-Jozsa-Macchiavello-Popescu-Sanpera protocol offers better rates for certain noise models.
+
+<Formula>
+$$F' = \frac{F^2 + \frac{(1-F)^2}{9}}{F^2 + \frac{2F(1-F)}{3} + \frac{5(1-F)^2}{9}}$$
+</Formula>
+
+```python
+def dejmps_fidelity_update(F):
+    """
+    DEJMPS fidelity improvement formula.
+    """
+    numerator = F**2 + (1-F)**2 / 9
+    denominator = F**2 + 2*F*(1-F)/3 + 5*(1-F)**2/9
+
+    F_new = numerator / denominator
+    p_success = denominator
+
+    return F_new, p_success
+
+def distillation_simulation(F_initial, num_rounds=10, pairs_available=1024):
+    """
+    Simulate full distillation process with limited pairs.
+    """
+    F = F_initial
+    pairs = pairs_available
+    history = [(0, F, pairs)]
+
+    for round in range(1, num_rounds + 1):
+        if pairs < 2:
+            break
+
+        F_new, p_success = dejmps_fidelity_update(F)
+
+        # Expected pairs after round (pairs go in pairs, probabilistic success)
+        expected_pairs = (pairs // 2) * p_success
+
+        if expected_pairs < 1:
+            break
+
+        pairs = int(expected_pairs)
+        F = F_new
+        history.append((round, F, pairs))
+
+    return history
+
+# Run simulation
+print("DEJMPS Distillation Simulation:")
+print("=" * 50)
+print(f"Starting with 1024 pairs at F = 0.75\n")
+
+history = distillation_simulation(0.75, num_rounds=10, pairs_available=1024)
+
+print(f"{'Round':<8} {'Fidelity':<12} {'Pairs':<10}")
+print("-" * 30)
+for round, F, pairs in history:
+    print(f"{round:<8} {F:<12.4f} {pairs:<10}")
+
+# Find required rounds for target fidelity
+print("\nRounds needed to reach F = 0.99:")
+for F_init in [0.7, 0.8, 0.9]:
+    F = F_init
+    rounds = 0
+    while F < 0.99:
+        F, _ = dejmps_fidelity_update(F)
+        rounds += 1
+        if rounds > 100:
+            break
+    print(f"  F_init = {F_init}: {rounds} rounds")
+```
+
+## 4. Distillation Thresholds
+
+Not all noisy states can be distilled. The threshold depends on the type of noise and protocol.
+
+<Definition term="Distillation Threshold">
+The minimum initial fidelity F_min below which no distillation protocol can increase entanglement. For Werner states with BBPSSW/DEJMPS: F_min = 0.5.
+</Definition>
+
+<Warning>
+States with F < 0.5 are in the "bound entanglement" regime for Werner states - they may still be entangled but cannot be distilled using these protocols.
+</Warning>
+
+```python
+def find_distillation_threshold():
+    """
+    Find the minimum fidelity for successful distillation.
+    """
+    # Test various starting fidelities
+    print("Distillation Threshold Analysis:")
+    print("=" * 50)
+
+    for F_init in np.linspace(0.4, 0.6, 11):
+        F = F_init
+        improved = False
+
+        for _ in range(10):
+            F_new, _ = dejmps_fidelity_update(F)
+            if F_new > F_init + 0.01:  # Significant improvement
+                improved = True
+                break
+            F = F_new
+
+        status = "Distillable" if improved else "Cannot distill"
+        print(f"F = {F_init:.2f}: {status}")
+
+    print("\nThreshold is around F = 0.5")
+
+find_distillation_threshold()
+```
+
+## 5. Connection to Quantum Error Correction
+
+Entanglement distillation is deeply connected to quantum error correction. In fact, distillation can be viewed as error correction on entangled states.
+
+```python
+def stabilizer_distillation_concept():
+    """
+    Conceptual connection between distillation and QEC.
+
+    The bilateral CNOT + measurement in BBPSSW is analogous to
+    syndrome measurement in stabilizer codes.
+    """
+    print("Distillation-QEC Connection:")
+    print("=" * 50)
+    print("""
+    BBPSSW Step         | QEC Analog
+    --------------------|--------------------
+    Two noisy pairs     | Encoded logical qubit
+    Bilateral CNOT      | Syndrome extraction
+    Measure targets     | Measure ancilla
+    Discard if disagree | Error detected, discard
+    Keep if agree       | No error, keep
+
+    Both filter out errors through redundancy!
+    """)
+
+stabilizer_distillation_concept()
+```
+
+## 6. One-Way vs Two-Way Distillation
+
+<Definition term="One-Way Distillation">
+Only one party (Alice) performs operations and sends classical information to Bob. Limited distillation power but simpler to implement.
+</Definition>
+
+<Definition term="Two-Way Distillation">
+Both parties perform operations and exchange classical information. More powerful but requires bidirectional communication.
+</Definition>
+
+```python
+def compare_protocols():
+    """
+    Compare one-way and two-way distillation capabilities.
+    """
+    print("One-Way vs Two-Way Distillation:")
+    print("=" * 50)
+
+    # One-way (hashing protocol) has different threshold
+    # Two-way (BBPSSW/DEJMPS) can distill more states
+
+    print("""
+    Protocol Type | Threshold | Communication
+    --------------|-----------|---------------
+    One-way       | F > 0.81  | Alice -> Bob only
+    Two-way       | F > 0.50  | Bidirectional
+    Hashing       | F > 0.81  | One-way, asymptotic
+    Recurrence    | F > 0.50  | Two-way, finite
+
+    Two-way protocols are strictly more powerful!
+    """)
+
+compare_protocols()
+```
+
+## 7. Distillation Yield
+
+The yield is the ratio of output to input Bell pairs.
+
+<Formula>
+$$Y = \lim_{n \to \infty} \frac{m}{n}$$
+</Formula>
+
+where n noisy pairs produce m high-fidelity pairs.
+
+```python
+def calculate_yield(F_initial, F_target=0.99, pairs_initial=10000):
+    """
+    Calculate distillation yield to reach target fidelity.
+    """
+    F = F_initial
+    pairs = pairs_initial
+    rounds = 0
+
+    while F < F_target and pairs >= 2:
+        F_new, p_success = dejmps_fidelity_update(F)
+        pairs = int((pairs // 2) * p_success)
+        F = F_new
+        rounds += 1
+
+    yield_ratio = pairs / pairs_initial
+    return yield_ratio, F, rounds
+
+print("Distillation Yield Analysis:")
+print("=" * 50)
+print(f"Target fidelity: 0.99")
+print(f"Starting pairs: 10000\n")
+
+print(f"{'F_initial':<12} {'Yield':<10} {'Final F':<12} {'Rounds':<8}")
+print("-" * 42)
+
+for F_init in [0.6, 0.7, 0.8, 0.9]:
+    yield_r, F_final, rounds = calculate_yield(F_init, 0.99)
+    print(f"{F_init:<12.2f} {yield_r:<10.4f} {F_final:<12.4f} {rounds:<8}")
+```
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Motivation**: Noise degrades entanglement; distillation recovers it
+2. **BBPSSW Protocol**: Bilateral CNOT + measurement to filter errors
+3. **DEJMPS Protocol**: Recurrence relation for fidelity improvement
+4. **Thresholds**: Minimum fidelity needed (F > 0.5 for Werner states)
+5. **QEC Connection**: Distillation as error correction on entangled states
+6. **Protocol Types**: One-way vs two-way tradeoffs
+7. **Yield**: Practical efficiency of distillation
+
+Entanglement distillation is essential for quantum repeaters and long-distance quantum communication.
+
+## Further Reading
+
+- Next lesson: Bound Entanglement
+- Related: Quantum repeater protocols
+- Application: Long-distance quantum key distribution

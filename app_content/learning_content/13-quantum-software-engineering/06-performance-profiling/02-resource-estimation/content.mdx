@@ -1,0 +1,805 @@
+---
+title: "Resource Estimation Tools"
+description: "Learn to estimate quantum computational resources including qubit counts, gate requirements, execution time, and costs for both NISQ and fault-tolerant implementations using industry-standard tools."
+duration: 50
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Use Azure Quantum Resource Estimator for fault-tolerant cost analysis
+- Calculate logical qubit and T-gate requirements for algorithms
+- Estimate physical qubit overhead for different error correction codes
+- Analyze time-to-solution for various quantum hardware architectures
+- Compare resource requirements across different implementation strategies
+
+## 1. Introduction to Resource Estimation
+
+Resource estimation answers the critical question: "What will it take to run this quantum algorithm on real hardware?" This encompasses not just immediate execution on NISQ devices, but also future fault-tolerant implementations.
+
+<Definition term="Resource Estimation">
+Resource estimation is the process of quantifying all computational resources required to execute a quantum algorithm, including qubits (logical and physical), gates, time, classical co-processing, and potentially financial cost. Accurate estimation enables realistic planning for quantum advantage.
+</Definition>
+
+### Why Resource Estimation Matters
+
+1. **Feasibility Assessment** - Determines whether an algorithm can run on current or near-future hardware
+2. **Architecture Selection** - Guides choice between different quantum hardware platforms
+3. **Timeline Planning** - Estimates when quantum advantage becomes achievable
+4. **Cost Optimization** - Identifies the most expensive resources for optimization focus
+
+<Warning>
+Early resource estimates for practical quantum algorithms often reveal requirements far beyond current capabilities. This is valuable information - it helps focus development efforts on the most impactful optimizations.
+</Warning>
+
+## 2. NISQ Resource Estimation
+
+For near-term quantum devices, resource estimation focuses on circuit metrics that directly impact execution success.
+
+```python
+from dataclasses import dataclass
+from typing import Dict, Optional
+import numpy as np
+
+@dataclass
+class NISQResourceEstimate:
+    """Resource estimate for NISQ device execution."""
+    num_qubits: int
+    circuit_depth: int
+    two_qubit_gates: int
+    single_qubit_gates: int
+    measurements: int
+    estimated_fidelity: float
+    estimated_runtime_us: float
+    recommended_shots: int
+
+class NISQEstimator:
+    """
+    Resource estimator for NISQ quantum devices.
+
+    Estimates execution requirements based on hardware characteristics.
+    """
+
+    def __init__(self,
+                 t1_us: float = 100.0,
+                 t2_us: float = 80.0,
+                 single_qubit_time_us: float = 0.02,
+                 two_qubit_time_us: float = 0.3,
+                 measurement_time_us: float = 1.0,
+                 single_qubit_fidelity: float = 0.9995,
+                 two_qubit_fidelity: float = 0.995,
+                 readout_fidelity: float = 0.98):
+        """
+        Initialize with hardware parameters.
+
+        Args:
+            t1_us: T1 relaxation time in microseconds
+            t2_us: T2 dephasing time in microseconds
+            single_qubit_time_us: Single-qubit gate duration
+            two_qubit_time_us: Two-qubit gate duration
+            measurement_time_us: Measurement duration
+            single_qubit_fidelity: Single-qubit gate fidelity
+            two_qubit_fidelity: Two-qubit gate fidelity
+            readout_fidelity: Measurement fidelity
+        """
+        self.t1_us = t1_us
+        self.t2_us = t2_us
+        self.single_qubit_time_us = single_qubit_time_us
+        self.two_qubit_time_us = two_qubit_time_us
+        self.measurement_time_us = measurement_time_us
+        self.single_qubit_fidelity = single_qubit_fidelity
+        self.two_qubit_fidelity = two_qubit_fidelity
+        self.readout_fidelity = readout_fidelity
+
+    def estimate(self, circuit) -> NISQResourceEstimate:
+        """
+        Generate resource estimate for a circuit.
+
+        Args:
+            circuit: Qiskit QuantumCircuit
+
+        Returns:
+            NISQResourceEstimate with all resource metrics
+        """
+        ops = circuit.count_ops()
+
+        # Count gate types
+        two_q_gates = ['cx', 'cz', 'swap', 'iswap', 'ecr']
+        two_q_count = sum(ops.get(g, 0) for g in two_q_gates)
+        total_gates = sum(ops.values())
+        single_q_count = total_gates - two_q_count
+        measurements = ops.get('measure', 0)
+
+        # Estimate runtime
+        runtime = (
+            single_q_count * self.single_qubit_time_us +
+            two_q_count * self.two_qubit_time_us +
+            measurements * self.measurement_time_us
+        )
+
+        # Estimate fidelity
+        gate_fidelity = (
+            self.single_qubit_fidelity ** single_q_count *
+            self.two_qubit_fidelity ** two_q_count
+        )
+        measurement_fidelity = self.readout_fidelity ** measurements
+
+        # Decoherence factor
+        decoherence_factor = np.exp(-runtime / self.t2_us)
+
+        total_fidelity = gate_fidelity * measurement_fidelity * decoherence_factor
+
+        # Recommended shots for statistical significance
+        # Based on achieving relative error < 5% with 95% confidence
+        if total_fidelity > 0:
+            recommended_shots = int(np.ceil(
+                (1.96 / 0.05) ** 2 * (1 - total_fidelity) / total_fidelity
+            ))
+            recommended_shots = max(1000, min(recommended_shots, 100000))
+        else:
+            recommended_shots = 100000
+
+        return NISQResourceEstimate(
+            num_qubits=circuit.num_qubits,
+            circuit_depth=circuit.depth(),
+            two_qubit_gates=two_q_count,
+            single_qubit_gates=single_q_count,
+            measurements=measurements,
+            estimated_fidelity=total_fidelity,
+            estimated_runtime_us=runtime,
+            recommended_shots=recommended_shots
+        )
+
+    def compare_devices(self, circuit, device_configs: Dict) -> Dict:
+        """
+        Compare resource estimates across different device configurations.
+        """
+        results = {}
+        for name, config in device_configs.items():
+            estimator = NISQEstimator(**config)
+            results[name] = estimator.estimate(circuit)
+        return results
+
+
+# Example usage
+from qiskit import QuantumCircuit
+
+def create_test_circuit():
+    qc = QuantumCircuit(5)
+    qc.h([0, 1, 2, 3, 4])
+    for i in range(4):
+        qc.cx(i, i+1)
+    qc.measure_all()
+    return qc
+
+# Define device configurations
+devices = {
+    'ibm_superconducting': {
+        't1_us': 100, 't2_us': 80,
+        'single_qubit_time_us': 0.02, 'two_qubit_time_us': 0.3,
+        'single_qubit_fidelity': 0.9995, 'two_qubit_fidelity': 0.995
+    },
+    'ionq_trapped_ion': {
+        't1_us': 10000, 't2_us': 1000,
+        'single_qubit_time_us': 10, 'two_qubit_time_us': 200,
+        'single_qubit_fidelity': 0.9999, 'two_qubit_fidelity': 0.998
+    }
+}
+
+circuit = create_test_circuit()
+estimator = NISQEstimator()
+comparison = estimator.compare_devices(circuit, devices)
+
+for device, estimate in comparison.items():
+    print(f"\n{device}:")
+    print(f"  Estimated fidelity: {estimate.estimated_fidelity:.4f}")
+    print(f"  Runtime: {estimate.estimated_runtime_us:.2f} us")
+    print(f"  Recommended shots: {estimate.recommended_shots}")
+```
+
+## 3. Fault-Tolerant Resource Estimation
+
+For algorithms requiring fault tolerance, resource estimation becomes significantly more complex due to error correction overhead.
+
+<Definition term="Logical Qubit">
+A logical qubit is an error-corrected quantum bit encoded using multiple physical qubits according to a quantum error correction code. The number of physical qubits per logical qubit depends on the code and target error rate.
+</Definition>
+
+### Physical Qubit Overhead
+
+The relationship between logical and physical qubits depends on the error correction code:
+
+<Formula>
+$$n_{physical} = n_{logical} \times d^2$$
+</Formula>
+
+for surface codes, where $d$ is the code distance determining error suppression.
+
+```python
+from dataclasses import dataclass
+from typing import Optional
+import math
+
+@dataclass
+class FaultTolerantEstimate:
+    """Resource estimate for fault-tolerant execution."""
+    logical_qubits: int
+    physical_qubits: int
+    code_distance: int
+    t_gates: int
+    t_factories: int
+    factory_qubits: int
+    total_physical_qubits: int
+    execution_time_hours: float
+    magic_state_distillation_rounds: int
+
+class FaultTolerantEstimator:
+    """
+    Estimate resources for fault-tolerant quantum computation.
+
+    Based on surface code assumptions with magic state distillation.
+    """
+
+    def __init__(self,
+                 physical_error_rate: float = 1e-3,
+                 target_logical_error: float = 1e-10,
+                 code_cycle_time_us: float = 1.0,
+                 t_factory_footprint: int = 16000):
+        """
+        Initialize fault-tolerant estimator.
+
+        Args:
+            physical_error_rate: Physical gate error rate
+            target_logical_error: Target logical error rate
+            code_cycle_time_us: Surface code cycle time
+            t_factory_footprint: Physical qubits per T-factory
+        """
+        self.physical_error_rate = physical_error_rate
+        self.target_logical_error = target_logical_error
+        self.code_cycle_time_us = code_cycle_time_us
+        self.t_factory_footprint = t_factory_footprint
+
+    def calculate_code_distance(self,
+                                 logical_qubits: int,
+                                 algorithm_depth: int) -> int:
+        """
+        Calculate required code distance for target error rate.
+
+        Uses the formula: p_logical ~ (p_physical/p_threshold)^((d+1)/2)
+        """
+        # Surface code threshold ~1%
+        p_threshold = 0.01
+
+        # Total operations scales with qubits * depth
+        total_operations = logical_qubits * algorithm_depth
+
+        # Required per-operation error rate
+        per_op_error = self.target_logical_error / total_operations
+
+        # Calculate required distance
+        ratio = self.physical_error_rate / p_threshold
+        if ratio >= 1:
+            raise ValueError("Physical error rate exceeds threshold")
+
+        # d such that ratio^((d+1)/2) < per_op_error
+        d = 2 * math.ceil(math.log(per_op_error) / math.log(ratio)) - 1
+        d = max(3, d)  # Minimum distance 3
+
+        # Ensure odd distance
+        if d % 2 == 0:
+            d += 1
+
+        return d
+
+    def estimate_t_factory_resources(self,
+                                      t_count: int,
+                                      algorithm_time_us: float) -> dict:
+        """
+        Estimate T-factory requirements for magic state distillation.
+        """
+        # T-factory produces one T-state per ~10 code cycles
+        t_factory_production_time = 10 * self.code_cycle_time_us
+
+        # T-gates that can be parallel
+        t_parallelism = max(1, int(t_count / 1000))
+
+        # Required factories to meet throughput
+        required_throughput = t_count / algorithm_time_us  # T-states per microsecond
+        factories_for_throughput = math.ceil(
+            required_throughput * t_factory_production_time
+        )
+
+        # At least one factory, scale with parallelism
+        num_factories = max(1, factories_for_throughput, t_parallelism // 10)
+
+        # Distillation rounds (15-to-1 protocol typically needs 2 levels)
+        distillation_rounds = 2 if self.physical_error_rate > 1e-4 else 1
+
+        return {
+            'num_factories': num_factories,
+            'factory_qubits': num_factories * self.t_factory_footprint,
+            'distillation_rounds': distillation_rounds,
+            'production_time_us': t_factory_production_time
+        }
+
+    def estimate(self,
+                 logical_qubits: int,
+                 t_count: int,
+                 clifford_depth: int,
+                 algorithm_description: str = "") -> FaultTolerantEstimate:
+        """
+        Generate fault-tolerant resource estimate.
+
+        Args:
+            logical_qubits: Number of logical qubits
+            t_count: Number of T-gates (or T-equivalent)
+            clifford_depth: Depth of Clifford operations
+            algorithm_description: Description for reporting
+
+        Returns:
+            FaultTolerantEstimate with all resources
+        """
+        # Total algorithm depth
+        total_depth = clifford_depth + t_count  # T-gates sequential
+
+        # Calculate code distance
+        code_distance = self.calculate_code_distance(
+            logical_qubits, total_depth
+        )
+
+        # Physical qubits for data
+        data_qubits_per_logical = 2 * code_distance ** 2  # Surface code
+        data_physical_qubits = logical_qubits * data_qubits_per_logical
+
+        # Ancilla qubits for syndrome measurement
+        ancilla_per_logical = code_distance ** 2
+        ancilla_qubits = logical_qubits * ancilla_per_logical
+
+        # Execution time estimate
+        code_cycles = total_depth * code_distance  # Depth scales with d
+        execution_time_us = code_cycles * self.code_cycle_time_us
+        execution_time_hours = execution_time_us / (3600 * 1e6)
+
+        # T-factory resources
+        t_factory_info = self.estimate_t_factory_resources(
+            t_count, execution_time_us
+        )
+
+        # Total physical qubits
+        total_physical = (
+            data_physical_qubits +
+            ancilla_qubits +
+            t_factory_info['factory_qubits']
+        )
+
+        return FaultTolerantEstimate(
+            logical_qubits=logical_qubits,
+            physical_qubits=data_physical_qubits + ancilla_qubits,
+            code_distance=code_distance,
+            t_gates=t_count,
+            t_factories=t_factory_info['num_factories'],
+            factory_qubits=t_factory_info['factory_qubits'],
+            total_physical_qubits=total_physical,
+            execution_time_hours=execution_time_hours,
+            magic_state_distillation_rounds=t_factory_info['distillation_rounds']
+        )
+
+
+# Example: Estimate resources for Shor's algorithm (2048-bit)
+estimator = FaultTolerantEstimator(
+    physical_error_rate=1e-3,
+    target_logical_error=1e-10
+)
+
+# Shor's algorithm for 2048-bit RSA
+# Approximately 4n logical qubits and n^3 T-gates
+n_bits = 2048
+logical_qubits = 4 * n_bits  # ~8192 qubits
+t_count = n_bits ** 2 * 100  # Simplified estimate
+clifford_depth = n_bits ** 2
+
+estimate = estimator.estimate(
+    logical_qubits=logical_qubits,
+    t_count=t_count,
+    clifford_depth=clifford_depth,
+    algorithm_description="Shor's algorithm for 2048-bit RSA"
+)
+
+print("Fault-Tolerant Resource Estimate (Shor 2048-bit):")
+print(f"  Logical qubits: {estimate.logical_qubits:,}")
+print(f"  Physical qubits: {estimate.total_physical_qubits:,}")
+print(f"  Code distance: {estimate.code_distance}")
+print(f"  T-gates: {estimate.t_gates:,}")
+print(f"  T-factories: {estimate.t_factories}")
+print(f"  Execution time: {estimate.execution_time_hours:.1f} hours")
+```
+
+## 4. Using Azure Quantum Resource Estimator
+
+Microsoft's Azure Quantum Resource Estimator provides industry-standard resource estimation for fault-tolerant algorithms.
+
+```python
+# Note: Requires azure-quantum package
+# pip install azure-quantum[qiskit]
+
+from typing import Dict, Any
+import json
+
+class AzureResourceEstimatorWrapper:
+    """
+    Wrapper for Azure Quantum Resource Estimator integration.
+
+    Provides a simplified interface for resource estimation.
+    """
+
+    def __init__(self):
+        self.job_params = {
+            "qubitParams": {
+                "name": "qubit_gate_ns_e3"  # Default: gate-based, ns timescale, 10^-3 error
+            },
+            "qecScheme": {
+                "name": "surface_code"
+            },
+            "errorBudget": 0.01  # 1% total error budget
+        }
+
+    def set_qubit_model(self, model: str):
+        """
+        Set the qubit model for estimation.
+
+        Available models:
+        - qubit_gate_ns_e3: Gate-based, nanosecond, 10^-3 error
+        - qubit_gate_ns_e4: Gate-based, nanosecond, 10^-4 error
+        - qubit_gate_us_e3: Gate-based, microsecond, 10^-3 error
+        - qubit_gate_us_e4: Gate-based, microsecond, 10^-4 error
+        - qubit_maj_ns_e4: Majorana-based, nanosecond, 10^-4 error
+        - qubit_maj_ns_e6: Majorana-based, nanosecond, 10^-6 error
+        """
+        self.job_params["qubitParams"]["name"] = model
+
+    def set_error_budget(self, budget: float):
+        """Set the total error budget for the computation."""
+        self.job_params["errorBudget"] = budget
+
+    def set_qec_scheme(self, scheme: str):
+        """
+        Set the quantum error correction scheme.
+
+        Available schemes:
+        - surface_code: Standard surface code
+        - floquet_code: Floquet code (for Majorana qubits)
+        """
+        self.job_params["qecScheme"]["name"] = scheme
+
+    def estimate_from_qiskit(self, circuit) -> Dict[str, Any]:
+        """
+        Run resource estimation on a Qiskit circuit.
+
+        Note: Actual Azure integration requires azure-quantum SDK.
+        This is a simulation for educational purposes.
+        """
+        # In production, this would submit to Azure:
+        # from azure.quantum import Workspace
+        # from azure.quantum.qiskit import AzureQuantumProvider
+        # workspace = Workspace(resource_id="...", location="...")
+        # backend = AzureQuantumProvider(workspace).get_backend("microsoft.estimator")
+        # job = backend.run(circuit, **self.job_params)
+        # result = job.result()
+
+        # Simulated result structure
+        ops = circuit.count_ops()
+        t_count = ops.get('t', 0) + ops.get('tdg', 0) + 7 * ops.get('ccx', 0)
+
+        return self._simulate_azure_result(
+            num_qubits=circuit.num_qubits,
+            t_count=t_count,
+            depth=circuit.depth()
+        )
+
+    def _simulate_azure_result(self, num_qubits: int, t_count: int,
+                                depth: int) -> Dict[str, Any]:
+        """Simulate Azure Resource Estimator output format."""
+        # Simplified calculations matching Azure output structure
+        code_distance = max(7, 2 * int((num_qubits * depth) ** 0.2) + 1)
+        physical_per_logical = 2 * code_distance ** 2
+
+        return {
+            "status": "success",
+            "physicalCounts": {
+                "physicalQubits": num_qubits * physical_per_logical + t_count * 100,
+                "runtimeInSeconds": depth * code_distance * 1e-6,
+                "breakdown": {
+                    "algorithmicLogicalQubits": num_qubits,
+                    "algorithmicLogicalDepth": depth,
+                    "logicalDepth": depth * code_distance,
+                    "numTstates": t_count,
+                    "numTfactories": max(1, t_count // 1000),
+                    "physicalQubitsForAlgorithm": num_qubits * physical_per_logical,
+                    "physicalQubitsForTfactories": t_count * 100
+                }
+            },
+            "logicalQubit": {
+                "codeDistance": code_distance,
+                "physicalQubits": physical_per_logical,
+                "logicalCycleTime": code_distance * 1e-6,
+                "logicalErrorRate": 1e-12
+            },
+            "tfactory": {
+                "numTstatesPerRound": 1,
+                "numRounds": 2,
+                "physicalQubits": 15000,
+                "runtime": 50e-6
+            },
+            "jobParams": self.job_params
+        }
+
+    def format_report(self, result: Dict[str, Any]) -> str:
+        """Format estimation result as readable report."""
+        pc = result["physicalCounts"]
+        lq = result["logicalQubit"]
+        tf = result["tfactory"]
+        bd = pc["breakdown"]
+
+        lines = [
+            "=" * 60,
+            "AZURE QUANTUM RESOURCE ESTIMATION REPORT",
+            "=" * 60,
+            "",
+            "OVERALL RESOURCES:",
+            f"  Physical qubits: {pc['physicalQubits']:,}",
+            f"  Runtime: {pc['runtimeInSeconds']:.2f} seconds",
+            "",
+            "ALGORITHM BREAKDOWN:",
+            f"  Logical qubits: {bd['algorithmicLogicalQubits']:,}",
+            f"  Logical depth: {bd['logicalDepth']:,}",
+            f"  T-states required: {bd['numTstates']:,}",
+            f"  T-factories: {bd['numTfactories']}",
+            "",
+            "LOGICAL QUBIT PROPERTIES:",
+            f"  Code distance: {lq['codeDistance']}",
+            f"  Physical qubits per logical: {lq['physicalQubits']}",
+            f"  Logical error rate: {lq['logicalErrorRate']:.2e}",
+            "",
+            "T-FACTORY PROPERTIES:",
+            f"  Physical qubits per factory: {tf['physicalQubits']:,}",
+            f"  Distillation rounds: {tf['numRounds']}",
+            "=" * 60
+        ]
+        return "\n".join(lines)
+
+
+# Example usage
+from qiskit import QuantumCircuit
+
+# Create a circuit with T-gates
+qc = QuantumCircuit(10)
+for i in range(10):
+    qc.h(i)
+for i in range(9):
+    qc.cx(i, i+1)
+for i in range(10):
+    qc.t(i)
+qc.ccx(0, 1, 2)  # Toffoli decomposes to 7 T-gates
+
+# Run estimation
+azure_estimator = AzureResourceEstimatorWrapper()
+azure_estimator.set_qubit_model("qubit_gate_ns_e4")
+azure_estimator.set_error_budget(0.01)
+
+result = azure_estimator.estimate_from_qiskit(qc)
+print(azure_estimator.format_report(result))
+```
+
+## 5. Comparative Resource Analysis
+
+Comparing resources across different algorithm implementations and hardware targets:
+
+```python
+import pandas as pd
+from typing import List, Dict
+
+class ResourceComparator:
+    """
+    Compare resource requirements across implementations and targets.
+    """
+
+    def __init__(self):
+        self.nisq_estimator = NISQEstimator()
+        self.ft_estimator = FaultTolerantEstimator()
+
+    def compare_implementations(self,
+                                 implementations: Dict[str, 'QuantumCircuit'],
+                                 mode: str = 'nisq') -> pd.DataFrame:
+        """
+        Compare multiple circuit implementations.
+
+        Args:
+            implementations: Dict mapping names to circuits
+            mode: 'nisq' or 'fault_tolerant'
+
+        Returns:
+            DataFrame with comparison metrics
+        """
+        results = []
+
+        for name, circuit in implementations.items():
+            if mode == 'nisq':
+                est = self.nisq_estimator.estimate(circuit)
+                results.append({
+                    'Implementation': name,
+                    'Qubits': est.num_qubits,
+                    'Depth': est.circuit_depth,
+                    '2Q Gates': est.two_qubit_gates,
+                    'Est. Fidelity': f"{est.estimated_fidelity:.4f}",
+                    'Runtime (us)': f"{est.estimated_runtime_us:.2f}",
+                    'Rec. Shots': est.recommended_shots
+                })
+            else:
+                ops = circuit.count_ops()
+                t_count = ops.get('t', 0) + ops.get('tdg', 0)
+                est = self.ft_estimator.estimate(
+                    logical_qubits=circuit.num_qubits,
+                    t_count=t_count,
+                    clifford_depth=circuit.depth() - t_count
+                )
+                results.append({
+                    'Implementation': name,
+                    'Logical Qubits': est.logical_qubits,
+                    'Physical Qubits': f"{est.total_physical_qubits:,}",
+                    'Code Distance': est.code_distance,
+                    'T-gates': est.t_gates,
+                    'T-factories': est.t_factories,
+                    'Time (hours)': f"{est.execution_time_hours:.2f}"
+                })
+
+        return pd.DataFrame(results)
+
+    def hardware_comparison(self, circuit) -> pd.DataFrame:
+        """
+        Compare execution across different hardware platforms.
+        """
+        platforms = {
+            'IBM Eagle (127Q)': {
+                't1_us': 120, 't2_us': 90,
+                'single_qubit_fidelity': 0.9996, 'two_qubit_fidelity': 0.996
+            },
+            'Google Sycamore (72Q)': {
+                't1_us': 15, 't2_us': 10,
+                'single_qubit_fidelity': 0.9992, 'two_qubit_fidelity': 0.994
+            },
+            'IonQ Forte (32Q)': {
+                't1_us': 100000, 't2_us': 10000,
+                'single_qubit_fidelity': 0.9999, 'two_qubit_fidelity': 0.998
+            },
+            'Rigetti Aspen (80Q)': {
+                't1_us': 30, 't2_us': 20,
+                'single_qubit_fidelity': 0.998, 'two_qubit_fidelity': 0.97
+            }
+        }
+
+        results = []
+        for name, params in platforms.items():
+            estimator = NISQEstimator(**params)
+            est = estimator.estimate(circuit)
+            results.append({
+                'Platform': name,
+                'Est. Fidelity': f"{est.estimated_fidelity:.4f}",
+                'Runtime (us)': f"{est.estimated_runtime_us:.2f}",
+                'Rec. Shots': est.recommended_shots,
+                'Feasible': 'Yes' if est.estimated_fidelity > 0.1 else 'No'
+            })
+
+        return pd.DataFrame(results)
+
+
+# Example comparison
+from qiskit import QuantumCircuit
+from qiskit.circuit.library import QFT
+
+# Different QFT implementations
+def qft_exact(n):
+    return QFT(n, do_swaps=True)
+
+def qft_approximate(n, precision=3):
+    qc = QuantumCircuit(n)
+    for i in range(n):
+        qc.h(i)
+        for j in range(i+1, min(i+precision+1, n)):
+            qc.cp(3.14159/(2**(j-i)), j, i)
+    return qc
+
+implementations = {
+    'Exact QFT (8Q)': qft_exact(8),
+    'Approx QFT p=3': qft_approximate(8, 3),
+    'Approx QFT p=2': qft_approximate(8, 2)
+}
+
+comparator = ResourceComparator()
+print("Implementation Comparison (NISQ):")
+print(comparator.compare_implementations(implementations, mode='nisq'))
+print("\nHardware Platform Comparison:")
+print(comparator.hardware_comparison(qft_exact(8)))
+```
+
+## 6. Resource Estimation Best Practices
+
+<Tip>
+Always perform resource estimation at multiple stages of algorithm development:
+1. **Early stage**: Rough estimates to assess feasibility
+2. **Design stage**: Compare implementation alternatives
+3. **Pre-execution**: Detailed estimates for production planning
+</Tip>
+
+### Estimation Checklist
+
+```python
+def resource_estimation_checklist(circuit, target: str = 'nisq') -> Dict:
+    """
+    Comprehensive resource estimation checklist.
+    """
+    checklist = {
+        'circuit_metrics': {},
+        'resource_estimates': {},
+        'feasibility_assessment': {},
+        'recommendations': []
+    }
+
+    # Circuit metrics
+    ops = circuit.count_ops()
+    checklist['circuit_metrics'] = {
+        'qubits': circuit.num_qubits,
+        'depth': circuit.depth(),
+        'total_gates': sum(ops.values()),
+        'two_qubit_gates': sum(ops.get(g, 0) for g in ['cx', 'cz', 'swap']),
+        't_count': ops.get('t', 0) + ops.get('tdg', 0) + 7 * ops.get('ccx', 0)
+    }
+
+    if target == 'nisq':
+        est = NISQEstimator().estimate(circuit)
+        checklist['resource_estimates'] = {
+            'estimated_fidelity': est.estimated_fidelity,
+            'runtime_us': est.estimated_runtime_us,
+            'recommended_shots': est.recommended_shots
+        }
+
+        # Feasibility
+        checklist['feasibility_assessment'] = {
+            'fidelity_acceptable': est.estimated_fidelity > 0.5,
+            'depth_within_coherence': circuit.depth() < 100,
+            'qubit_count_available': circuit.num_qubits <= 100
+        }
+
+        # Recommendations
+        if est.estimated_fidelity < 0.5:
+            checklist['recommendations'].append(
+                "Consider circuit optimization to improve fidelity"
+            )
+        if circuit.depth() > 50:
+            checklist['recommendations'].append(
+                "Apply depth reduction techniques"
+            )
+
+    return checklist
+```
+
+## Summary
+
+In this lesson, you learned comprehensive resource estimation techniques:
+
+1. **NISQ Estimation** - Calculating fidelity, runtime, and shot requirements for near-term devices
+2. **Fault-Tolerant Estimation** - Computing physical qubit overhead and T-factory requirements
+3. **Azure Resource Estimator** - Using industry-standard tools for detailed analysis
+4. **Comparative Analysis** - Comparing implementations across hardware platforms
+5. **Best Practices** - Systematic approaches to resource estimation at all development stages
+
+<Warning>
+Resource estimates are based on models and assumptions. Always validate with actual hardware performance when possible, and maintain margins for unexpected overhead.
+</Warning>
+
+## Further Reading
+
+- Next lesson: Simulator Performance Profiling
+- Related: Circuit Optimization for Resource Reduction
+- Application: Planning for Quantum Advantage

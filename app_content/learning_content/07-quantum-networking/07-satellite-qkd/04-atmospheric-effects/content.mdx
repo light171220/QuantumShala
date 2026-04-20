@@ -1,0 +1,427 @@
+# Atmospheric Effects
+
+## Introduction
+
+The Earth's atmosphere presents both opportunities and challenges for satellite QKD. While it's only ~10 km of effective optical path, atmospheric effects can significantly impact quantum link performance. This lesson examines these effects and mitigation strategies.
+
+## Atmospheric Effects Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              ATMOSPHERIC EFFECTS ON SATELLITE QKD                   │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│                    🛰️ Satellite                                     │
+│                      │                                              │
+│  ────────────────────┼────────────────── Space (vacuum)            │
+│                      │                                              │
+│  ╔══════════════════╪═══════════════════╗ ← ~100 km: Ionosphere   │
+│  ║                  │                   ║                          │
+│  ║   ┌──────────────┼──────────────┐   ║                          │
+│  ║   │              │ TURBULENCE   │   ║ ← 10-20 km: Stratosphere │
+│  ║   │   ~~~~~~~~   │   ~~~~~~~~   │   ║                          │
+│  ║   │  Beam wander │  Scintillation   ║                          │
+│  ║   │              │              │   ║                          │
+│  ║   ├──────────────┼──────────────┤   ║ ← 0-10 km: Troposphere  │
+│  ║   │   ABSORPTION │ SCATTERING   │   ║   (weather layer)        │
+│  ║   │   H₂O, CO₂   │ Rayleigh/Mie │   ║                          │
+│  ║   │              │              │   ║                          │
+│  ║   └──────────────┼──────────────┘   ║                          │
+│  ╚══════════════════╪═══════════════════╝                          │
+│  ────────────────────┼────────────────── Ground                    │
+│                     🔭                                              │
+│                  Ground Station                                     │
+│                                                                     │
+│  Main Effects:                                                      │
+│  1. Absorption: Photons absorbed by molecules                      │
+│  2. Scattering: Photons redirected away from path                  │
+│  3. Turbulence: Refractive index fluctuations                      │
+│  4. Background: Sky brightness (especially daytime)                │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Absorption and Scattering
+
+```python
+import numpy as np
+from dataclasses import dataclass
+from typing import Dict, List
+
+@dataclass
+class AtmosphericModel:
+    """Atmospheric transmission model."""
+    wavelength_nm: float
+    zenith_transmission: float  # at zenith
+    scale_height_km: float
+    absorbers: List[str]
+
+class AtmosphericLoss:
+    """
+    Model atmospheric absorption and scattering.
+    """
+
+    def __init__(self):
+        self.transmission_windows = self._define_windows()
+
+    def _define_windows(self) -> Dict[str, AtmosphericModel]:
+        """Define atmospheric transmission windows."""
+        return {
+            "visible_red": AtmosphericModel(
+                wavelength_nm=780,
+                zenith_transmission=0.85,
+                scale_height_km=8.5,
+                absorbers=["H2O", "O2"]
+            ),
+            "nir_850": AtmosphericModel(
+                wavelength_nm=850,
+                zenith_transmission=0.88,
+                scale_height_km=8.5,
+                absorbers=["H2O"]
+            ),
+            "telecom_1550": AtmosphericModel(
+                wavelength_nm=1550,
+                zenith_transmission=0.92,
+                scale_height_km=8.5,
+                absorbers=["H2O", "CO2"]
+            )
+        }
+
+    def calculate_transmission(
+        self,
+        wavelength_nm: float,
+        zenith_angle_deg: float,
+        altitude_km: float = 0
+    ) -> float:
+        """Calculate atmospheric transmission."""
+        # Find closest window
+        window = min(self.transmission_windows.values(),
+                    key=lambda w: abs(w.wavelength_nm - wavelength_nm))
+
+        # Airmass calculation (secant approximation)
+        if zenith_angle_deg >= 90:
+            return 0
+        airmass = 1 / np.cos(np.radians(zenith_angle_deg))
+
+        # Altitude correction
+        alt_factor = np.exp(-altitude_km / window.scale_height_km)
+
+        # Transmission
+        tau_zenith = -np.log(window.zenith_transmission)
+        transmission = np.exp(-tau_zenith * airmass * alt_factor)
+
+        return transmission
+
+    def loss_vs_zenith(self, wavelength_nm: float = 850) -> Dict:
+        """Calculate loss vs zenith angle."""
+        angles = np.arange(0, 75, 5)
+        transmissions = [self.calculate_transmission(wavelength_nm, a) for a in angles]
+        losses_db = [-10 * np.log10(t) for t in transmissions]
+
+        return {
+            "angles": list(angles),
+            "transmissions": transmissions,
+            "losses_db": losses_db
+        }
+
+    def print_analysis(self):
+        """Print atmospheric analysis."""
+        print("Atmospheric Transmission Analysis")
+        print("=" * 60)
+
+        for name, window in self.transmission_windows.items():
+            print(f"\n{name} ({window.wavelength_nm} nm):")
+            print(f"  Zenith transmission: {window.zenith_transmission*100:.1f}%")
+            print(f"  Absorbers: {', '.join(window.absorbers)}")
+
+            # Calculate at different angles
+            for angle in [0, 30, 60]:
+                trans = self.calculate_transmission(window.wavelength_nm, angle)
+                loss = -10 * np.log10(trans)
+                print(f"  At {angle}°: {trans*100:.1f}% ({loss:.1f} dB loss)")
+
+# Analyze atmosphere
+atm = AtmosphericLoss()
+atm.print_analysis()
+```
+
+## Turbulence Effects
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              ATMOSPHERIC TURBULENCE                                 │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  CAUSES:                                                            │
+│  • Temperature gradients → density variations                      │
+│  • Wind mixing of different temperature air                        │
+│  • Ground heating during day                                       │
+│                                                                     │
+│  EFFECTS ON OPTICAL BEAM:                                           │
+│                                                                     │
+│  1. SCINTILLATION (Intensity fluctuations)                         │
+│     ┌─────────────────────────────────────────┐                    │
+│     │  ████  █████     ███████     █████  ███ │                    │
+│     │  Intensity varies in space and time     │                    │
+│     └─────────────────────────────────────────┘                    │
+│     Impact: Fading, temporary signal loss                          │
+│                                                                     │
+│  2. BEAM WANDER (Position fluctuations)                            │
+│     ┌─────────────────────────────────────────┐                    │
+│     │           ←→                            │                    │
+│     │      ○  ○  ●  ○  ○    Beam center moves │                    │
+│     │           ↑↓                            │                    │
+│     └─────────────────────────────────────────┘                    │
+│     Impact: Pointing errors, coupling loss                         │
+│                                                                     │
+│  3. BEAM SPREADING (Size increase)                                 │
+│     ┌─────────────────────────────────────────┐                    │
+│     │    (  )  →  (    )  →  (      )         │                    │
+│     │    Beam expands beyond diffraction limit │                    │
+│     └─────────────────────────────────────────┘                    │
+│     Impact: Reduced intensity, collection loss                     │
+│                                                                     │
+│  FRIED PARAMETER (r₀):                                             │
+│  Coherence length of atmosphere                                    │
+│  Typical: 5-20 cm at visible wavelengths                           │
+│  Larger r₀ = better seeing                                         │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Turbulence Modeling
+
+```python
+@dataclass
+class TurbulenceParameters:
+    """Atmospheric turbulence parameters."""
+    Cn2: float  # Structure constant (m^-2/3)
+    wind_speed_ms: float
+    fried_param_cm: float
+    isoplanatic_angle_arcsec: float
+
+class TurbulenceModel:
+    """
+    Model atmospheric turbulence effects.
+    """
+
+    def __init__(self, wavelength_nm: float = 850):
+        self.wavelength = wavelength_nm * 1e-9  # Convert to meters
+        self.conditions = self._define_conditions()
+
+    def _define_conditions(self) -> Dict[str, TurbulenceParameters]:
+        """Define typical turbulence conditions."""
+        return {
+            "excellent": TurbulenceParameters(
+                Cn2=1e-16,
+                wind_speed_ms=5,
+                fried_param_cm=20,
+                isoplanatic_angle_arcsec=10
+            ),
+            "good": TurbulenceParameters(
+                Cn2=5e-16,
+                wind_speed_ms=10,
+                fried_param_cm=10,
+                isoplanatic_angle_arcsec=5
+            ),
+            "moderate": TurbulenceParameters(
+                Cn2=1e-15,
+                wind_speed_ms=15,
+                fried_param_cm=5,
+                isoplanatic_angle_arcsec=2
+            ),
+            "poor": TurbulenceParameters(
+                Cn2=5e-15,
+                wind_speed_ms=20,
+                fried_param_cm=2,
+                isoplanatic_angle_arcsec=1
+            )
+        }
+
+    def calculate_strehl_ratio(
+        self,
+        telescope_diameter_m: float,
+        fried_param_m: float
+    ) -> float:
+        """Calculate Strehl ratio (image quality)."""
+        D_r0 = telescope_diameter_m / fried_param_m
+
+        if D_r0 < 0.5:
+            # Small aperture, diffraction limited
+            return 1.0
+
+        # Kolmogorov turbulence approximation
+        strehl = np.exp(-(D_r0 / 3.44) ** (5/3))
+        return strehl
+
+    def scintillation_index(
+        self,
+        zenith_angle_deg: float,
+        Cn2: float = 1e-15
+    ) -> float:
+        """Calculate scintillation index (intensity variance)."""
+        # Simplified model for weak turbulence
+        k = 2 * np.pi / self.wavelength
+        L = 10000 / np.cos(np.radians(zenith_angle_deg))  # Path length (m)
+
+        # Rytov variance
+        sigma_R2 = 1.23 * Cn2 * (k ** (7/6)) * (L ** (11/6))
+
+        return min(sigma_R2, 1.0)  # Cap at saturation
+
+    def fiber_coupling_efficiency(
+        self,
+        telescope_diameter_m: float,
+        fried_param_m: float
+    ) -> float:
+        """Calculate fiber coupling efficiency under turbulence."""
+        # Coupling degrades with turbulence
+        D_r0 = telescope_diameter_m / fried_param_m
+
+        if D_r0 < 1:
+            # Nearly diffraction limited
+            return 0.8
+
+        # Coupling efficiency drops with turbulence
+        return 0.8 * np.exp(-0.5 * D_r0)
+
+    def print_analysis(self):
+        """Print turbulence analysis."""
+        print("\nTurbulence Impact Analysis")
+        print("=" * 60)
+
+        telescope_d = 0.5  # 50 cm telescope
+
+        for condition, params in self.conditions.items():
+            r0 = params.fried_param_cm / 100  # Convert to meters
+            strehl = self.calculate_strehl_ratio(telescope_d, r0)
+            coupling = self.fiber_coupling_efficiency(telescope_d, r0)
+            scint = self.scintillation_index(30, params.Cn2)
+
+            print(f"\n{condition.upper()} conditions:")
+            print(f"  Fried parameter: {params.fried_param_cm} cm")
+            print(f"  Strehl ratio: {strehl:.2f}")
+            print(f"  Fiber coupling: {coupling*100:.1f}%")
+            print(f"  Scintillation: {scint:.2f}")
+
+# Analyze turbulence
+turb = TurbulenceModel()
+turb.print_analysis()
+```
+
+## Mitigation Strategies
+
+```python
+class MitigationStrategies:
+    """
+    Strategies to mitigate atmospheric effects.
+    """
+
+    def __init__(self):
+        self.strategies = self._define_strategies()
+
+    def _define_strategies(self) -> Dict:
+        """Define mitigation strategies."""
+        return {
+            "adaptive_optics": {
+                "name": "Adaptive Optics",
+                "mechanism": "Deformable mirror corrects wavefront",
+                "improvement": "3-10x improvement in Strehl ratio",
+                "complexity": "High (requires wavefront sensor, fast control)",
+                "applicability": "Downlink (ground-based correction)"
+            },
+            "tip_tilt": {
+                "name": "Tip-Tilt Correction",
+                "mechanism": "Fast steering mirror tracks beam wander",
+                "improvement": "Reduces pointing loss by 80%",
+                "complexity": "Medium",
+                "applicability": "Both uplink and downlink"
+            },
+            "aperture_averaging": {
+                "name": "Aperture Averaging",
+                "mechanism": "Large aperture averages scintillation",
+                "improvement": "Reduces variance by (D/r0)^7/3",
+                "complexity": "Low (just use bigger telescope)",
+                "applicability": "Downlink (large ground receivers)"
+            },
+            "temporal_filtering": {
+                "name": "Temporal Filtering",
+                "mechanism": "Time gating matches turbulence coherence",
+                "improvement": "Reduces background noise",
+                "complexity": "Low-Medium",
+                "applicability": "Both directions"
+            },
+            "wavelength_selection": {
+                "name": "Longer Wavelength",
+                "mechanism": "Turbulence effects scale as λ^-1/5",
+                "improvement": "Better at 1550nm vs 850nm",
+                "complexity": "Low (design choice)",
+                "applicability": "System design"
+            },
+            "site_selection": {
+                "name": "High Altitude Sites",
+                "mechanism": "Above most turbulent atmosphere",
+                "improvement": "2-3x better seeing at 4000m",
+                "complexity": "Infrastructure challenge",
+                "applicability": "Ground station location"
+            }
+        }
+
+    def print_strategies(self):
+        """Print mitigation strategies."""
+        print("\nAtmospheric Mitigation Strategies")
+        print("=" * 70)
+
+        for strat_id, strat in self.strategies.items():
+            print(f"\n{strat['name']}")
+            print("-" * 50)
+            print(f"  Mechanism: {strat['mechanism']}")
+            print(f"  Improvement: {strat['improvement']}")
+            print(f"  Complexity: {strat['complexity']}")
+            print(f"  Use case: {strat['applicability']}")
+
+# Display strategies
+mitigation = MitigationStrategies()
+mitigation.print_strategies()
+```
+
+## Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              ATMOSPHERIC EFFECTS SUMMARY                            │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Main Effects:                                                      │
+│  • Absorption: 10-15% loss at zenith (850nm)                       │
+│  • Scattering: Additional few percent                              │
+│  • Turbulence: Scintillation, wander, spreading                    │
+│  • Background: Major issue for daytime operation                   │
+│                                                                     │
+│  Zenith Angle Dependence:                                           │
+│  • Loss increases as sec(zenith_angle)                             │
+│  • Practical limit ~60-70° from zenith                             │
+│  • Best performance near zenith                                    │
+│                                                                     │
+│  Turbulence Effects:                                                │
+│  • Fried parameter (r₀): 5-20 cm typical                           │
+│  • Scintillation: Intensity fading                                 │
+│  • Beam wander: Position fluctuations                              │
+│  • Fiber coupling: Degrades with turbulence                        │
+│                                                                     │
+│  Mitigation Strategies:                                             │
+│  • Adaptive optics for wavefront correction                        │
+│  • Tip-tilt for beam tracking                                      │
+│  • Large apertures for averaging                                   │
+│  • High-altitude sites                                             │
+│  • Longer wavelengths (1550 vs 850 nm)                            │
+│                                                                     │
+│  Weather Impact:                                                    │
+│  • Clouds: Complete blockage                                       │
+│  • Clear nights: Best operation                                    │
+│  • Daytime: Possible with filtering (challenging)                  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Understanding and mitigating atmospheric effects is essential for reliable satellite QKD operation.

@@ -1,0 +1,513 @@
+---
+title: "Monte Carlo Option Pricing"
+description: "Learn Monte Carlo simulation methods for option pricing, including variance reduction techniques and path-dependent options."
+duration: 55
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Implement Monte Carlo simulation for European options
+- Apply variance reduction techniques
+- Price path-dependent options (Asian, barrier)
+- Estimate Greeks using Monte Carlo
+- Understand convergence and error analysis
+
+## 1. Monte Carlo Fundamentals
+
+Monte Carlo simulation estimates option prices by averaging payoffs across many simulated price paths.
+
+<Definition term="Monte Carlo Simulation">
+A computational technique that uses random sampling to estimate expectations. For option pricing, we simulate stock paths and average discounted payoffs.
+</Definition>
+
+```python
+import numpy as np
+from scipy.stats import norm
+
+class MonteCarloEngine:
+    """
+    Monte Carlo option pricing engine.
+    """
+
+    def __init__(self, S, K, T, r, sigma, n_simulations=100000, n_steps=252):
+        """
+        Args:
+            S: Initial stock price
+            K: Strike price
+            T: Time to maturity
+            r: Risk-free rate
+            sigma: Volatility
+            n_simulations: Number of paths to simulate
+            n_steps: Time steps per path
+        """
+        self.S = S
+        self.K = K
+        self.T = T
+        self.r = r
+        self.sigma = sigma
+        self.n_sims = n_simulations
+        self.n_steps = n_steps
+        self.dt = T / n_steps
+
+    def simulate_gbm_paths(self, seed=None):
+        """
+        Simulate stock price paths using Geometric Brownian Motion.
+
+        dS = μSdt + σSdW
+        S_t = S_0 * exp((μ - σ²/2)t + σW_t)
+        """
+        if seed:
+            np.random.seed(seed)
+
+        # Generate random increments
+        Z = np.random.standard_normal((self.n_sims, self.n_steps))
+
+        # Drift and diffusion
+        drift = (self.r - 0.5 * self.sigma**2) * self.dt
+        diffusion = self.sigma * np.sqrt(self.dt)
+
+        # Calculate log returns
+        log_returns = drift + diffusion * Z
+
+        # Cumulative sum to get log prices
+        log_prices = np.cumsum(log_returns, axis=1)
+
+        # Add initial price and convert to prices
+        paths = self.S * np.exp(np.hstack([np.zeros((self.n_sims, 1)), log_prices]))
+
+        return paths
+
+    def price_european_call(self, seed=None):
+        """Price European call using Monte Carlo."""
+        paths = self.simulate_gbm_paths(seed)
+        final_prices = paths[:, -1]
+
+        payoffs = np.maximum(final_prices - self.K, 0)
+        discounted_payoffs = np.exp(-self.r * self.T) * payoffs
+
+        price = np.mean(discounted_payoffs)
+        std_error = np.std(discounted_payoffs) / np.sqrt(self.n_sims)
+
+        return price, std_error
+
+    def price_european_put(self, seed=None):
+        """Price European put using Monte Carlo."""
+        paths = self.simulate_gbm_paths(seed)
+        final_prices = paths[:, -1]
+
+        payoffs = np.maximum(self.K - final_prices, 0)
+        discounted_payoffs = np.exp(-self.r * self.T) * payoffs
+
+        price = np.mean(discounted_payoffs)
+        std_error = np.std(discounted_payoffs) / np.sqrt(self.n_sims)
+
+        return price, std_error
+
+# Example
+mc = MonteCarloEngine(S=100, K=100, T=1.0, r=0.05, sigma=0.20, n_simulations=100000)
+
+call_price, call_se = mc.price_european_call(seed=42)
+put_price, put_se = mc.price_european_put(seed=42)
+
+# Compare to Black-Scholes
+def bs_call(S, K, T, r, sigma):
+    d1 = (np.log(S/K) + (r + sigma**2/2)*T) / (sigma*np.sqrt(T))
+    d2 = d1 - sigma*np.sqrt(T)
+    return S * norm.cdf(d1) - K * np.exp(-r*T) * norm.cdf(d2)
+
+bs_price = bs_call(100, 100, 1.0, 0.05, 0.20)
+
+print("Monte Carlo vs Black-Scholes:")
+print(f"  MC Call: ${call_price:.4f} ± ${call_se:.4f}")
+print(f"  BS Call: ${bs_price:.4f}")
+print(f"  Error: ${abs(call_price - bs_price):.4f}")
+print(f"  MC Put: ${put_price:.4f} ± ${put_se:.4f}")
+```
+
+## 2. Variance Reduction Techniques
+
+Reduce the standard error without increasing simulations.
+
+<Formula>
+Monte Carlo standard error:
+$$SE = \frac{\sigma}{\sqrt{n}}$$
+To halve the error, you need 4× more simulations. Variance reduction achieves the same accuracy with fewer paths.
+</Formula>
+
+```python
+class VarianceReduction:
+    """
+    Variance reduction techniques for Monte Carlo.
+    """
+
+    def __init__(self, S, K, T, r, sigma, n_simulations=50000):
+        self.S = S
+        self.K = K
+        self.T = T
+        self.r = r
+        self.sigma = sigma
+        self.n_sims = n_simulations
+
+    def antithetic_variates(self, seed=None):
+        """
+        Antithetic variates: Use Z and -Z together.
+
+        Reduces variance when f(Z) and f(-Z) are negatively correlated.
+        """
+        if seed:
+            np.random.seed(seed)
+
+        n_pairs = self.n_sims // 2
+
+        Z = np.random.standard_normal(n_pairs)
+
+        # Calculate final prices for Z and -Z
+        drift = (self.r - 0.5 * self.sigma**2) * self.T
+        diffusion = self.sigma * np.sqrt(self.T)
+
+        S_T_pos = self.S * np.exp(drift + diffusion * Z)
+        S_T_neg = self.S * np.exp(drift + diffusion * (-Z))
+
+        # Payoffs
+        payoff_pos = np.maximum(S_T_pos - self.K, 0)
+        payoff_neg = np.maximum(S_T_neg - self.K, 0)
+
+        # Average paired payoffs
+        payoff_avg = (payoff_pos + payoff_neg) / 2
+        discounted = np.exp(-self.r * self.T) * payoff_avg
+
+        price = np.mean(discounted)
+        std_error = np.std(discounted) / np.sqrt(n_pairs)
+
+        return price, std_error
+
+    def control_variates(self, seed=None):
+        """
+        Control variates: Use known expectation to reduce variance.
+
+        Use the stock price itself as control (E[S_T] = S_0 * e^(rT))
+        """
+        if seed:
+            np.random.seed(seed)
+
+        Z = np.random.standard_normal(self.n_sims)
+
+        drift = (self.r - 0.5 * self.sigma**2) * self.T
+        diffusion = self.sigma * np.sqrt(self.T)
+
+        S_T = self.S * np.exp(drift + diffusion * Z)
+
+        # Option payoff (what we want)
+        payoff = np.exp(-self.r * self.T) * np.maximum(S_T - self.K, 0)
+
+        # Control: discounted stock price
+        control = np.exp(-self.r * self.T) * S_T
+        control_mean = self.S  # Known expectation: E[e^(-rT)*S_T] = S_0
+
+        # Estimate optimal beta
+        cov_matrix = np.cov(payoff, control)
+        beta = cov_matrix[0, 1] / cov_matrix[1, 1]
+
+        # Adjusted payoffs
+        adjusted = payoff - beta * (control - control_mean)
+
+        price = np.mean(adjusted)
+        std_error = np.std(adjusted) / np.sqrt(self.n_sims)
+
+        return price, std_error, beta
+
+# Compare methods
+vr = VarianceReduction(S=100, K=100, T=1.0, r=0.05, sigma=0.20, n_simulations=50000)
+
+print("Variance Reduction Comparison:")
+print("=" * 50)
+
+# Standard MC
+mc_standard = MonteCarloEngine(S=100, K=100, T=1.0, r=0.05, sigma=0.20, n_simulations=50000)
+std_price, std_se = mc_standard.price_european_call(seed=42)
+print(f"Standard MC: ${std_price:.4f} ± ${std_se:.4f}")
+
+# Antithetic
+anti_price, anti_se = vr.antithetic_variates(seed=42)
+print(f"Antithetic:  ${anti_price:.4f} ± ${anti_se:.4f}")
+
+# Control variates
+cv_price, cv_se, beta = vr.control_variates(seed=42)
+print(f"Control Var: ${cv_price:.4f} ± ${cv_se:.4f} (β={beta:.2f})")
+
+print(f"\nVariance reduction factors:")
+print(f"  Antithetic: {(std_se/anti_se)**2:.1f}x")
+print(f"  Control:    {(std_se/cv_se)**2:.1f}x")
+```
+
+<Tip>
+Combining variance reduction techniques can provide even greater efficiency. Antithetic + control variates is a common combination.
+</Tip>
+
+## 3. Path-Dependent Options
+
+Monte Carlo excels at pricing path-dependent options.
+
+```python
+class PathDependentOptions:
+    """
+    Price path-dependent options using Monte Carlo.
+    """
+
+    def __init__(self, S, K, T, r, sigma, n_sims=100000, n_steps=252):
+        self.S = S
+        self.K = K
+        self.T = T
+        self.r = r
+        self.sigma = sigma
+        self.n_sims = n_sims
+        self.n_steps = n_steps
+        self.dt = T / n_steps
+
+    def simulate_paths(self, seed=None):
+        """Generate stock price paths."""
+        if seed:
+            np.random.seed(seed)
+
+        Z = np.random.standard_normal((self.n_sims, self.n_steps))
+        drift = (self.r - 0.5 * self.sigma**2) * self.dt
+        diffusion = self.sigma * np.sqrt(self.dt)
+
+        log_returns = drift + diffusion * Z
+        log_prices = np.cumsum(log_returns, axis=1)
+
+        paths = self.S * np.exp(np.hstack([np.zeros((self.n_sims, 1)), log_prices]))
+        return paths
+
+    def asian_call(self, averaging='arithmetic', seed=None):
+        """
+        Asian call option - payoff based on average price.
+
+        Args:
+            averaging: 'arithmetic' or 'geometric'
+        """
+        paths = self.simulate_paths(seed)
+
+        if averaging == 'arithmetic':
+            average_price = np.mean(paths, axis=1)
+        else:
+            average_price = np.exp(np.mean(np.log(paths), axis=1))
+
+        payoffs = np.maximum(average_price - self.K, 0)
+        discounted = np.exp(-self.r * self.T) * payoffs
+
+        price = np.mean(discounted)
+        std_error = np.std(discounted) / np.sqrt(self.n_sims)
+
+        return price, std_error
+
+    def barrier_call(self, barrier, barrier_type='up-and-out', seed=None):
+        """
+        Barrier option - knocked in or out if barrier is crossed.
+
+        Args:
+            barrier: Barrier level
+            barrier_type: 'up-and-out', 'up-and-in', 'down-and-out', 'down-and-in'
+        """
+        paths = self.simulate_paths(seed)
+
+        if 'up' in barrier_type:
+            crossed = np.max(paths, axis=1) >= barrier
+        else:
+            crossed = np.min(paths, axis=1) <= barrier
+
+        if 'out' in barrier_type:
+            alive = ~crossed
+        else:
+            alive = crossed
+
+        final_prices = paths[:, -1]
+        payoffs = np.maximum(final_prices - self.K, 0) * alive
+
+        discounted = np.exp(-self.r * self.T) * payoffs
+
+        price = np.mean(discounted)
+        std_error = np.std(discounted) / np.sqrt(self.n_sims)
+
+        return price, std_error
+
+    def lookback_call(self, floating_strike=True, seed=None):
+        """
+        Lookback option - strike based on path extremum.
+
+        Args:
+            floating_strike: If True, strike = min(S); else payoff = max(S) - K
+        """
+        paths = self.simulate_paths(seed)
+        final_prices = paths[:, -1]
+
+        if floating_strike:
+            min_prices = np.min(paths, axis=1)
+            payoffs = final_prices - min_prices  # Always >= 0
+        else:
+            max_prices = np.max(paths, axis=1)
+            payoffs = np.maximum(max_prices - self.K, 0)
+
+        discounted = np.exp(-self.r * self.T) * payoffs
+
+        price = np.mean(discounted)
+        std_error = np.std(discounted) / np.sqrt(self.n_sims)
+
+        return price, std_error
+
+# Price exotic options
+exotic = PathDependentOptions(S=100, K=100, T=1.0, r=0.05, sigma=0.20)
+
+print("Path-Dependent Option Prices:")
+print("=" * 50)
+
+# Asian options
+asian_arith, asian_arith_se = exotic.asian_call('arithmetic', seed=42)
+asian_geom, asian_geom_se = exotic.asian_call('geometric', seed=42)
+print(f"Asian Call (arithmetic): ${asian_arith:.4f} ± ${asian_arith_se:.4f}")
+print(f"Asian Call (geometric):  ${asian_geom:.4f} ± ${asian_geom_se:.4f}")
+
+# Barrier options
+barrier_uo, barrier_uo_se = exotic.barrier_call(120, 'up-and-out', seed=42)
+barrier_ui, barrier_ui_se = exotic.barrier_call(120, 'up-and-in', seed=42)
+print(f"\nBarrier 120 Up-and-Out: ${barrier_uo:.4f} ± ${barrier_uo_se:.4f}")
+print(f"Barrier 120 Up-and-In:  ${barrier_ui:.4f} ± ${barrier_ui_se:.4f}")
+
+# Lookback
+lookback, lookback_se = exotic.lookback_call(floating_strike=True, seed=42)
+print(f"\nLookback (floating): ${lookback:.4f} ± ${lookback_se:.4f}")
+```
+
+## 4. Greeks via Monte Carlo
+
+Estimate Greeks using finite differences on simulated payoffs.
+
+```python
+class MonteCarloGreeks:
+    """
+    Calculate Greeks using Monte Carlo with finite differences.
+    """
+
+    def __init__(self, S, K, T, r, sigma, n_sims=100000):
+        self.S = S
+        self.K = K
+        self.T = T
+        self.r = r
+        self.sigma = sigma
+        self.n_sims = n_sims
+
+    def price_call(self, S, sigma):
+        """Helper to price call with given S and sigma."""
+        Z = np.random.standard_normal(self.n_sims)
+        S_T = S * np.exp((self.r - 0.5*sigma**2)*self.T + sigma*np.sqrt(self.T)*Z)
+        payoffs = np.maximum(S_T - self.K, 0)
+        return np.exp(-self.r * self.T) * np.mean(payoffs)
+
+    def delta(self, h=0.01):
+        """Delta via central difference."""
+        np.random.seed(42)
+        V_up = self.price_call(self.S + h, self.sigma)
+        np.random.seed(42)
+        V_down = self.price_call(self.S - h, self.sigma)
+        return (V_up - V_down) / (2 * h)
+
+    def gamma(self, h=0.01):
+        """Gamma via central difference."""
+        np.random.seed(42)
+        V = self.price_call(self.S, self.sigma)
+        np.random.seed(42)
+        V_up = self.price_call(self.S + h, self.sigma)
+        np.random.seed(42)
+        V_down = self.price_call(self.S - h, self.sigma)
+        return (V_up - 2*V + V_down) / (h**2)
+
+    def vega(self, h=0.001):
+        """Vega via central difference."""
+        np.random.seed(42)
+        V_up = self.price_call(self.S, self.sigma + h)
+        np.random.seed(42)
+        V_down = self.price_call(self.S, self.sigma - h)
+        return (V_up - V_down) / (2 * h) * 0.01
+
+    def all_greeks(self):
+        """Calculate all Greeks."""
+        np.random.seed(42)
+        return {
+            'delta': self.delta(),
+            'gamma': self.gamma(),
+            'vega': self.vega()
+        }
+
+# Calculate MC Greeks
+mc_greeks = MonteCarloGreeks(S=100, K=100, T=0.5, r=0.05, sigma=0.20)
+greeks = mc_greeks.all_greeks()
+
+print("Monte Carlo Greeks:")
+for name, value in greeks.items():
+    print(f"  {name}: {value:.4f}")
+```
+
+## 5. Convergence Analysis
+
+Understand Monte Carlo error behavior.
+
+```python
+def convergence_study(S, K, T, r, sigma, n_sims_list, n_trials=20):
+    """
+    Study Monte Carlo convergence.
+    """
+    # True value (Black-Scholes)
+    d1 = (np.log(S/K) + (r + sigma**2/2)*T) / (sigma*np.sqrt(T))
+    d2 = d1 - sigma*np.sqrt(T)
+    true_price = S * norm.cdf(d1) - K * np.exp(-r*T) * norm.cdf(d2)
+
+    results = []
+
+    for n_sims in n_sims_list:
+        errors = []
+        for trial in range(n_trials):
+            mc = MonteCarloEngine(S, K, T, r, sigma, n_simulations=n_sims)
+            price, _ = mc.price_european_call()
+            errors.append(abs(price - true_price))
+
+        results.append({
+            'n_sims': n_sims,
+            'mean_error': np.mean(errors),
+            'std_error': np.std(errors),
+            'theoretical_error': sigma * np.sqrt(T) / np.sqrt(n_sims)  # Rough bound
+        })
+
+    return results, true_price
+
+n_sims_list = [1000, 5000, 10000, 50000, 100000, 500000]
+conv_results, true_price = convergence_study(
+    S=100, K=100, T=1.0, r=0.05, sigma=0.20, n_sims_list=n_sims_list
+)
+
+print("Monte Carlo Convergence Analysis:")
+print(f"True Price: ${true_price:.4f}")
+print(f"\n{'N Sims':>10} {'Mean Error':>12} {'Std Error':>12}")
+print("-" * 36)
+for r in conv_results:
+    print(f"{r['n_sims']:>10} ${r['mean_error']:>11.4f} ${r['std_error']:>11.4f}")
+```
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Monte Carlo basics**: Simulate paths, average discounted payoffs
+2. **GBM simulation**: S_T = S_0 × exp((r - σ²/2)T + σ√T × Z)
+3. **Variance reduction**: Antithetic variates, control variates
+4. **Path-dependent options**: Asian, barrier, lookback
+5. **Greeks estimation**: Use finite differences with common random numbers
+6. **Convergence**: Error ∝ 1/√n, variance reduction improves efficiency
+
+## Further Reading
+
+- Next lesson: Quantum Option Pricing
+- Related: Least-Squares Monte Carlo for American Options
+- Application: Exotic Option Trading

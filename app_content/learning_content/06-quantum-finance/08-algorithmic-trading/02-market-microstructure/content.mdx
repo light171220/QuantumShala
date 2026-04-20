@@ -1,0 +1,854 @@
+---
+title: "Market Microstructure"
+description: "Understanding order books, market making, price formation, and the mechanics of how trades are executed."
+---
+
+# Market Microstructure
+
+Market microstructure studies how trades are executed, prices are formed, and liquidity is provided. Understanding these mechanics is essential for algorithmic trading.
+
+<QuizQuestion
+  question="What is market microstructure?"
+  options={[
+    "The physical structure of stock exchanges",
+    "The study of trading mechanisms and price formation",
+    "The size of market participants",
+    "The design of trading algorithms"
+  ]}
+  correctIndex={1}
+/>
+
+## The Order Book
+
+The order book is the central mechanism for matching buyers and sellers.
+
+```python
+"""
+Order Book Implementation and Analysis
+"""
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+from enum import Enum
+from datetime import datetime
+from collections import defaultdict
+import heapq
+
+class OrderSide(Enum):
+    BID = "bid"  # Buy orders
+    ASK = "ask"  # Sell orders
+
+@dataclass
+class LimitOrder:
+    """A limit order in the order book."""
+    order_id: str
+    side: OrderSide
+    price: float
+    quantity: float
+    timestamp: datetime = field(default_factory=datetime.now)
+
+    def __lt__(self, other):
+        """For priority queue ordering."""
+        if self.side == OrderSide.BID:
+            # Bids: higher price = higher priority
+            if self.price != other.price:
+                return self.price > other.price
+        else:
+            # Asks: lower price = higher priority
+            if self.price != other.price:
+                return self.price < other.price
+        # Same price: earlier timestamp = higher priority
+        return self.timestamp < other.timestamp
+
+@dataclass
+class Trade:
+    """A completed trade."""
+    buyer_order_id: str
+    seller_order_id: str
+    price: float
+    quantity: float
+    timestamp: datetime = field(default_factory=datetime.now)
+
+class OrderBook:
+    """
+    Limit order book with price-time priority matching.
+    """
+
+    def __init__(self, symbol: str):
+        self.symbol = symbol
+        # Price levels: price -> list of orders at that price
+        self.bids: Dict[float, List[LimitOrder]] = defaultdict(list)
+        self.asks: Dict[float, List[LimitOrder]] = defaultdict(list)
+        # Order lookup by ID
+        self.orders: Dict[str, LimitOrder] = {}
+        # Trade history
+        self.trades: List[Trade] = []
+
+    def add_order(self, order: LimitOrder) -> List[Trade]:
+        """
+        Add order to book. Returns list of trades if order crosses spread.
+        """
+        trades = []
+
+        # Try to match with opposite side
+        if order.side == OrderSide.BID:
+            trades = self._match_bid(order)
+        else:
+            trades = self._match_ask(order)
+
+        # If order has remaining quantity, add to book
+        if order.quantity > 0:
+            self._add_to_book(order)
+
+        return trades
+
+    def _match_bid(self, bid_order: LimitOrder) -> List[Trade]:
+        """Match a bid order against asks."""
+        trades = []
+
+        # Get sorted ask prices (lowest first)
+        ask_prices = sorted(self.asks.keys())
+
+        for ask_price in ask_prices:
+            if bid_order.quantity <= 0:
+                break
+            if ask_price > bid_order.price:
+                break  # No more matches possible
+
+            # Match against orders at this price level
+            remaining_asks = []
+            for ask_order in self.asks[ask_price]:
+                if bid_order.quantity <= 0:
+                    remaining_asks.append(ask_order)
+                    continue
+
+                # Execute trade
+                trade_qty = min(bid_order.quantity, ask_order.quantity)
+                trade = Trade(
+                    buyer_order_id=bid_order.order_id,
+                    seller_order_id=ask_order.order_id,
+                    price=ask_price,  # Price at resting order
+                    quantity=trade_qty
+                )
+                trades.append(trade)
+                self.trades.append(trade)
+
+                bid_order.quantity -= trade_qty
+                ask_order.quantity -= trade_qty
+
+                if ask_order.quantity > 0:
+                    remaining_asks.append(ask_order)
+                else:
+                    del self.orders[ask_order.order_id]
+
+            if remaining_asks:
+                self.asks[ask_price] = remaining_asks
+            else:
+                del self.asks[ask_price]
+
+        return trades
+
+    def _match_ask(self, ask_order: LimitOrder) -> List[Trade]:
+        """Match an ask order against bids."""
+        trades = []
+
+        # Get sorted bid prices (highest first)
+        bid_prices = sorted(self.bids.keys(), reverse=True)
+
+        for bid_price in bid_prices:
+            if ask_order.quantity <= 0:
+                break
+            if bid_price < ask_order.price:
+                break
+
+            remaining_bids = []
+            for bid_order in self.bids[bid_price]:
+                if ask_order.quantity <= 0:
+                    remaining_bids.append(bid_order)
+                    continue
+
+                trade_qty = min(ask_order.quantity, bid_order.quantity)
+                trade = Trade(
+                    buyer_order_id=bid_order.order_id,
+                    seller_order_id=ask_order.order_id,
+                    price=bid_price,
+                    quantity=trade_qty
+                )
+                trades.append(trade)
+                self.trades.append(trade)
+
+                ask_order.quantity -= trade_qty
+                bid_order.quantity -= trade_qty
+
+                if bid_order.quantity > 0:
+                    remaining_bids.append(bid_order)
+                else:
+                    del self.orders[bid_order.order_id]
+
+            if remaining_bids:
+                self.bids[bid_price] = remaining_bids
+            else:
+                del self.bids[bid_price]
+
+        return trades
+
+    def _add_to_book(self, order: LimitOrder):
+        """Add order to the book (no matching)."""
+        self.orders[order.order_id] = order
+        if order.side == OrderSide.BID:
+            self.bids[order.price].append(order)
+        else:
+            self.asks[order.price].append(order)
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel an order. Returns True if successful."""
+        if order_id not in self.orders:
+            return False
+
+        order = self.orders[order_id]
+        del self.orders[order_id]
+
+        if order.side == OrderSide.BID:
+            self.bids[order.price] = [
+                o for o in self.bids[order.price] if o.order_id != order_id
+            ]
+            if not self.bids[order.price]:
+                del self.bids[order.price]
+        else:
+            self.asks[order.price] = [
+                o for o in self.asks[order.price] if o.order_id != order_id
+            ]
+            if not self.asks[order.price]:
+                del self.asks[order.price]
+
+        return True
+
+    def get_best_bid(self) -> Optional[float]:
+        """Get highest bid price."""
+        return max(self.bids.keys()) if self.bids else None
+
+    def get_best_ask(self) -> Optional[float]:
+        """Get lowest ask price."""
+        return min(self.asks.keys()) if self.asks else None
+
+    def get_spread(self) -> Optional[float]:
+        """Get bid-ask spread."""
+        best_bid = self.get_best_bid()
+        best_ask = self.get_best_ask()
+        if best_bid and best_ask:
+            return best_ask - best_bid
+        return None
+
+    def get_mid_price(self) -> Optional[float]:
+        """Get mid-market price."""
+        best_bid = self.get_best_bid()
+        best_ask = self.get_best_ask()
+        if best_bid and best_ask:
+            return (best_bid + best_ask) / 2
+        return None
+
+    def get_depth(self, levels: int = 5) -> Dict:
+        """Get order book depth at top N price levels."""
+        bid_prices = sorted(self.bids.keys(), reverse=True)[:levels]
+        ask_prices = sorted(self.asks.keys())[:levels]
+
+        return {
+            "bids": [
+                {
+                    "price": p,
+                    "quantity": sum(o.quantity for o in self.bids[p]),
+                    "orders": len(self.bids[p])
+                }
+                for p in bid_prices
+            ],
+            "asks": [
+                {
+                    "price": p,
+                    "quantity": sum(o.quantity for o in self.asks[p]),
+                    "orders": len(self.asks[p])
+                }
+                for p in ask_prices
+            ]
+        }
+
+
+# Demonstrate order book
+book = OrderBook("AAPL")
+
+# Add some orders
+orders = [
+    LimitOrder("b1", OrderSide.BID, 149.90, 100),
+    LimitOrder("b2", OrderSide.BID, 149.85, 200),
+    LimitOrder("b3", OrderSide.BID, 149.80, 150),
+    LimitOrder("a1", OrderSide.ASK, 150.10, 100),
+    LimitOrder("a2", OrderSide.ASK, 150.15, 200),
+    LimitOrder("a3", OrderSide.ASK, 150.20, 150),
+]
+
+for order in orders:
+    book.add_order(order)
+
+print("Order Book State:")
+print(f"Best Bid: {book.get_best_bid()}")
+print(f"Best Ask: {book.get_best_ask()}")
+print(f"Spread: {book.get_spread()}")
+print(f"Mid Price: {book.get_mid_price()}")
+print(f"\nDepth: {book.get_depth(3)}")
+
+# Execute a crossing order
+crossing_order = LimitOrder("b4", OrderSide.BID, 150.15, 150)
+trades = book.add_order(crossing_order)
+print(f"\nTrades executed: {len(trades)}")
+for trade in trades:
+    print(f"  Price: {trade.price}, Qty: {trade.quantity}")
+```
+
+## Market Impact and Execution Cost
+
+Large orders move prices. Understanding market impact is crucial for efficient execution.
+
+```python
+import math
+from dataclasses import dataclass
+from typing import List, Optional
+
+@dataclass
+class MarketImpactModel:
+    """
+    Model the price impact of trading.
+    Uses square-root impact model: impact proportional to sqrt(size/volume).
+    """
+
+    daily_volume: float  # Average daily volume
+    volatility: float  # Daily volatility
+    spread: float  # Typical bid-ask spread
+
+    def estimate_temporary_impact(self,
+                                   order_size: float,
+                                   execution_time_fraction: float = 1.0) -> float:
+        """
+        Estimate temporary price impact.
+
+        Temporary impact: price movement during execution that reverses after.
+
+        Args:
+            order_size: Size of order in shares
+            execution_time_fraction: Fraction of day to execute (1.0 = full day)
+
+        Returns:
+            Estimated price impact as percentage
+        """
+        # Participation rate
+        participation = order_size / (self.daily_volume * execution_time_fraction)
+
+        # Square-root impact model
+        # Impact = eta * sigma * sqrt(Q / V)
+        eta = 0.1  # Market impact coefficient (varies by market)
+        impact = eta * self.volatility * math.sqrt(participation)
+
+        return impact * 100  # Return as percentage
+
+    def estimate_permanent_impact(self, order_size: float) -> float:
+        """
+        Estimate permanent price impact.
+
+        Permanent impact: price movement that persists after execution.
+        Typically smaller than temporary impact.
+        """
+        participation = order_size / self.daily_volume
+
+        # Linear model for permanent impact
+        gamma = 0.05  # Permanent impact coefficient
+        impact = gamma * self.volatility * participation
+
+        return impact * 100
+
+    def estimate_total_cost(self,
+                            order_size: float,
+                            mid_price: float,
+                            execution_time_fraction: float = 1.0) -> dict:
+        """
+        Estimate total execution cost.
+
+        Returns breakdown of costs.
+        """
+        # Half spread cost (crossing the spread)
+        spread_cost = (self.spread / 2) / mid_price * 100
+
+        # Impact costs
+        temp_impact = self.estimate_temporary_impact(
+            order_size, execution_time_fraction
+        )
+        perm_impact = self.estimate_permanent_impact(order_size)
+
+        # Total cost
+        total_pct = spread_cost + temp_impact + perm_impact
+        total_dollars = mid_price * order_size * (total_pct / 100)
+
+        return {
+            "spread_cost_pct": spread_cost,
+            "temporary_impact_pct": temp_impact,
+            "permanent_impact_pct": perm_impact,
+            "total_cost_pct": total_pct,
+            "total_cost_dollars": total_dollars
+        }
+
+
+class OptimalExecutionPlanner:
+    """
+    Plan optimal execution to minimize market impact.
+    Based on Almgren-Chriss optimal execution framework.
+    """
+
+    def __init__(self,
+                 impact_model: MarketImpactModel,
+                 risk_aversion: float = 0.001):
+        self.impact_model = impact_model
+        self.risk_aversion = risk_aversion
+
+    def vwap_schedule(self,
+                      total_quantity: float,
+                      num_slices: int,
+                      volume_profile: Optional[List[float]] = None) -> List[float]:
+        """
+        Generate VWAP (Volume Weighted Average Price) schedule.
+
+        Trades in proportion to historical volume profile.
+        """
+        if volume_profile is None:
+            # Assume U-shaped intraday volume (common pattern)
+            volume_profile = self._generate_u_shaped_profile(num_slices)
+
+        # Normalize profile
+        total_volume = sum(volume_profile)
+        normalized = [v / total_volume for v in volume_profile]
+
+        # Allocate quantity
+        schedule = [total_quantity * weight for weight in normalized]
+
+        return schedule
+
+    def twap_schedule(self,
+                      total_quantity: float,
+                      num_slices: int) -> List[float]:
+        """
+        Generate TWAP (Time Weighted Average Price) schedule.
+
+        Equal-sized trades over time.
+        """
+        return [total_quantity / num_slices] * num_slices
+
+    def is_schedule(self,
+                    total_quantity: float,
+                    num_slices: int) -> List[float]:
+        """
+        Generate Implementation Shortfall optimal schedule.
+
+        Balances market impact vs. timing risk.
+        Front-loads execution to reduce timing risk.
+        """
+        # Simplified version of Almgren-Chriss
+        # More aggressive execution = more impact but less timing risk
+
+        # Calculate decay rate based on risk aversion
+        daily_var = (self.impact_model.volatility ** 2)
+        kappa = math.sqrt(self.risk_aversion / daily_var) if daily_var > 0 else 1
+
+        schedule = []
+        remaining = total_quantity
+
+        for i in range(num_slices):
+            time_remaining = num_slices - i
+            if time_remaining <= 0:
+                slice_qty = remaining
+            else:
+                # Exponential decay
+                slice_qty = remaining * (1 - math.exp(-kappa / time_remaining))
+                slice_qty = max(slice_qty, remaining / time_remaining)  # Floor
+
+            schedule.append(slice_qty)
+            remaining -= slice_qty
+
+        # Ensure we trade exactly total_quantity
+        diff = total_quantity - sum(schedule)
+        if schedule:
+            schedule[-1] += diff
+
+        return schedule
+
+    def _generate_u_shaped_profile(self, num_slices: int) -> List[float]:
+        """Generate U-shaped volume profile (high at open/close)."""
+        profile = []
+        for i in range(num_slices):
+            # Distance from center
+            x = abs(i - num_slices / 2) / (num_slices / 2)
+            # U-shape: higher at edges
+            volume = 0.5 + 0.5 * (x ** 2)
+            profile.append(volume)
+        return profile
+
+    def compare_strategies(self,
+                          total_quantity: float,
+                          num_slices: int,
+                          mid_price: float) -> dict:
+        """Compare different execution strategies."""
+        strategies = {
+            "TWAP": self.twap_schedule(total_quantity, num_slices),
+            "VWAP": self.vwap_schedule(total_quantity, num_slices),
+            "IS": self.is_schedule(total_quantity, num_slices)
+        }
+
+        results = {}
+        for name, schedule in strategies.items():
+            # Estimate costs for each slice
+            total_cost = 0
+            for slice_qty in schedule:
+                cost = self.impact_model.estimate_total_cost(
+                    slice_qty, mid_price, 1 / num_slices
+                )
+                total_cost += cost["total_cost_dollars"]
+
+            results[name] = {
+                "schedule": [round(q, 0) for q in schedule],
+                "estimated_cost": total_cost
+            }
+
+        return results
+
+
+# Example usage
+impact_model = MarketImpactModel(
+    daily_volume=5_000_000,
+    volatility=0.02,
+    spread=0.02
+)
+
+# Estimate impact for a large order
+order_size = 100_000  # 100k shares = 2% of daily volume
+mid_price = 150.0
+
+cost = impact_model.estimate_total_cost(order_size, mid_price)
+print("Market Impact Analysis")
+print("=" * 40)
+print(f"Order Size: {order_size:,} shares")
+print(f"Daily Volume: {impact_model.daily_volume:,}")
+print(f"Participation: {order_size/impact_model.daily_volume*100:.1f}%")
+print(f"\nCost Breakdown:")
+print(f"  Spread Cost: {cost['spread_cost_pct']:.3f}%")
+print(f"  Temporary Impact: {cost['temporary_impact_pct']:.3f}%")
+print(f"  Permanent Impact: {cost['permanent_impact_pct']:.3f}%")
+print(f"  Total: {cost['total_cost_pct']:.3f}% (${cost['total_cost_dollars']:,.0f})")
+
+# Compare execution strategies
+planner = OptimalExecutionPlanner(impact_model)
+comparison = planner.compare_strategies(order_size, 10, mid_price)
+
+print(f"\nExecution Strategy Comparison (10 slices):")
+for name, result in comparison.items():
+    print(f"  {name}: ${result['estimated_cost']:,.0f}")
+```
+
+## Market Making
+
+Market makers provide liquidity and profit from the bid-ask spread.
+
+```python
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+import random
+import math
+
+@dataclass
+class Quote:
+    """A two-sided quote."""
+    bid_price: float
+    bid_size: int
+    ask_price: float
+    ask_size: int
+
+    @property
+    def spread(self) -> float:
+        return self.ask_price - self.bid_price
+
+    @property
+    def mid_price(self) -> float:
+        return (self.bid_price + self.ask_price) / 2
+
+class MarketMaker:
+    """
+    Simple market making strategy.
+
+    Provides liquidity by quoting both sides.
+    Manages inventory risk through quote adjustments.
+    """
+
+    def __init__(self,
+                 symbol: str,
+                 base_spread: float = 0.02,
+                 max_position: int = 1000,
+                 quote_size: int = 100):
+        self.symbol = symbol
+        self.base_spread = base_spread
+        self.max_position = max_position
+        self.quote_size = quote_size
+
+        # State
+        self.position: int = 0
+        self.cash: float = 0.0
+        self.pnl_history: List[float] = []
+        self.quote_history: List[Quote] = []
+
+    def generate_quote(self,
+                       fair_value: float,
+                       volatility: float = 0.01) -> Quote:
+        """
+        Generate a quote based on fair value and inventory.
+
+        Adjusts spread based on:
+        - Volatility (wider spread when volatile)
+        - Inventory (skew to reduce position)
+        """
+        # Base spread adjusted for volatility
+        vol_adjusted_spread = self.base_spread * (1 + volatility * 50)
+
+        # Inventory skew
+        # When long, lower bid and ask to encourage selling to us
+        # When short, raise bid and ask to encourage buying from us
+        inventory_ratio = self.position / self.max_position if self.max_position > 0 else 0
+        skew = inventory_ratio * self.base_spread
+
+        half_spread = vol_adjusted_spread / 2
+
+        bid_price = fair_value - half_spread - skew
+        ask_price = fair_value + half_spread - skew
+
+        # Adjust size based on inventory
+        if self.position > 0:
+            # Long: smaller bid (less buying), larger ask (more selling)
+            bid_size = max(10, int(self.quote_size * (1 - inventory_ratio)))
+            ask_size = min(self.max_position, int(self.quote_size * (1 + inventory_ratio)))
+        else:
+            bid_size = min(self.max_position, int(self.quote_size * (1 - inventory_ratio)))
+            ask_size = max(10, int(self.quote_size * (1 + inventory_ratio)))
+
+        quote = Quote(
+            bid_price=round(bid_price, 2),
+            bid_size=bid_size,
+            ask_price=round(ask_price, 2),
+            ask_size=ask_size
+        )
+
+        self.quote_history.append(quote)
+        return quote
+
+    def on_fill(self, side: str, price: float, quantity: int):
+        """Process a fill on our quote."""
+        if side == "bid":
+            # We bought
+            self.position += quantity
+            self.cash -= price * quantity
+        else:
+            # We sold
+            self.position -= quantity
+            self.cash += price * quantity
+
+    def mark_to_market(self, current_price: float) -> float:
+        """Calculate current PnL."""
+        return self.cash + self.position * current_price
+
+    def get_metrics(self) -> Dict:
+        """Get market making metrics."""
+        if not self.quote_history:
+            return {}
+
+        spreads = [q.spread for q in self.quote_history]
+
+        return {
+            "avg_spread": sum(spreads) / len(spreads),
+            "current_position": self.position,
+            "quote_count": len(self.quote_history)
+        }
+
+
+class MarketMakingSimulator:
+    """Simulate market making activity."""
+
+    def __init__(self, market_maker: MarketMaker):
+        self.mm = market_maker
+        self.trade_history: List[Dict] = []
+
+    def simulate_session(self,
+                         initial_price: float,
+                         num_ticks: int,
+                         fill_probability: float = 0.1):
+        """Simulate a trading session."""
+        current_price = initial_price
+
+        for tick in range(num_ticks):
+            # Random price movement
+            price_change = random.gauss(0, 0.001) * current_price
+            current_price += price_change
+
+            volatility = abs(price_change / current_price) * 100
+
+            # Generate quote
+            quote = self.mm.generate_quote(current_price, volatility)
+
+            # Random fills
+            if random.random() < fill_probability:
+                # Someone hits our bid
+                fill_qty = min(quote.bid_size, random.randint(10, 100))
+                self.mm.on_fill("bid", quote.bid_price, fill_qty)
+                self.trade_history.append({
+                    "tick": tick,
+                    "side": "bid",
+                    "price": quote.bid_price,
+                    "quantity": fill_qty
+                })
+
+            if random.random() < fill_probability:
+                # Someone lifts our offer
+                fill_qty = min(quote.ask_size, random.randint(10, 100))
+                self.mm.on_fill("ask", quote.ask_price, fill_qty)
+                self.trade_history.append({
+                    "tick": tick,
+                    "side": "ask",
+                    "price": quote.ask_price,
+                    "quantity": fill_qty
+                })
+
+            # Record PnL
+            self.mm.pnl_history.append(self.mm.mark_to_market(current_price))
+
+        return self.mm.mark_to_market(current_price)
+
+
+# Run simulation
+random.seed(42)
+mm = MarketMaker("AAPL", base_spread=0.05, max_position=500, quote_size=100)
+sim = MarketMakingSimulator(mm)
+
+final_pnl = sim.simulate_session(
+    initial_price=150.0,
+    num_ticks=1000,
+    fill_probability=0.08
+)
+
+print("\nMarket Making Simulation Results")
+print("=" * 40)
+print(f"Trades: {len(sim.trade_history)}")
+print(f"Final Position: {mm.position} shares")
+print(f"Final PnL: ${final_pnl:,.2f}")
+print(f"Metrics: {mm.get_metrics()}")
+```
+
+## Quantum Opportunities in Market Microstructure
+
+Quantum computing offers potential advantages in microstructure applications.
+
+```python
+from typing import Dict, List
+from dataclasses import dataclass
+
+@dataclass
+class QuantumMicrostructureApplication:
+    name: str
+    description: str
+    classical_approach: str
+    quantum_advantage: str
+    current_status: str
+
+QUANTUM_APPLICATIONS = [
+    QuantumMicrostructureApplication(
+        name="Optimal Quote Placement",
+        description="Determine optimal bid/ask prices and sizes",
+        classical_approach="Heuristic rules, simple optimization",
+        quantum_advantage="QAOA for multi-objective optimization",
+        current_status="Research phase"
+    ),
+
+    QuantumMicrostructureApplication(
+        name="Order Flow Prediction",
+        description="Predict incoming order flow and toxicity",
+        classical_approach="ML models on historical patterns",
+        quantum_advantage="Quantum ML for pattern recognition",
+        current_status="Early research"
+    ),
+
+    QuantumMicrostructureApplication(
+        name="Inventory Optimization",
+        description="Optimize inventory levels across assets",
+        classical_approach="Linear/quadratic programming",
+        quantum_advantage="Quantum annealing for portfolio-wide",
+        current_status="Pilot testing"
+    ),
+
+    QuantumMicrostructureApplication(
+        name="Latency Arbitrage Detection",
+        description="Detect and respond to latency arbitrage",
+        classical_approach="Fast classical processors",
+        quantum_advantage="Potential quantum speedup for pattern matching",
+        current_status="Theoretical"
+    ),
+
+    QuantumMicrostructureApplication(
+        name="Multi-Venue Routing",
+        description="Route orders optimally across venues",
+        classical_approach="Smart order routing algorithms",
+        quantum_advantage="Quantum optimization for real-time routing",
+        current_status="Research phase"
+    )
+]
+
+def analyze_quantum_readiness(application_name: str) -> Dict:
+    """Analyze readiness of quantum application."""
+    for app in QUANTUM_APPLICATIONS:
+        if app.name == application_name:
+            return {
+                "description": app.description,
+                "quantum_advantage": app.quantum_advantage,
+                "status": app.current_status,
+                "recommendation": _get_recommendation(app.current_status)
+            }
+    return {"error": "Application not found"}
+
+def _get_recommendation(status: str) -> str:
+    recommendations = {
+        "Research phase": "Monitor developments, prepare data infrastructure",
+        "Early research": "Academic collaboration, proof of concept",
+        "Pilot testing": "Evaluate pilot results, plan integration",
+        "Theoretical": "Wait for practical implementations"
+    }
+    return recommendations.get(status, "Assess on case-by-case basis")
+
+# Display applications
+print("\nQuantum Opportunities in Market Microstructure")
+print("=" * 60)
+for app in QUANTUM_APPLICATIONS:
+    print(f"\n{app.name}")
+    print(f"  Description: {app.description}")
+    print(f"  Quantum Advantage: {app.quantum_advantage}")
+    print(f"  Status: {app.current_status}")
+```
+
+## Summary
+
+Market microstructure is fundamental to algorithmic trading:
+
+1. **Order Book**: Central mechanism for price discovery and trade execution
+2. **Market Impact**: Large orders move prices; execution must be planned carefully
+3. **Market Making**: Providing liquidity while managing inventory risk
+4. **Quantum Potential**: Optimization and pattern recognition opportunities
+
+Understanding these mechanics is essential for building effective trading systems.
+
+<QuizQuestion
+  question="What is the primary goal of a VWAP execution strategy?"
+  options={[
+    "Execute as fast as possible",
+    "Match the volume-weighted average price over a period",
+    "Minimize the number of trades",
+    "Maximize trading profits"
+  ]}
+  correctIndex={1}
+/>

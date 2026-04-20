@@ -1,0 +1,846 @@
+---
+title: "Version Control Strategies for Quantum Projects"
+description: "Learn specialized version control practices for quantum software, including managing circuit definitions, parameter histories, calibration data, and experiment reproducibility across classical and quantum components."
+duration: 45
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Structure quantum project repositories for effective collaboration and version tracking
+- Implement versioning strategies for quantum circuits, parameters, and calibration data
+- Use Git branches and tags to manage quantum experiment lifecycles
+- Track and reproduce quantum experiments with full provenance
+- Handle large binary files and simulation results with Git LFS
+- Implement semantic versioning for quantum libraries and applications
+
+## 1. Version Control Challenges in Quantum Computing
+
+Quantum software projects present unique version control challenges that go beyond traditional software development. Beyond code, you must track quantum circuits, optimization parameters, calibration data, and experimental results.
+
+<Definition term="Quantum Experiment Provenance">
+The complete record of how a quantum experiment was conducted, including circuit definitions, transpilation settings, backend calibration state, random seeds, and all parameters necessary to reproduce results.
+</Definition>
+
+### What Needs Versioning in Quantum Projects
+
+| Artifact Type | Example | Challenge |
+|---------------|---------|-----------|
+| Circuit Definitions | QASM files, Qiskit circuits | Text-based, diffable |
+| Parameters | VQE angles, QAOA gammas | Numeric arrays, many iterations |
+| Calibration Data | T1/T2 times, gate errors | Backend-specific, time-varying |
+| Results | Measurement counts, statevectors | Large binary data |
+| Visualizations | Circuit diagrams, plots | Generated artifacts |
+
+<Warning>
+Quantum hardware calibration changes daily. A circuit that works today may behave differently tomorrow. Always record calibration timestamps alongside results.
+</Warning>
+
+## 2. Repository Structure for Quantum Projects
+
+A well-organized repository structure facilitates collaboration and ensures reproducibility.
+
+### Recommended Project Layout
+
+```
+quantum-project/
+├── .github/
+│   ├── workflows/           # CI/CD pipelines
+│   │   ├── ci.yml
+│   │   └── hardware-tests.yml
+│   └── CODEOWNERS
+├── src/
+│   └── quantum_project/
+│       ├── __init__.py
+│       ├── circuits/        # Circuit definitions
+│       │   ├── __init__.py
+│       │   ├── ansatze.py
+│       │   └── feature_maps.py
+│       ├── algorithms/      # Quantum algorithms
+│       │   ├── __init__.py
+│       │   ├── vqe.py
+│       │   └── qaoa.py
+│       └── utils/
+│           ├── __init__.py
+│           └── transpilation.py
+├── circuits/                # Exported circuit files
+│   ├── qasm/
+│   │   └── bell_state.qasm
+│   └── json/
+│       └── vqe_ansatz.json
+├── experiments/             # Experiment configurations
+│   ├── vqe_h2/
+│   │   ├── config.yaml
+│   │   └── README.md
+│   └── qaoa_maxcut/
+│       ├── config.yaml
+│       └── README.md
+├── data/                    # Data files (use Git LFS)
+│   ├── calibrations/
+│   ├── results/
+│   └── parameters/
+├── notebooks/               # Jupyter notebooks
+│   ├── exploration/
+│   └── analysis/
+├── tests/
+│   ├── unit/
+│   ├── integration/
+│   └── hardware/
+├── docs/
+├── .gitignore
+├── .gitattributes          # Git LFS configuration
+├── pyproject.toml
+└── README.md
+```
+
+### Essential .gitignore for Quantum Projects
+
+```gitignore
+# .gitignore for quantum projects
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_metadata/
+
+# Quantum-specific
+*.qpy                     # Large serialized circuits
+*.npy                     # NumPy arrays (use LFS for large ones)
+*.pkl                     # Pickled objects
+
+# Results (track with LFS or external storage)
+results/*.json
+results/*.csv
+!results/.gitkeep
+
+# Credentials
+.env
+.qiskit/
+ibm_quantum_token.txt
+
+# Large simulation outputs
+*.hdf5
+*.h5
+*.statevector
+
+# Generated visualizations
+*.png
+*.pdf
+*.svg
+!docs/images/*.png
+
+# Temporary files
+tmp/
+*.tmp
+*.log
+```
+
+## 3. Circuit Versioning Strategies
+
+Quantum circuits are the core artifacts that need careful version tracking.
+
+### Text-Based Circuit Formats
+
+<Tip>
+Store circuits in text-based formats (QASM, JSON) rather than binary (QPY) for better diff visibility and code review.
+</Tip>
+
+```python
+# src/quantum_project/circuits/versioning.py
+"""Circuit versioning utilities."""
+from dataclasses import dataclass, asdict
+from datetime import datetime
+from typing import Optional, Dict, Any
+import hashlib
+import json
+
+from qiskit import QuantumCircuit
+from qiskit.qasm3 import dumps as qasm3_dumps
+
+@dataclass
+class CircuitVersion:
+    """Versioned quantum circuit with metadata."""
+    name: str
+    version: str
+    description: str
+    created_at: str
+    author: str
+    circuit_hash: str
+    qasm: str
+    metadata: Dict[str, Any]
+
+    @classmethod
+    def from_circuit(
+        cls,
+        circuit: QuantumCircuit,
+        version: str,
+        description: str = "",
+        author: str = "",
+        metadata: Optional[Dict] = None
+    ) -> "CircuitVersion":
+        """Create versioned circuit from QuantumCircuit."""
+        qasm = qasm3_dumps(circuit)
+        circuit_hash = hashlib.sha256(qasm.encode()).hexdigest()[:12]
+
+        return cls(
+            name=circuit.name or "unnamed",
+            version=version,
+            description=description,
+            created_at=datetime.utcnow().isoformat(),
+            author=author,
+            circuit_hash=circuit_hash,
+            qasm=qasm,
+            metadata=metadata or {}
+        )
+
+    def to_json(self) -> str:
+        """Serialize to JSON for version control."""
+        return json.dumps(asdict(self), indent=2)
+
+    @classmethod
+    def from_json(cls, json_str: str) -> "CircuitVersion":
+        """Deserialize from JSON."""
+        data = json.loads(json_str)
+        return cls(**data)
+
+    def save(self, path: str):
+        """Save versioned circuit to file."""
+        with open(path, 'w') as f:
+            f.write(self.to_json())
+
+    @classmethod
+    def load(cls, path: str) -> "CircuitVersion":
+        """Load versioned circuit from file."""
+        with open(path, 'r') as f:
+            return cls.from_json(f.read())
+
+
+class CircuitRegistry:
+    """Registry for tracking circuit versions."""
+
+    def __init__(self, registry_path: str = "circuits/registry.json"):
+        self.registry_path = registry_path
+        self.circuits: Dict[str, Dict[str, CircuitVersion]] = {}
+        self._load_registry()
+
+    def _load_registry(self):
+        """Load existing registry."""
+        try:
+            with open(self.registry_path, 'r') as f:
+                data = json.load(f)
+                for name, versions in data.items():
+                    self.circuits[name] = {
+                        v: CircuitVersion(**info)
+                        for v, info in versions.items()
+                    }
+        except FileNotFoundError:
+            self.circuits = {}
+
+    def _save_registry(self):
+        """Persist registry to disk."""
+        data = {
+            name: {v: asdict(cv) for v, cv in versions.items()}
+            for name, versions in self.circuits.items()
+        }
+        with open(self.registry_path, 'w') as f:
+            json.dump(data, f, indent=2)
+
+    def register(self, circuit_version: CircuitVersion):
+        """Register a new circuit version."""
+        name = circuit_version.name
+        version = circuit_version.version
+
+        if name not in self.circuits:
+            self.circuits[name] = {}
+
+        if version in self.circuits[name]:
+            raise ValueError(f"Version {version} already exists for {name}")
+
+        self.circuits[name][version] = circuit_version
+        self._save_registry()
+
+    def get(self, name: str, version: str = "latest") -> CircuitVersion:
+        """Get a specific circuit version."""
+        if name not in self.circuits:
+            raise KeyError(f"Circuit {name} not found")
+
+        if version == "latest":
+            # Get highest semantic version
+            versions = sorted(self.circuits[name].keys())
+            version = versions[-1]
+
+        return self.circuits[name][version]
+
+    def list_versions(self, name: str) -> list:
+        """List all versions of a circuit."""
+        return list(self.circuits.get(name, {}).keys())
+```
+
+### Example: Versioned Circuit File
+
+```json
+{
+  "name": "vqe_uccsd_ansatz",
+  "version": "1.2.0",
+  "description": "UCCSD ansatz for H2 molecule, optimized depth",
+  "created_at": "2024-01-15T10:30:00",
+  "author": "quantum-team",
+  "circuit_hash": "a1b2c3d4e5f6",
+  "qasm": "OPENQASM 3.0;\ninclude \"stdgates.inc\";\nqubit[4] q;\nbit[4] c;\n...",
+  "metadata": {
+    "num_qubits": 4,
+    "depth": 24,
+    "cx_count": 12,
+    "parameters": ["theta_0", "theta_1", "theta_2"],
+    "target_molecule": "H2",
+    "basis_set": "sto-3g"
+  }
+}
+```
+
+## 4. Parameter and Experiment Tracking
+
+Variational algorithms generate thousands of parameter sets during optimization. Tracking these is essential for reproducibility.
+
+<Formula>
+$$\text{Experiment ID} = \text{hash}(\text{circuit}_v, \text{backend}, \text{params}, \text{seed})$$
+</Formula>
+
+```python
+# src/quantum_project/tracking/experiment.py
+"""Experiment tracking for quantum workflows."""
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from typing import Dict, List, Optional, Any
+from pathlib import Path
+import hashlib
+import json
+import uuid
+
+import numpy as np
+
+@dataclass
+class ParameterCheckpoint:
+    """Checkpoint of optimization parameters."""
+    iteration: int
+    parameters: List[float]
+    cost: float
+    timestamp: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class ExperimentRun:
+    """Complete record of a quantum experiment."""
+    experiment_id: str
+    name: str
+    description: str
+
+    # Circuit info
+    circuit_name: str
+    circuit_version: str
+    circuit_hash: str
+
+    # Backend info
+    backend_name: str
+    backend_version: Optional[str]
+    calibration_timestamp: Optional[str]
+
+    # Execution config
+    shots: int
+    optimization_level: int
+    seed: Optional[int]
+    error_mitigation: Dict[str, Any]
+
+    # Timing
+    started_at: str
+    completed_at: Optional[str] = None
+
+    # Results
+    final_parameters: Optional[List[float]] = None
+    final_cost: Optional[float] = None
+    checkpoints: List[ParameterCheckpoint] = field(default_factory=list)
+    raw_results: Optional[Dict] = None
+
+    # Git info
+    git_commit: Optional[str] = None
+    git_branch: Optional[str] = None
+    git_dirty: bool = False
+
+    @classmethod
+    def create(
+        cls,
+        name: str,
+        circuit_name: str,
+        circuit_version: str,
+        circuit_hash: str,
+        backend_name: str,
+        shots: int = 1024,
+        **kwargs
+    ) -> "ExperimentRun":
+        """Create a new experiment run."""
+        experiment_id = str(uuid.uuid4())[:8]
+
+        # Try to get git info
+        git_commit = None
+        git_branch = None
+        git_dirty = False
+
+        try:
+            import subprocess
+            git_commit = subprocess.check_output(
+                ['git', 'rev-parse', 'HEAD'],
+                stderr=subprocess.DEVNULL
+            ).decode().strip()[:8]
+            git_branch = subprocess.check_output(
+                ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+                stderr=subprocess.DEVNULL
+            ).decode().strip()
+            status = subprocess.check_output(
+                ['git', 'status', '--porcelain'],
+                stderr=subprocess.DEVNULL
+            ).decode()
+            git_dirty = len(status) > 0
+        except Exception:
+            pass
+
+        return cls(
+            experiment_id=experiment_id,
+            name=name,
+            description=kwargs.get('description', ''),
+            circuit_name=circuit_name,
+            circuit_version=circuit_version,
+            circuit_hash=circuit_hash,
+            backend_name=backend_name,
+            backend_version=kwargs.get('backend_version'),
+            calibration_timestamp=kwargs.get('calibration_timestamp'),
+            shots=shots,
+            optimization_level=kwargs.get('optimization_level', 1),
+            seed=kwargs.get('seed'),
+            error_mitigation=kwargs.get('error_mitigation', {}),
+            started_at=datetime.utcnow().isoformat(),
+            git_commit=git_commit,
+            git_branch=git_branch,
+            git_dirty=git_dirty
+        )
+
+    def add_checkpoint(
+        self,
+        iteration: int,
+        parameters: np.ndarray,
+        cost: float,
+        **metadata
+    ):
+        """Add a parameter checkpoint."""
+        checkpoint = ParameterCheckpoint(
+            iteration=iteration,
+            parameters=parameters.tolist(),
+            cost=cost,
+            timestamp=datetime.utcnow().isoformat(),
+            metadata=metadata
+        )
+        self.checkpoints.append(checkpoint)
+
+    def complete(
+        self,
+        final_parameters: np.ndarray,
+        final_cost: float,
+        raw_results: Optional[Dict] = None
+    ):
+        """Mark experiment as complete."""
+        self.completed_at = datetime.utcnow().isoformat()
+        self.final_parameters = final_parameters.tolist()
+        self.final_cost = final_cost
+        self.raw_results = raw_results
+
+    def save(self, directory: str = "experiments"):
+        """Save experiment to disk."""
+        path = Path(directory)
+        path.mkdir(parents=True, exist_ok=True)
+
+        filename = f"{self.name}_{self.experiment_id}.json"
+        filepath = path / filename
+
+        with open(filepath, 'w') as f:
+            json.dump(asdict(self), f, indent=2)
+
+        return str(filepath)
+
+    @classmethod
+    def load(cls, filepath: str) -> "ExperimentRun":
+        """Load experiment from disk."""
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+        # Reconstruct checkpoints
+        checkpoints = [
+            ParameterCheckpoint(**cp) for cp in data.pop('checkpoints', [])
+        ]
+        data['checkpoints'] = checkpoints
+
+        return cls(**data)
+
+    def get_reproducibility_hash(self) -> str:
+        """Generate hash for reproducibility verification."""
+        key_data = {
+            'circuit_hash': self.circuit_hash,
+            'backend': self.backend_name,
+            'shots': self.shots,
+            'seed': self.seed,
+            'optimization_level': self.optimization_level
+        }
+        return hashlib.sha256(
+            json.dumps(key_data, sort_keys=True).encode()
+        ).hexdigest()[:16]
+
+
+class ExperimentTracker:
+    """Track multiple experiments in a project."""
+
+    def __init__(self, project_dir: str = "."):
+        self.project_dir = Path(project_dir)
+        self.experiments_dir = self.project_dir / "data" / "experiments"
+        self.experiments_dir.mkdir(parents=True, exist_ok=True)
+
+    def list_experiments(self, name_filter: Optional[str] = None) -> List[str]:
+        """List all experiment files."""
+        pattern = f"*{name_filter}*.json" if name_filter else "*.json"
+        return [str(f) for f in self.experiments_dir.glob(pattern)]
+
+    def get_experiment(self, experiment_id: str) -> ExperimentRun:
+        """Load experiment by ID."""
+        matches = list(self.experiments_dir.glob(f"*_{experiment_id}.json"))
+        if not matches:
+            raise KeyError(f"Experiment {experiment_id} not found")
+        return ExperimentRun.load(str(matches[0]))
+
+    def compare_experiments(
+        self,
+        exp_ids: List[str]
+    ) -> Dict[str, Any]:
+        """Compare multiple experiments."""
+        experiments = [self.get_experiment(eid) for eid in exp_ids]
+
+        return {
+            'experiments': exp_ids,
+            'comparison': {
+                'final_costs': [e.final_cost for e in experiments],
+                'total_iterations': [len(e.checkpoints) for e in experiments],
+                'backends': [e.backend_name for e in experiments],
+                'best': min(exp_ids, key=lambda eid:
+                    self.get_experiment(eid).final_cost or float('inf'))
+            }
+        }
+```
+
+## 5. Git Branching Strategy for Quantum Research
+
+<Example>
+**Quantum Research Git Workflow**
+
+```
+main (stable, reproducible experiments)
+│
+├── develop (integration branch)
+│   │
+│   ├── feature/new-ansatz
+│   │   └── Implement novel ansatz design
+│   │
+│   ├── experiment/vqe-h2-optimization
+│   │   └── VQE parameter optimization study
+│   │
+│   └── hardware/ibm-brisbane-calibration
+│       └── Backend-specific optimizations
+│
+├── release/v1.0
+│   └── Stable release with known-good parameters
+│
+└── hotfix/calibration-drift
+    └── Urgent fix for calibration issues
+```
+
+```bash
+# Creating an experiment branch
+git checkout develop
+git checkout -b experiment/qaoa-maxcut-study
+
+# Tagging a successful experiment
+git tag -a exp-qaoa-v1 -m "QAOA MaxCut: 95% approximation ratio achieved"
+
+# Creating a release with reproducible results
+git checkout main
+git merge --no-ff release/v1.0
+git tag -a v1.0.0 -m "Release 1.0.0: Stable VQE implementation"
+```
+</Example>
+
+### Branch Naming Conventions
+
+| Prefix | Purpose | Example |
+|--------|---------|---------|
+| `feature/` | New functionality | `feature/adaptive-vqe` |
+| `experiment/` | Research experiments | `experiment/noise-mitigation-study` |
+| `hardware/` | Backend-specific work | `hardware/ionq-optimization` |
+| `release/` | Release preparation | `release/v2.0` |
+| `hotfix/` | Urgent fixes | `hotfix/token-expiration` |
+
+## 6. Git LFS for Large Quantum Data
+
+Quantum simulations and results often produce large files that shouldn't be stored directly in Git.
+
+### Configuring Git LFS
+
+```bash
+# Install Git LFS
+git lfs install
+
+# Track large file types
+git lfs track "*.npy"
+git lfs track "*.hdf5"
+git lfs track "*.pkl"
+git lfs track "data/results/**"
+git lfs track "data/calibrations/**"
+
+# Commit the attributes file
+git add .gitattributes
+git commit -m "Configure Git LFS for large data files"
+```
+
+### .gitattributes Configuration
+
+```gitattributes
+# .gitattributes
+
+# Large numerical data
+*.npy filter=lfs diff=lfs merge=lfs -text
+*.npz filter=lfs diff=lfs merge=lfs -text
+*.hdf5 filter=lfs diff=lfs merge=lfs -text
+*.h5 filter=lfs diff=lfs merge=lfs -text
+
+# Serialized objects
+*.pkl filter=lfs diff=lfs merge=lfs -text
+*.pickle filter=lfs diff=lfs merge=lfs -text
+*.qpy filter=lfs diff=lfs merge=lfs -text
+
+# Results directories
+data/results/** filter=lfs diff=lfs merge=lfs -text
+data/calibrations/** filter=lfs diff=lfs merge=lfs -text
+
+# Keep circuit definitions as regular text for diffing
+circuits/**/*.qasm text
+circuits/**/*.json text
+
+# Images
+*.png filter=lfs diff=lfs merge=lfs -text
+*.pdf filter=lfs diff=lfs merge=lfs -text
+```
+
+<Tip>
+For very large datasets (gigabytes), consider using external storage (S3, DVC) instead of Git LFS. Store only references and metadata in Git.
+</Tip>
+
+## 7. Semantic Versioning for Quantum Libraries
+
+Apply semantic versioning principles to quantum software with quantum-specific considerations.
+
+<Formula>
+$$\text{Version} = \text{MAJOR}.\text{MINOR}.\text{PATCH}[-\text{prerelease}][+\text{build}]$$
+</Formula>
+
+### Quantum-Specific Versioning Guidelines
+
+```python
+# src/quantum_project/__init__.py
+"""Quantum Project - Semantic Versioning"""
+
+__version__ = "2.1.0"
+
+# Version history and compatibility notes
+VERSION_HISTORY = {
+    "2.1.0": {
+        "date": "2024-01-15",
+        "changes": [
+            "Added ADAPT-VQE implementation",
+            "Improved circuit optimization"
+        ],
+        "compatible_qiskit": ">=1.0.0",
+        "breaking": False
+    },
+    "2.0.0": {
+        "date": "2024-01-01",
+        "changes": [
+            "BREAKING: Changed parameter format from dict to ndarray",
+            "BREAKING: Removed deprecated noise model API",
+            "Added support for dynamic circuits"
+        ],
+        "compatible_qiskit": ">=1.0.0",
+        "breaking": True
+    },
+    "1.5.0": {
+        "date": "2023-12-01",
+        "changes": [
+            "Added error mitigation module",
+            "Deprecated old noise model API"
+        ],
+        "compatible_qiskit": ">=0.45.0",
+        "breaking": False
+    }
+}
+
+def get_compatibility_info():
+    """Return compatibility information for current version."""
+    return VERSION_HISTORY.get(__version__, {})
+```
+
+### Version Bumping Rules for Quantum Projects
+
+| Change Type | Version Bump | Example |
+|-------------|--------------|---------|
+| Breaking API change | MAJOR | Parameter format change |
+| Breaking circuit change | MAJOR | Gate decomposition change affecting results |
+| New algorithm | MINOR | Adding QAOA implementation |
+| New backend support | MINOR | Adding IonQ support |
+| Bug fix | PATCH | Fixing transpilation error |
+| Performance improvement | PATCH | Reducing circuit depth |
+| Documentation | PATCH | Updating docstrings |
+
+```python
+# scripts/bump_version.py
+"""Version bumping script for quantum projects."""
+import re
+import sys
+from pathlib import Path
+from enum import Enum
+
+class BumpType(Enum):
+    MAJOR = "major"
+    MINOR = "minor"
+    PATCH = "patch"
+
+def parse_version(version_str: str) -> tuple:
+    """Parse semantic version string."""
+    match = re.match(r'^(\d+)\.(\d+)\.(\d+)', version_str)
+    if not match:
+        raise ValueError(f"Invalid version: {version_str}")
+    return tuple(int(x) for x in match.groups())
+
+def bump_version(current: str, bump_type: BumpType) -> str:
+    """Bump version according to type."""
+    major, minor, patch = parse_version(current)
+
+    if bump_type == BumpType.MAJOR:
+        return f"{major + 1}.0.0"
+    elif bump_type == BumpType.MINOR:
+        return f"{major}.{minor + 1}.0"
+    else:
+        return f"{major}.{minor}.{patch + 1}"
+
+def update_version_file(filepath: str, new_version: str):
+    """Update version in file."""
+    path = Path(filepath)
+    content = path.read_text()
+
+    # Update __version__ = "x.y.z"
+    updated = re.sub(
+        r'__version__\s*=\s*["\'][^"\']+["\']',
+        f'__version__ = "{new_version}"',
+        content
+    )
+
+    path.write_text(updated)
+    print(f"Updated {filepath} to version {new_version}")
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: python bump_version.py [major|minor|patch]")
+        sys.exit(1)
+
+    bump_type = BumpType(sys.argv[1])
+
+    # Read current version
+    init_path = "src/quantum_project/__init__.py"
+    content = Path(init_path).read_text()
+    match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
+    current_version = match.group(1)
+
+    new_version = bump_version(current_version, bump_type)
+    print(f"Bumping {current_version} -> {new_version}")
+
+    update_version_file(init_path, new_version)
+```
+
+## 8. Reproducibility Checklist
+
+Ensure your quantum experiments can be reproduced by following this checklist:
+
+```markdown
+## Experiment Reproducibility Checklist
+
+### Code Version
+- [ ] Git commit hash recorded
+- [ ] No uncommitted changes (or changes documented)
+- [ ] Dependencies locked (requirements.txt or poetry.lock)
+
+### Circuit Definition
+- [ ] Circuit version tagged
+- [ ] QASM/JSON export saved
+- [ ] Transpilation settings recorded
+
+### Backend Configuration
+- [ ] Backend name and version
+- [ ] Calibration timestamp
+- [ ] Optimization level
+- [ ] Shots count
+
+### Parameters
+- [ ] Initial parameters saved
+- [ ] Random seed recorded
+- [ ] Optimizer settings documented
+- [ ] All checkpoints saved
+
+### Results
+- [ ] Raw measurement counts saved
+- [ ] Post-processed results saved
+- [ ] Error mitigation settings recorded
+- [ ] Execution timestamps logged
+```
+
+## Summary
+
+In this lesson, you learned version control strategies tailored for quantum software:
+
+1. **Repository Structure**: Organized layout separating code, circuits, experiments, and data
+2. **Circuit Versioning**: Text-based formats with hash tracking and registries
+3. **Experiment Tracking**: Complete provenance including git state, parameters, and calibration
+4. **Branching Strategy**: Experiment-focused branches with proper tagging
+5. **Git LFS**: Managing large simulation results and calibration data
+6. **Semantic Versioning**: Quantum-specific versioning guidelines
+
+<Tip>
+Start with good version control habits from day one. Retroactively adding provenance tracking to a project is much harder than building it in from the start.
+</Tip>
+
+## Further Reading
+
+- Next lesson: Containerization for Quantum Applications
+- Related: CI/CD for Quantum Applications
+- Advanced: Infrastructure as Code for Quantum Systems

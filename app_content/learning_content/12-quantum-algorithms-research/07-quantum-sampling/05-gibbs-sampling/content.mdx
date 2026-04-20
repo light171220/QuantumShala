@@ -1,0 +1,766 @@
+---
+title: "Quantum Gibbs Sampling and Thermal States"
+description: "Explore quantum algorithms for preparing thermal (Gibbs) states, including variational approaches, quantum Metropolis algorithms, and applications to combinatorial optimization and quantum machine learning."
+duration: 45
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Understand thermal/Gibbs states and their importance in physics and optimization
+- Implement quantum Metropolis-Hastings algorithms for thermal sampling
+- Compare variational and algorithmic approaches to Gibbs state preparation
+- Analyze the complexity of quantum thermal state preparation
+- Apply quantum Gibbs sampling to optimization and machine learning problems
+
+## 1. Thermal States and Gibbs Distributions
+
+The Gibbs (thermal) state at inverse temperature $\beta = 1/(k_B T)$ is:
+
+<Formula>
+$$\rho_\beta = \frac{e^{-\beta H}}{Z}, \quad Z = \text{Tr}(e^{-\beta H})$$
+</Formula>
+
+<Definition term="Gibbs State">
+A quantum mixed state representing thermal equilibrium at temperature $T$. At low temperature ($\beta \to \infty$), the state approaches the ground state. At high temperature ($\beta \to 0$), it becomes the maximally mixed state.
+</Definition>
+
+### Importance of Gibbs States
+
+1. **Physics**: Describe equilibrium properties of quantum systems
+2. **Optimization**: Low-temperature sampling finds approximate minima
+3. **Machine Learning**: Boltzmann machines and probabilistic models
+4. **Cryptography**: Quantum proofs of work
+
+```python
+import numpy as np
+from typing import Dict, Tuple
+from scipy.linalg import expm
+
+class GibbsStatePreparation:
+    """
+    Classical simulation of Gibbs state properties.
+    """
+
+    def __init__(self, hamiltonian: np.ndarray):
+        """
+        Initialize with Hamiltonian.
+
+        Args:
+            hamiltonian: Hermitian matrix representing H
+        """
+        self.H = hamiltonian
+        self.dim = hamiltonian.shape[0]
+
+        # Compute eigendecomposition
+        self.eigenvalues, self.eigenvectors = np.linalg.eigh(hamiltonian)
+
+    def gibbs_state(self, beta: float) -> np.ndarray:
+        """
+        Compute the exact Gibbs state rho_beta.
+
+        Args:
+            beta: Inverse temperature
+
+        Returns:
+            Density matrix of Gibbs state
+        """
+        # exp(-beta * H) in eigenbasis
+        exp_energies = np.exp(-beta * self.eigenvalues)
+        Z = np.sum(exp_energies)
+
+        # Construct density matrix
+        rho = np.zeros((self.dim, self.dim), dtype=complex)
+        for i in range(self.dim):
+            v = self.eigenvectors[:, i]
+            rho += (exp_energies[i] / Z) * np.outer(v, v.conj())
+
+        return rho
+
+    def partition_function(self, beta: float) -> float:
+        """Compute partition function Z(beta)."""
+        return np.sum(np.exp(-beta * self.eigenvalues))
+
+    def free_energy(self, beta: float) -> float:
+        """Compute Helmholtz free energy F = -ln(Z)/beta."""
+        Z = self.partition_function(beta)
+        return -np.log(Z) / beta if beta > 0 else self.eigenvalues.min()
+
+    def thermal_expectation(self, observable: np.ndarray, beta: float) -> float:
+        """
+        Compute thermal expectation value <O>_beta = Tr(rho_beta * O).
+
+        Args:
+            observable: Hermitian operator O
+            beta: Inverse temperature
+
+        Returns:
+            Thermal expectation value
+        """
+        rho = self.gibbs_state(beta)
+        return np.real(np.trace(rho @ observable))
+
+    def analyze_temperature_dependence(
+        self,
+        betas: np.ndarray
+    ) -> Dict:
+        """
+        Analyze Gibbs state properties across temperatures.
+
+        Args:
+            betas: Array of inverse temperatures
+
+        Returns:
+            Analysis dictionary
+        """
+        results = {
+            'betas': betas,
+            'free_energies': [],
+            'mean_energies': [],
+            'entropies': [],
+            'ground_state_population': []
+        }
+
+        for beta in betas:
+            rho = self.gibbs_state(beta)
+
+            # Free energy
+            F = self.free_energy(beta)
+            results['free_energies'].append(F)
+
+            # Mean energy
+            E = self.thermal_expectation(self.H, beta)
+            results['mean_energies'].append(E)
+
+            # Entropy S = beta * (E - F)
+            S = beta * (E - F) if beta > 0 else np.log(self.dim)
+            results['entropies'].append(S)
+
+            # Ground state population
+            gs_pop = np.real(rho[0, 0])
+            results['ground_state_population'].append(gs_pop)
+
+        return results
+
+
+# Example: 2-qubit Heisenberg Hamiltonian
+X = np.array([[0, 1], [1, 0]])
+Y = np.array([[0, -1j], [1j, 0]])
+Z = np.array([[1, 0], [0, -1]])
+
+H_heisenberg = np.kron(X, X) + np.kron(Y, Y) + np.kron(Z, Z)
+
+gibbs_prep = GibbsStatePreparation(H_heisenberg)
+
+betas = np.linspace(0.1, 5, 20)
+analysis = gibbs_prep.analyze_temperature_dependence(betas)
+
+print("Gibbs State Analysis for Heisenberg Model:")
+print(f"  Ground state energy: {gibbs_prep.eigenvalues[0]:.4f}")
+print(f"  Max excited energy: {gibbs_prep.eigenvalues[-1]:.4f}")
+print(f"\n  beta=0.1: E={analysis['mean_energies'][0]:.4f}, GS_pop={analysis['ground_state_population'][0]:.4f}")
+print(f"  beta=5.0: E={analysis['mean_energies'][-1]:.4f}, GS_pop={analysis['ground_state_population'][-1]:.4f}")
+```
+
+## 2. Classical Gibbs Sampling: Metropolis-Hastings
+
+The classical approach uses Markov Chain Monte Carlo (MCMC):
+
+```python
+class ClassicalGibbsSampler:
+    """
+    Metropolis-Hastings sampling from classical Gibbs distribution.
+    """
+
+    def __init__(self, energy_function, num_states: int):
+        """
+        Initialize sampler.
+
+        Args:
+            energy_function: Function E(x) returning energy of state x
+            num_states: Size of state space
+        """
+        self.energy = energy_function
+        self.num_states = num_states
+
+    def metropolis_step(
+        self,
+        current_state: int,
+        beta: float
+    ) -> int:
+        """
+        Single Metropolis-Hastings step.
+
+        Args:
+            current_state: Current state index
+            beta: Inverse temperature
+
+        Returns:
+            New state after MC step
+        """
+        # Propose random neighbor
+        proposed_state = np.random.randint(self.num_states)
+
+        # Acceptance probability
+        delta_E = self.energy(proposed_state) - self.energy(current_state)
+        acceptance_prob = min(1, np.exp(-beta * delta_E))
+
+        # Accept or reject
+        if np.random.random() < acceptance_prob:
+            return proposed_state
+        return current_state
+
+    def sample(
+        self,
+        beta: float,
+        num_samples: int,
+        burn_in: int = 1000,
+        thin: int = 10
+    ) -> Dict:
+        """
+        Generate samples from Gibbs distribution.
+
+        Args:
+            beta: Inverse temperature
+            num_samples: Number of samples to collect
+            burn_in: Initial steps to discard
+            thin: Collect every thin-th sample
+
+        Returns:
+            Sampling results
+        """
+        # Initialize randomly
+        current_state = np.random.randint(self.num_states)
+
+        # Burn-in period
+        for _ in range(burn_in):
+            current_state = self.metropolis_step(current_state, beta)
+
+        # Collect samples
+        samples = []
+        energies = []
+
+        for i in range((num_samples - 1) * thin + 1):
+            current_state = self.metropolis_step(current_state, beta)
+            if i % thin == 0:
+                samples.append(current_state)
+                energies.append(self.energy(current_state))
+
+        return {
+            'samples': np.array(samples),
+            'energies': np.array(energies),
+            'mean_energy': np.mean(energies),
+            'energy_std': np.std(energies)
+        }
+
+
+# Example: Ising model energy
+def ising_energy(state: int, num_spins: int = 4, J: float = 1.0):
+    """Compute Ising energy for spin configuration."""
+    spins = [2 * ((state >> i) & 1) - 1 for i in range(num_spins)]
+    energy = 0
+    for i in range(num_spins):
+        energy -= J * spins[i] * spins[(i + 1) % num_spins]
+    return energy
+
+
+sampler = ClassicalGibbsSampler(
+    lambda x: ising_energy(x, 4),
+    num_states=16
+)
+
+result = sampler.sample(beta=2.0, num_samples=1000)
+print(f"\nClassical Gibbs Sampling (Ising model):")
+print(f"  Mean energy: {result['mean_energy']:.4f}")
+print(f"  Energy std: {result['energy_std']:.4f}")
+```
+
+## 3. Quantum Metropolis Algorithm
+
+The quantum Metropolis algorithm extends classical MCMC to quantum systems:
+
+```python
+class QuantumMetropolis:
+    """
+    Quantum Metropolis-Hastings for Gibbs state sampling.
+    """
+
+    def __init__(self, hamiltonian: np.ndarray):
+        self.H = hamiltonian
+        self.dim = hamiltonian.shape[0]
+        self.eigenvalues, self.eigenvectors = np.linalg.eigh(hamiltonian)
+
+    def transition_probability(
+        self,
+        i: int,
+        j: int,
+        beta: float
+    ) -> float:
+        """
+        Compute quantum Metropolis transition probability.
+
+        Args:
+            i, j: Energy level indices
+            beta: Inverse temperature
+
+        Returns:
+            Transition probability T(i -> j)
+        """
+        E_i = self.eigenvalues[i]
+        E_j = self.eigenvalues[j]
+        delta_E = E_j - E_i
+
+        # Metropolis acceptance
+        acceptance = min(1, np.exp(-beta * delta_E))
+
+        # Proposal is uniform over eigenstates
+        proposal = 1 / self.dim
+
+        return proposal * acceptance
+
+    def thermal_simulation(
+        self,
+        beta: float,
+        num_steps: int,
+        initial_state: int = 0
+    ) -> Dict:
+        """
+        Simulate quantum Metropolis dynamics.
+
+        Args:
+            beta: Inverse temperature
+            num_steps: Number of MC steps
+            initial_state: Starting eigenstate index
+
+        Returns:
+            Simulation results
+        """
+        state_history = [initial_state]
+        energy_history = [self.eigenvalues[initial_state]]
+
+        current = initial_state
+
+        for _ in range(num_steps):
+            # Propose new state uniformly
+            proposed = np.random.randint(self.dim)
+
+            # Metropolis acceptance
+            delta_E = self.eigenvalues[proposed] - self.eigenvalues[current]
+            if np.random.random() < min(1, np.exp(-beta * delta_E)):
+                current = proposed
+
+            state_history.append(current)
+            energy_history.append(self.eigenvalues[current])
+
+        # Compute occupation statistics
+        unique, counts = np.unique(state_history, return_counts=True)
+        occupation = dict(zip(unique, counts / len(state_history)))
+
+        # Compare with exact Gibbs distribution
+        Z = np.sum(np.exp(-beta * self.eigenvalues))
+        exact_probs = np.exp(-beta * self.eigenvalues) / Z
+
+        return {
+            'state_history': state_history,
+            'energy_history': energy_history,
+            'mean_energy': np.mean(energy_history),
+            'occupation_probs': occupation,
+            'exact_probs': exact_probs,
+            'ground_state_occupation': occupation.get(0, 0)
+        }
+
+
+# Example
+qm = QuantumMetropolis(H_heisenberg)
+result = qm.thermal_simulation(beta=2.0, num_steps=10000)
+
+print(f"\nQuantum Metropolis Simulation:")
+print(f"  Mean energy: {result['mean_energy']:.4f}")
+print(f"  Ground state occupation: {result['ground_state_occupation']:.4f}")
+print(f"  Exact ground state prob: {result['exact_probs'][0]:.4f}")
+```
+
+## 4. Variational Gibbs State Preparation
+
+Variational approaches can prepare approximate thermal states:
+
+```python
+class VariationalGibbsPreparation:
+    """
+    Variational preparation of Gibbs states.
+    Uses parameterized purification ansatz.
+    """
+
+    def __init__(self, hamiltonian: np.ndarray, num_params: int = 10):
+        self.H = hamiltonian
+        self.dim = hamiltonian.shape[0]
+        self.num_params = num_params
+
+    def parameterized_state(self, params: np.ndarray) -> np.ndarray:
+        """
+        Generate parameterized mixed state.
+
+        Uses a simple diagonal ansatz for demonstration.
+        """
+        # Softmax to get valid probabilities
+        probs = np.exp(params[:self.dim])
+        probs = probs / probs.sum()
+
+        # Create diagonal density matrix
+        rho = np.diag(probs.astype(complex))
+
+        return rho
+
+    def free_energy_loss(
+        self,
+        params: np.ndarray,
+        beta: float
+    ) -> float:
+        """
+        Compute variational free energy F = E - S/beta.
+
+        The true Gibbs state minimizes this quantity.
+
+        Args:
+            params: Variational parameters
+            beta: Inverse temperature
+
+        Returns:
+            Variational free energy
+        """
+        rho = self.parameterized_state(params)
+
+        # Energy E = Tr(rho * H)
+        E = np.real(np.trace(rho @ self.H))
+
+        # Entropy S = -Tr(rho * log(rho))
+        eigenvalues = np.linalg.eigvalsh(rho)
+        eigenvalues = eigenvalues[eigenvalues > 1e-10]
+        S = -np.sum(eigenvalues * np.log(eigenvalues))
+
+        # Variational free energy
+        F = E - S / beta if beta > 0 else E
+
+        return F
+
+    def optimize(
+        self,
+        beta: float,
+        learning_rate: float = 0.1,
+        num_iterations: int = 500
+    ) -> Dict:
+        """
+        Optimize parameters to minimize variational free energy.
+
+        Args:
+            beta: Target inverse temperature
+            learning_rate: Gradient descent step size
+            num_iterations: Number of optimization steps
+
+        Returns:
+            Optimization results
+        """
+        from scipy.optimize import minimize
+
+        # Initialize parameters
+        params_init = np.zeros(self.num_params)
+
+        # Optimize
+        result = minimize(
+            lambda p: self.free_energy_loss(p, beta),
+            params_init,
+            method='L-BFGS-B'
+        )
+
+        optimal_params = result.x
+        optimal_rho = self.parameterized_state(optimal_params)
+
+        # Compute exact Gibbs state for comparison
+        gibbs_exact = GibbsStatePreparation(self.H)
+        rho_exact = gibbs_exact.gibbs_state(beta)
+
+        # Fidelity
+        fidelity = np.real(np.trace(optimal_rho @ rho_exact))
+
+        return {
+            'optimal_params': optimal_params,
+            'variational_state': optimal_rho,
+            'exact_gibbs': rho_exact,
+            'fidelity': fidelity,
+            'variational_free_energy': self.free_energy_loss(optimal_params, beta),
+            'exact_free_energy': gibbs_exact.free_energy(beta)
+        }
+
+
+# Example
+vgp = VariationalGibbsPreparation(H_heisenberg, num_params=4)
+result = vgp.optimize(beta=2.0)
+
+print(f"\nVariational Gibbs Preparation:")
+print(f"  Fidelity with exact: {result['fidelity']:.4f}")
+print(f"  Variational F: {result['variational_free_energy']:.4f}")
+print(f"  Exact F: {result['exact_free_energy']:.4f}")
+```
+
+## 5. Quantum Simulated Annealing
+
+Quantum annealing provides another approach to thermal state preparation:
+
+```python
+class QuantumSimulatedAnnealing:
+    """
+    Simulated annealing on quantum systems.
+    """
+
+    def __init__(self, hamiltonian: np.ndarray):
+        self.H = hamiltonian
+        self.dim = hamiltonian.shape[0]
+
+    def anneal(
+        self,
+        beta_schedule: np.ndarray,
+        mc_steps_per_temp: int = 100
+    ) -> Dict:
+        """
+        Perform simulated annealing.
+
+        Args:
+            beta_schedule: Array of inverse temperatures (increasing)
+            mc_steps_per_temp: MC steps at each temperature
+
+        Returns:
+            Annealing results
+        """
+        eigenvalues, _ = np.linalg.eigh(self.H)
+
+        # Start in random state
+        current_state = np.random.randint(self.dim)
+        current_energy = eigenvalues[current_state]
+
+        history = {
+            'betas': [],
+            'energies': [],
+            'states': []
+        }
+
+        best_energy = current_energy
+        best_state = current_state
+
+        for beta in beta_schedule:
+            for _ in range(mc_steps_per_temp):
+                # Propose new state
+                proposed_state = np.random.randint(self.dim)
+                proposed_energy = eigenvalues[proposed_state]
+
+                # Metropolis acceptance
+                delta_E = proposed_energy - current_energy
+                if delta_E < 0 or np.random.random() < np.exp(-beta * delta_E):
+                    current_state = proposed_state
+                    current_energy = proposed_energy
+
+                    if current_energy < best_energy:
+                        best_energy = current_energy
+                        best_state = current_state
+
+            history['betas'].append(beta)
+            history['energies'].append(current_energy)
+            history['states'].append(current_state)
+
+        return {
+            'final_energy': current_energy,
+            'best_energy': best_energy,
+            'best_state': best_state,
+            'ground_state_energy': eigenvalues[0],
+            'history': history,
+            'found_ground_state': best_state == 0
+        }
+
+
+# Example: Annealing on Heisenberg model
+qsa = QuantumSimulatedAnnealing(H_heisenberg)
+beta_schedule = np.linspace(0.1, 10, 50)
+result = qsa.anneal(beta_schedule, mc_steps_per_temp=200)
+
+print(f"\nQuantum Simulated Annealing:")
+print(f"  Ground state energy: {result['ground_state_energy']:.4f}")
+print(f"  Best found energy: {result['best_energy']:.4f}")
+print(f"  Found ground state: {result['found_ground_state']}")
+```
+
+## 6. Complexity of Gibbs State Preparation
+
+### Theoretical Results
+
+<Definition term="Mixing Time">
+The number of steps required for a Markov chain to get close to the stationary distribution. For quantum Gibbs sampling, this determines the algorithm's efficiency.
+</Definition>
+
+```python
+def analyze_mixing_time(
+    hamiltonian: np.ndarray,
+    beta: float,
+    threshold: float = 0.01
+) -> Dict:
+    """
+    Estimate mixing time for quantum Gibbs sampling.
+
+    Args:
+        hamiltonian: System Hamiltonian
+        beta: Inverse temperature
+        threshold: Distance threshold for mixing
+
+    Returns:
+        Mixing time analysis
+    """
+    eigenvalues, _ = np.linalg.eigh(hamiltonian)
+    dim = len(eigenvalues)
+
+    # Gap between ground state and first excited
+    spectral_gap = eigenvalues[1] - eigenvalues[0]
+
+    # For Metropolis on discrete space, mixing time related to spectral gap
+    # and temperature
+    # Simplified estimate: t_mix ~ dim^2 for high temp, exponential for low temp
+
+    if beta * spectral_gap < 1:
+        # High temperature regime
+        estimated_mixing = dim ** 2
+        regime = "high_temperature"
+    else:
+        # Low temperature regime - can be exponential
+        estimated_mixing = dim ** 2 * np.exp(beta * spectral_gap)
+        regime = "low_temperature"
+
+    # Partition function ratio (measure of temperature regime)
+    Z = np.sum(np.exp(-beta * eigenvalues))
+    ground_state_prob = np.exp(-beta * eigenvalues[0]) / Z
+
+    return {
+        'spectral_gap': spectral_gap,
+        'estimated_mixing_time': estimated_mixing,
+        'regime': regime,
+        'ground_state_prob': ground_state_prob,
+        'effective_dimension': 1 / np.sum((np.exp(-beta * eigenvalues) / Z) ** 2)
+    }
+
+
+# Analysis for different temperatures
+print("\nMixing Time Analysis:")
+print(f"{'beta':<10}{'Regime':<20}{'Est. Mixing':<15}{'GS Prob':<10}")
+print("-" * 55)
+
+for beta in [0.1, 1.0, 5.0, 10.0]:
+    analysis = analyze_mixing_time(H_heisenberg, beta)
+    print(f"{beta:<10}{analysis['regime']:<20}"
+          f"{analysis['estimated_mixing_time']:<15.1f}"
+          f"{analysis['ground_state_prob']:<10.4f}")
+```
+
+<Warning>
+Quantum Gibbs state preparation can be QMA-hard in general. The difficulty depends on the Hamiltonian structure and temperature. Local Hamiltonians at high temperatures are typically easier.
+</Warning>
+
+## 7. Applications
+
+### Combinatorial Optimization
+
+Low-temperature Gibbs sampling approximates optimization:
+
+```python
+def gibbs_optimization(
+    cost_function,
+    num_states: int,
+    num_samples: int = 1000,
+    final_beta: float = 50
+) -> Dict:
+    """
+    Use Gibbs sampling for combinatorial optimization.
+
+    Args:
+        cost_function: Function to minimize
+        num_states: Size of search space
+        num_samples: Number of samples at final temperature
+        final_beta: Final inverse temperature
+
+    Returns:
+        Optimization results
+    """
+    sampler = ClassicalGibbsSampler(cost_function, num_states)
+
+    # Annealing schedule
+    betas = np.linspace(0.1, final_beta, 20)
+
+    best_state = None
+    best_cost = float('inf')
+    current_state = np.random.randint(num_states)
+
+    for beta in betas:
+        result = sampler.sample(beta, num_samples=100, burn_in=100, thin=1)
+
+        for s in result['samples']:
+            cost = cost_function(s)
+            if cost < best_cost:
+                best_cost = cost
+                best_state = s
+
+    # Final sampling at low temperature
+    final_result = sampler.sample(final_beta, num_samples=num_samples)
+
+    return {
+        'best_state': best_state,
+        'best_cost': best_cost,
+        'final_samples': final_result['samples'],
+        'final_mean_energy': final_result['mean_energy']
+    }
+
+
+# Example: Max-Cut on a small graph
+def maxcut_cost(state: int, adjacency: np.ndarray) -> float:
+    """Negative of cut size (to minimize)."""
+    n = adjacency.shape[0]
+    cut = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            if adjacency[i, j] == 1:
+                si = 2 * ((state >> i) & 1) - 1
+                sj = 2 * ((state >> j) & 1) - 1
+                if si != sj:
+                    cut += 1
+    return -cut  # Negative because we minimize
+
+# Small graph
+adj = np.array([
+    [0, 1, 1, 0],
+    [1, 0, 1, 1],
+    [1, 1, 0, 1],
+    [0, 1, 1, 0]
+])
+
+result = gibbs_optimization(
+    lambda x: maxcut_cost(x, adj),
+    num_states=16
+)
+
+print(f"\nGibbs Sampling for Max-Cut:")
+print(f"  Best cut found: {-result['best_cost']}")
+print(f"  Best configuration: {bin(result['best_state'])}")
+```
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Gibbs States**: Thermal equilibrium states $\rho_\beta = e^{-\beta H}/Z$
+2. **Metropolis Algorithm**: Classical and quantum versions for thermal sampling
+3. **Variational Approach**: Minimizing variational free energy
+4. **Simulated Annealing**: Temperature scheduling for optimization
+5. **Complexity**: Mixing times and computational hardness
+6. **Applications**: Optimization and physics simulations
+
+## Further Reading
+
+- Next lesson: Sampling Applications in Finance, Physics, and ML
+- Related: Quantum Annealing, VQE
+- Application: Quantum Boltzmann Machines

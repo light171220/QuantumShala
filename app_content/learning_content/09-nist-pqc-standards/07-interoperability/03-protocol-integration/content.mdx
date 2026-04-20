@@ -1,0 +1,459 @@
+---
+title: "Protocol Integration"
+description: "Integrating PQC algorithms into existing security protocols including key exchange, authentication, and encrypted communications."
+---
+
+# Protocol Integration
+
+Integrating PQC into existing protocols requires careful consideration of message formats, negotiation mechanisms, and backward compatibility.
+
+## Key Exchange Protocol Integration
+
+### Protocol Negotiation
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Algorithm Negotiation Patterns                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  PREFERENCE-ORDERED LISTS                                       │
+│  ┌────────────────────────────────────────────────────────────┐│
+│  │  Client: [X25519_ML-KEM-768, X25519, ML-KEM-768]           ││
+│  │  Server: [X25519_ML-KEM-768, X25519, P-256]                ││
+│  │  Selected: X25519_ML-KEM-768 (highest common preference)   ││
+│  └────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  NEGOTIATION FLOW                                               │
+│  ┌─────────┐                              ┌─────────┐          │
+│  │ Client  │                              │ Server  │          │
+│  └────┬────┘                              └────┬────┘          │
+│       │    ClientHello                         │               │
+│       │    supported_groups: [hybrid, pqc]     │               │
+│       │ ──────────────────────────────────────>│               │
+│       │                                        │               │
+│       │                        ServerHello     │               │
+│       │                 selected_group: hybrid │               │
+│       │ <──────────────────────────────────────│               │
+│       │                                        │               │
+│       │    Key exchange with selected algo     │               │
+│       │ <─────────────────────────────────────>│               │
+│                                                                  │
+│  GRACEFUL DEGRADATION                                           │
+│  If no PQC supported: Fall back to classical                   │
+│  If no hybrid: Use pure PQC or pure classical                  │
+│  Log all negotiation decisions for audit                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Integrating with TLS-like Protocols
+
+```python
+"""
+PQC Integration with Key Exchange Protocols
+"""
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import List, Optional, Tuple
+
+class KeyExchangeGroup(Enum):
+    """Supported key exchange groups."""
+    # Classical
+    X25519 = 0x001D
+    P256 = 0x0017
+    P384 = 0x0018
+
+    # PQC (draft values)
+    ML_KEM_512 = 0x0200
+    ML_KEM_768 = 0x0201
+    ML_KEM_1024 = 0x0202
+
+    # Hybrid
+    X25519_ML_KEM_768 = 0x6399
+
+@dataclass
+class NegotiationResult:
+    """Result of algorithm negotiation."""
+    selected_group: KeyExchangeGroup
+    is_hybrid: bool
+    is_pqc: bool
+    client_preference_rank: int
+    server_preference_rank: int
+
+class ProtocolNegotiator:
+    """
+    Key exchange algorithm negotiator.
+    """
+
+    # Default preferences (highest to lowest)
+    DEFAULT_CLIENT_PREFS = [
+        KeyExchangeGroup.X25519_ML_KEM_768,  # Hybrid first
+        KeyExchangeGroup.ML_KEM_768,          # Then pure PQC
+        KeyExchangeGroup.X25519,              # Then classical
+    ]
+
+    DEFAULT_SERVER_PREFS = [
+        KeyExchangeGroup.X25519_ML_KEM_768,
+        KeyExchangeGroup.X25519,
+        KeyExchangeGroup.ML_KEM_768,
+    ]
+
+    def __init__(self,
+                 client_groups: List[KeyExchangeGroup] = None,
+                 server_groups: List[KeyExchangeGroup] = None):
+        self.client_groups = client_groups or self.DEFAULT_CLIENT_PREFS
+        self.server_groups = server_groups or self.DEFAULT_SERVER_PREFS
+
+    def negotiate(self) -> Optional[NegotiationResult]:
+        """
+        Negotiate key exchange algorithm.
+
+        Uses server preference order for selection.
+        """
+        for server_rank, server_group in enumerate(self.server_groups):
+            if server_group in self.client_groups:
+                client_rank = self.client_groups.index(server_group)
+
+                return NegotiationResult(
+                    selected_group=server_group,
+                    is_hybrid=self._is_hybrid(server_group),
+                    is_pqc=self._is_pqc(server_group),
+                    client_preference_rank=client_rank,
+                    server_preference_rank=server_rank
+                )
+
+        return None  # No common algorithm
+
+    def _is_hybrid(self, group: KeyExchangeGroup) -> bool:
+        """Check if group is a hybrid scheme."""
+        return "ML_KEM" in group.name and "X25519" in group.name
+
+    def _is_pqc(self, group: KeyExchangeGroup) -> bool:
+        """Check if group includes PQC."""
+        return "ML_KEM" in group.name
+
+# Example negotiation
+print("Protocol Negotiation Example")
+print("=" * 50)
+
+negotiator = ProtocolNegotiator()
+result = negotiator.negotiate()
+
+if result:
+    print(f"Selected: {result.selected_group.name}")
+    print(f"Is Hybrid: {result.is_hybrid}")
+    print(f"Is PQC: {result.is_pqc}")
+    print(f"Client rank: {result.client_preference_rank}")
+    print(f"Server rank: {result.server_preference_rank}")
+else:
+    print("No common algorithm found!")
+```
+
+## Authentication Integration
+
+### Signature Algorithm Negotiation
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│           Signature Algorithm Integration                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  CERTIFICATE CHAIN CONSIDERATIONS                               │
+│                                                                  │
+│  Traditional Chain:                                             │
+│  Root CA (RSA) → Intermediate CA (ECDSA) → End Entity (ECDSA)  │
+│  Total signature data: ~600 bytes                               │
+│                                                                  │
+│  PQC Chain:                                                     │
+│  Root CA (ML-DSA) → Intermediate CA (ML-DSA) → EE (ML-DSA)     │
+│  Total signature data: ~10,000 bytes                           │
+│                                                                  │
+│  Hybrid Chain:                                                  │
+│  Root CA (Hybrid) → Intermediate CA (Hybrid) → EE (Hybrid)     │
+│  Total signature data: ~10,700 bytes                           │
+│                                                                  │
+│  NEGOTIATION                                                    │
+│  Client: signature_algorithms: [ml-dsa-65, ecdsa-p256, ...]    │
+│  Server: Select highest priority that matches cert chain       │
+│                                                                  │
+│  COMPATIBILITY MODE                                             │
+│  Server may have multiple certificates:                        │
+│  - ECDSA certificate for legacy clients                        │
+│  - ML-DSA certificate for PQC-capable clients                  │
+│  - Hybrid certificate for defense-in-depth                     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Multi-Certificate Support
+
+```python
+"""
+Multi-certificate support for protocol integration
+"""
+
+from dataclasses import dataclass
+from typing import List, Optional
+from enum import Enum
+
+class SignatureAlgorithm(Enum):
+    """Supported signature algorithms."""
+    ECDSA_P256 = "ecdsa_secp256r1_sha256"
+    RSA_PSS = "rsa_pss_sha256"
+    ML_DSA_44 = "ml_dsa_44"
+    ML_DSA_65 = "ml_dsa_65"
+    ML_DSA_87 = "ml_dsa_87"
+    HYBRID_ECDSA_ML_DSA = "hybrid_ecdsa_ml_dsa_65"
+
+@dataclass
+class Certificate:
+    """Certificate with algorithm info."""
+    subject: str
+    issuer: str
+    algorithm: SignatureAlgorithm
+    public_key: bytes
+    signature: bytes
+    chain: List['Certificate'] = None
+
+class CertificateSelector:
+    """
+    Select appropriate certificate based on client capabilities.
+    """
+
+    def __init__(self, available_certs: List[Certificate]):
+        self.certs = {cert.algorithm: cert for cert in available_certs}
+
+    def select(self, client_supported: List[SignatureAlgorithm],
+               prefer_hybrid: bool = True) -> Optional[Certificate]:
+        """
+        Select certificate matching client capabilities.
+
+        Priority:
+        1. Hybrid (if preferred and supported)
+        2. PQC
+        3. Classical
+        """
+        # Build priority order
+        priority = []
+
+        if prefer_hybrid:
+            priority.extend([
+                SignatureAlgorithm.HYBRID_ECDSA_ML_DSA,
+            ])
+
+        priority.extend([
+            SignatureAlgorithm.ML_DSA_65,
+            SignatureAlgorithm.ML_DSA_87,
+            SignatureAlgorithm.ML_DSA_44,
+            SignatureAlgorithm.ECDSA_P256,
+            SignatureAlgorithm.RSA_PSS,
+        ])
+
+        for algo in priority:
+            if algo in client_supported and algo in self.certs:
+                return self.certs[algo]
+
+        return None
+
+# Example
+print("Certificate Selection")
+print("=" * 50)
+
+# Server has multiple certificates
+available = [
+    Certificate("server.example.com", "CA", SignatureAlgorithm.ECDSA_P256, b"", b""),
+    Certificate("server.example.com", "CA", SignatureAlgorithm.ML_DSA_65, b"", b""),
+]
+
+selector = CertificateSelector(available)
+
+# Legacy client
+legacy_client = [SignatureAlgorithm.ECDSA_P256, SignatureAlgorithm.RSA_PSS]
+cert = selector.select(legacy_client)
+print(f"Legacy client: {cert.algorithm.value if cert else 'None'}")
+
+# Modern client
+modern_client = [SignatureAlgorithm.ML_DSA_65, SignatureAlgorithm.ECDSA_P256]
+cert = selector.select(modern_client)
+print(f"Modern client: {cert.algorithm.value if cert else 'None'}")
+```
+
+## Message Format Updates
+
+### Handling Larger Keys and Signatures
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Protocol Message Format Updates                     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ISSUE: Fixed-size fields may be too small                     │
+│                                                                  │
+│  Example: TLS 1.3 Certificate message                          │
+│  - Max certificate_request_context: 255 bytes ✓                │
+│  - Max certificate_list: 2^24-1 bytes ✓ (16MB limit OK)        │
+│  - Individual cert: 2^24-1 bytes ✓                             │
+│                                                                  │
+│  Example: SSH                                                   │
+│  - Max name-list: 2^32-1 bytes ✓                               │
+│  - Public key blob: length-prefixed ✓                          │
+│                                                                  │
+│  POTENTIAL ISSUES                                               │
+│  - MTU constraints (1500 bytes typical)                        │
+│  - UDP protocols may fragment heavily                          │
+│  - Handshake size limits in some implementations               │
+│  - Memory allocation limits                                     │
+│                                                                  │
+│  SOLUTIONS                                                      │
+│  - Use TCP for large handshakes                                │
+│  - Implement message fragmentation                             │
+│  - Consider compressed certificates                             │
+│  - Update implementation limits                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Backward Compatibility
+
+### Fallback Strategies
+
+```python
+"""
+Backward compatibility and fallback strategies
+"""
+
+from enum import Enum
+from typing import Optional, List, Tuple
+from dataclasses import dataclass
+
+class FallbackPolicy(Enum):
+    """Fallback behavior when PQC not supported."""
+    FAIL_CLOSED = "fail"           # Reject connection
+    FALLBACK_CLASSICAL = "classic"  # Use classical crypto
+    WARN_AND_FALLBACK = "warn"      # Log warning, use classical
+
+@dataclass
+class ConnectionAttempt:
+    """Result of connection attempt."""
+    success: bool
+    algorithm_used: str
+    is_pqc: bool
+    fallback_used: bool
+    warning: Optional[str]
+
+class BackwardCompatibleClient:
+    """
+    Client with backward compatibility support.
+    """
+
+    def __init__(self,
+                 fallback_policy: FallbackPolicy = FallbackPolicy.WARN_AND_FALLBACK,
+                 pqc_required_hosts: List[str] = None):
+        self.policy = fallback_policy
+        self.pqc_required = set(pqc_required_hosts or [])
+
+    def connect(self, host: str,
+                server_capabilities: List[str]) -> ConnectionAttempt:
+        """
+        Attempt connection with appropriate algorithm.
+        """
+        # Check for PQC support
+        has_pqc = any("ml_kem" in cap or "hybrid" in cap
+                      for cap in server_capabilities)
+
+        # Host requires PQC
+        if host in self.pqc_required and not has_pqc:
+            return ConnectionAttempt(
+                success=False,
+                algorithm_used="none",
+                is_pqc=False,
+                fallback_used=False,
+                warning=f"PQC required for {host} but not supported"
+            )
+
+        # Best case: hybrid available
+        if "x25519_ml_kem_768" in server_capabilities:
+            return ConnectionAttempt(
+                success=True,
+                algorithm_used="x25519_ml_kem_768",
+                is_pqc=True,
+                fallback_used=False,
+                warning=None
+            )
+
+        # PQC only
+        if "ml_kem_768" in server_capabilities:
+            return ConnectionAttempt(
+                success=True,
+                algorithm_used="ml_kem_768",
+                is_pqc=True,
+                fallback_used=False,
+                warning=None
+            )
+
+        # Classical fallback
+        if "x25519" in server_capabilities:
+            if self.policy == FallbackPolicy.FAIL_CLOSED:
+                return ConnectionAttempt(
+                    success=False,
+                    algorithm_used="none",
+                    is_pqc=False,
+                    fallback_used=False,
+                    warning="PQC not supported, policy requires PQC"
+                )
+
+            warning = None
+            if self.policy == FallbackPolicy.WARN_AND_FALLBACK:
+                warning = f"Falling back to classical crypto for {host}"
+
+            return ConnectionAttempt(
+                success=True,
+                algorithm_used="x25519",
+                is_pqc=False,
+                fallback_used=True,
+                warning=warning
+            )
+
+        return ConnectionAttempt(
+            success=False,
+            algorithm_used="none",
+            is_pqc=False,
+            fallback_used=False,
+            warning="No supported algorithms"
+        )
+
+# Example
+client = BackwardCompatibleClient(
+    fallback_policy=FallbackPolicy.WARN_AND_FALLBACK,
+    pqc_required_hosts=["secure.example.com"]
+)
+
+# Test various server configurations
+servers = [
+    ("modern.com", ["x25519_ml_kem_768", "x25519"]),
+    ("legacy.com", ["x25519", "p256"]),
+    ("secure.example.com", ["x25519"]),  # PQC required but not available
+]
+
+print("Connection Attempts")
+print("=" * 50)
+
+for host, caps in servers:
+    result = client.connect(host, caps)
+    print(f"\n{host}:")
+    print(f"  Success: {result.success}")
+    print(f"  Algorithm: {result.algorithm_used}")
+    print(f"  PQC: {result.is_pqc}")
+    if result.warning:
+        print(f"  Warning: {result.warning}")
+```
+
+## Summary
+
+Protocol integration requires:
+
+1. **Algorithm Negotiation**: Support preference-ordered lists
+2. **Multi-Certificate**: Serve different certs for different clients
+3. **Message Formats**: Ensure fields can handle larger PQC data
+4. **Fallback Policies**: Define behavior when PQC unavailable
+5. **Logging**: Track negotiation decisions for security audit
+
+The transition period requires flexibility while maintaining security.

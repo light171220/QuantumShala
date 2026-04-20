@@ -1,0 +1,1042 @@
+---
+title: "Applications of Quantum Reservoir Computing"
+description: "Explore real-world applications of quantum reservoir computing, including time series prediction, signal processing, natural language processing, and quantum system characterization."
+duration: 70
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Apply QRC to time series forecasting problems
+- Implement signal processing with quantum reservoirs
+- Use QRC for classification and pattern recognition
+- Design QRC solutions for specific domains
+- Evaluate QRC performance on real-world tasks
+- Identify problems suitable for quantum reservoir approaches
+
+## 1. Time Series Forecasting
+
+Quantum reservoir computing excels at temporal prediction tasks where high-dimensional feature spaces provide advantages.
+
+<Definition term="QRC Time Series Forecasting">
+QRC time series forecasting uses a quantum reservoir to transform input sequences into high-dimensional feature representations, enabling accurate prediction of future values through simple linear readout.
+</Definition>
+
+### Financial Time Series Prediction
+
+```python
+import numpy as np
+from scipy.linalg import expm
+
+class FinancialQRCPredictor:
+    """
+    Quantum reservoir predictor for financial time series.
+
+    Handles multi-asset prediction with correlation modeling.
+    """
+
+    def __init__(self, n_qubits, n_assets):
+        """
+        Initialize financial predictor.
+
+        Args:
+            n_qubits: Qubits in quantum reservoir
+            n_assets: Number of financial assets to track
+        """
+        self.n_qubits = n_qubits
+        self.dim = 2**n_qubits
+        self.n_assets = n_assets
+
+        # Build reservoir
+        self.H = self._build_hamiltonian()
+        self.U = expm(-1j * self.H * 0.5)
+        self.observables = self._build_observables()
+
+        # Output weights for each asset
+        self.W_out = None
+
+        # Normalization parameters
+        self.means = None
+        self.stds = None
+
+        self.reset()
+
+    def _build_hamiltonian(self):
+        """Build Hamiltonian optimized for multi-variate input."""
+        H = np.zeros((self.dim, self.dim), dtype=complex)
+
+        I = np.eye(2, dtype=complex)
+        X = np.array([[0, 1], [1, 0]], dtype=complex)
+        Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+        Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        def kron_chain(ops):
+            result = ops[0]
+            for op in ops[1:]:
+                result = np.kron(result, op)
+            return result
+
+        np.random.seed(42)
+
+        # Transverse field
+        for i in range(self.n_qubits):
+            ops = [I] * self.n_qubits
+            ops[i] = X
+            H += np.random.uniform(0.5, 1.5) * kron_chain(ops)
+
+        # All-to-all ZZ coupling (captures correlations)
+        for i in range(self.n_qubits):
+            for j in range(i + 1, self.n_qubits):
+                ops = [I] * self.n_qubits
+                ops[i] = Z
+                ops[j] = Z
+                H += np.random.uniform(-0.5, 0.5) * kron_chain(ops)
+
+        return H
+
+    def _build_observables(self):
+        """Build measurement observables."""
+        I = np.eye(2, dtype=complex)
+        paulis = [
+            np.array([[1, 0], [0, -1]], dtype=complex),
+            np.array([[0, 1], [1, 0]], dtype=complex)
+        ]
+
+        observables = []
+        for i in range(self.n_qubits):
+            for P in paulis:
+                ops = [I] * self.n_qubits
+                ops[i] = P
+                O = ops[0]
+                for op in ops[1:]:
+                    O = np.kron(O, op)
+                observables.append(O)
+
+        return observables
+
+    def reset(self):
+        """Reset reservoir state."""
+        self.rho = np.zeros((self.dim, self.dim), dtype=complex)
+        self.rho[0, 0] = 1.0
+
+    def _encode_multi_asset(self, returns):
+        """Encode multiple asset returns."""
+        # Use different qubits for different assets
+        I = np.eye(2, dtype=complex)
+
+        for i, r in enumerate(returns[:self.n_qubits]):
+            theta = r * np.pi  # Returns typically in [-1, 1]
+            Ry = np.array([
+                [np.cos(theta/2), -np.sin(theta/2)],
+                [np.sin(theta/2), np.cos(theta/2)]
+            ], dtype=complex)
+
+            ops = [I] * self.n_qubits
+            ops[i] = Ry
+            U = ops[0]
+            for op in ops[1:]:
+                U = np.kron(U, op)
+
+            self.rho = U @ self.rho @ U.conj().T
+
+    def step(self, returns):
+        """Process single time step with multi-asset returns."""
+        self._encode_multi_asset(returns)
+        self.rho = self.U @ self.rho @ self.U.conj().T
+
+        # Normalize density matrix
+        self.rho = (self.rho + self.rho.conj().T) / 2
+        self.rho /= np.trace(self.rho)
+
+        # Measure observables
+        features = []
+        for O in self.observables:
+            features.append(np.real(np.trace(O @ self.rho)))
+
+        return np.array(features)
+
+    def fit(self, price_data, prediction_horizon=1, train_ratio=0.8):
+        """
+        Train predictor on historical price data.
+
+        Args:
+            price_data: Array of shape (time, n_assets)
+            prediction_horizon: Steps ahead to predict
+            train_ratio: Fraction for training
+        """
+        # Calculate returns
+        returns = np.diff(np.log(price_data + 1e-8), axis=0)
+
+        # Normalize
+        self.means = np.mean(returns, axis=0)
+        self.stds = np.std(returns, axis=0) + 1e-8
+        normalized = (returns - self.means) / self.stds
+
+        # Process through reservoir
+        self.reset()
+        features = []
+        for t in range(len(normalized)):
+            feat = self.step(normalized[t])
+            features.append(feat)
+        features = np.array(features)
+
+        # Prepare training data
+        washout = 50
+        n_train = int(len(features) * train_ratio)
+
+        X = features[washout:n_train - prediction_horizon]
+        Y = normalized[washout + prediction_horizon:n_train]
+
+        # Multi-output ridge regression
+        reg = 1e-4
+        XTX = X.T @ X + reg * np.eye(X.shape[1])
+        self.W_out = np.linalg.solve(XTX, X.T @ Y)
+
+        # Training metrics
+        Y_pred = X @ self.W_out
+        train_mse = np.mean((Y_pred - Y)**2)
+
+        return {'train_mse': train_mse, 'n_samples': len(X)}
+
+    def predict(self, price_data, n_future=10):
+        """
+        Predict future returns.
+
+        Args:
+            price_data: Historical prices
+            n_future: Number of future steps
+        """
+        if self.W_out is None:
+            raise ValueError("Model not trained")
+
+        returns = np.diff(np.log(price_data + 1e-8), axis=0)
+        normalized = (returns - self.means) / self.stds
+
+        # Process history
+        self.reset()
+        for t in range(len(normalized)):
+            features = self.step(normalized[t])
+
+        # Predict future
+        predictions = []
+        for _ in range(n_future):
+            pred = features @ self.W_out
+            predictions.append(pred * self.stds + self.means)
+
+            # Feed prediction back
+            features = self.step(pred)
+
+        return np.array(predictions)
+
+
+def prepare_stock_data(prices, lookback=100):
+    """
+    Prepare stock data for QRC prediction.
+
+    Returns normalized returns and metadata.
+    """
+    returns = np.diff(np.log(prices + 1e-8), axis=0)
+
+    # Add technical indicators
+    features = {
+        'returns': returns,
+        'volatility': np.array([np.std(returns[max(0,i-20):i+1], axis=0)
+                                for i in range(len(returns))]),
+        'momentum': np.array([np.mean(returns[max(0,i-10):i+1], axis=0)
+                             for i in range(len(returns))])
+    }
+
+    return features
+```
+
+### Chaotic System Prediction
+
+```python
+class ChaoticSystemPredictor:
+    """
+    QRC predictor specialized for chaotic systems.
+    """
+
+    def __init__(self, n_qubits, lyapunov_estimate=0.0):
+        """
+        Initialize chaotic system predictor.
+
+        Args:
+            n_qubits: Reservoir size
+            lyapunov_estimate: Estimated Lyapunov exponent for adaptation
+        """
+        self.n_qubits = n_qubits
+        self.dim = 2**n_qubits
+        self.lyapunov = lyapunov_estimate
+
+        # Adjust reservoir dynamics based on chaos level
+        self.leaking_rate = self._adapt_leaking_rate()
+
+        # Build reservoir
+        self.H = self._build_hamiltonian()
+        self.U = expm(-1j * self.H)
+        self.observables = self._build_observables()
+
+        self.W_out = None
+        self.reset()
+
+    def _adapt_leaking_rate(self):
+        """Adapt leaking rate to chaos level."""
+        # Higher Lyapunov → faster dynamics → higher leaking rate
+        base_rate = 0.3
+        adaptation = min(0.6, 0.1 * self.lyapunov)
+        return min(0.9, base_rate + adaptation)
+
+    def _build_hamiltonian(self):
+        """Build Hamiltonian for chaotic dynamics."""
+        H = np.zeros((self.dim, self.dim), dtype=complex)
+        I = np.eye(2, dtype=complex)
+        X = np.array([[0, 1], [1, 0]], dtype=complex)
+        Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        def kron_chain(ops):
+            result = ops[0]
+            for op in ops[1:]:
+                result = np.kron(result, op)
+            return result
+
+        np.random.seed(42)
+
+        for i in range(self.n_qubits):
+            ops = [I] * self.n_qubits
+            ops[i] = X
+            H += np.random.randn() * kron_chain(ops)
+
+        for i in range(self.n_qubits - 1):
+            ops = [I] * self.n_qubits
+            ops[i] = Z
+            ops[i + 1] = Z
+            H += np.random.randn() * kron_chain(ops)
+
+        return H
+
+    def _build_observables(self):
+        """Build observables."""
+        I = np.eye(2, dtype=complex)
+        paulis = [np.array([[1, 0], [0, -1]]), np.array([[0, 1], [1, 0]])]
+
+        observables = []
+        for i in range(self.n_qubits):
+            for P in paulis:
+                ops = [I] * self.n_qubits
+                ops[i] = P
+                O = ops[0]
+                for op in ops[1:]:
+                    O = np.kron(O, op)
+                observables.append(O)
+        return observables
+
+    def reset(self):
+        self.rho = np.zeros((self.dim, self.dim), dtype=complex)
+        self.rho[0, 0] = 1.0
+
+    def step(self, u):
+        """Process single input with leaky integration."""
+        rho_prev = self.rho.copy()
+
+        theta = u * np.pi
+        Ry = np.array([
+            [np.cos(theta/2), -np.sin(theta/2)],
+            [np.sin(theta/2), np.cos(theta/2)]
+        ], dtype=complex)
+        I_rest = np.eye(2**(self.n_qubits - 1), dtype=complex)
+        U_enc = np.kron(Ry, I_rest)
+
+        self.rho = U_enc @ self.rho @ U_enc.conj().T
+        self.rho = self.U @ self.rho @ self.U.conj().T
+
+        # Leaky integration
+        self.rho = (1 - self.leaking_rate) * rho_prev + self.leaking_rate * self.rho
+        self.rho = (self.rho + self.rho.conj().T) / 2
+        self.rho /= np.trace(self.rho)
+
+        return np.array([np.real(np.trace(O @ self.rho)) for O in self.observables])
+
+    def train_and_predict(self, time_series, horizon=1, train_ratio=0.8):
+        """Train and generate predictions."""
+        mean, std = np.mean(time_series), np.std(time_series) + 1e-8
+        normalized = (time_series - mean) / std
+
+        # Collect features
+        self.reset()
+        features = np.array([self.step(u) for u in normalized])
+
+        # Train
+        washout = 50
+        n_train = int(len(features) * train_ratio)
+
+        X_train = features[washout:n_train - horizon]
+        y_train = normalized[washout + horizon:n_train]
+
+        reg = 1e-4
+        XTX = X_train.T @ X_train + reg * np.eye(X_train.shape[1])
+        self.W_out = np.linalg.solve(XTX, X_train.T @ y_train)
+
+        # Predict
+        X_test = features[n_train:-horizon] if horizon > 0 else features[n_train:]
+        y_test = normalized[n_train + horizon:] if horizon > 0 else normalized[n_train:]
+
+        min_len = min(len(X_test), len(y_test))
+        predictions = X_test[:min_len] @ self.W_out
+
+        # Denormalize
+        predictions = predictions * std + mean
+        actual = y_test[:min_len] * std + mean
+
+        return predictions, actual
+```
+
+<Tip>
+For chaotic systems, matching the reservoir dynamics to the system's characteristic timescale is crucial. Estimate the Lyapunov exponent and adjust the leaking rate accordingly.
+</Tip>
+
+## 2. Signal Processing Applications
+
+Quantum reservoirs provide natural signal processing capabilities through their temporal dynamics.
+
+### Adaptive Filtering
+
+```python
+class QRCAdaptiveFilter:
+    """
+    Quantum reservoir-based adaptive filter.
+
+    Applications: noise cancellation, channel equalization, echo cancellation.
+    """
+
+    def __init__(self, n_qubits, filter_type='noise_cancellation'):
+        """
+        Initialize adaptive filter.
+
+        Args:
+            n_qubits: Reservoir size
+            filter_type: 'noise_cancellation', 'equalization', or 'prediction'
+        """
+        self.n_qubits = n_qubits
+        self.dim = 2**n_qubits
+        self.filter_type = filter_type
+
+        self.H = self._build_hamiltonian()
+        self.U = expm(-1j * self.H * 0.3)
+        self.observables = self._build_observables()
+
+        self.W_out = None
+        self.reset()
+
+    def _build_hamiltonian(self):
+        H = np.zeros((self.dim, self.dim), dtype=complex)
+        I = np.eye(2, dtype=complex)
+        X = np.array([[0, 1], [1, 0]], dtype=complex)
+        Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        def kron_chain(ops):
+            result = ops[0]
+            for op in ops[1:]:
+                result = np.kron(result, op)
+            return result
+
+        np.random.seed(42)
+
+        for i in range(self.n_qubits):
+            ops = [I] * self.n_qubits
+            ops[i] = X
+            H += np.random.randn() * kron_chain(ops)
+
+        for i in range(self.n_qubits - 1):
+            ops = [I] * self.n_qubits
+            ops[i] = Z
+            ops[i + 1] = Z
+            H += np.random.randn() * kron_chain(ops)
+
+        return H
+
+    def _build_observables(self):
+        I = np.eye(2, dtype=complex)
+        paulis = [np.array([[1, 0], [0, -1]]), np.array([[0, 1], [1, 0]])]
+        observables = []
+        for i in range(self.n_qubits):
+            for P in paulis:
+                ops = [I] * self.n_qubits
+                ops[i] = P
+                O = ops[0]
+                for op in ops[1:]:
+                    O = np.kron(O, op)
+                observables.append(O)
+        return observables
+
+    def reset(self):
+        self.rho = np.zeros((self.dim, self.dim), dtype=complex)
+        self.rho[0, 0] = 1.0
+
+    def step(self, u):
+        theta = u * np.pi
+        Ry = np.array([
+            [np.cos(theta/2), -np.sin(theta/2)],
+            [np.sin(theta/2), np.cos(theta/2)]
+        ], dtype=complex)
+        I_rest = np.eye(2**(self.n_qubits - 1), dtype=complex)
+        U_enc = np.kron(Ry, I_rest)
+
+        self.rho = U_enc @ self.rho @ U_enc.conj().T
+        self.rho = self.U @ self.rho @ self.U.conj().T
+
+        return np.array([np.real(np.trace(O @ self.rho)) for O in self.observables])
+
+    def train_filter(self, noisy_signal, clean_signal=None, reference_signal=None):
+        """
+        Train the adaptive filter.
+
+        For noise cancellation: noisy_signal is primary, reference_signal is noise reference
+        For equalization: noisy_signal is received, clean_signal is original
+        """
+        self.reset()
+        features = np.array([self.step(u) for u in noisy_signal])
+
+        if self.filter_type == 'noise_cancellation' and reference_signal is not None:
+            # Learn to predict noise from reference
+            target = noisy_signal - (clean_signal if clean_signal is not None else 0)
+        elif clean_signal is not None:
+            target = clean_signal
+        else:
+            # Default: identity (for testing)
+            target = noisy_signal
+
+        washout = 30
+        X = features[washout:]
+        y = target[washout:]
+        min_len = min(len(X), len(y))
+
+        reg = 1e-4
+        XTX = X[:min_len].T @ X[:min_len] + reg * np.eye(X.shape[1])
+        self.W_out = np.linalg.solve(XTX, X[:min_len].T @ y[:min_len])
+
+        return self
+
+    def filter(self, signal):
+        """Apply trained filter to signal."""
+        if self.W_out is None:
+            raise ValueError("Filter not trained")
+
+        self.reset()
+        features = np.array([self.step(u) for u in signal])
+
+        if self.filter_type == 'noise_cancellation':
+            # Output is estimated noise to subtract
+            noise_estimate = features @ self.W_out
+            return signal - noise_estimate
+        else:
+            return features @ self.W_out
+
+
+def demonstrate_noise_cancellation():
+    """Demonstrate QRC noise cancellation."""
+    # Generate test signals
+    t = np.linspace(0, 10, 1000)
+    clean = np.sin(2 * np.pi * t)
+    noise = 0.5 * np.random.randn(len(t))
+    noisy = clean + noise
+
+    # Train filter
+    qrc_filter = QRCAdaptiveFilter(n_qubits=4, filter_type='noise_cancellation')
+    qrc_filter.train_filter(noisy, clean_signal=clean)
+
+    # Apply to new data
+    t_test = np.linspace(10, 20, 1000)
+    clean_test = np.sin(2 * np.pi * t_test)
+    noise_test = 0.5 * np.random.randn(len(t_test))
+    noisy_test = clean_test + noise_test
+
+    filtered = qrc_filter.filter(noisy_test)
+
+    # Evaluate
+    snr_before = 10 * np.log10(np.var(clean_test) / np.var(noise_test))
+    snr_after = 10 * np.log10(np.var(clean_test) / np.var(filtered - clean_test))
+
+    return {'snr_improvement_db': snr_after - snr_before}
+```
+
+## 3. Classification and Pattern Recognition
+
+Quantum reservoirs transform sequential patterns into discriminative features for classification.
+
+```python
+class QRCSequenceClassifier:
+    """
+    Sequence classification using quantum reservoir.
+
+    Applications: speech recognition, gesture recognition, anomaly detection.
+    """
+
+    def __init__(self, n_qubits, n_classes):
+        """
+        Initialize sequence classifier.
+
+        Args:
+            n_qubits: Reservoir size
+            n_classes: Number of output classes
+        """
+        self.n_qubits = n_qubits
+        self.dim = 2**n_qubits
+        self.n_classes = n_classes
+
+        self.H = self._build_hamiltonian()
+        self.U = expm(-1j * self.H * 0.5)
+        self.observables = self._build_observables()
+
+        self.W_out = None
+        self.reset()
+
+    def _build_hamiltonian(self):
+        H = np.zeros((self.dim, self.dim), dtype=complex)
+        I = np.eye(2, dtype=complex)
+        X = np.array([[0, 1], [1, 0]], dtype=complex)
+        Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        def kron_chain(ops):
+            result = ops[0]
+            for op in ops[1:]:
+                result = np.kron(result, op)
+            return result
+
+        np.random.seed(42)
+        for i in range(self.n_qubits):
+            ops = [I] * self.n_qubits
+            ops[i] = X
+            H += np.random.randn() * kron_chain(ops)
+
+        for i in range(self.n_qubits - 1):
+            ops = [I] * self.n_qubits
+            ops[i] = Z
+            ops[i + 1] = Z
+            H += np.random.randn() * kron_chain(ops)
+
+        return H
+
+    def _build_observables(self):
+        I = np.eye(2, dtype=complex)
+        paulis = [np.array([[1, 0], [0, -1]]), np.array([[0, 1], [1, 0]])]
+        observables = []
+        for i in range(self.n_qubits):
+            for P in paulis:
+                ops = [I] * self.n_qubits
+                ops[i] = P
+                O = ops[0]
+                for op in ops[1:]:
+                    O = np.kron(O, op)
+                observables.append(O)
+        return observables
+
+    def reset(self):
+        self.rho = np.zeros((self.dim, self.dim), dtype=complex)
+        self.rho[0, 0] = 1.0
+
+    def step(self, u):
+        theta = u * np.pi
+        Ry = np.array([
+            [np.cos(theta/2), -np.sin(theta/2)],
+            [np.sin(theta/2), np.cos(theta/2)]
+        ], dtype=complex)
+        I_rest = np.eye(2**(self.n_qubits - 1), dtype=complex)
+        U_enc = np.kron(Ry, I_rest)
+
+        self.rho = U_enc @ self.rho @ U_enc.conj().T
+        self.rho = self.U @ self.rho @ self.U.conj().T
+
+        return np.array([np.real(np.trace(O @ self.rho)) for O in self.observables])
+
+    def extract_sequence_features(self, sequence):
+        """Extract features from entire sequence."""
+        self.reset()
+
+        # Collect features at multiple time points
+        all_features = []
+        for u in sequence:
+            feat = self.step(u)
+            all_features.append(feat)
+
+        all_features = np.array(all_features)
+
+        # Aggregate: final state + statistics
+        features = np.concatenate([
+            all_features[-1],  # Final state
+            np.mean(all_features, axis=0),  # Mean
+            np.std(all_features, axis=0),  # Variability
+        ])
+
+        return features
+
+    def fit(self, sequences, labels, reg=1e-3):
+        """
+        Train classifier on labeled sequences.
+
+        Args:
+            sequences: List of input sequences
+            labels: Integer class labels
+        """
+        # Extract features
+        X = np.array([self.extract_sequence_features(seq) for seq in sequences])
+
+        # One-hot encode labels
+        Y = np.zeros((len(labels), self.n_classes))
+        for i, label in enumerate(labels):
+            Y[i, label] = 1
+
+        # Train multi-output regression
+        XTX = X.T @ X + reg * np.eye(X.shape[1])
+        self.W_out = np.linalg.solve(XTX, X.T @ Y)
+
+        # Training accuracy
+        predictions = self.predict(sequences)
+        accuracy = np.mean(predictions == labels)
+
+        return {'train_accuracy': accuracy}
+
+    def predict(self, sequences):
+        """Predict class labels."""
+        X = np.array([self.extract_sequence_features(seq) for seq in sequences])
+        scores = X @ self.W_out
+        return np.argmax(scores, axis=1)
+
+    def predict_proba(self, sequences):
+        """Predict class probabilities."""
+        X = np.array([self.extract_sequence_features(seq) for seq in sequences])
+        scores = X @ self.W_out
+        # Softmax
+        exp_scores = np.exp(scores - np.max(scores, axis=1, keepdims=True))
+        return exp_scores / np.sum(exp_scores, axis=1, keepdims=True)
+```
+
+<Warning>
+For classification tasks, ensure balanced training data across classes. QRC, like other ML methods, can be biased toward majority classes if the training set is imbalanced.
+</Warning>
+
+## 4. Quantum System Characterization
+
+QRC can be used to characterize other quantum systems—a uniquely quantum application.
+
+```python
+class QuantumSystemCharacterizer:
+    """
+    Use QRC to characterize unknown quantum systems.
+
+    Learn the dynamics of a target quantum system from measurement data.
+    """
+
+    def __init__(self, n_qubits):
+        """Initialize characterizer."""
+        self.n_qubits = n_qubits
+        self.dim = 2**n_qubits
+
+        # QRC reservoir
+        self.H_reservoir = self._build_reservoir_hamiltonian()
+        self.U_reservoir = expm(-1j * self.H_reservoir * 0.5)
+        self.observables = self._build_observables()
+
+        # Learned model of target system
+        self.W_dynamics = None
+
+        self.reset()
+
+    def _build_reservoir_hamiltonian(self):
+        H = np.zeros((self.dim, self.dim), dtype=complex)
+        I = np.eye(2, dtype=complex)
+        X = np.array([[0, 1], [1, 0]], dtype=complex)
+        Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        def kron_chain(ops):
+            result = ops[0]
+            for op in ops[1:]:
+                result = np.kron(result, op)
+            return result
+
+        np.random.seed(42)
+        for i in range(self.n_qubits):
+            ops = [I] * self.n_qubits
+            ops[i] = X
+            H += np.random.randn() * kron_chain(ops)
+
+        for i in range(self.n_qubits - 1):
+            ops = [I] * self.n_qubits
+            ops[i] = Z
+            ops[i + 1] = Z
+            H += np.random.randn() * kron_chain(ops)
+
+        return H
+
+    def _build_observables(self):
+        I = np.eye(2, dtype=complex)
+        paulis = [np.array([[1, 0], [0, -1]]), np.array([[0, 1], [1, 0]])]
+        observables = []
+        for i in range(self.n_qubits):
+            for P in paulis:
+                ops = [I] * self.n_qubits
+                ops[i] = P
+                O = ops[0]
+                for op in ops[1:]:
+                    O = np.kron(O, op)
+                observables.append(O)
+        return observables
+
+    def reset(self):
+        self.rho = np.zeros((self.dim, self.dim), dtype=complex)
+        self.rho[0, 0] = 1.0
+
+    def step(self, measurement):
+        """Feed measurement from target system."""
+        # Encode measurement as reservoir input
+        for i, m in enumerate(measurement[:self.n_qubits]):
+            theta = m * np.pi
+            Ry = np.array([
+                [np.cos(theta/2), -np.sin(theta/2)],
+                [np.sin(theta/2), np.cos(theta/2)]
+            ], dtype=complex)
+
+            I = np.eye(2, dtype=complex)
+            ops = [I] * self.n_qubits
+            ops[i] = Ry
+            U = ops[0]
+            for op in ops[1:]:
+                U = np.kron(U, op)
+
+            self.rho = U @ self.rho @ U.conj().T
+
+        # Evolve reservoir
+        self.rho = self.U_reservoir @ self.rho @ self.U_reservoir.conj().T
+
+        return np.array([np.real(np.trace(O @ self.rho)) for O in self.observables])
+
+    def learn_dynamics(self, measurement_sequence, time_step=1):
+        """
+        Learn target system dynamics from measurements.
+
+        Args:
+            measurement_sequence: Time series of measurements from target
+            time_step: Steps ahead to predict
+        """
+        self.reset()
+        features = np.array([self.step(m) for m in measurement_sequence])
+
+        washout = 30
+        X = features[washout:-time_step]
+        Y = measurement_sequence[washout + time_step:]
+
+        min_len = min(len(X), len(Y))
+
+        reg = 1e-4
+        XTX = X[:min_len].T @ X[:min_len] + reg * np.eye(X.shape[1])
+        self.W_dynamics = np.linalg.solve(XTX, X[:min_len].T @ Y[:min_len])
+
+        # Evaluate
+        Y_pred = X[:min_len] @ self.W_dynamics
+        mse = np.mean((Y_pred - Y[:min_len])**2)
+
+        return {'dynamics_mse': mse}
+
+    def predict_evolution(self, initial_measurement, n_steps):
+        """Predict future evolution of target system."""
+        if self.W_dynamics is None:
+            raise ValueError("Dynamics not learned")
+
+        predictions = []
+        current = initial_measurement
+
+        self.reset()
+        for _ in range(n_steps):
+            features = self.step(current)
+            next_measurement = features @ self.W_dynamics
+            predictions.append(next_measurement)
+            current = next_measurement
+
+        return np.array(predictions)
+```
+
+## 5. Domain-Specific Applications
+
+### Speech and Audio Processing
+
+```python
+class QRCSpeechProcessor:
+    """
+    Speech processing with quantum reservoir.
+    """
+
+    def __init__(self, n_qubits, frame_size=256, hop_size=128):
+        """Initialize speech processor."""
+        self.n_qubits = n_qubits
+        self.frame_size = frame_size
+        self.hop_size = hop_size
+
+        # QRC components (simplified)
+        self.dim = 2**n_qubits
+        self.H = self._build_hamiltonian()
+        self.U = expm(-1j * self.H * 0.5)
+        self.observables = self._build_observables()
+
+        self.reset()
+
+    def _build_hamiltonian(self):
+        H = np.zeros((self.dim, self.dim), dtype=complex)
+        I = np.eye(2, dtype=complex)
+        X = np.array([[0, 1], [1, 0]], dtype=complex)
+        Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+        def kron_chain(ops):
+            result = ops[0]
+            for op in ops[1:]:
+                result = np.kron(result, op)
+            return result
+
+        np.random.seed(42)
+        for i in range(self.n_qubits):
+            ops = [I] * self.n_qubits
+            ops[i] = X
+            H += np.random.randn() * kron_chain(ops)
+
+        for i in range(self.n_qubits - 1):
+            ops = [I] * self.n_qubits
+            ops[i] = Z
+            ops[i + 1] = Z
+            H += np.random.randn() * kron_chain(ops)
+
+        return H
+
+    def _build_observables(self):
+        I = np.eye(2, dtype=complex)
+        paulis = [np.array([[1, 0], [0, -1]])]
+        observables = []
+        for i in range(self.n_qubits):
+            for P in paulis:
+                ops = [I] * self.n_qubits
+                ops[i] = P
+                O = ops[0]
+                for op in ops[1:]:
+                    O = np.kron(O, op)
+                observables.append(O)
+        return observables
+
+    def reset(self):
+        self.rho = np.zeros((self.dim, self.dim), dtype=complex)
+        self.rho[0, 0] = 1.0
+
+    def step(self, u):
+        theta = u * np.pi
+        Ry = np.array([
+            [np.cos(theta/2), -np.sin(theta/2)],
+            [np.sin(theta/2), np.cos(theta/2)]
+        ], dtype=complex)
+        I_rest = np.eye(2**(self.n_qubits - 1), dtype=complex)
+        U_enc = np.kron(Ry, I_rest)
+
+        self.rho = U_enc @ self.rho @ U_enc.conj().T
+        self.rho = self.U @ self.rho @ self.U.conj().T
+
+        return np.array([np.real(np.trace(O @ self.rho)) for O in self.observables])
+
+    def extract_audio_features(self, audio):
+        """Extract frame-level features from audio."""
+        n_frames = (len(audio) - self.frame_size) // self.hop_size + 1
+
+        all_features = []
+        self.reset()
+
+        for i in range(n_frames):
+            start = i * self.hop_size
+            frame = audio[start:start + self.frame_size]
+
+            # Simple feature: normalized energy
+            energy = np.sqrt(np.mean(frame**2))
+            normalized_energy = np.tanh(energy * 10)  # Scale to [-1, 1]
+
+            feat = self.step(normalized_energy)
+            all_features.append(feat)
+
+        return np.array(all_features)
+```
+
+## 6. Evaluating QRC for Your Problem
+
+When deciding if QRC is suitable for your application:
+
+```python
+def evaluate_qrc_suitability(problem_characteristics):
+    """
+    Evaluate if QRC is suitable for a given problem.
+
+    Args:
+        problem_characteristics: Dict with problem properties
+
+    Returns:
+        Suitability score and recommendations
+    """
+    score = 0
+    recommendations = []
+
+    # Temporal structure
+    if problem_characteristics.get('temporal', False):
+        score += 30
+        recommendations.append("QRC is well-suited for temporal data")
+
+    # Complexity
+    complexity = problem_characteristics.get('complexity', 'low')
+    if complexity == 'high':
+        score += 25
+        recommendations.append("High complexity benefits from quantum feature space")
+    elif complexity == 'medium':
+        score += 15
+
+    # Data size
+    data_size = problem_characteristics.get('data_size', 'medium')
+    if data_size == 'small':
+        score += 20
+        recommendations.append("QRC works well with limited training data")
+    elif data_size == 'medium':
+        score += 10
+
+    # Real-time requirements
+    if problem_characteristics.get('real_time', False):
+        if problem_characteristics.get('has_quantum_hardware', False):
+            score += 15
+            recommendations.append("Photonic QRC suitable for real-time")
+        else:
+            score -= 10
+            recommendations.append("Simulation overhead may limit real-time use")
+
+    # Nonlinearity
+    if problem_characteristics.get('nonlinear', False):
+        score += 20
+        recommendations.append("Quantum dynamics provide natural nonlinearity")
+
+    suitability = 'high' if score > 60 else 'medium' if score > 30 else 'low'
+
+    return {
+        'score': score,
+        'suitability': suitability,
+        'recommendations': recommendations
+    }
+```
+
+## Summary
+
+In this lesson, you learned:
+
+1. **Time series forecasting** with QRC for financial and chaotic systems
+2. **Signal processing** applications including adaptive filtering
+3. **Sequence classification** for pattern recognition tasks
+4. **Quantum system characterization** as a uniquely quantum application
+5. **Domain-specific applications** in speech and audio processing
+6. **Evaluation criteria** for determining QRC suitability
+
+Quantum reservoir computing provides a practical path to quantum advantage for temporal machine learning tasks.
+
+## Further Reading
+
+- Related: Hybrid Classical-Quantum Systems
+- Application: Industrial Process Control with QRC
+- Research: Scaling QRC to Large Problems

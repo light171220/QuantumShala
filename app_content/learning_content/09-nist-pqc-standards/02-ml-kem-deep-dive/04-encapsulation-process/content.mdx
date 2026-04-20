@@ -1,0 +1,854 @@
+---
+title: "ML-KEM Encapsulation Process"
+description: "Detailed walkthrough of the ML-KEM encapsulation algorithm, from random seed generation through ciphertext construction and shared secret derivation."
+keywords: ["ml-kem", "encapsulation", "encaps", "ciphertext", "shared-secret", "lattice-cryptography"]
+---
+
+# ML-KEM Encapsulation Process
+
+The encapsulation process is where ML-KEM's cryptographic magic happens. Given a public encapsulation key, the sender generates a shared secret and corresponding ciphertext. This lesson provides a detailed, step-by-step walkthrough of the ML-KEM.Encaps algorithm as specified in FIPS 203.
+
+## Encapsulation Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    ML-KEM ENCAPSULATION                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Inputs:                                                       │
+│   ┌─────────────────┐                                          │
+│   │ Encapsulation   │  ek (public key)                         │
+│   │ Key (ek)        │  = (t̂ ∥ ρ)                               │
+│   └────────┬────────┘                                          │
+│            │                                                    │
+│            ▼                                                    │
+│   ┌─────────────────────────────────────────┐                  │
+│   │         ENCAPSULATION PROCESS           │                  │
+│   │                                         │                  │
+│   │  1. Generate random m ← {0,1}^256       │                  │
+│   │  2. Derive (K̄, r) = G(m ∥ H(ek))        │                  │
+│   │  3. Compute ciphertext c = Encrypt(ek,m,r)                 │
+│   │  4. Derive K = KDF(K̄ ∥ H(c))            │                  │
+│   └─────────────────┬───────────────────────┘                  │
+│                     │                                           │
+│            ┌────────┴────────┐                                 │
+│            │                 │                                  │
+│            ▼                 ▼                                  │
+│   ┌─────────────┐   ┌─────────────┐                           │
+│   │ Ciphertext  │   │ Shared      │                           │
+│   │ (c)         │   │ Secret (K)  │                           │
+│   └─────────────┘   └─────────────┘                           │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Step 1: Input Validation and Parsing
+
+The encapsulation process begins by validating and parsing the encapsulation key:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              ENCAPSULATION KEY PARSING                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Encapsulation Key (ek) Structure:                            │
+│   ┌────────────────────────────────────────────┐               │
+│   │     t̂ (encoded)      │        ρ           │               │
+│   │   12·k·256/8 bytes   │     32 bytes       │               │
+│   └────────────────────────────────────────────┘               │
+│                                                                 │
+│   Parsing Steps:                                                │
+│                                                                 │
+│   1. Split ek into encoded t̂ and seed ρ                       │
+│   2. Decode t̂ from byte representation                         │
+│   3. Validate encoding (modular check)                         │
+│                                                                 │
+│   Size by Variant:                                              │
+│   ┌──────────────┬────────────┬─────────┬─────────┐           │
+│   │   Variant    │ t̂ (bytes) │ ρ (bytes)│ Total  │           │
+│   ├──────────────┼────────────┼─────────┼─────────┤           │
+│   │ ML-KEM-512   │    768     │   32    │   800   │           │
+│   │ ML-KEM-768   │   1152     │   32    │  1184   │           │
+│   │ ML-KEM-1024  │   1536     │   32    │  1568   │           │
+│   └──────────────┴────────────┴─────────┴─────────┘           │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+def parse_encapsulation_key(ek: bytes, k: int) -> tuple:
+    """
+    Parse encapsulation key into components.
+
+    Args:
+        ek: Encapsulation key bytes
+        k: Module dimension (2, 3, or 4)
+
+    Returns:
+        (t_hat, rho): Decoded public vector and seed
+    """
+    # Calculate sizes
+    t_hat_bytes = 12 * k * 256 // 8  # 12 bits per coefficient
+
+    # Split the key
+    t_hat_encoded = ek[:t_hat_bytes]
+    rho = ek[t_hat_bytes:t_hat_bytes + 32]
+
+    # Decode t_hat (k polynomials, 256 coefficients each)
+    t_hat = []
+    for i in range(k):
+        poly_bytes = t_hat_encoded[i * 384:(i + 1) * 384]
+        polynomial = decode_polynomial_12bit(poly_bytes)
+        t_hat.append(polynomial)
+
+    return t_hat, rho
+
+def decode_polynomial_12bit(data: bytes) -> list:
+    """
+    Decode a polynomial from 12-bit encoding.
+    Each coefficient uses 12 bits (for values 0 to q-1).
+    """
+    coefficients = []
+    bits = bytes_to_bits(data)
+
+    for i in range(256):
+        # Extract 12 bits for each coefficient
+        coeff = bits_to_int(bits[i*12:(i+1)*12])
+
+        # Validate coefficient is in valid range
+        if coeff >= 3329:  # q = 3329
+            raise ValueError(f"Invalid coefficient: {coeff}")
+
+        coefficients.append(coeff)
+
+    return coefficients
+```
+
+## Step 2: Random Message Generation
+
+ML-KEM generates a random 256-bit message that will be used to derive both the shared secret and the encryption randomness:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  RANDOM MESSAGE GENERATION                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │              Random Number Generator                     │  │
+│   │                     (CSPRNG)                             │  │
+│   └─────────────────────────┬───────────────────────────────┘  │
+│                             │                                   │
+│                             ▼                                   │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                    m ∈ {0,1}^256                         │  │
+│   │              (32 random bytes)                           │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Security Requirements:                                        │
+│   • Must use cryptographically secure RNG                      │
+│   • Must have full 256 bits of entropy                         │
+│   • Must not be predictable or repeatable                      │
+│                                                                 │
+│   WARNING: Weak randomness → Complete security failure!        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+import os
+import hashlib
+
+def encaps_generate_message() -> bytes:
+    """
+    Generate random 256-bit message for encapsulation.
+
+    This message serves dual purposes:
+    1. Source of randomness for encryption
+    2. Contributes to shared secret derivation
+    """
+    # Use OS-provided cryptographic randomness
+    m = os.urandom(32)  # 256 bits
+
+    return m
+```
+
+## Step 3: Hash Function Applications
+
+ML-KEM uses hash functions extensively. The G function (SHA3-512) derives both the pre-shared secret and encryption randomness:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    HASH DERIVATIONS                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Step A: Hash the encapsulation key                           │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │    h = H(ek) = SHA3-256(ek)                            │  │
+│   │                                                         │  │
+│   │    ┌─────────┐      ┌──────────┐      ┌─────────┐     │  │
+│   │    │   ek    │ ───▶ │ SHA3-256 │ ───▶ │    h    │     │  │
+│   │    │(public) │      └──────────┘      │(32 bytes)│     │  │
+│   │    └─────────┘                        └─────────┘     │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step B: Derive K̄ and randomness r                           │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │    (K̄ ∥ r) = G(m ∥ h) = SHA3-512(m ∥ h)                │  │
+│   │                                                         │  │
+│   │    ┌───────────┐      ┌──────────┐      ┌───────────┐ │  │
+│   │    │  m ∥ h    │ ───▶ │ SHA3-512 │ ───▶ │  K̄ ∥ r    │ │  │
+│   │    │ (64 bytes)│      └──────────┘      │ (64 bytes)│ │  │
+│   │    └───────────┘                        └───────────┘ │  │
+│   │                                                         │  │
+│   │         K̄ = first 32 bytes (pre-shared secret)         │  │
+│   │         r = last 32 bytes (encryption coins)           │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+def hash_functions_derivation(m: bytes, ek: bytes) -> tuple:
+    """
+    Apply hash functions to derive K_bar and randomness r.
+
+    Args:
+        m: Random 32-byte message
+        ek: Encapsulation key
+
+    Returns:
+        (K_bar, r): Pre-shared secret and encryption randomness
+    """
+    # H function: SHA3-256
+    h = hashlib.sha3_256(ek).digest()
+
+    # G function: SHA3-512
+    g_input = m + h  # 64 bytes
+    g_output = hashlib.sha3_512(g_input).digest()  # 64 bytes
+
+    # Split output
+    K_bar = g_output[:32]  # Pre-shared secret
+    r = g_output[32:]       # Encryption randomness (coins)
+
+    return K_bar, r
+```
+
+## Step 4: Matrix Regeneration
+
+Using the seed ρ from the encapsulation key, we regenerate the public matrix Â:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   MATRIX REGENERATION                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   The matrix Â is regenerated from seed ρ using XOF            │
+│                                                                 │
+│   For each position (i, j):                                     │
+│                                                                 │
+│    ┌─────────────────────────────────────────────────────────┐ │
+│    │                                                         │ │
+│    │    Â[i][j] = SampleNTT(XOF(ρ ∥ j ∥ i))                 │ │
+│    │                                                         │ │
+│    │    where XOF = SHAKE128                                 │ │
+│    │                                                         │ │
+│    └─────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│   Matrix Structure (example k=3):                              │
+│                                                                 │
+│    Â = ┌                                           ┐           │
+│        │  Â[0][0]    Â[0][1]    Â[0][2]           │           │
+│        │  Â[1][0]    Â[1][1]    Â[1][2]           │           │
+│        │  Â[2][0]    Â[2][1]    Â[2][2]           │           │
+│        └                                           ┘           │
+│                                                                 │
+│   Each entry is a polynomial with 256 coefficients in NTT form │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+from hashlib import shake_128
+
+def regenerate_matrix_A(rho: bytes, k: int) -> list:
+    """
+    Regenerate public matrix A from seed rho.
+
+    This produces identical matrix to what was generated
+    during key generation.
+    """
+    A_hat = [[None for _ in range(k)] for _ in range(k)]
+
+    for i in range(k):
+        for j in range(k):
+            # Create seed for this position
+            xof_input = rho + bytes([j, i])  # Note: j before i
+
+            # Use SHAKE128 to generate polynomial coefficients
+            xof = shake_128(xof_input)
+            A_hat[i][j] = sample_ntt_polynomial(xof)
+
+    return A_hat
+
+def sample_ntt_polynomial(xof) -> list:
+    """
+    Sample a polynomial in NTT form using rejection sampling.
+
+    Coefficients must be uniformly distributed mod q=3329.
+    """
+    coefficients = []
+
+    while len(coefficients) < 256:
+        # Read 3 bytes to get 2 potential coefficients
+        three_bytes = xof.digest(3)
+        xof = shake_128(xof.digest(1000))  # Continue XOF
+
+        # Extract two 12-bit values
+        d1 = three_bytes[0] + 256 * (three_bytes[1] % 16)
+        d2 = (three_bytes[1] // 16) + 16 * three_bytes[2]
+
+        # Rejection sampling: only accept if < q
+        if d1 < 3329 and len(coefficients) < 256:
+            coefficients.append(d1)
+        if d2 < 3329 and len(coefficients) < 256:
+            coefficients.append(d2)
+
+    return coefficients
+```
+
+## Step 5: Sample Error Vectors
+
+Using the randomness r, we sample the error vectors needed for encryption:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  ERROR VECTOR SAMPLING                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Deterministic sampling from randomness r:                    │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │  PRF(r, nonce) = SHAKE256(r ∥ nonce)                   │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Vectors to Sample:                                            │
+│                                                                 │
+│   1. r̂ (encryption randomness vector)                          │
+│      - k polynomials                                            │
+│      - Sampled from CBD with η₁                                │
+│      - Nonces: 0, 1, ..., k-1                                  │
+│                                                                 │
+│   2. e₁ (first error vector)                                   │
+│      - k polynomials                                            │
+│      - Sampled from CBD with η₂                                │
+│      - Nonces: k, k+1, ..., 2k-1                               │
+│                                                                 │
+│   3. e₂ (second error polynomial)                              │
+│      - 1 polynomial                                             │
+│      - Sampled from CBD with η₂                                │
+│      - Nonce: 2k                                               │
+│                                                                 │
+│   CBD Parameters by Variant:                                    │
+│   ┌──────────────┬──────┬──────┐                               │
+│   │   Variant    │  η₁  │  η₂  │                               │
+│   ├──────────────┼──────┼──────┤                               │
+│   │ ML-KEM-512   │   3  │   2  │                               │
+│   │ ML-KEM-768   │   2  │   2  │                               │
+│   │ ML-KEM-1024  │   2  │   2  │                               │
+│   └──────────────┴──────┴──────┘                               │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+def sample_error_vectors(r: bytes, k: int, eta1: int, eta2: int) -> tuple:
+    """
+    Sample error vectors for encryption.
+
+    Args:
+        r: 32-byte randomness seed
+        k: Module dimension
+        eta1: CBD parameter for r vector
+        eta2: CBD parameter for e1, e2
+
+    Returns:
+        (r_vec, e1, e2): Error vectors
+    """
+    r_vec = []
+    e1 = []
+
+    # Sample r vector (k polynomials with CBD_eta1)
+    for i in range(k):
+        prf_output = shake256_prf(r, i)
+        poly = sample_cbd(prf_output, eta1)
+        r_vec.append(poly)
+
+    # Sample e1 vector (k polynomials with CBD_eta2)
+    for i in range(k):
+        prf_output = shake256_prf(r, k + i)
+        poly = sample_cbd(prf_output, eta2)
+        e1.append(poly)
+
+    # Sample e2 polynomial (1 polynomial with CBD_eta2)
+    prf_output = shake256_prf(r, 2 * k)
+    e2 = sample_cbd(prf_output, eta2)
+
+    return r_vec, e1, e2
+
+def sample_cbd(prf_bytes: bytes, eta: int) -> list:
+    """
+    Sample polynomial using Centered Binomial Distribution.
+
+    CBD_η produces coefficients in range [-η, η].
+    Each coefficient = sum of η bits - sum of η other bits.
+    """
+    coefficients = []
+    bits = bytes_to_bits(prf_bytes)
+
+    for i in range(256):
+        # Get 2η bits for this coefficient
+        offset = i * 2 * eta
+        a_bits = bits[offset:offset + eta]
+        b_bits = bits[offset + eta:offset + 2 * eta]
+
+        # Coefficient = (sum of a bits) - (sum of b bits)
+        a_sum = sum(a_bits)
+        b_sum = sum(b_bits)
+        coeff = (a_sum - b_sum) % 3329  # Reduce mod q
+
+        coefficients.append(coeff)
+
+    return coefficients
+```
+
+## Step 6: Compute Ciphertext Components
+
+The ciphertext consists of two parts: u (compressed vector) and v (compressed polynomial):
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              CIPHERTEXT COMPUTATION                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Ciphertext = (c₁, c₂) = (Compress(u, du), Compress(v, dv))  │
+│                                                                 │
+│   Step 1: Compute u = NTT⁻¹(Â^T · r̂) + e₁                     │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   ┌───────┐        ┌───────┐       ┌───────┐           │  │
+│   │   │  Â^T  │   ·    │   r̂   │   =   │  temp │           │  │
+│   │   │(k×k)  │        │  (k)  │       │  (k)  │           │  │
+│   │   └───────┘        └───────┘       └───────┘           │  │
+│   │                                                         │  │
+│   │            temp (in NTT domain)                        │  │
+│   │                     │                                   │  │
+│   │                     ▼                                   │  │
+│   │                ┌─────────┐                             │  │
+│   │                │  NTT⁻¹  │                             │  │
+│   │                └────┬────┘                             │  │
+│   │                     │                                   │  │
+│   │                     ▼                                   │  │
+│   │               temp (in normal domain)                  │  │
+│   │                     │                                   │  │
+│   │                     │  + e₁                            │  │
+│   │                     ▼                                   │  │
+│   │                 u (k polynomials)                      │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step 2: Compute v = NTT⁻¹(t̂^T · r̂) + e₂ + μ                │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Inner product: t̂^T · r̂ = Σ t̂[i] · r̂[i]               │  │
+│   │                                                         │  │
+│   │           ┌─────────┐                                   │  │
+│   │           │  NTT⁻¹  │                                   │  │
+│   │           └────┬────┘                                   │  │
+│   │                │                                        │  │
+│   │                │  + e₂ + μ                             │  │
+│   │                ▼                                        │  │
+│   │          v (1 polynomial)                              │  │
+│   │                                                         │  │
+│   │   Where μ = Decompress(Decode(m), 1)                   │  │
+│   │   (message encoded as polynomial coefficients)         │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+def compute_ciphertext(A_hat: list, t_hat: list, r_vec: list,
+                       e1: list, e2: list, m: bytes, k: int) -> tuple:
+    """
+    Compute ciphertext components u and v.
+
+    Args:
+        A_hat: Public matrix in NTT domain
+        t_hat: Public vector in NTT domain
+        r_vec: Randomness vector (normal domain)
+        e1, e2: Error vectors (normal domain)
+        m: Message to encode
+        k: Module dimension
+    """
+    # Convert r to NTT domain
+    r_hat = [ntt(poly) for poly in r_vec]
+
+    # Compute u = NTT^(-1)(A^T · r_hat) + e1
+    u = []
+    for i in range(k):
+        # Compute i-th component of A^T · r_hat
+        acc = [0] * 256
+        for j in range(k):
+            # A^T[i][j] = A[j][i]
+            product = pointwise_multiply(A_hat[j][i], r_hat[j])
+            acc = add_polynomials(acc, product)
+
+        # Inverse NTT and add error
+        u_i = add_polynomials(ntt_inverse(acc), e1[i])
+        u.append(u_i)
+
+    # Compute v = NTT^(-1)(t_hat^T · r_hat) + e2 + mu
+    inner_product = [0] * 256
+    for j in range(k):
+        product = pointwise_multiply(t_hat[j], r_hat[j])
+        inner_product = add_polynomials(inner_product, product)
+
+    v_temp = ntt_inverse(inner_product)
+    v_temp = add_polynomials(v_temp, e2)
+
+    # Encode message as polynomial
+    mu = decode_message_to_polynomial(m)
+    v = add_polynomials(v_temp, mu)
+
+    return u, v
+
+def decode_message_to_polynomial(m: bytes) -> list:
+    """
+    Decode 32-byte message to polynomial.
+
+    Each bit becomes a coefficient: 0 or q/2 (≈1665).
+    This allows the message to survive the noise.
+    """
+    coefficients = []
+    bits = bytes_to_bits(m)
+
+    for bit in bits:
+        if bit:
+            # Map 1 to q/2 (rounded)
+            coefficients.append(1665)  # ≈ 3329/2
+        else:
+            # Map 0 to 0
+            coefficients.append(0)
+
+    return coefficients
+```
+
+## Step 7: Compression
+
+Before encoding, the ciphertext components are compressed to reduce size:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    COMPRESSION                                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Compression reduces precision to save bandwidth:             │
+│                                                                 │
+│   Compress_d(x) = round(2^d / q · x) mod 2^d                   │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Original coefficient: 0 to 3328 (needs 12 bits)      │  │
+│   │                           │                             │  │
+│   │                           ▼                             │  │
+│   │   Compressed to d bits: 0 to 2^d - 1                   │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Compression Parameters:                                       │
+│   ┌──────────────┬──────┬──────┬────────────┬────────────┐    │
+│   │   Variant    │  du  │  dv  │ u bits/coef│ v bits/coef│    │
+│   ├──────────────┼──────┼──────┼────────────┼────────────┤    │
+│   │ ML-KEM-512   │  10  │   4  │     10     │      4     │    │
+│   │ ML-KEM-768   │  10  │   4  │     10     │      4     │    │
+│   │ ML-KEM-1024  │  11  │   5  │     11     │      5     │    │
+│   └──────────────┴──────┴──────┴────────────┴────────────┘    │
+│                                                                 │
+│   Effect on Sizes:                                              │
+│                                                                 │
+│   • u vector: k·256 coefficients × du bits                     │
+│   • v polynomial: 256 coefficients × dv bits                   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+Q = 3329  # ML-KEM modulus
+
+def compress(x: int, d: int) -> int:
+    """
+    Compress a single coefficient from mod q to d bits.
+
+    Compress_d(x) = round(2^d / q · x) mod 2^d
+    """
+    # Use integer arithmetic to avoid floating point
+    # round(2^d * x / q) = (2^d * x + q/2) // q
+    compressed = ((1 << d) * x + Q // 2) // Q
+    return compressed % (1 << d)
+
+def compress_vector(u: list, du: int) -> bytes:
+    """
+    Compress and encode the u vector.
+    """
+    all_compressed = []
+
+    for polynomial in u:
+        for coeff in polynomial:
+            compressed = compress(coeff, du)
+            all_compressed.append(compressed)
+
+    # Pack into bytes
+    return pack_coefficients(all_compressed, du)
+
+def compress_polynomial(v: list, dv: int) -> bytes:
+    """
+    Compress and encode the v polynomial.
+    """
+    compressed = [compress(coeff, dv) for coeff in v]
+    return pack_coefficients(compressed, dv)
+
+def pack_coefficients(coeffs: list, bits_per_coeff: int) -> bytes:
+    """
+    Pack coefficients into bytes.
+    """
+    total_bits = len(coeffs) * bits_per_coeff
+    byte_array = bytearray((total_bits + 7) // 8)
+
+    bit_position = 0
+    for coeff in coeffs:
+        for i in range(bits_per_coeff):
+            if coeff & (1 << i):
+                byte_idx = bit_position // 8
+                bit_idx = bit_position % 8
+                byte_array[byte_idx] |= (1 << bit_idx)
+            bit_position += 1
+
+    return bytes(byte_array)
+```
+
+## Step 8: Final Output Generation
+
+The final step combines the compressed ciphertext with key derivation:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                FINAL OUTPUT GENERATION                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Ciphertext Assembly:                                          │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │    c = c₁ ∥ c₂ = Compress(u, du) ∥ Compress(v, dv)     │  │
+│   │                                                         │  │
+│   │    ┌──────────────────────────────────────────────────┐│  │
+│   │    │      c₁ (u compressed)    │  c₂ (v compressed)  ││  │
+│   │    │    du·k·256/8 bytes       │   dv·256/8 bytes    ││  │
+│   │    └──────────────────────────────────────────────────┘│  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Shared Secret Derivation:                                     │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │    K = KDF(K̄ ∥ H(c)) = SHAKE256(K̄ ∥ SHA3-256(c), 32)  │  │
+│   │                                                         │  │
+│   │    ┌──────────┐   ┌──────────┐                         │  │
+│   │    │   K̄      │   │  H(c)    │                         │  │
+│   │    │(32 bytes)│ ∥ │(32 bytes)│                         │  │
+│   │    └──────────┘   └──────────┘                         │  │
+│   │          │              │                               │  │
+│   │          └──────┬───────┘                               │  │
+│   │                 │                                       │  │
+│   │                 ▼                                       │  │
+│   │          ┌───────────┐                                 │  │
+│   │          │  SHAKE256 │                                 │  │
+│   │          └─────┬─────┘                                 │  │
+│   │                │                                        │  │
+│   │                ▼                                        │  │
+│   │          ┌──────────┐                                  │  │
+│   │          │    K     │ (Shared Secret)                  │  │
+│   │          │(32 bytes)│                                  │  │
+│   │          └──────────┘                                  │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```python
+def finalize_encapsulation(u: list, v: list, K_bar: bytes,
+                           k: int, du: int, dv: int) -> tuple:
+    """
+    Finalize encapsulation: compress ciphertext and derive shared secret.
+
+    Returns:
+        (K, c): Shared secret and ciphertext
+    """
+    # Compress and encode ciphertext
+    c1 = compress_vector(u, du)
+    c2 = compress_polynomial(v, dv)
+    c = c1 + c2
+
+    # Hash ciphertext
+    c_hash = hashlib.sha3_256(c).digest()
+
+    # Derive final shared secret
+    # K = SHAKE256(K_bar || c_hash, 32)
+    shake = hashlib.shake_256(K_bar + c_hash)
+    K = shake.digest(32)
+
+    return K, c
+```
+
+## Complete Encapsulation Algorithm
+
+Here's the complete ML-KEM encapsulation:
+
+```python
+class MLKEMEncapsulation:
+    """Complete ML-KEM encapsulation implementation."""
+
+    def __init__(self, variant: str = "ML-KEM-768"):
+        params = {
+            "ML-KEM-512":  {"k": 2, "eta1": 3, "eta2": 2, "du": 10, "dv": 4},
+            "ML-KEM-768":  {"k": 3, "eta1": 2, "eta2": 2, "du": 10, "dv": 4},
+            "ML-KEM-1024": {"k": 4, "eta1": 2, "eta2": 2, "du": 11, "dv": 5},
+        }
+        self.params = params[variant]
+
+    def encaps(self, ek: bytes) -> tuple:
+        """
+        ML-KEM.Encaps algorithm as per FIPS 203.
+
+        Args:
+            ek: Encapsulation key (public key)
+
+        Returns:
+            (K, c): Shared secret and ciphertext
+        """
+        k = self.params["k"]
+        eta1, eta2 = self.params["eta1"], self.params["eta2"]
+        du, dv = self.params["du"], self.params["dv"]
+
+        # Step 1: Parse encapsulation key
+        t_hat, rho = parse_encapsulation_key(ek, k)
+
+        # Step 2: Generate random message
+        m = os.urandom(32)
+
+        # Step 3: Hash derivations
+        K_bar, r = hash_functions_derivation(m, ek)
+
+        # Step 4: Regenerate matrix A
+        A_hat = regenerate_matrix_A(rho, k)
+
+        # Step 5: Sample error vectors
+        r_vec, e1, e2 = sample_error_vectors(r, k, eta1, eta2)
+
+        # Step 6: Compute ciphertext components
+        u, v = compute_ciphertext(A_hat, t_hat, r_vec, e1, e2, m, k)
+
+        # Step 7-8: Compress and finalize
+        K, c = finalize_encapsulation(u, v, K_bar, k, du, dv)
+
+        return K, c
+```
+
+## Encapsulation Complexity Analysis
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              COMPUTATIONAL COMPLEXITY                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Operation Counts (for ML-KEM-768, k=3):                      │
+│                                                                 │
+│   ┌────────────────────────┬────────────┬───────────────────┐  │
+│   │      Operation         │   Count    │   Description     │  │
+│   ├────────────────────────┼────────────┼───────────────────┤  │
+│   │ SHA3-256 calls         │     2      │ H(ek), H(c)       │  │
+│   │ SHA3-512 calls         │     1      │ G function        │  │
+│   │ SHAKE128 calls         │     9      │ k² matrix samples │  │
+│   │ SHAKE256 calls         │     8      │ PRF for vectors   │  │
+│   │ NTT operations         │     3      │ r vector          │  │
+│   │ NTT⁻¹ operations       │     4      │ u vector + v      │  │
+│   │ Pointwise multiplies   │    12      │ Matrix-vector     │  │
+│   │ Polynomial additions   │   ~15      │ Various           │  │
+│   │ CBD samplings          │     7      │ r, e1, e2         │  │
+│   │ Compressions           │  4×256     │ u and v           │  │
+│   └────────────────────────┴────────────┴───────────────────┘  │
+│                                                                 │
+│   Total: ~10,000-15,000 arithmetic operations                  │
+│   Typical timing: 15-40 microseconds on modern CPUs            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Security Properties of Encapsulation
+
+The encapsulation process provides several critical security properties:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SECURITY PROPERTIES                                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   1. IND-CCA2 Security (via FO Transform)                      │
+│      ┌────────────────────────────────────────────────────┐    │
+│      │ The shared secret K depends on:                    │    │
+│      │ • Random message m (unknown to attacker)          │    │
+│      │ • Hash of ciphertext H(c)                         │    │
+│      │                                                    │    │
+│      │ Prevents: Ciphertext manipulation attacks         │    │
+│      └────────────────────────────────────────────────────┘    │
+│                                                                 │
+│   2. Perfect Forward Secrecy (Session Independence)            │
+│      ┌────────────────────────────────────────────────────┐    │
+│      │ Each encapsulation uses fresh random m            │    │
+│      │ Compromise of one session doesn't affect others   │    │
+│      └────────────────────────────────────────────────────┘    │
+│                                                                 │
+│   3. Key Binding                                                │
+│      ┌────────────────────────────────────────────────────┐    │
+│      │ K = KDF(K̄ || H(c)) binds secret to ciphertext     │    │
+│      │ Different ciphertext → Different shared secret    │    │
+│      └────────────────────────────────────────────────────┘    │
+│                                                                 │
+│   4. Implicit Rejection                                         │
+│      ┌────────────────────────────────────────────────────┐    │
+│      │ Invalid ciphertexts produce pseudorandom K        │    │
+│      │ (Handled in decapsulation, but designed here)     │    │
+│      └────────────────────────────────────────────────────┘    │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Summary
+
+The ML-KEM encapsulation process:
+
+1. **Parses** the encapsulation key to extract the public vector t̂ and seed ρ
+2. **Generates** a random 256-bit message m
+3. **Derives** K̄ and encryption randomness r using hash functions
+4. **Regenerates** the public matrix Â from the seed
+5. **Samples** error vectors r, e₁, e₂ using deterministic PRF
+6. **Computes** ciphertext components u and v using lattice operations
+7. **Compresses** the ciphertext to reduce size
+8. **Derives** the final shared secret K using KDF
+
+The result is a ciphertext c and shared secret K, both protected by the hardness of Module-LWE and secured against adaptive chosen-ciphertext attacks through the Fujisaki-Okamoto transform.

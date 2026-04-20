@@ -1,0 +1,481 @@
+---
+title: "Quantum Generative Models"
+description: "Build quantum generative models including quantum GANs, Born machines, and variational autoencoders for generating new data samples."
+---
+
+# Quantum Generative Models
+
+Generative models learn to produce new samples from a data distribution. Quantum computers offer unique advantages through their natural ability to represent and sample from complex probability distributions.
+
+## Quantum Born Machines
+
+Born machines leverage quantum measurement probabilities to directly model probability distributions.
+
+<Definition>
+**Quantum Born Machine**:
+
+A Born machine uses the Born rule to model a target distribution:
+
+$$P_\theta(x) = |\langle x | U(\theta) | 0 \rangle|^2$$
+
+where $U(\theta)$ is a parameterized quantum circuit and $|x\rangle$ represents computational basis states.
+</Definition>
+
+```python
+import numpy as np
+
+class QuantumBornMachine:
+    """Born machine for learning discrete probability distributions."""
+
+    def __init__(self, n_qubits: int, n_layers: int):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dim = 2 ** n_qubits
+        self.n_params = n_qubits * n_layers * 3
+
+    def circuit(self, params: np.ndarray) -> np.ndarray:
+        """Apply parameterized circuit to |0⟩."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1
+
+        param_idx = 0
+        for layer in range(self.n_layers):
+            # Rotation layer
+            for q in range(self.n_qubits):
+                # RX
+                theta = params[param_idx]
+                c, s = np.cos(theta/2), np.sin(theta/2)
+                new_state = np.zeros_like(state)
+                for z in range(self.dim):
+                    z_flip = z ^ (1 << (self.n_qubits - 1 - q))
+                    new_state[z] = c * state[z] - 1j * s * state[z_flip]
+                state = new_state
+                param_idx += 1
+
+                # RY
+                theta = params[param_idx]
+                c, s = np.cos(theta/2), np.sin(theta/2)
+                new_state = np.zeros_like(state)
+                for z in range(self.dim):
+                    z_flip = z ^ (1 << (self.n_qubits - 1 - q))
+                    bit = (z >> (self.n_qubits - 1 - q)) & 1
+                    new_state[z] = c * state[z] + (1-2*bit) * s * state[z_flip]
+                state = new_state
+                param_idx += 1
+
+                # RZ
+                theta = params[param_idx]
+                for z in range(self.dim):
+                    bit = (z >> (self.n_qubits - 1 - q)) & 1
+                    state[z] *= np.exp(1j*theta/2) if bit else np.exp(-1j*theta/2)
+                param_idx += 1
+
+            # Entangling layer
+            for q in range(self.n_qubits - 1):
+                new_state = np.zeros_like(state)
+                for z in range(self.dim):
+                    ctrl = (z >> (self.n_qubits - 1 - q)) & 1
+                    z_new = z ^ (1 << (self.n_qubits-1-(q+1))) if ctrl else z
+                    new_state[z_new] += state[z]
+                state = new_state
+
+        return state
+
+    def get_probabilities(self, params: np.ndarray) -> np.ndarray:
+        """Get probability distribution from circuit."""
+        state = self.circuit(params)
+        return np.abs(state)**2
+
+    def sample(self, params: np.ndarray, n_samples: int) -> np.ndarray:
+        """Sample from the Born machine distribution."""
+        probs = self.get_probabilities(params)
+        samples = np.random.choice(self.dim, size=n_samples, p=probs)
+        return samples
+
+    def kl_divergence(self, target_probs: np.ndarray,
+                      params: np.ndarray) -> float:
+        """Compute KL divergence from target distribution."""
+        model_probs = self.get_probabilities(params)
+        model_probs = np.clip(model_probs, 1e-10, 1)
+        return np.sum(target_probs * np.log(target_probs / model_probs + 1e-10))
+
+    def train(self, target_probs: np.ndarray,
+              n_epochs: int = 100, lr: float = 0.1) -> np.ndarray:
+        """Train Born machine to match target distribution."""
+        params = np.random.uniform(-np.pi, np.pi, self.n_params)
+
+        for epoch in range(n_epochs):
+            # Gradient via parameter shift
+            gradients = np.zeros_like(params)
+            for i in range(len(params)):
+                params_plus = params.copy()
+                params_plus[i] += np.pi/2
+                params_minus = params.copy()
+                params_minus[i] -= np.pi/2
+
+                loss_plus = self.kl_divergence(target_probs, params_plus)
+                loss_minus = self.kl_divergence(target_probs, params_minus)
+                gradients[i] = (loss_plus - loss_minus) / 2
+
+            params -= lr * gradients
+
+            if epoch % 20 == 0:
+                kl = self.kl_divergence(target_probs, params)
+                print(f"Epoch {epoch}: KL divergence = {kl:.4f}")
+
+        return params
+
+
+# Example: Learn a bimodal distribution
+print("Quantum Born Machine")
+print("=" * 50)
+
+n_qubits = 3
+dim = 2 ** n_qubits
+
+# Create bimodal target distribution
+target_probs = np.zeros(dim)
+target_probs[1] = 0.3   # |001⟩
+target_probs[2] = 0.2   # |010⟩
+target_probs[5] = 0.25  # |101⟩
+target_probs[6] = 0.25  # |110⟩
+target_probs /= target_probs.sum()
+
+print(f"Target distribution peaks: {np.where(target_probs > 0.1)[0]}")
+
+bm = QuantumBornMachine(n_qubits=3, n_layers=3)
+params = bm.train(target_probs, n_epochs=80, lr=0.2)
+
+learned_probs = bm.get_probabilities(params)
+print(f"\nLearned distribution peaks: {np.where(learned_probs > 0.1)[0]}")
+
+# Generate samples
+samples = bm.sample(params, 100)
+print(f"Sample histogram: {np.bincount(samples, minlength=dim)}")
+```
+
+## Quantum Generative Adversarial Networks
+
+Quantum GANs pit a quantum generator against a discriminator to learn data distributions.
+
+```python
+import numpy as np
+
+class QuantumGAN:
+    """Quantum GAN with quantum generator and classical discriminator."""
+
+    def __init__(self, n_qubits: int, n_layers: int):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dim = 2 ** n_qubits
+        self.n_gen_params = n_qubits * n_layers * 2
+
+        # Classical discriminator (simple neural network weights)
+        self.disc_w1 = np.random.randn(self.dim, 16) * 0.1
+        self.disc_w2 = np.random.randn(16, 1) * 0.1
+
+    def generator(self, params: np.ndarray) -> np.ndarray:
+        """Quantum generator circuit."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1
+
+        param_idx = 0
+        for layer in range(self.n_layers):
+            for q in range(self.n_qubits):
+                # RY rotation
+                theta = params[param_idx]
+                c, s = np.cos(theta/2), np.sin(theta/2)
+                new_state = np.zeros_like(state)
+                for z in range(self.dim):
+                    z_flip = z ^ (1 << (self.n_qubits - 1 - q))
+                    bit = (z >> (self.n_qubits - 1 - q)) & 1
+                    new_state[z] = c * state[z] + (1-2*bit) * s * state[z_flip]
+                state = new_state
+                param_idx += 1
+
+                # RZ rotation
+                theta = params[param_idx]
+                for z in range(self.dim):
+                    bit = (z >> (self.n_qubits - 1 - q)) & 1
+                    state[z] *= np.exp(1j*theta/2) if bit else np.exp(-1j*theta/2)
+                param_idx += 1
+
+            # Entanglement
+            for q in range(self.n_qubits - 1):
+                new_state = np.zeros_like(state)
+                for z in range(self.dim):
+                    ctrl = (z >> (self.n_qubits - 1 - q)) & 1
+                    z_new = z ^ (1 << (self.n_qubits-1-(q+1))) if ctrl else z
+                    new_state[z_new] += state[z]
+                state = new_state
+
+        return np.abs(state)**2
+
+    def sample_generator(self, params: np.ndarray, n_samples: int) -> np.ndarray:
+        """Sample from generator distribution."""
+        probs = self.generator(params)
+        indices = np.random.choice(self.dim, size=n_samples, p=probs)
+        # Convert to one-hot vectors
+        samples = np.eye(self.dim)[indices]
+        return samples
+
+    def discriminator(self, x: np.ndarray) -> float:
+        """Classical discriminator network."""
+        h = np.tanh(x @ self.disc_w1)
+        out = 1 / (1 + np.exp(-h @ self.disc_w2))
+        return out[0]
+
+    def train_step(self, real_data: np.ndarray, gen_params: np.ndarray,
+                   lr_gen: float = 0.1, lr_disc: float = 0.01):
+        """Single training step for GAN."""
+        n_samples = len(real_data)
+
+        # Generate fake samples
+        fake_samples = self.sample_generator(gen_params, n_samples)
+
+        # Train discriminator
+        for _ in range(3):  # Multiple discriminator updates
+            # Discriminator gradients
+            disc_loss = 0
+            for real in real_data:
+                d_real = self.discriminator(real)
+                disc_loss -= np.log(d_real + 1e-10)
+
+            for fake in fake_samples:
+                d_fake = self.discriminator(fake)
+                disc_loss -= np.log(1 - d_fake + 1e-10)
+
+            # Simple gradient descent on discriminator
+            # (Simplified - real implementation would compute proper gradients)
+            self.disc_w1 -= lr_disc * np.random.randn(*self.disc_w1.shape) * 0.01
+            self.disc_w2 -= lr_disc * np.random.randn(*self.disc_w2.shape) * 0.01
+
+        # Train generator with parameter shift
+        gen_gradients = np.zeros_like(gen_params)
+        for i in range(len(gen_params)):
+            params_plus = gen_params.copy()
+            params_plus[i] += np.pi/2
+            params_minus = gen_params.copy()
+            params_minus[i] -= np.pi/2
+
+            # Generator loss: -log(D(G(z)))
+            fake_plus = self.sample_generator(params_plus, 10)
+            fake_minus = self.sample_generator(params_minus, 10)
+
+            loss_plus = -np.mean([np.log(self.discriminator(f) + 1e-10) for f in fake_plus])
+            loss_minus = -np.mean([np.log(self.discriminator(f) + 1e-10) for f in fake_minus])
+
+            gen_gradients[i] = (loss_plus - loss_minus) / 2
+
+        gen_params -= lr_gen * gen_gradients
+
+        return gen_params, disc_loss / (2 * n_samples)
+
+
+# Example
+print("\nQuantum GAN")
+print("=" * 50)
+
+n_qubits = 2
+dim = 2 ** n_qubits
+
+# Create simple real data distribution
+np.random.seed(42)
+real_probs = np.array([0.4, 0.1, 0.1, 0.4])  # Peaks at |00⟩ and |11⟩
+real_indices = np.random.choice(dim, size=50, p=real_probs)
+real_data = np.eye(dim)[real_indices]
+
+qgan = QuantumGAN(n_qubits=2, n_layers=2)
+gen_params = np.random.uniform(-np.pi, np.pi, qgan.n_gen_params)
+
+print("Training qGAN...")
+for epoch in range(30):
+    gen_params, d_loss = qgan.train_step(real_data, gen_params)
+    if epoch % 10 == 0:
+        gen_probs = qgan.generator(gen_params)
+        print(f"Epoch {epoch}: D_loss={d_loss:.4f}, Gen_probs={gen_probs.round(2)}")
+
+print(f"\nTarget distribution: {real_probs}")
+print(f"Learned distribution: {qgan.generator(gen_params).round(2)}")
+```
+
+## Quantum Variational Autoencoder
+
+Quantum autoencoders compress quantum states into lower-dimensional representations.
+
+```python
+import numpy as np
+
+class QuantumAutoencoder:
+    """Quantum autoencoder for state compression."""
+
+    def __init__(self, n_qubits: int, n_latent: int, n_layers: int):
+        self.n_qubits = n_qubits
+        self.n_latent = n_latent
+        self.n_trash = n_qubits - n_latent
+        self.n_layers = n_layers
+        self.dim = 2 ** n_qubits
+        self.n_params = n_qubits * n_layers * 2
+
+    def encoder(self, state: np.ndarray, params: np.ndarray) -> np.ndarray:
+        """Encode state - trash qubits should end up in |0⟩."""
+        param_idx = 0
+
+        for layer in range(self.n_layers):
+            for q in range(self.n_qubits):
+                # RY
+                theta = params[param_idx]
+                c, s = np.cos(theta/2), np.sin(theta/2)
+                new_state = np.zeros_like(state)
+                for z in range(self.dim):
+                    z_flip = z ^ (1 << (self.n_qubits - 1 - q))
+                    bit = (z >> (self.n_qubits - 1 - q)) & 1
+                    new_state[z] = c * state[z] + (1-2*bit) * s * state[z_flip]
+                state = new_state
+                param_idx += 1
+
+                # RZ
+                theta = params[param_idx]
+                for z in range(self.dim):
+                    bit = (z >> (self.n_qubits - 1 - q)) & 1
+                    state[z] *= np.exp(1j*theta/2) if bit else np.exp(-1j*theta/2)
+                param_idx += 1
+
+            # Entanglement
+            for q in range(self.n_qubits - 1):
+                new_state = np.zeros_like(state)
+                for z in range(self.dim):
+                    ctrl = (z >> (self.n_qubits - 1 - q)) & 1
+                    z_new = z ^ (1 << (self.n_qubits-1-(q+1))) if ctrl else z
+                    new_state[z_new] += state[z]
+                state = new_state
+
+        return state
+
+    def trash_fidelity(self, encoded_state: np.ndarray) -> float:
+        """Compute probability that trash qubits are in |0⟩."""
+        # Trash qubits are the last n_trash qubits
+        prob_trash_zero = 0
+        for z in range(self.dim):
+            # Check if trash qubits (last n_trash bits) are all 0
+            trash_bits = z & ((1 << self.n_trash) - 1)
+            if trash_bits == 0:
+                prob_trash_zero += np.abs(encoded_state[z])**2
+        return prob_trash_zero
+
+    def compression_loss(self, input_state: np.ndarray,
+                         params: np.ndarray) -> float:
+        """Loss: 1 - P(trash qubits = |0⟩)."""
+        encoded = self.encoder(input_state, params)
+        return 1 - self.trash_fidelity(encoded)
+
+    def train(self, training_states: list,
+              n_epochs: int = 100, lr: float = 0.1) -> np.ndarray:
+        """Train autoencoder on set of states."""
+        params = np.random.uniform(-np.pi, np.pi, self.n_params)
+
+        for epoch in range(n_epochs):
+            total_loss = 0
+            gradients = np.zeros_like(params)
+
+            for state in training_states:
+                # Compute gradients
+                for i in range(len(params)):
+                    params_plus = params.copy()
+                    params_plus[i] += np.pi/2
+                    params_minus = params.copy()
+                    params_minus[i] -= np.pi/2
+
+                    loss_plus = self.compression_loss(state, params_plus)
+                    loss_minus = self.compression_loss(state, params_minus)
+                    gradients[i] += (loss_plus - loss_minus) / 2
+
+                total_loss += self.compression_loss(state, params)
+
+            gradients /= len(training_states)
+            params -= lr * gradients
+
+            if epoch % 20 == 0:
+                avg_loss = total_loss / len(training_states)
+                avg_fidelity = 1 - avg_loss
+                print(f"Epoch {epoch}: Compression fidelity = {avg_fidelity:.4f}")
+
+        return params
+
+
+# Example
+print("\nQuantum Autoencoder")
+print("=" * 50)
+
+n_qubits = 4
+n_latent = 2
+dim = 2 ** n_qubits
+
+# Create training states (random pure states)
+np.random.seed(42)
+training_states = []
+for _ in range(5):
+    state = np.random.randn(dim) + 1j * np.random.randn(dim)
+    state /= np.linalg.norm(state)
+    training_states.append(state)
+
+qae = QuantumAutoencoder(n_qubits=4, n_latent=2, n_layers=3)
+print(f"Compressing {n_qubits} qubits to {n_latent} qubits")
+print(f"Parameters: {qae.n_params}")
+
+params = qae.train(training_states, n_epochs=60, lr=0.3)
+
+# Test compression
+print("\nFinal compression fidelities:")
+for i, state in enumerate(training_states):
+    fidelity = qae.trash_fidelity(qae.encoder(state, params))
+    print(f"  State {i+1}: {fidelity:.4f}")
+```
+
+## Distribution Comparison Metrics
+
+```python
+import numpy as np
+
+def total_variation_distance(p: np.ndarray, q: np.ndarray) -> float:
+    """Total variation distance between distributions."""
+    return 0.5 * np.sum(np.abs(p - q))
+
+def kl_divergence(p: np.ndarray, q: np.ndarray) -> float:
+    """KL divergence D(P||Q)."""
+    q_safe = np.clip(q, 1e-10, 1)
+    p_safe = np.clip(p, 1e-10, 1)
+    return np.sum(p_safe * np.log(p_safe / q_safe))
+
+def jensen_shannon_divergence(p: np.ndarray, q: np.ndarray) -> float:
+    """Jensen-Shannon divergence (symmetric KL)."""
+    m = 0.5 * (p + q)
+    return 0.5 * kl_divergence(p, m) + 0.5 * kl_divergence(q, m)
+
+
+# Example
+print("\nDistribution Comparison Metrics")
+print("=" * 50)
+
+p = np.array([0.4, 0.1, 0.1, 0.4])  # Target
+q = np.array([0.35, 0.15, 0.15, 0.35])  # Learned
+
+print(f"Target: {p}")
+print(f"Learned: {q}")
+print(f"Total Variation Distance: {total_variation_distance(p, q):.4f}")
+print(f"KL Divergence: {kl_divergence(p, q):.4f}")
+print(f"Jensen-Shannon Divergence: {jensen_shannon_divergence(p, q):.4f}")
+```
+
+## Summary
+
+Quantum generative models offer unique advantages:
+
+1. **Born Machines**: Direct probability modeling via quantum measurement
+2. **Quantum GANs**: Adversarial training with quantum generators
+3. **Quantum Autoencoders**: State compression and feature learning
+4. **Hybrid Models**: Combine quantum and classical components
+
+<Tip>
+Born machines are particularly natural for quantum systems since they directly use the Born rule. For classical data, consider whether the quantum representation provides advantages over classical generative models.
+</Tip>

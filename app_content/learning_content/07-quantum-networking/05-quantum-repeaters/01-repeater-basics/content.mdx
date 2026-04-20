@@ -1,0 +1,621 @@
+# Repeater Basics
+
+## Introduction
+
+Classical communication over long distances relies on signal amplification—repeaters that boost weakened signals. Quantum communication faces a fundamental challenge: the no-cloning theorem forbids copying quantum states, making classical amplification impossible. Quantum repeaters solve this problem through entanglement swapping and purification, enabling long-distance quantum communication without direct signal amplification.
+
+## The Distance Problem
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              THE QUANTUM DISTANCE BARRIER                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Rate                                                               │
+│   ↑  Classical (with amplifiers)                                   │
+│   │  ────────────────────────────────────────→                     │
+│   │                                                                 │
+│   │  ●                                                              │
+│   │   ●                                                             │
+│   │    ●                                                            │
+│   │     ●●        Quantum (direct)                                  │
+│   │       ●●●                                                       │
+│   │          ●●●●                                                   │
+│   │              ●●●●●●●                                            │
+│   │                    ●●●●●●●●●●●                                  │
+│   └──────────────────────────────────────────→ Distance             │
+│                                                                     │
+│  Problem: Quantum rate scales as η^L = 10^(-αL/10)                 │
+│  • 50 km:  ~10% transmission                                       │
+│  • 100 km: ~1% transmission                                        │
+│  • 500 km: ~10⁻¹⁰ transmission (essentially zero)                  │
+│                                                                     │
+│  Cannot amplify: No-cloning theorem                                │
+│  Cannot repeat: Measuring destroys quantum information             │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Why Classical Approaches Fail
+
+```python
+import numpy as np
+from dataclasses import dataclass
+from typing import Tuple, List, Dict, Optional
+
+class DirectTransmissionAnalysis:
+    """
+    Analyze the fundamental limits of direct quantum transmission.
+    """
+
+    def __init__(
+        self,
+        fiber_loss_db_km: float = 0.2,  # Telecom fiber
+        source_rate: float = 1e9,        # GHz source
+        detector_efficiency: float = 0.9
+    ):
+        self.fiber_loss = fiber_loss_db_km
+        self.source_rate = source_rate
+        self.detector_efficiency = detector_efficiency
+
+    def transmission(self, distance: float) -> float:
+        """Calculate fiber transmission at distance (km)."""
+        return 10**(-self.fiber_loss * distance / 10)
+
+    def success_rate(self, distance: float) -> float:
+        """Calculate successful transmission rate (Hz)."""
+        eta = self.transmission(distance) * self.detector_efficiency
+        return self.source_rate * eta
+
+    def time_per_bit(self, distance: float) -> float:
+        """Average time to transmit one qubit (seconds)."""
+        rate = self.success_rate(distance)
+        return 1 / rate if rate > 0 else float('inf')
+
+    def plob_bound(self, distance: float) -> float:
+        """
+        PLOB capacity bound (bits per channel use).
+
+        Fundamental limit without quantum repeaters:
+        C ≤ -log₂(1 - η)
+        """
+        eta = self.transmission(distance)
+        if eta >= 1:
+            return float('inf')
+        return -np.log2(1 - eta)
+
+    def analyze_distances(self, distances: List[float]) -> Dict:
+        """Comprehensive analysis across distances."""
+        return {
+            "distance_km": distances,
+            "transmission": [self.transmission(d) for d in distances],
+            "rate_hz": [self.success_rate(d) for d in distances],
+            "time_per_bit_s": [self.time_per_bit(d) for d in distances],
+            "plob_bound": [self.plob_bound(d) for d in distances]
+        }
+
+# Demonstrate the distance problem
+analyzer = DirectTransmissionAnalysis()
+
+print("Direct Quantum Transmission Analysis")
+print("=" * 60)
+
+distances = [10, 50, 100, 200, 500, 1000]
+analysis = analyzer.analyze_distances(distances)
+
+print("\nDistance | Transmission | Rate (Hz)    | Time/bit    | PLOB")
+print("-" * 60)
+
+for i, d in enumerate(distances):
+    trans = analysis["transmission"][i]
+    rate = analysis["rate_hz"][i]
+    time = analysis["time_per_bit_s"][i]
+    plob = analysis["plob_bound"][i]
+
+    rate_str = f"{rate:.2e}" if rate > 1 else "< 1"
+    time_str = f"{time:.2e}s" if time < float('inf') else "∞"
+
+    print(f"  {d:4d} km | {trans:.2e}    | {rate_str:12s} | {time_str:11s} | {plob:.2e}")
+
+print("\nAt 500 km: Would take >10³⁰ years per qubit!")
+print("Solution: Quantum Repeaters")
+```
+
+## The Quantum Repeater Concept
+
+Quantum repeaters overcome the distance barrier by dividing the channel into shorter segments:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              QUANTUM REPEATER ARCHITECTURE                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Without Repeater (Direct):                                         │
+│                                                                     │
+│  Alice ══════════════════════════════════════════════════ Bob      │
+│                        L km (η = η^L)                               │
+│                                                                     │
+│  With Repeaters (N segments):                                       │
+│                                                                     │
+│  Alice ═══ R₁ ═══ R₂ ═══ R₃ ═══ ... ═══ Rₙ₋₁ ═══ Bob             │
+│        L/N    L/N    L/N            L/N      L/N                   │
+│                                                                     │
+│  Each segment: η_seg = η^(L/N)                                     │
+│  Total (with swapping): η_total ~ η^(L/N) × poly(N)                │
+│                                                                     │
+│  Key Improvement:                                                   │
+│  • Direct: Rate ∝ η^L (exponential in L)                           │
+│  • Repeater: Rate ∝ poly(L) (polynomial in L)                      │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Repeater Operation Overview
+
+```python
+@dataclass
+class RepeaterNode:
+    """Model of a quantum repeater node."""
+    position: float           # km from Alice
+    memory_coherence: float   # seconds
+    bsm_efficiency: float     # Bell state measurement success rate
+    local_gate_fidelity: float
+
+class BasicRepeaterChain:
+    """
+    Basic quantum repeater chain model.
+
+    Demonstrates how segmentation improves rate scaling.
+    """
+
+    def __init__(
+        self,
+        total_distance: float = 500,  # km
+        n_segments: int = 10,
+        fiber_loss_db_km: float = 0.2,
+        source_rate: float = 1e6
+    ):
+        self.total_distance = total_distance
+        self.n_segments = n_segments
+        self.segment_length = total_distance / n_segments
+        self.fiber_loss = fiber_loss_db_km
+        self.source_rate = source_rate
+
+        # Create repeater nodes
+        self.nodes = []
+        for i in range(1, n_segments):
+            pos = i * self.segment_length
+            self.nodes.append(RepeaterNode(
+                position=pos,
+                memory_coherence=0.1,  # 100 ms
+                bsm_efficiency=0.5,    # Linear optics
+                local_gate_fidelity=0.99
+            ))
+
+    def segment_transmission(self) -> float:
+        """Transmission probability per segment."""
+        return 10**(-self.fiber_loss * self.segment_length / 10)
+
+    def direct_transmission(self) -> float:
+        """Transmission without repeaters."""
+        return 10**(-self.fiber_loss * self.total_distance / 10)
+
+    def segment_success_rate(self) -> float:
+        """Rate of creating entanglement per segment."""
+        eta = self.segment_transmission()
+        return self.source_rate * eta
+
+    def estimate_rate(self) -> float:
+        """
+        Estimate end-to-end rate with repeaters.
+
+        Simplified model: assumes ideal synchronization.
+        """
+        # Per-segment rate
+        seg_rate = self.segment_success_rate()
+
+        # Time to establish all segments
+        # Average time per segment
+        t_segment = 1 / seg_rate
+
+        # With memories, can work in parallel
+        # Time dominated by slowest segment + swapping
+        n_swaps = self.n_segments - 1
+        bsm_eff = self.nodes[0].bsm_efficiency if self.nodes else 0.5
+
+        # Effective rate (simplified)
+        # Real rate depends on protocol details
+        effective_rate = seg_rate * (bsm_eff ** n_swaps)
+
+        return effective_rate
+
+    def improvement_factor(self) -> float:
+        """Calculate improvement over direct transmission."""
+        direct_rate = self.source_rate * self.direct_transmission()
+        repeater_rate = self.estimate_rate()
+
+        if direct_rate > 0:
+            return repeater_rate / direct_rate
+        return float('inf')
+
+    def analyze(self) -> Dict:
+        """Complete chain analysis."""
+        return {
+            "total_distance": self.total_distance,
+            "n_segments": self.n_segments,
+            "segment_length": self.segment_length,
+            "direct_transmission": self.direct_transmission(),
+            "segment_transmission": self.segment_transmission(),
+            "direct_rate": self.source_rate * self.direct_transmission(),
+            "repeater_rate": self.estimate_rate(),
+            "improvement_factor": self.improvement_factor()
+        }
+
+# Demonstrate repeater advantage
+print("\nQuantum Repeater Chain Analysis")
+print("=" * 60)
+
+for n_seg in [2, 5, 10, 20]:
+    chain = BasicRepeaterChain(
+        total_distance=500,
+        n_segments=n_seg
+    )
+    analysis = chain.analyze()
+
+    print(f"\n{n_seg} segments ({analysis['segment_length']:.0f} km each):")
+    print(f"  Segment transmission: {analysis['segment_transmission']:.2e}")
+    print(f"  Direct rate: {analysis['direct_rate']:.2e} Hz")
+    print(f"  Repeater rate: {analysis['repeater_rate']:.2e} Hz")
+    if analysis['direct_rate'] > 0:
+        print(f"  Improvement: {analysis['improvement_factor']:.0e}×")
+```
+
+## Three Key Operations
+
+Quantum repeaters rely on three fundamental operations:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              THE THREE REPEATER OPERATIONS                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  1. ENTANGLEMENT GENERATION (per segment)                          │
+│     ┌─────┐         ┌─────┐                                        │
+│     │Node │═════════│Node │  Create EPR pair over short distance   │
+│     │  A  │         │  B  │                                        │
+│     └─────┘         └─────┘                                        │
+│                                                                     │
+│  2. ENTANGLEMENT SWAPPING (connect segments)                        │
+│     ┌─────┐    ┌─────┐    ┌─────┐                                  │
+│     │  A  │════│ Rep │════│  B  │                                  │
+│     └─────┘    └──┬──┘    └─────┘                                  │
+│                  BSM                                                │
+│                   ↓                                                 │
+│     ┌─────┐                ┌─────┐                                  │
+│     │  A  │════════════════│  B  │  Now A-B are entangled          │
+│     └─────┘                └─────┘                                  │
+│                                                                     │
+│  3. ENTANGLEMENT PURIFICATION (restore fidelity)                    │
+│     ┌─────┐                ┌─────┐                                  │
+│     │  A  │════════════════│  B  │  Noisy pair (F ~ 0.8)           │
+│     │     │════════════════│     │  Noisy pair (F ~ 0.8)           │
+│     └─────┘                └─────┘                                  │
+│                   ↓                                                 │
+│     ┌─────┐                ┌─────┐                                  │
+│     │  A  │════════════════│  B  │  One better pair (F ~ 0.95)     │
+│     └─────┘                └─────┘                                  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Operation Implementation
+
+```python
+class RepeaterOperations:
+    """
+    The three fundamental quantum repeater operations.
+    """
+
+    def __init__(self):
+        pass
+
+    def entanglement_generation(
+        self,
+        segment_length: float,
+        source_fidelity: float = 0.98,
+        fiber_loss_db_km: float = 0.2,
+        detection_efficiency: float = 0.9
+    ) -> Tuple[bool, float, float]:
+        """
+        Attempt to generate entanglement over one segment.
+
+        Returns (success, fidelity, time_taken).
+        """
+        # Transmission probability
+        eta = 10**(-fiber_loss_db_km * segment_length / 10)
+        eta *= detection_efficiency
+
+        # Attempt generation
+        success = np.random.random() < eta
+
+        if success:
+            # Fidelity slightly reduced by channel
+            fidelity = source_fidelity * (1 - 0.001 * segment_length)
+            time = segment_length / (3e5)  # Light travel time (ms)
+            return True, fidelity, time
+
+        return False, 0.0, segment_length / (3e5)
+
+    def entanglement_swapping(
+        self,
+        F1: float,
+        F2: float,
+        bsm_efficiency: float = 0.5,
+        gate_fidelity: float = 0.99
+    ) -> Tuple[bool, float]:
+        """
+        Perform entanglement swapping at repeater node.
+
+        Combines two adjacent pairs into one longer pair.
+        Returns (success, output_fidelity).
+        """
+        # BSM success (50% for linear optics)
+        if np.random.random() > bsm_efficiency:
+            return False, 0.0
+
+        # Output fidelity from swapping
+        # F_out ≈ F1 × F2 for Werner states (simplified)
+        F_out = F1 * F2
+
+        # Include gate errors
+        F_out *= gate_fidelity
+
+        return True, F_out
+
+    def entanglement_purification(
+        self,
+        F_in: float,
+        protocol: str = "bbpssw"
+    ) -> Tuple[bool, float]:
+        """
+        Purify two noisy pairs into one higher-fidelity pair.
+
+        Uses BBPSSW protocol.
+        Returns (success, output_fidelity).
+        """
+        # Success probability
+        p_success = F_in**2 + (1 - F_in)**2 / 3
+
+        if np.random.random() > p_success:
+            return False, 0.0
+
+        # Output fidelity
+        F_out = F_in**2 / p_success
+
+        return True, F_out
+
+# Demonstrate operations
+ops = RepeaterOperations()
+
+print("\nQuantum Repeater Operations Demo")
+print("=" * 60)
+
+# Entanglement generation
+print("\n1. Entanglement Generation (50 km segment):")
+successes = 0
+fidelities = []
+for _ in range(1000):
+    success, F, _ = ops.entanglement_generation(50)
+    if success:
+        successes += 1
+        fidelities.append(F)
+print(f"   Success rate: {successes/10:.1f}%")
+print(f"   Average fidelity: {np.mean(fidelities):.4f}")
+
+# Entanglement swapping
+print("\n2. Entanglement Swapping (F1=0.95, F2=0.95):")
+successes = 0
+fidelities = []
+for _ in range(1000):
+    success, F = ops.entanglement_swapping(0.95, 0.95)
+    if success:
+        successes += 1
+        fidelities.append(F)
+print(f"   Success rate: {successes/10:.1f}%")
+print(f"   Output fidelity: {np.mean(fidelities):.4f}")
+
+# Purification
+print("\n3. Entanglement Purification (F_in=0.80):")
+successes = 0
+fidelities = []
+for _ in range(1000):
+    success, F = ops.entanglement_purification(0.80)
+    if success:
+        successes += 1
+        fidelities.append(F)
+print(f"   Success rate: {successes/10:.1f}%")
+print(f"   Output fidelity: {np.mean(fidelities):.4f}")
+```
+
+## Repeater Generations
+
+Quantum repeaters are classified into generations based on their approach:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              QUANTUM REPEATER GENERATIONS                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  1st Generation: Heralded Entanglement + Purification              │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  • Create pairs segment by segment                          │   │
+│  │  • Swap to extend range                                     │   │
+│  │  • Purify to restore fidelity                               │   │
+│  │  • Rate: polynomial in distance, low absolute rates         │   │
+│  │  • Requires: Quantum memories, heralding                    │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│  2nd Generation: Encoded Operations                                 │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  • Use quantum error correction codes                       │   │
+│  │  • Deterministic rather than probabilistic                  │   │
+│  │  • Higher rates but complex nodes                           │   │
+│  │  • Requires: Encoded qubits, logical gates                  │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│  3rd Generation: Full Error Correction                              │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  • Fault-tolerant quantum operations                        │   │
+│  │  • Errors corrected at each node                            │   │
+│  │  • Near-classical rates possible                            │   │
+│  │  • Requires: Fault-tolerant quantum computers at nodes      │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│  Progress: 1st gen demonstrated, 2nd gen in development,           │
+│           3rd gen long-term goal                                    │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Rate Scaling Analysis
+
+```python
+class RepeaterScalingAnalysis:
+    """
+    Analyze how rates scale with distance for different approaches.
+    """
+
+    def __init__(self, fiber_loss_db_km: float = 0.2):
+        self.fiber_loss = fiber_loss_db_km
+        self.att_length = 10 / (self.fiber_loss * np.log(10))  # Attenuation length
+
+    def direct_rate(self, distance: float, R0: float = 1e9) -> float:
+        """Direct transmission rate (exponential decay)."""
+        eta = 10**(-self.fiber_loss * distance / 10)
+        return R0 * eta
+
+    def first_gen_rate(
+        self,
+        distance: float,
+        n_segments: int,
+        R0: float = 1e9,
+        memory_time: float = 0.1
+    ) -> float:
+        """
+        First-generation repeater rate.
+
+        Rate ~ R0 × η_seg × (efficiency factors) / N
+        Polynomial improvement over direct.
+        """
+        L_seg = distance / n_segments
+        eta_seg = 10**(-self.fiber_loss * L_seg / 10)
+
+        # Segment generation rate
+        seg_rate = R0 * eta_seg
+
+        # Swapping efficiency (50% per swap, N-1 swaps)
+        swap_eff = 0.5 ** (n_segments - 1)
+
+        # Memory decoherence factor
+        T_gen = n_segments / seg_rate  # Approximate generation time
+        memory_eff = np.exp(-T_gen / memory_time) if memory_time > 0 else 1
+
+        return seg_rate * swap_eff * memory_eff / n_segments
+
+    def optimal_segments(
+        self,
+        distance: float,
+        memory_time: float = 0.1
+    ) -> int:
+        """Find optimal number of segments."""
+        best_n = 1
+        best_rate = self.direct_rate(distance)
+
+        for n in range(2, 100):
+            rate = self.first_gen_rate(distance, n, memory_time=memory_time)
+            if rate > best_rate:
+                best_rate = rate
+                best_n = n
+
+        return best_n
+
+    def compare_scaling(
+        self,
+        distances: List[float],
+        n_segments: int = 10
+    ) -> Dict:
+        """Compare direct vs repeater scaling."""
+        return {
+            "distance": distances,
+            "direct": [self.direct_rate(d) for d in distances],
+            "repeater": [self.first_gen_rate(d, n_segments) for d in distances],
+            "improvement": [
+                self.first_gen_rate(d, n_segments) / self.direct_rate(d)
+                if self.direct_rate(d) > 0 else float('inf')
+                for d in distances
+            ]
+        }
+
+# Analyze scaling
+scaling = RepeaterScalingAnalysis()
+
+print("\nRepeater Rate Scaling Analysis")
+print("=" * 60)
+
+distances = [100, 200, 500, 1000, 2000]
+comparison = scaling.compare_scaling(distances, n_segments=10)
+
+print("\nDistance | Direct Rate  | Repeater Rate | Improvement")
+print("-" * 60)
+
+for i, d in enumerate(distances):
+    direct = comparison["direct"][i]
+    repeater = comparison["repeater"][i]
+    improve = comparison["improvement"][i]
+
+    print(f"  {d:4d} km | {direct:.2e} Hz | {repeater:.2e} Hz  | {improve:.0e}×")
+
+print("\nOptimal segment count by distance:")
+for d in [100, 500, 1000]:
+    n_opt = scaling.optimal_segments(d)
+    print(f"  {d} km: {n_opt} segments ({d/n_opt:.0f} km each)")
+```
+
+## Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              QUANTUM REPEATER BASICS SUMMARY                        │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  The Problem:                                                       │
+│  • Quantum states can't be amplified (no-cloning)                  │
+│  • Direct transmission: Rate ∝ η^L (exponential decay)             │
+│  • 500 km: Would take longer than age of universe per qubit        │
+│                                                                     │
+│  The Solution: Quantum Repeaters                                    │
+│  • Divide channel into segments                                     │
+│  • Create entanglement per segment (shorter distance)               │
+│  • Connect via swapping (BSM at intermediate nodes)                │
+│  • Restore fidelity via purification                               │
+│                                                                     │
+│  Rate Improvement:                                                  │
+│  • From exponential η^L to polynomial poly(L)                      │
+│  • 500 km: From 10⁻¹⁰ to 10⁻² range                                │
+│  • Enables practical long-distance quantum communication           │
+│                                                                     │
+│  Requirements:                                                      │
+│  • Quantum memories (store while waiting)                          │
+│  • Heralding (know when entanglement succeeds)                     │
+│  • High-fidelity local operations                                  │
+│  • Classical communication for coordination                        │
+│                                                                     │
+│  Generations:                                                       │
+│  • 1st: Probabilistic swapping + purification                      │
+│  • 2nd: Encoded qubits, deterministic swapping                     │
+│  • 3rd: Full quantum error correction                              │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Quantum repeaters transform the exponentially decaying quantum channel into a polynomial-scaling resource, making global quantum networks possible.

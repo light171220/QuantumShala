@@ -1,0 +1,478 @@
+---
+title: "Value at Risk and Conditional Value at Risk"
+description: "Master VaR and CVaR calculations using parametric, historical, and Monte Carlo methods. Understand why CVaR is a coherent risk measure while VaR is not."
+duration: 55
+difficulty: "intermediate"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Calculate Value at Risk using parametric and historical methods
+- Implement Monte Carlo VaR estimation
+- Understand CVaR as a coherent risk measure
+- Compare VaR and CVaR in portfolio risk management
+- Apply VaR/CVaR to portfolio optimization constraints
+
+## 1. Introduction to Value at Risk
+
+Value at Risk (VaR) is the most widely used risk measure in financial institutions.
+
+<Definition term="Value at Risk (VaR)">
+VaR is the maximum loss not exceeded with a given probability (confidence level) over a given time horizon. For example, a 95% 1-day VaR of $1 million means there is a 5% chance of losing more than $1 million in one day.
+</Definition>
+
+<Formula>
+$$\text{VaR}_\alpha = -\inf\{x : P(L \leq x) \geq \alpha\}$$
+or equivalently, VaR is the $\alpha$-quantile of the loss distribution.
+</Formula>
+
+### VaR Parameters
+
+| Parameter | Typical Values | Description |
+|-----------|---------------|-------------|
+| Confidence Level | 95%, 99% | Probability of not exceeding loss |
+| Time Horizon | 1 day, 10 days | Period for loss calculation |
+| Method | Parametric, Historical, MC | Calculation approach |
+
+## 2. Parametric VaR
+
+Assumes returns follow a known distribution (typically normal).
+
+```python
+import numpy as np
+from scipy import stats
+
+def parametric_var(returns, confidence_level=0.95, holding_period=1):
+    """
+    Calculate parametric (normal) VaR.
+
+    Args:
+        returns: Array of returns
+        confidence_level: Confidence level (e.g., 0.95 for 95%)
+        holding_period: Holding period in days
+
+    Returns:
+        VaR as a positive number (loss)
+    """
+    mean = np.mean(returns)
+    std = np.std(returns, ddof=1)
+
+    # Z-score for confidence level
+    z = stats.norm.ppf(1 - confidence_level)
+
+    # VaR for holding period
+    var = -(mean * holding_period + z * std * np.sqrt(holding_period))
+
+    return var
+
+def parametric_var_portfolio(weights, returns_matrix, confidence_level=0.95):
+    """
+    Portfolio VaR using variance-covariance method.
+
+    Args:
+        weights: Portfolio weights
+        returns_matrix: Matrix of asset returns (rows=time, cols=assets)
+        confidence_level: Confidence level
+
+    Returns:
+        Portfolio VaR
+    """
+    # Portfolio mean return
+    mean_returns = np.mean(returns_matrix, axis=0)
+    portfolio_mean = np.dot(weights, mean_returns)
+
+    # Portfolio variance
+    cov_matrix = np.cov(returns_matrix, rowvar=False)
+    portfolio_var = np.dot(weights, np.dot(cov_matrix, weights))
+    portfolio_std = np.sqrt(portfolio_var)
+
+    # VaR
+    z = stats.norm.ppf(1 - confidence_level)
+    var = -(portfolio_mean + z * portfolio_std)
+
+    return var
+
+# Example
+np.random.seed(42)
+returns = np.random.normal(0.0004, 0.015, 252)
+
+var_95 = parametric_var(returns, confidence_level=0.95)
+var_99 = parametric_var(returns, confidence_level=0.99)
+
+print(f"95% 1-day VaR: {var_95:.4f} ({var_95:.2%})")
+print(f"99% 1-day VaR: {var_99:.4f} ({var_99:.2%})")
+```
+
+<Warning>
+Parametric VaR assumes normal returns, which underestimates tail risk. Real financial returns have fat tails and occasional extreme losses.
+</Warning>
+
+## 3. Historical VaR
+
+Uses actual historical returns without distributional assumptions.
+
+```python
+def historical_var(returns, confidence_level=0.95):
+    """
+    Calculate historical (empirical) VaR.
+
+    Simply finds the appropriate percentile of historical returns.
+    """
+    # VaR is the negative of the (1-α) quantile of returns
+    percentile = (1 - confidence_level) * 100
+    var = -np.percentile(returns, percentile)
+
+    return var
+
+def historical_var_portfolio(weights, returns_matrix, confidence_level=0.95):
+    """
+    Portfolio historical VaR.
+    """
+    # Calculate portfolio returns
+    portfolio_returns = np.dot(returns_matrix, weights)
+
+    return historical_var(portfolio_returns, confidence_level)
+
+# Compare with parametric
+hist_var_95 = historical_var(returns, confidence_level=0.95)
+hist_var_99 = historical_var(returns, confidence_level=0.99)
+
+print(f"Historical 95% VaR: {hist_var_95:.4f}")
+print(f"Historical 99% VaR: {hist_var_99:.4f}")
+print(f"\nDifference from parametric:")
+print(f"  95%: {(hist_var_95 - var_95)/var_95:.1%}")
+print(f"  99%: {(hist_var_99 - var_99)/var_99:.1%}")
+```
+
+### Advantages and Disadvantages
+
+| Method | Advantages | Disadvantages |
+|--------|------------|---------------|
+| Parametric | Fast, analytical | Assumes normality |
+| Historical | No distribution assumption | Limited by historical data |
+| Monte Carlo | Flexible | Computationally intensive |
+
+## 4. Monte Carlo VaR
+
+Simulates future returns using a model.
+
+```python
+def monte_carlo_var(returns, confidence_level=0.95, n_simulations=10000,
+                    holding_period=1, model='normal'):
+    """
+    Monte Carlo VaR estimation.
+
+    Args:
+        returns: Historical returns (for parameter estimation)
+        confidence_level: VaR confidence level
+        n_simulations: Number of Monte Carlo paths
+        holding_period: Number of days to simulate
+        model: 'normal' or 'student-t'
+
+    Returns:
+        VaR estimate
+    """
+    mean = np.mean(returns)
+    std = np.std(returns, ddof=1)
+
+    if model == 'normal':
+        # Simulate returns
+        simulated_returns = np.random.normal(
+            mean * holding_period,
+            std * np.sqrt(holding_period),
+            n_simulations
+        )
+    elif model == 'student-t':
+        # Estimate degrees of freedom
+        df = 5  # Typical for financial returns
+        simulated_returns = stats.t.rvs(
+            df, loc=mean * holding_period,
+            scale=std * np.sqrt(holding_period),
+            size=n_simulations
+        )
+
+    # VaR from simulated distribution
+    percentile = (1 - confidence_level) * 100
+    var = -np.percentile(simulated_returns, percentile)
+
+    return var
+
+# Monte Carlo VaR
+np.random.seed(42)
+mc_var_95 = monte_carlo_var(returns, confidence_level=0.95)
+mc_var_99 = monte_carlo_var(returns, confidence_level=0.99)
+
+print(f"Monte Carlo 95% VaR: {mc_var_95:.4f}")
+print(f"Monte Carlo 99% VaR: {mc_var_99:.4f}")
+
+# With Student-t for fat tails
+mc_var_t = monte_carlo_var(returns, confidence_level=0.99, model='student-t')
+print(f"\nStudent-t 99% VaR: {mc_var_t:.4f}")
+print(f"Difference from normal MC: {(mc_var_t - mc_var_99)/mc_var_99:.1%}")
+```
+
+## 5. Conditional Value at Risk (CVaR)
+
+CVaR, also called Expected Shortfall, measures the average loss in the worst cases.
+
+<Definition term="Conditional Value at Risk (CVaR)">
+CVaR at confidence level α is the expected loss given that the loss exceeds VaR. It answers: "If we're in the worst α% of outcomes, what's the average loss?"
+</Definition>
+
+<Formula>
+$$\text{CVaR}_\alpha = E[L \mid L > \text{VaR}_\alpha] = \frac{1}{1-\alpha} \int_\alpha^1 \text{VaR}_u \, du$$
+</Formula>
+
+```python
+def cvar_historical(returns, confidence_level=0.95):
+    """
+    Calculate historical CVaR (Expected Shortfall).
+
+    Args:
+        returns: Array of returns
+        confidence_level: Confidence level
+
+    Returns:
+        CVaR as a positive number (expected loss in tail)
+    """
+    var = historical_var(returns, confidence_level)
+
+    # CVaR is mean of returns worse than VaR
+    tail_returns = returns[returns < -var]
+
+    if len(tail_returns) == 0:
+        return var  # Edge case
+
+    cvar = -np.mean(tail_returns)
+
+    return cvar
+
+def cvar_parametric(returns, confidence_level=0.95):
+    """
+    Parametric (normal) CVaR.
+    """
+    mean = np.mean(returns)
+    std = np.std(returns, ddof=1)
+
+    alpha = 1 - confidence_level
+    z = stats.norm.ppf(alpha)
+
+    # Expected shortfall formula for normal distribution
+    cvar = -mean + std * stats.norm.pdf(z) / alpha
+
+    return cvar
+
+# Calculate CVaR
+cvar_95 = cvar_historical(returns, confidence_level=0.95)
+cvar_99 = cvar_historical(returns, confidence_level=0.99)
+
+print(f"95% CVaR: {cvar_95:.4f}")
+print(f"99% CVaR: {cvar_99:.4f}")
+
+print(f"\nCVaR vs VaR ratio:")
+print(f"  95%: {cvar_95/hist_var_95:.2f}x")
+print(f"  99%: {cvar_99/hist_var_99:.2f}x")
+```
+
+<Tip>
+CVaR is always greater than or equal to VaR at the same confidence level. CVaR captures tail risk more completely by considering all losses beyond VaR, not just the boundary.
+</Tip>
+
+## 6. VaR vs CVaR as Risk Measures
+
+CVaR is a coherent risk measure; VaR is not.
+
+```python
+def demonstrate_var_subadditivity_failure():
+    """
+    Show that VaR can fail sub-additivity.
+    """
+    np.random.seed(42)
+    n = 1000
+
+    # Two assets with independent, asymmetric risks
+    # Asset A: usually small gains, occasional large loss
+    a_returns = np.random.choice(
+        [0.01, -0.30],
+        size=n,
+        p=[0.97, 0.03]
+    )
+
+    # Asset B: similar pattern, independent
+    b_returns = np.random.choice(
+        [0.01, -0.30],
+        size=n,
+        p=[0.97, 0.03]
+    )
+
+    # 95% VaR for each
+    var_a = historical_var(a_returns, 0.95)
+    var_b = historical_var(b_returns, 0.95)
+
+    # 50/50 portfolio
+    portfolio_returns = 0.5 * a_returns + 0.5 * b_returns
+    var_portfolio = historical_var(portfolio_returns, 0.95)
+
+    print("Demonstrating VaR sub-additivity failure:")
+    print(f"  VaR(A): {var_a:.4f}")
+    print(f"  VaR(B): {var_b:.4f}")
+    print(f"  VaR(A) + VaR(B): {var_a + var_b:.4f}")
+    print(f"  VaR(Portfolio): {var_portfolio:.4f}")
+
+    if var_portfolio > var_a + var_b:
+        print("  ⚠️ VaR fails sub-additivity!")
+    else:
+        print("  ✓ Sub-additivity holds in this example")
+
+    # CVaR comparison
+    cvar_a = cvar_historical(a_returns, 0.95)
+    cvar_b = cvar_historical(b_returns, 0.95)
+    cvar_portfolio = cvar_historical(portfolio_returns, 0.95)
+
+    print(f"\nCVaR comparison:")
+    print(f"  CVaR(A) + CVaR(B): {cvar_a + cvar_b:.4f}")
+    print(f"  CVaR(Portfolio): {cvar_portfolio:.4f}")
+    print(f"  ✓ CVaR always satisfies sub-additivity")
+
+demonstrate_var_subadditivity_failure()
+```
+
+### Comparison Table
+
+| Property | VaR | CVaR |
+|----------|-----|------|
+| Coherent | ❌ | ✓ |
+| Sub-additive | Sometimes fails | Always holds |
+| Tail information | Just boundary | Average of tail |
+| Optimization | Non-convex | Convex |
+| Industry use | Very common | Increasing |
+
+## 7. CVaR in Portfolio Optimization
+
+CVaR can be used as a risk constraint or objective.
+
+```python
+import cvxpy as cp
+
+def cvar_optimization(expected_returns, scenarios, alpha=0.05, target_return=None):
+    """
+    Portfolio optimization minimizing CVaR.
+
+    Args:
+        expected_returns: Expected return per asset
+        scenarios: Matrix of return scenarios (rows=scenarios, cols=assets)
+        alpha: Tail probability (e.g., 0.05 for 95% CVaR)
+        target_return: Minimum required return
+
+    Returns:
+        Optimal weights
+    """
+    n_assets = len(expected_returns)
+    n_scenarios = scenarios.shape[0]
+
+    # Decision variables
+    w = cp.Variable(n_assets)  # Weights
+    z = cp.Variable()           # VaR threshold
+    u = cp.Variable(n_scenarios, nonneg=True)  # Auxiliary for CVaR
+
+    # Portfolio returns in each scenario
+    portfolio_returns = scenarios @ w
+
+    # CVaR formulation (Rockafellar-Uryasev)
+    # CVaR = z + (1/alpha) * E[max(0, -portfolio_return - z)]
+    cvar = z + (1 / (alpha * n_scenarios)) * cp.sum(u)
+
+    # Constraints
+    constraints = [
+        cp.sum(w) == 1,
+        w >= 0,
+        u >= -portfolio_returns - z
+    ]
+
+    if target_return is not None:
+        constraints.append(expected_returns @ w >= target_return)
+
+    # Minimize CVaR
+    objective = cp.Minimize(cvar)
+
+    problem = cp.Problem(objective, constraints)
+    problem.solve()
+
+    return w.value, -cvar.value  # Return negative for consistency
+
+# Example with scenarios
+np.random.seed(42)
+n_assets = 4
+n_scenarios = 1000
+
+# Generate correlated scenarios
+mean_returns = np.array([0.10, 0.08, 0.12, 0.06])
+cov = np.array([
+    [0.04, 0.01, 0.02, 0.005],
+    [0.01, 0.02, 0.008, 0.003],
+    [0.02, 0.008, 0.05, 0.01],
+    [0.005, 0.003, 0.01, 0.015]
+])
+
+scenarios = np.random.multivariate_normal(mean_returns/252, cov/252, n_scenarios)
+
+weights, cvar_val = cvar_optimization(mean_returns, scenarios, alpha=0.05)
+print("CVaR-minimizing portfolio:")
+print(f"  Weights: {weights.round(3)}")
+print(f"  95% CVaR: {-cvar_val:.4f}")
+```
+
+## 8. Quantum Computing for VaR/CVaR
+
+Quantum algorithms can accelerate VaR/CVaR calculations.
+
+<Formula>
+Quantum Amplitude Estimation can estimate probabilities with error $\epsilon$ using $O(1/\epsilon)$ evaluations instead of the classical $O(1/\epsilon^2)$ for Monte Carlo.
+</Formula>
+
+```python
+def estimate_var_speedup(n_scenarios_classical, epsilon=0.01):
+    """
+    Estimate potential quantum speedup for VaR calculation.
+
+    Classical MC: O(1/ε²) samples for ε accuracy
+    Quantum AE: O(1/ε) queries for ε accuracy
+    """
+    classical_samples = 1 / epsilon**2
+    quantum_queries = 1 / epsilon
+
+    speedup = classical_samples / quantum_queries
+
+    print("Quantum VaR Speedup Estimate:")
+    print(f"  Target accuracy: {epsilon:.2%}")
+    print(f"  Classical samples needed: {classical_samples:,.0f}")
+    print(f"  Quantum queries needed: {quantum_queries:,.0f}")
+    print(f"  Theoretical speedup: {speedup:.0f}x")
+
+    return speedup
+
+estimate_var_speedup(n_scenarios_classical=10000, epsilon=0.01)
+```
+
+<Warning>
+Current quantum hardware (NISQ) cannot yet realize these speedups for practical VaR calculations. This remains a promising area for future quantum advantage.
+</Warning>
+
+## Summary
+
+In this lesson, you learned:
+
+1. **VaR** quantifies maximum loss at a confidence level
+2. **Three methods**: parametric, historical, Monte Carlo
+3. **CVaR** measures expected loss in the tail
+4. **CVaR is coherent** while VaR is not
+5. **Portfolio optimization** can minimize CVaR directly
+6. **Quantum algorithms** offer potential speedups
+
+## Further Reading
+
+- Next lesson: Stress Testing and Scenario Analysis
+- Related: Monte Carlo Simulation for Risk
+- Application: Quantum Amplitude Estimation for Finance

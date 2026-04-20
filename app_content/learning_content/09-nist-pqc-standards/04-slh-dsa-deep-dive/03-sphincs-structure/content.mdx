@@ -1,0 +1,710 @@
+---
+title: "SPHINCS+ Hypertree Structure"
+description: "Understanding the multi-layer hypertree architecture that enables stateless hash-based signatures in SLH-DSA/SPHINCS+."
+keywords: ["sphincs+", "hypertree", "xmss", "fors", "stateless", "merkle-tree"]
+---
+
+# SPHINCS+ Hypertree Structure
+
+SLH-DSA/SPHINCS+ achieves stateless signatures through a clever multi-layer tree structure called a hypertree. This lesson explores how the hypertree combines XMSS trees and FORS to create a practical stateless signature scheme.
+
+## The Challenge of Stateless Signatures
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              THE STATELESS CHALLENGE                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Stateful Approach (XMSS/LMS):                                │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   • Use one-time keys in sequence: OTS₀, OTS₁, OTS₂... │  │
+│   │   • Must track: "I've used keys 0 through 157"         │  │
+│   │   • Reuse = CATASTROPHIC security failure              │  │
+│   │   • Limited to 2^h total signatures                    │  │
+│   │                                                         │  │
+│   │       ┌─ Counter = 158 ─┐                              │  │
+│   │       │  (must persist) │                              │  │
+│   │       └─────────────────┘                              │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   SPHINCS+ Approach:                                            │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   • Randomly select which OTS to use each time         │  │
+│   │   • Selection deterministic from message + randomness  │  │
+│   │   • With HUGE tree, collision probability negligible   │  │
+│   │   • No state needed - just the private key             │  │
+│   │                                                         │  │
+│   │       ┌─ Hash(SK, R, M) → index ─┐                     │  │
+│   │       │  (computed fresh)         │                     │  │
+│   │       └───────────────────────────┘                     │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Trade-off: Larger signatures for stateless operation         │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Hypertree Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SPHINCS+ HYPERTREE STRUCTURE                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Parameters: d layers, h/d height per layer, total height h   │
+│   Example: d=8 layers, h=64 total, h/d=8 height per layer      │
+│                                                                 │
+│   Layer d-1 (Top):         [XMSS Tree]  ← Root = Public Key    │
+│                                │                                │
+│                        ┌───────┴───────┐                        │
+│   Layer d-2:      [XMSS] ... [XMSS] ... [XMSS]                 │
+│                      │         │         │                      │
+│                   ┌──┴──┐   ┌──┴──┐   ┌──┴──┐                  │
+│                  ...   ...  ...  ...  ...  ...                  │
+│                   │     │    │    │    │    │                   │
+│                  ...   ...  ...  ...  ...  ...                  │
+│                   │     │    │    │    │    │                   │
+│   Layer 0:      [XMSS][XMSS][XMSS][XMSS][XMSS][XMSS]...       │
+│                   │     │    │    │    │    │                   │
+│                 [FORS][FORS][FORS][FORS][FORS][FORS]...       │
+│                   ↑                                             │
+│                Message signature (few-time signature)          │
+│                                                                 │
+│   Total leaves: 2^h FORS instances                             │
+│   Each layer has 2^{h/d} leaves per tree                       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## XMSS Tree Layer
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              XMSS TREE IN HYPERTREE                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Each XMSS tree in SPHINCS+:                                  │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Height: h' = h/d (e.g., 8 for total h=64, d=8)       │  │
+│   │   Leaves: 2^{h'} WOTS+ public keys                     │  │
+│   │                                                         │  │
+│   │                  [Root]                                 │  │
+│   │                 /      \                                │  │
+│   │               /          \                              │  │
+│   │             [N]          [N]                            │  │
+│   │            / \          / \                             │  │
+│   │          ...  ...     ...  ...                          │  │
+│   │         /\    /\     /\    /\                           │  │
+│   │       [WOTS][WOTS][WOTS][WOTS]...                      │  │
+│   │                                                         │  │
+│   │   Root is signed by WOTS+ in layer above               │  │
+│   │   (Except top layer - its root is the public key)      │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Chaining:                                                     │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Top XMSS root = Public Key                           │  │
+│   │         ↓ (WOTS+ signs)                                │  │
+│   │   Next layer XMSS root                                 │  │
+│   │         ↓ (WOTS+ signs)                                │  │
+│   │   ... continues down layers ...                        │  │
+│   │         ↓ (WOTS+ signs)                                │  │
+│   │   Bottom layer XMSS root                               │  │
+│   │         ↓ (WOTS+ signs)                                │  │
+│   │   FORS public key (message signature)                  │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## FORS: Forest of Random Subsets
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              FORS (FEW-TIME SIGNATURE)                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Purpose: Sign the actual message (few-time, not one-time)    │
+│                                                                 │
+│   Structure: k trees, each with 2^a leaves                     │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Tree₀      Tree₁      Tree₂    ...    Tree_{k-1}     │  │
+│   │    [R₀]       [R₁]       [R₂]           [R_{k-1}]      │  │
+│   │   / | \      / | \      / | \           / | \          │  │
+│   │  [leaves]   [leaves]   [leaves]        [leaves]        │  │
+│   │                                                         │  │
+│   │   Each tree has 2^a leaves                             │  │
+│   │   Total: k × 2^a secret values                         │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Signing Process:                                             │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   1. Hash message to get k indices: i₀, i₁, ..., i_{k-1}│  │
+│   │      where each iⱼ ∈ {0, 1, ..., 2^a - 1}              │  │
+│   │                                                         │  │
+│   │   2. For each tree j:                                  │  │
+│   │      • Reveal leaf at index iⱼ                         │  │
+│   │      • Include authentication path to root Rⱼ          │  │
+│   │                                                         │  │
+│   │   3. FORS public key = H(R₀ || R₁ || ... || R_{k-1})  │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Why "Few-Time"?                                              │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   Unlike one-time signatures:                          │  │
+│   │   • Can reuse same FORS key a few times               │  │
+│   │   • Security degrades gradually with reuse            │  │
+│   │   • k and a chosen so random reuse is negligible      │  │
+│   │                                                         │  │
+│   │   Security analysis:                                   │  │
+│   │   • After q signatures, ~q×k leaves revealed          │  │
+│   │   • Forgery needs all k indices to be revealed        │  │
+│   │   • Probability decreases exponentially with k        │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Complete Signature Generation
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SPHINCS+ SIGNATURE GENERATION                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Input: Message M, Secret Key SK                              │
+│                                                                 │
+│   Step 1: Generate Randomness                                  │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   R = PRF(SK.prf, OptRand, M)                          │  │
+│   │   (OptRand can be random for hedged signing)           │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step 2: Compute Message Digest and Tree Indices              │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   digest = H(R, PK, M)                                 │  │
+│   │   (md, idx_tree, idx_leaf) = split(digest)             │  │
+│   │                                                         │  │
+│   │   md: message for FORS (k × a bits)                    │  │
+│   │   idx_tree: which hypertree path (h - h/d bits)        │  │
+│   │   idx_leaf: which FORS in bottom tree (h/d bits)       │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step 3: Sign with FORS                                       │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   SIG_FORS = FORS.sign(md, SK, idx_tree, idx_leaf)     │  │
+│   │   PK_FORS = FORS.pkFromSig(SIG_FORS, md)              │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step 4: Sign FORS Public Key Through Hypertree               │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   For layer 0 to d-1:                                  │  │
+│   │     • Get WOTS+ key for current index                  │  │
+│   │     • Sign: SIG_WOTS[layer] = WOTS.sign(prev_root)    │  │
+│   │     • Compute auth path in XMSS tree                   │  │
+│   │     • Compute root for verification by layer above    │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Output Signature:                                            │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   σ = (R, SIG_FORS, SIG_HT)                            │  │
+│   │                                                         │  │
+│   │   where SIG_HT = (                                     │  │
+│   │     (SIG_WOTS[0], AUTH[0]),                           │  │
+│   │     (SIG_WOTS[1], AUTH[1]),                           │  │
+│   │     ...                                                │  │
+│   │     (SIG_WOTS[d-1], AUTH[d-1])                        │  │
+│   │   )                                                    │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Signature Verification
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SPHINCS+ SIGNATURE VERIFICATION                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Input: Message M, Signature σ = (R, SIG_FORS, SIG_HT), PK    │
+│                                                                 │
+│   Step 1: Recompute Digest and Indices                         │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   digest = H(R, PK, M)                                 │  │
+│   │   (md, idx_tree, idx_leaf) = split(digest)             │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step 2: Verify FORS and Extract Public Key                   │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   PK_FORS = FORS.pkFromSig(SIG_FORS, md)              │  │
+│   │   (Recompute FORS public key from signature)           │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step 3: Verify Hypertree Chain                               │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   node = PK_FORS                                       │  │
+│   │                                                         │  │
+│   │   For layer = 0 to d-1:                                │  │
+│   │     • Verify WOTS+ signature on node                   │  │
+│   │     • Extract WOTS+ public key                         │  │
+│   │     • Use AUTH[layer] to compute tree root             │  │
+│   │     • node = computed root                             │  │
+│   │                                                         │  │
+│   │   Final node should equal PK                           │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Step 4: Accept if Final Root Matches Public Key              │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   return (node == PK)                                  │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Implementation: Hypertree Index Computation
+
+```python
+import hashlib
+import struct
+from typing import Tuple
+
+class HypertreeAddressing:
+    """
+    Demonstrate SPHINCS+ hypertree addressing.
+    """
+
+    def __init__(self, h: int, d: int, a: int, k: int, n: int = 32):
+        """
+        Initialize hypertree parameters.
+
+        Args:
+            h: Total tree height
+            d: Number of layers
+            a: FORS tree height
+            k: Number of FORS trees
+            n: Security parameter (bytes)
+        """
+        self.h = h
+        self.d = d
+        self.h_prime = h // d  # Height per XMSS tree
+        self.a = a
+        self.k = k
+        self.n = n
+
+        # Calculate bit lengths
+        self.md_len = (k * a + 7) // 8  # Message digest for FORS
+        self.tree_idx_len = (h - self.h_prime + 7) // 8  # Tree index
+        self.leaf_idx_len = (self.h_prime + 7) // 8  # Leaf index
+
+    def compute_indices(self, message: bytes, public_key: bytes,
+                       randomizer: bytes) -> Tuple[bytes, int, int]:
+        """
+        Compute message digest and tree indices.
+
+        Returns:
+            (md, idx_tree, idx_leaf)
+        """
+        # Compute message digest
+        digest = hashlib.sha256(randomizer + public_key + message).digest()
+
+        # Extend if needed (in real implementation, use SHAKE or MGF)
+        while len(digest) < self.md_len + self.tree_idx_len + self.leaf_idx_len:
+            digest += hashlib.sha256(digest).digest()
+
+        # Split digest
+        offset = 0
+        md = digest[offset:offset + self.md_len]
+        offset += self.md_len
+
+        tree_bytes = digest[offset:offset + self.tree_idx_len]
+        idx_tree = int.from_bytes(tree_bytes, 'big') % (2 ** (self.h - self.h_prime))
+        offset += self.tree_idx_len
+
+        leaf_bytes = digest[offset:offset + self.leaf_idx_len]
+        idx_leaf = int.from_bytes(leaf_bytes, 'big') % (2 ** self.h_prime)
+
+        return md, idx_tree, idx_leaf
+
+    def tree_layer_indices(self, idx_tree: int, idx_leaf: int) -> list:
+        """
+        Compute indices for each layer of the hypertree.
+
+        Returns list of (tree_index, leaf_index) for each layer.
+        """
+        indices = []
+
+        current_tree = idx_tree
+        current_leaf = idx_leaf
+
+        for layer in range(self.d):
+            indices.append((current_tree, current_leaf))
+
+            # Move up: current leaf becomes part of tree index for next layer
+            if layer < self.d - 1:
+                # Combine current tree and leaf for next level
+                next_idx = (current_tree << self.h_prime) | current_leaf
+                current_tree = next_idx >> self.h_prime
+                current_leaf = next_idx & ((1 << self.h_prime) - 1)
+
+        return indices
+
+    def fors_indices(self, md: bytes) -> list:
+        """
+        Split message digest into FORS tree indices.
+
+        Returns list of k indices, each in range [0, 2^a).
+        """
+        # Convert md to bit string
+        bits = []
+        for byte in md:
+            for i in range(8):
+                bits.append((byte >> (7 - i)) & 1)
+
+        # Extract k indices of a bits each
+        indices = []
+        for i in range(self.k):
+            idx = 0
+            for j in range(self.a):
+                bit_pos = i * self.a + j
+                if bit_pos < len(bits):
+                    idx = (idx << 1) | bits[bit_pos]
+            indices.append(idx)
+
+        return indices
+
+
+# Demonstration with SPHINCS+-128f parameters
+hyper = HypertreeAddressing(
+    h=66,    # Total height
+    d=22,    # Layers
+    a=6,     # FORS tree height
+    k=33,    # FORS trees
+    n=16     # Security parameter
+)
+
+print("SPHINCS+-128f-like parameters:")
+print(f"  Total height h = {hyper.h}")
+print(f"  Layers d = {hyper.d}")
+print(f"  Height per layer h' = {hyper.h_prime}")
+print(f"  FORS: k={hyper.k} trees, 2^{hyper.a}={2**hyper.a} leaves each")
+print(f"  Total FORS leaves: {hyper.k * 2**hyper.a}")
+print(f"  Total hypertree leaves: 2^{hyper.h} ≈ {2**hyper.h:.2e}")
+
+# Example signing
+message = b"Test message for SPHINCS+"
+pk = b"public_key_placeholder_32bytes!!"[:32]
+R = b"randomizer_16bytes!"[:16]
+
+md, idx_tree, idx_leaf = hyper.compute_indices(message, pk, R)
+print(f"\nFor message '{message.decode()}':")
+print(f"  idx_tree = {idx_tree}")
+print(f"  idx_leaf = {idx_leaf}")
+
+layer_indices = hyper.tree_layer_indices(idx_tree, idx_leaf)
+print(f"\nHypertree path (layer: tree, leaf):")
+for layer, (tree, leaf) in enumerate(layer_indices):
+    print(f"  Layer {layer}: tree={tree}, leaf={leaf}")
+
+fors_idx = hyper.fors_indices(md)
+print(f"\nFORS indices (first 5 of {len(fors_idx)}):")
+for i in range(min(5, len(fors_idx))):
+    print(f"  Tree {i}: leaf index {fors_idx[i]}")
+```
+
+## Signature Size Analysis
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SPHINCS+ SIGNATURE COMPONENTS                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Signature σ = (R, SIG_FORS, SIG_HT)                          │
+│                                                                 │
+│   Component Sizes:                                              │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                                                         │  │
+│   │   R (randomizer):                                       │  │
+│   │   • n bytes                                             │  │
+│   │                                                         │  │
+│   │   SIG_FORS:                                             │  │
+│   │   • k × (n + a × n) bytes                              │  │
+│   │   • k leaves (n each) + k auth paths (a×n each)        │  │
+│   │   • = k × n × (1 + a)                                  │  │
+│   │                                                         │  │
+│   │   SIG_HT (d layers):                                    │  │
+│   │   • d × (WOTS+ sig + auth path)                        │  │
+│   │   • WOTS+ sig: len × n bytes                           │  │
+│   │   • Auth path: h' × n bytes                            │  │
+│   │   • = d × (len + h') × n                               │  │
+│   │                                                         │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Example: SLH-DSA-128f (n=16, k=33, a=6, d=22, h'=3, w=16):  │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │   R: 16 bytes                                          │  │
+│   │   SIG_FORS: 33 × 16 × (1 + 6) = 3,696 bytes           │  │
+│   │   WOTS+ len = 35 (for n=16, w=16)                      │  │
+│   │   SIG_HT: 22 × (35 + 3) × 16 = 13,376 bytes           │  │
+│   │   ────────────────────────────────────────             │  │
+│   │   Total: ~17,088 bytes (≈17 KB)                       │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   Comparison: SLH-DSA-128s uses different parameters:          │
+│   • Deeper FORS trees (more leaves revealed = smaller auth)   │
+│   • More layers in hypertree                                   │
+│   • Result: ~7,856 bytes but slower signing                   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## FORS Implementation
+
+```python
+import hashlib
+import os
+from typing import List, Tuple
+
+class SimpleFORS:
+    """
+    Simplified FORS (Forest of Random Subsets) implementation.
+    Educational - not production ready.
+    """
+
+    def __init__(self, k: int = 33, a: int = 6, n: int = 16):
+        """
+        Initialize FORS parameters.
+
+        Args:
+            k: Number of trees
+            a: Height of each tree (2^a leaves per tree)
+            n: Hash output size in bytes
+        """
+        self.k = k
+        self.a = a
+        self.t = 2 ** a  # Leaves per tree
+        self.n = n
+
+    def _hash(self, *args) -> bytes:
+        """Hash function"""
+        data = b''.join(args)
+        return hashlib.sha256(data).digest()[:self.n]
+
+    def _prf(self, seed: bytes, addr: bytes) -> bytes:
+        """Pseudorandom function for key generation"""
+        return self._hash(seed, addr)
+
+    def keygen(self, sk_seed: bytes, pk_seed: bytes) -> Tuple[List[List[bytes]], bytes]:
+        """
+        Generate FORS key pair.
+
+        Returns:
+            (secret_leaves, public_key)
+        """
+        # Generate all secret leaves
+        secret_leaves = []
+        tree_roots = []
+
+        for i in range(self.k):
+            tree_leaves = []
+            for j in range(self.t):
+                addr = i.to_bytes(4, 'big') + j.to_bytes(4, 'big')
+                leaf = self._prf(sk_seed, addr)
+                tree_leaves.append(leaf)
+
+            secret_leaves.append(tree_leaves)
+
+            # Compute tree root
+            root = self._compute_root(tree_leaves, pk_seed, i)
+            tree_roots.append(root)
+
+        # Public key is hash of all roots
+        pk = self._hash(*tree_roots)
+        return secret_leaves, pk
+
+    def _compute_root(self, leaves: List[bytes], pk_seed: bytes,
+                      tree_idx: int) -> bytes:
+        """Compute Merkle root of a FORS tree"""
+        # Build tree bottom-up
+        current_level = [self._hash(pk_seed, tree_idx.to_bytes(4, 'big'),
+                                    i.to_bytes(4, 'big'), leaf)
+                         for i, leaf in enumerate(leaves)]
+
+        while len(current_level) > 1:
+            next_level = []
+            for i in range(0, len(current_level), 2):
+                parent = self._hash(pk_seed, current_level[i], current_level[i+1])
+                next_level.append(parent)
+            current_level = next_level
+
+        return current_level[0]
+
+    def _get_auth_path(self, leaves: List[bytes], idx: int,
+                       pk_seed: bytes, tree_idx: int) -> List[bytes]:
+        """Get authentication path for leaf at idx"""
+        # Hash leaves first
+        current_level = [self._hash(pk_seed, tree_idx.to_bytes(4, 'big'),
+                                    i.to_bytes(4, 'big'), leaf)
+                         for i, leaf in enumerate(leaves)]
+
+        auth_path = []
+        current_idx = idx
+
+        while len(current_level) > 1:
+            # Get sibling
+            if current_idx % 2 == 0:
+                sibling = current_level[current_idx + 1]
+            else:
+                sibling = current_level[current_idx - 1]
+            auth_path.append(sibling)
+
+            # Move up
+            next_level = []
+            for i in range(0, len(current_level), 2):
+                parent = self._hash(pk_seed, current_level[i], current_level[i+1])
+                next_level.append(parent)
+            current_level = next_level
+            current_idx //= 2
+
+        return auth_path
+
+    def sign(self, message_digest: bytes, secret_leaves: List[List[bytes]],
+             pk_seed: bytes) -> List[Tuple[bytes, List[bytes]]]:
+        """
+        Sign message digest with FORS.
+
+        Args:
+            message_digest: k×a bits of message to sign
+            secret_leaves: All secret leaf values
+            pk_seed: Public seed
+
+        Returns:
+            List of (revealed_leaf, auth_path) for each tree
+        """
+        # Parse message digest into k indices
+        indices = self._parse_indices(message_digest)
+
+        signature = []
+        for i in range(self.k):
+            idx = indices[i]
+            # Reveal the leaf
+            leaf = secret_leaves[i][idx]
+            # Get auth path
+            auth_path = self._get_auth_path(secret_leaves[i], idx, pk_seed, i)
+            signature.append((leaf, auth_path))
+
+        return signature
+
+    def _parse_indices(self, md: bytes) -> List[int]:
+        """Parse message digest into k indices of a bits each"""
+        bits = []
+        for byte in md:
+            for i in range(8):
+                bits.append((byte >> (7 - i)) & 1)
+
+        indices = []
+        for i in range(self.k):
+            idx = 0
+            for j in range(self.a):
+                bit_pos = i * self.a + j
+                if bit_pos < len(bits):
+                    idx = (idx << 1) | bits[bit_pos]
+            indices.append(idx)
+        return indices
+
+    def pk_from_sig(self, signature: List[Tuple[bytes, List[bytes]]],
+                    message_digest: bytes, pk_seed: bytes) -> bytes:
+        """
+        Compute public key from signature (for verification).
+        """
+        indices = self._parse_indices(message_digest)
+        tree_roots = []
+
+        for i in range(self.k):
+            leaf, auth_path = signature[i]
+            idx = indices[i]
+
+            # Hash the revealed leaf
+            current = self._hash(pk_seed, i.to_bytes(4, 'big'),
+                                idx.to_bytes(4, 'big'), leaf)
+
+            # Climb up using auth path
+            for j, sibling in enumerate(auth_path):
+                if (idx >> j) & 1 == 0:
+                    current = self._hash(pk_seed, current, sibling)
+                else:
+                    current = self._hash(pk_seed, sibling, current)
+
+            tree_roots.append(current)
+
+        return self._hash(*tree_roots)
+
+
+# Demonstration
+fors = SimpleFORS(k=10, a=4, n=16)  # Smaller parameters for demo
+
+sk_seed = os.urandom(16)
+pk_seed = os.urandom(16)
+
+# Key generation
+secret_leaves, pk = fors.keygen(sk_seed, pk_seed)
+print(f"FORS with k={fors.k}, a={fors.a}")
+print(f"Public key: {pk.hex()}")
+
+# Sign
+message_digest = os.urandom(fors.k * fors.a // 8 + 1)
+signature = fors.sign(message_digest, secret_leaves, pk_seed)
+
+print(f"\nSignature has {len(signature)} components")
+print(f"Each component: 1 leaf ({fors.n} bytes) + {fors.a} auth nodes ({fors.a * fors.n} bytes)")
+
+# Verify by recomputing public key
+recovered_pk = fors.pk_from_sig(signature, message_digest, pk_seed)
+print(f"\nRecovered PK: {recovered_pk.hex()}")
+print(f"Verification: {'PASS' if recovered_pk == pk else 'FAIL'}")
+```
+
+## Summary
+
+SPHINCS+ hypertree structure enables stateless signatures:
+
+**Hypertree Design:**
+- d layers of XMSS trees with h/d height each
+- Top layer root is the public key
+- Each layer signs the roots of trees in the layer below
+- Total capacity: 2^h distinct signing paths
+
+**FORS (Few-Time Signature):**
+- k trees with 2^a leaves each
+- Signs the actual message
+- Reveals k leaves plus authentication paths
+- Can tolerate limited reuse (few-time, not one-time)
+
+**Stateless Operation:**
+- Message + randomness determines path through hypertree
+- No state tracking needed
+- Collision probability negligible with huge tree
+
+**Signature Components:**
+- Randomizer R
+- FORS signature (leaves + auth paths)
+- d WOTS+ signatures with auth paths
+
+**Trade-offs:**
+- "f" variants: Faster, larger signatures
+- "s" variants: Smaller signatures, slower signing
+- All variants: Conservative hash-only security

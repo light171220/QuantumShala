@@ -1,0 +1,589 @@
+---
+title: "Risk Greeks and Sensitivities"
+duration: "40 minutes"
+---
+
+# Risk Greeks and Sensitivities
+
+Greeks measure how derivative values change with respect to various parameters. Understanding Greeks is essential for risk management, hedging, and trading decisions.
+
+## First-Order Greeks
+
+First-order Greeks measure linear sensitivities to individual parameters.
+
+<QuizQuestion
+  question="Which Greek measures sensitivity to interest rate changes?"
+  options={[
+    "Delta",
+    "Vega",
+    "Rho",
+    "Theta"
+  ]}
+  correctAnswer={2}
+  explanation="Rho measures the sensitivity of option value to changes in the risk-free interest rate. It's particularly important for long-dated options where interest rate exposure is significant."
+/>
+
+```python
+import numpy as np
+from scipy.stats import norm
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+
+@dataclass
+class OptionParams:
+    """Parameters for option pricing and Greeks."""
+    spot: float
+    strike: float
+    rate: float
+    volatility: float
+    time: float
+    is_call: bool
+    dividend_yield: float = 0.0
+
+class GreeksCalculator:
+    """
+    Calculate all option Greeks analytically.
+    """
+
+    def __init__(self, params: OptionParams):
+        self.p = params
+
+    def _d1(self) -> float:
+        return (np.log(self.p.spot / self.p.strike) +
+                (self.p.rate - self.p.dividend_yield + 0.5 * self.p.volatility**2) * self.p.time) / \
+               (self.p.volatility * np.sqrt(self.p.time))
+
+    def _d2(self) -> float:
+        return self._d1() - self.p.volatility * np.sqrt(self.p.time)
+
+    # First-order Greeks
+
+    def delta(self) -> float:
+        """
+        Δ = ∂V/∂S
+
+        Rate of change of option value with respect to underlying price.
+        """
+        d1 = self._d1()
+        if self.p.is_call:
+            return np.exp(-self.p.dividend_yield * self.p.time) * norm.cdf(d1)
+        else:
+            return np.exp(-self.p.dividend_yield * self.p.time) * (norm.cdf(d1) - 1)
+
+    def vega(self) -> float:
+        """
+        ν = ∂V/∂σ
+
+        Sensitivity to volatility changes.
+        Typically quoted per 1% vol change.
+        """
+        d1 = self._d1()
+        return self.p.spot * np.exp(-self.p.dividend_yield * self.p.time) * \
+               np.sqrt(self.p.time) * norm.pdf(d1) * 0.01
+
+    def theta(self) -> float:
+        """
+        Θ = ∂V/∂t
+
+        Time decay - how much value is lost per day.
+        """
+        d1, d2 = self._d1(), self._d2()
+
+        term1 = -self.p.spot * np.exp(-self.p.dividend_yield * self.p.time) * \
+                norm.pdf(d1) * self.p.volatility / (2 * np.sqrt(self.p.time))
+
+        if self.p.is_call:
+            term2 = -self.p.rate * self.p.strike * np.exp(-self.p.rate * self.p.time) * norm.cdf(d2)
+            term3 = self.p.dividend_yield * self.p.spot * np.exp(-self.p.dividend_yield * self.p.time) * norm.cdf(d1)
+        else:
+            term2 = self.p.rate * self.p.strike * np.exp(-self.p.rate * self.p.time) * norm.cdf(-d2)
+            term3 = -self.p.dividend_yield * self.p.spot * np.exp(-self.p.dividend_yield * self.p.time) * norm.cdf(-d1)
+
+        return (term1 + term2 + term3) / 365  # Daily theta
+
+    def rho(self) -> float:
+        """
+        ρ = ∂V/∂r
+
+        Sensitivity to interest rate changes.
+        Per 1% rate change.
+        """
+        d2 = self._d2()
+        if self.p.is_call:
+            return self.p.strike * self.p.time * np.exp(-self.p.rate * self.p.time) * norm.cdf(d2) * 0.01
+        else:
+            return -self.p.strike * self.p.time * np.exp(-self.p.rate * self.p.time) * norm.cdf(-d2) * 0.01
+
+    def all_greeks(self) -> Dict[str, float]:
+        """Return all first-order Greeks."""
+        return {
+            'delta': self.delta(),
+            'gamma': self.gamma(),
+            'vega': self.vega(),
+            'theta': self.theta(),
+            'rho': self.rho()
+        }
+
+    # Second-order Greeks
+
+    def gamma(self) -> float:
+        """
+        Γ = ∂²V/∂S²
+
+        Rate of change of delta with respect to underlying.
+        """
+        d1 = self._d1()
+        return np.exp(-self.p.dividend_yield * self.p.time) * norm.pdf(d1) / \
+               (self.p.spot * self.p.volatility * np.sqrt(self.p.time))
+
+    def vanna(self) -> float:
+        """
+        ∂²V/∂S∂σ = ∂Δ/∂σ = ∂ν/∂S
+
+        Cross-sensitivity between delta and volatility.
+        """
+        d1, d2 = self._d1(), self._d2()
+        return -np.exp(-self.p.dividend_yield * self.p.time) * norm.pdf(d1) * d2 / self.p.volatility
+
+    def volga(self) -> float:
+        """
+        ∂²V/∂σ² = ∂ν/∂σ
+
+        Sensitivity of vega to volatility changes.
+        Also called vomma.
+        """
+        d1, d2 = self._d1(), self._d2()
+        return self.vega() * d1 * d2 / self.p.volatility
+
+    def charm(self) -> float:
+        """
+        ∂²V/∂S∂t = ∂Δ/∂t
+
+        Rate of change of delta with time (delta decay).
+        """
+        d1, d2 = self._d1(), self._d2()
+        if self.p.is_call:
+            return -self.p.dividend_yield * np.exp(-self.p.dividend_yield * self.p.time) * norm.cdf(d1) + \
+                   np.exp(-self.p.dividend_yield * self.p.time) * norm.pdf(d1) * \
+                   (2 * (self.p.rate - self.p.dividend_yield) * self.p.time - d2 * self.p.volatility * np.sqrt(self.p.time)) / \
+                   (2 * self.p.time * self.p.volatility * np.sqrt(self.p.time))
+        else:
+            return self.p.dividend_yield * np.exp(-self.p.dividend_yield * self.p.time) * norm.cdf(-d1) + \
+                   np.exp(-self.p.dividend_yield * self.p.time) * norm.pdf(d1) * \
+                   (2 * (self.p.rate - self.p.dividend_yield) * self.p.time - d2 * self.p.volatility * np.sqrt(self.p.time)) / \
+                   (2 * self.p.time * self.p.volatility * np.sqrt(self.p.time))
+
+    def speed(self) -> float:
+        """
+        ∂³V/∂S³ = ∂Γ/∂S
+
+        Rate of change of gamma with underlying.
+        """
+        d1 = self._d1()
+        return -self.gamma() * (d1 / (self.p.volatility * np.sqrt(self.p.time)) + 1) / self.p.spot
+```
+
+## Portfolio Greeks
+
+Portfolio Greeks aggregate individual position Greeks.
+
+```python
+class PortfolioGreeks:
+    """
+    Calculate and aggregate Greeks for a portfolio.
+    """
+
+    def __init__(self):
+        self.positions: List[Dict] = []
+
+    def add_position(
+        self,
+        params: OptionParams,
+        quantity: int,
+        position_id: str
+    ):
+        """Add an option position to the portfolio."""
+        self.positions.append({
+            'params': params,
+            'quantity': quantity,
+            'id': position_id
+        })
+
+    def add_stock(self, shares: int, price: float, position_id: str):
+        """Add a stock position."""
+        self.positions.append({
+            'type': 'stock',
+            'shares': shares,
+            'price': price,
+            'id': position_id
+        })
+
+    def portfolio_greeks(self) -> Dict[str, float]:
+        """Calculate aggregate portfolio Greeks."""
+        totals = {
+            'delta': 0.0,
+            'gamma': 0.0,
+            'vega': 0.0,
+            'theta': 0.0,
+            'rho': 0.0
+        }
+
+        for pos in self.positions:
+            if pos.get('type') == 'stock':
+                # Stock has delta = 1, all other Greeks = 0
+                totals['delta'] += pos['shares']
+            else:
+                calc = GreeksCalculator(pos['params'])
+                qty = pos['quantity']
+                totals['delta'] += calc.delta() * qty
+                totals['gamma'] += calc.gamma() * qty
+                totals['vega'] += calc.vega() * qty
+                totals['theta'] += calc.theta() * qty
+                totals['rho'] += calc.rho() * qty
+
+        return totals
+
+    def dollar_greeks(self, spot: float) -> Dict[str, float]:
+        """
+        Calculate dollar-value Greeks.
+
+        Delta dollars = delta * spot
+        Gamma dollars = 0.5 * gamma * spot² * (1% move)²
+        """
+        base = self.portfolio_greeks()
+
+        return {
+            'delta_dollars': base['delta'] * spot,
+            'gamma_dollars': 0.5 * base['gamma'] * spot**2 * 0.01**2,
+            'vega_dollars': base['vega'],  # Already in dollars per 1% vol
+            'theta_dollars': base['theta'],  # Already in dollars per day
+            'rho_dollars': base['rho']  # Already in dollars per 1% rate
+        }
+
+    def greek_attribution(self) -> List[Dict]:
+        """Attribute portfolio Greeks to individual positions."""
+        attribution = []
+
+        portfolio_total = self.portfolio_greeks()
+
+        for pos in self.positions:
+            if pos.get('type') == 'stock':
+                attr = {
+                    'id': pos['id'],
+                    'type': 'stock',
+                    'delta': pos['shares'],
+                    'delta_pct': pos['shares'] / portfolio_total['delta'] * 100 if portfolio_total['delta'] != 0 else 0,
+                    'gamma': 0,
+                    'vega': 0,
+                    'theta': 0
+                }
+            else:
+                calc = GreeksCalculator(pos['params'])
+                qty = pos['quantity']
+                attr = {
+                    'id': pos['id'],
+                    'type': 'option',
+                    'delta': calc.delta() * qty,
+                    'delta_pct': calc.delta() * qty / portfolio_total['delta'] * 100 if portfolio_total['delta'] != 0 else 0,
+                    'gamma': calc.gamma() * qty,
+                    'vega': calc.vega() * qty,
+                    'theta': calc.theta() * qty
+                }
+
+            attribution.append(attr)
+
+        return attribution
+```
+
+<QuizQuestion
+  question="What does gamma measure?"
+  options={[
+    "Rate of change of option value with spot",
+    "Rate of change of delta with spot",
+    "Rate of change of vega with spot",
+    "Rate of change of theta with spot"
+  ]}
+  correctAnswer={1}
+  explanation="Gamma (Γ) is the second derivative of option value with respect to spot price, or equivalently, the first derivative of delta. It measures how quickly delta changes as the underlying moves."
+/>
+
+## Numerical Greeks
+
+When analytical formulas aren't available, use numerical differentiation.
+
+```python
+class NumericalGreeks:
+    """
+    Calculate Greeks numerically using finite differences.
+
+    Useful for exotic options without analytical Greeks.
+    """
+
+    def __init__(self, pricer, base_params: Dict):
+        """
+        pricer: function that takes params dict and returns price
+        base_params: baseline parameters
+        """
+        self.pricer = pricer
+        self.base = base_params
+
+    def delta(self, bump: float = 0.01) -> float:
+        """
+        Δ ≈ (V(S+h) - V(S-h)) / (2h)
+
+        Central difference for better accuracy.
+        """
+        h = self.base['spot'] * bump
+        params_up = {**self.base, 'spot': self.base['spot'] + h}
+        params_down = {**self.base, 'spot': self.base['spot'] - h}
+
+        return (self.pricer(params_up) - self.pricer(params_down)) / (2 * h)
+
+    def gamma(self, bump: float = 0.01) -> float:
+        """
+        Γ ≈ (V(S+h) - 2V(S) + V(S-h)) / h²
+
+        Second derivative using central difference.
+        """
+        h = self.base['spot'] * bump
+        params_up = {**self.base, 'spot': self.base['spot'] + h}
+        params_down = {**self.base, 'spot': self.base['spot'] - h}
+
+        v_up = self.pricer(params_up)
+        v_base = self.pricer(self.base)
+        v_down = self.pricer(params_down)
+
+        return (v_up - 2 * v_base + v_down) / (h ** 2)
+
+    def vega(self, bump: float = 0.01) -> float:
+        """
+        ν ≈ (V(σ+h) - V(σ-h)) / (2h)
+
+        Per 1% volatility move.
+        """
+        h = bump  # Absolute bump in vol
+        params_up = {**self.base, 'volatility': self.base['volatility'] + h}
+        params_down = {**self.base, 'volatility': self.base['volatility'] - h}
+
+        return (self.pricer(params_up) - self.pricer(params_down)) / (2 * h) * 0.01
+
+    def theta(self, days: float = 1) -> float:
+        """
+        Θ ≈ (V(T-dt) - V(T)) / dt
+
+        Forward difference (time can only decrease).
+        """
+        dt = days / 365
+        params_later = {**self.base, 'time': self.base['time'] - dt}
+
+        return (self.pricer(params_later) - self.pricer(self.base)) / days
+
+    def all_greeks(self) -> Dict[str, float]:
+        """Calculate all numerical Greeks."""
+        return {
+            'delta': self.delta(),
+            'gamma': self.gamma(),
+            'vega': self.vega(),
+            'theta': self.theta()
+        }
+```
+
+## Quantum Greeks Calculation
+
+Quantum computing can parallelize Greeks calculations for large portfolios.
+
+```python
+class QuantumGreeksCalculator:
+    """
+    Quantum-enhanced Greeks calculation.
+
+    Quantum parallelism enables simultaneous evaluation
+    of multiple parameter shifts.
+    """
+
+    def __init__(self, num_qubits: int = 8):
+        self.num_qubits = num_qubits
+
+    def parallel_sensitivity_analysis(
+        self,
+        pricer,
+        base_params: Dict,
+        sensitivities: List[str]
+    ) -> Dict[str, float]:
+        """
+        Calculate multiple sensitivities in parallel.
+
+        Quantum advantage: evaluate 2^n parameter combinations
+        in single circuit execution.
+        """
+        results = {}
+        bump = 0.01
+
+        # In quantum version, all these would run in superposition
+        for sensitivity in sensitivities:
+            if sensitivity == 'delta':
+                h = base_params['spot'] * bump
+                up = {**base_params, 'spot': base_params['spot'] + h}
+                down = {**base_params, 'spot': base_params['spot'] - h}
+                results['delta'] = (pricer(up) - pricer(down)) / (2 * h)
+
+            elif sensitivity == 'gamma':
+                h = base_params['spot'] * bump
+                up = {**base_params, 'spot': base_params['spot'] + h}
+                down = {**base_params, 'spot': base_params['spot'] - h}
+                base = pricer(base_params)
+                results['gamma'] = (pricer(up) - 2*base + pricer(down)) / (h**2)
+
+            elif sensitivity == 'vega':
+                h = bump
+                up = {**base_params, 'volatility': base_params['volatility'] + h}
+                down = {**base_params, 'volatility': base_params['volatility'] - h}
+                results['vega'] = (pricer(up) - pricer(down)) / (2*h) * 0.01
+
+        return results
+
+    def scenario_greeks(
+        self,
+        portfolio_greeks_func,
+        spot_scenarios: np.ndarray,
+        vol_scenarios: np.ndarray
+    ) -> np.ndarray:
+        """
+        Calculate Greeks under multiple scenarios.
+
+        Matrix of (spots x vols) evaluated in parallel.
+        """
+        n_spots = len(spot_scenarios)
+        n_vols = len(vol_scenarios)
+
+        results = np.zeros((n_spots, n_vols, 5))  # 5 Greeks
+
+        for i, spot in enumerate(spot_scenarios):
+            for j, vol in enumerate(vol_scenarios):
+                greeks = portfolio_greeks_func(spot, vol)
+                results[i, j, :] = [
+                    greeks['delta'],
+                    greeks['gamma'],
+                    greeks['vega'],
+                    greeks['theta'],
+                    greeks['rho']
+                ]
+
+        return results
+```
+
+## Risk Reports
+
+Generate comprehensive risk reports for derivative portfolios.
+
+```python
+class RiskReporter:
+    """
+    Generate comprehensive risk reports.
+    """
+
+    def __init__(self, portfolio: PortfolioGreeks):
+        self.portfolio = portfolio
+
+    def summary_report(self, spot: float) -> Dict:
+        """Generate summary risk report."""
+        greeks = self.portfolio.portfolio_greeks()
+        dollar_greeks = self.portfolio.dollar_greeks(spot)
+
+        return {
+            'portfolio_value': self._portfolio_value(),
+            'greeks': greeks,
+            'dollar_greeks': dollar_greeks,
+            'risk_metrics': {
+                '1%_spot_move_pnl': dollar_greeks['delta_dollars'] * 0.01,
+                '1%_vol_move_pnl': dollar_greeks['vega_dollars'],
+                'daily_theta': dollar_greeks['theta_dollars'],
+                'gamma_1%_move': dollar_greeks['gamma_dollars']
+            }
+        }
+
+    def scenario_analysis(
+        self,
+        spot_changes: List[float],
+        vol_changes: List[float]
+    ) -> Dict:
+        """
+        P&L under different spot/vol scenarios.
+
+        Uses Greeks to approximate P&L:
+        ΔV ≈ δ*ΔS + ½γ*(ΔS)² + ν*Δσ + θ*Δt
+        """
+        greeks = self.portfolio.portfolio_greeks()
+        current_value = self._portfolio_value()
+
+        scenarios = []
+        for spot_chg in spot_changes:
+            for vol_chg in vol_changes:
+                # Taylor expansion approximation
+                delta_pnl = greeks['delta'] * spot_chg
+                gamma_pnl = 0.5 * greeks['gamma'] * spot_chg**2
+                vega_pnl = greeks['vega'] * (vol_chg / 0.01)  # vega per 1%
+
+                total_pnl = delta_pnl + gamma_pnl + vega_pnl
+
+                scenarios.append({
+                    'spot_change': spot_chg,
+                    'vol_change': vol_chg,
+                    'delta_pnl': delta_pnl,
+                    'gamma_pnl': gamma_pnl,
+                    'vega_pnl': vega_pnl,
+                    'total_pnl': total_pnl,
+                    'pnl_pct': total_pnl / current_value * 100 if current_value != 0 else 0
+                })
+
+        return {'scenarios': scenarios, 'current_value': current_value}
+
+    def _portfolio_value(self) -> float:
+        """Calculate current portfolio value."""
+        total = 0
+        for pos in self.portfolio.positions:
+            if pos.get('type') == 'stock':
+                total += pos['shares'] * pos['price']
+            else:
+                calc = GreeksCalculator(pos['params'])
+                price = self._option_price(pos['params'])
+                total += price * pos['quantity']
+        return total
+
+    def _option_price(self, params: OptionParams) -> float:
+        """Black-Scholes price."""
+        d1 = (np.log(params.spot / params.strike) +
+              (params.rate + 0.5 * params.volatility**2) * params.time) / \
+             (params.volatility * np.sqrt(params.time))
+        d2 = d1 - params.volatility * np.sqrt(params.time)
+
+        if params.is_call:
+            return params.spot * norm.cdf(d1) - \
+                   params.strike * np.exp(-params.rate * params.time) * norm.cdf(d2)
+        else:
+            return params.strike * np.exp(-params.rate * params.time) * norm.cdf(-d2) - \
+                   params.spot * norm.cdf(-d1)
+```
+
+## Summary
+
+Greeks provide essential risk metrics:
+
+**First-Order:**
+- **Delta (Δ)**: Price sensitivity to underlying
+- **Vega (ν)**: Volatility sensitivity
+- **Theta (Θ)**: Time decay
+- **Rho (ρ)**: Interest rate sensitivity
+
+**Second-Order:**
+- **Gamma (Γ)**: Delta's rate of change
+- **Vanna**: Cross-sensitivity (delta/vol)
+- **Volga/Vomma**: Vega's rate of change
+- **Charm**: Delta decay with time
+
+Applications:
+- Portfolio risk aggregation
+- Scenario analysis
+- Hedging decisions
+- Trading strategy design
+- Quantum-parallel computation

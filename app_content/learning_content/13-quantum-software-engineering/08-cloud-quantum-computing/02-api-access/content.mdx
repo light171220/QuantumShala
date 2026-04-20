@@ -1,0 +1,687 @@
+---
+title: "Quantum Cloud API Access and Authentication"
+description: "Master APIs and authentication for cloud quantum computing."
+duration: 55
+difficulty: "intermediate"
+---
+
+## 1. Authentication Architecture
+
+Secure access to quantum cloud services requires proper authentication and credential management.
+
+```
+Authentication Flow
+═══════════════════
+
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  Developer      │     │  Auth Service   │     │  Quantum API    │
+│  Application    │     │  (OAuth/IAM)    │     │  Gateway        │
+└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
+         │                       │                       │
+         │  1. Credentials       │                       │
+         │──────────────────────>│                       │
+         │                       │                       │
+         │  2. Access Token      │                       │
+         │<──────────────────────│                       │
+         │                       │                       │
+         │  3. API Request + Token                       │
+         │──────────────────────────────────────────────>│
+         │                       │                       │
+         │                       │  4. Validate Token    │
+         │                       │<──────────────────────│
+         │                       │                       │
+         │  5. Response                                  │
+         │<──────────────────────────────────────────────│
+```
+
+## 2. IBM Quantum Authentication
+
+IBM Quantum uses API tokens with the Qiskit Runtime Service.
+
+```python
+import os
+from dataclasses import dataclass
+from typing import Optional, Dict, List
+import json
+
+@dataclass
+class IBMQuantumCredentials:
+    """IBM Quantum authentication credentials."""
+    api_token: str
+    instance: str = "ibm-q/open/main"
+    channel: str = "ibm_quantum"
+    url: str = "https://auth.quantum-computing.ibm.com/api"
+
+class IBMQuantumAuth:
+    """Handle IBM Quantum authentication."""
+
+    CREDENTIALS_FILE = os.path.expanduser("~/.qiskit/qiskit-ibm.json")
+
+    def __init__(self):
+        self.credentials: Optional[IBMQuantumCredentials] = None
+        self._token_cache: Dict = {}
+
+    def save_account(self, token: str,
+                     instance: str = "ibm-q/open/main",
+                     overwrite: bool = False) -> None:
+        """Save IBM Quantum credentials to disk."""
+        creds = {
+            "token": token,
+            "instance": instance,
+            "channel": "ibm_quantum",
+            "url": "https://auth.quantum-computing.ibm.com/api"
+        }
+
+        cred_dir = os.path.dirname(self.CREDENTIALS_FILE)
+        if not os.path.exists(cred_dir):
+            os.makedirs(cred_dir, mode=0o700)
+
+        # Check for existing credentials
+        if os.path.exists(self.CREDENTIALS_FILE) and not overwrite:
+            raise ValueError("Credentials exist. Use overwrite=True.")
+
+        with open(self.CREDENTIALS_FILE, 'w') as f:
+            json.dump(creds, f, indent=2)
+        os.chmod(self.CREDENTIALS_FILE, 0o600)
+
+        print(f"Credentials saved to {self.CREDENTIALS_FILE}")
+
+    def load_account(self) -> IBMQuantumCredentials:
+        """Load credentials from disk or environment."""
+        # Priority 1: Environment variable
+        env_token = os.environ.get("IBM_QUANTUM_TOKEN")
+        if env_token:
+            return IBMQuantumCredentials(
+                api_token=env_token,
+                instance=os.environ.get("IBM_QUANTUM_INSTANCE", "ibm-q/open/main")
+            )
+
+        # Priority 2: Credentials file
+        if os.path.exists(self.CREDENTIALS_FILE):
+            with open(self.CREDENTIALS_FILE, 'r') as f:
+                data = json.load(f)
+            return IBMQuantumCredentials(
+                api_token=data["token"],
+                instance=data.get("instance", "ibm-q/open/main")
+            )
+
+        raise FileNotFoundError("No credentials found. Run save_account() first.")
+
+    def validate_token(self, token: str) -> bool:
+        """Validate API token format."""
+        # IBM tokens are typically 128 characters
+        if len(token) < 100:
+            return False
+        # Should contain alphanumeric and some special chars
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+        return all(c in allowed for c in token)
+
+    def get_auth_header(self) -> Dict[str, str]:
+        """Get authorization header for API requests."""
+        if not self.credentials:
+            self.credentials = self.load_account()
+        return {
+            "Authorization": f"Bearer {self.credentials.api_token}",
+            "Content-Type": "application/json"
+        }
+
+# Usage example
+ibm_auth = IBMQuantumAuth()
+# ibm_auth.save_account("your-api-token-here")
+print("IBM Quantum auth configured")
+```
+
+## 3. Amazon Braket Authentication
+
+Amazon Braket uses AWS IAM credentials.
+
+```python
+import os
+from pathlib import Path
+from configparser import ConfigParser
+
+@dataclass
+class AWSCredentials:
+    """AWS credentials for Braket access."""
+    access_key_id: str
+    secret_access_key: str
+    session_token: Optional[str] = None
+    region: str = "us-east-1"
+
+class BraketAuth:
+    """Handle Amazon Braket authentication via AWS."""
+
+    AWS_CREDENTIALS_FILE = Path.home() / ".aws" / "credentials"
+    AWS_CONFIG_FILE = Path.home() / ".aws" / "config"
+
+    def __init__(self, profile: str = "default"):
+        self.profile = profile
+        self.credentials: Optional[AWSCredentials] = None
+
+    def configure_credentials(self,
+                              access_key_id: str,
+                              secret_access_key: str,
+                              region: str = "us-east-1") -> None:
+        """Configure AWS credentials for Braket."""
+        # Create .aws directory if needed
+        aws_dir = Path.home() / ".aws"
+        aws_dir.mkdir(mode=0o700, exist_ok=True)
+
+        # Write credentials file
+        cred_config = ConfigParser()
+        if self.AWS_CREDENTIALS_FILE.exists():
+            cred_config.read(self.AWS_CREDENTIALS_FILE)
+
+        cred_config[self.profile] = {
+            "aws_access_key_id": access_key_id,
+            "aws_secret_access_key": secret_access_key
+        }
+
+        with open(self.AWS_CREDENTIALS_FILE, 'w') as f:
+            cred_config.write(f)
+        os.chmod(self.AWS_CREDENTIALS_FILE, 0o600)
+
+        # Write config file with region
+        config = ConfigParser()
+        if self.AWS_CONFIG_FILE.exists():
+            config.read(self.AWS_CONFIG_FILE)
+
+        profile_section = f"profile {self.profile}" if self.profile != "default" else "default"
+        config[profile_section] = {"region": region}
+
+        with open(self.AWS_CONFIG_FILE, 'w') as f:
+            config.write(f)
+
+        print(f"AWS credentials configured for profile: {self.profile}")
+
+    def load_credentials(self) -> AWSCredentials:
+        """Load AWS credentials."""
+        # Priority 1: Environment variables
+        if os.environ.get("AWS_ACCESS_KEY_ID"):
+            return AWSCredentials(
+                access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+                secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+                session_token=os.environ.get("AWS_SESSION_TOKEN"),
+                region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+            )
+
+        # Priority 2: Credentials file
+        if self.AWS_CREDENTIALS_FILE.exists():
+            cred_config = ConfigParser()
+            cred_config.read(self.AWS_CREDENTIALS_FILE)
+
+            if self.profile in cred_config:
+                section = cred_config[self.profile]
+                return AWSCredentials(
+                    access_key_id=section["aws_access_key_id"],
+                    secret_access_key=section["aws_secret_access_key"],
+                    session_token=section.get("aws_session_token"),
+                    region=self._get_region()
+                )
+
+        raise FileNotFoundError("No AWS credentials found")
+
+    def _get_region(self) -> str:
+        """Get AWS region from config."""
+        if self.AWS_CONFIG_FILE.exists():
+            config = ConfigParser()
+            config.read(self.AWS_CONFIG_FILE)
+            profile_section = f"profile {self.profile}" if self.profile != "default" else "default"
+            if profile_section in config:
+                return config[profile_section].get("region", "us-east-1")
+        return "us-east-1"
+
+    def get_boto3_session(self):
+        """Create boto3 session for Braket."""
+        # This would use real boto3 in production
+        creds = self.load_credentials()
+        return {
+            "region_name": creds.region,
+            "aws_access_key_id": creds.access_key_id,
+            "aws_secret_access_key": creds.secret_access_key
+        }
+
+braket_auth = BraketAuth()
+print("Braket auth module loaded")
+```
+
+## 4. Google Cloud Authentication
+
+Google Quantum AI uses Google Cloud Platform authentication.
+
+```python
+import json
+from pathlib import Path
+
+@dataclass
+class GoogleCloudCredentials:
+    """Google Cloud credentials for Quantum AI."""
+    project_id: str
+    client_email: str
+    private_key: str
+    token_uri: str = "https://oauth2.googleapis.com/token"
+
+class GoogleQuantumAuth:
+    """Handle Google Quantum AI authentication."""
+
+    def __init__(self, project_id: Optional[str] = None):
+        self.project_id = project_id
+        self.credentials: Optional[GoogleCloudCredentials] = None
+
+    def load_service_account(self, key_file: str) -> GoogleCloudCredentials:
+        """Load service account credentials from JSON key file."""
+        with open(key_file, 'r') as f:
+            data = json.load(f)
+
+        return GoogleCloudCredentials(
+            project_id=data["project_id"],
+            client_email=data["client_email"],
+            private_key=data["private_key"],
+            token_uri=data.get("token_uri", "https://oauth2.googleapis.com/token")
+        )
+
+    def load_application_default(self) -> Dict:
+        """Load application default credentials."""
+        # Check for GOOGLE_APPLICATION_CREDENTIALS env var
+        cred_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if cred_file and os.path.exists(cred_file):
+            with open(cred_file, 'r') as f:
+                return json.load(f)
+
+        # Check default location
+        default_path = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+        if default_path.exists():
+            with open(default_path, 'r') as f:
+                return json.load(f)
+
+        raise FileNotFoundError(
+            "No credentials found. Run 'gcloud auth application-default login'"
+        )
+
+    def get_quantum_engine_client(self):
+        """Initialize Cirq Engine client."""
+        # In production, this would return cirq_google.Engine
+        return {
+            "project_id": self.project_id or os.environ.get("GOOGLE_CLOUD_PROJECT"),
+            "authenticated": True
+        }
+
+google_auth = GoogleQuantumAuth()
+print("Google Quantum auth module loaded")
+```
+
+## 5. Unified API Client
+
+Create a unified interface for multiple providers.
+
+```python
+from abc import ABC, abstractmethod
+from enum import Enum
+import time
+
+class Provider(Enum):
+    IBM = "ibm"
+    BRAKET = "braket"
+    GOOGLE = "google"
+    AZURE = "azure"
+
+class RateLimiter:
+    """Handle API rate limiting."""
+
+    def __init__(self, requests_per_minute: int = 60):
+        self.requests_per_minute = requests_per_minute
+        self.request_times: List[float] = []
+
+    def wait_if_needed(self) -> None:
+        """Block if rate limit would be exceeded."""
+        now = time.time()
+        minute_ago = now - 60
+
+        # Remove old requests
+        self.request_times = [t for t in self.request_times if t > minute_ago]
+
+        if len(self.request_times) >= self.requests_per_minute:
+            # Wait until oldest request expires
+            sleep_time = self.request_times[0] - minute_ago + 0.1
+            print(f"Rate limit reached. Waiting {sleep_time:.1f}s")
+            time.sleep(sleep_time)
+
+        self.request_times.append(now)
+
+class QuantumAPIClient(ABC):
+    """Abstract base class for quantum API clients."""
+
+    def __init__(self):
+        self.rate_limiter = RateLimiter()
+        self._authenticated = False
+
+    @abstractmethod
+    def authenticate(self) -> bool:
+        """Authenticate with the provider."""
+        pass
+
+    @abstractmethod
+    def list_backends(self) -> List[Dict]:
+        """List available backends."""
+        pass
+
+    @abstractmethod
+    def submit_circuit(self, circuit: Dict, backend: str, shots: int) -> str:
+        """Submit a circuit and return job ID."""
+        pass
+
+    @abstractmethod
+    def get_job_status(self, job_id: str) -> Dict:
+        """Get status of a submitted job."""
+        pass
+
+    def _make_request(self, method: str, url: str,
+                      data: Optional[Dict] = None) -> Dict:
+        """Make authenticated API request with rate limiting."""
+        self.rate_limiter.wait_if_needed()
+
+        # Simulated request (would use requests library)
+        return {
+            "status": "success",
+            "method": method,
+            "url": url,
+            "data": data
+        }
+
+class IBMQuantumClient(QuantumAPIClient):
+    """IBM Quantum API client."""
+
+    BASE_URL = "https://api.quantum-computing.ibm.com"
+
+    def __init__(self):
+        super().__init__()
+        self.auth = IBMQuantumAuth()
+
+    def authenticate(self) -> bool:
+        """Authenticate with IBM Quantum."""
+        try:
+            self.auth.credentials = self.auth.load_account()
+            self._authenticated = True
+            return True
+        except Exception as e:
+            print(f"Authentication failed: {e}")
+            return False
+
+    def list_backends(self) -> List[Dict]:
+        """List IBM Quantum backends."""
+        response = self._make_request(
+            "GET",
+            f"{self.BASE_URL}/v1/backends"
+        )
+        # Simulated response
+        return [
+            {"name": "ibm_brisbane", "qubits": 127, "status": "online"},
+            {"name": "ibm_osaka", "qubits": 127, "status": "online"},
+            {"name": "ibm_kyoto", "qubits": 127, "status": "maintenance"}
+        ]
+
+    def submit_circuit(self, circuit: Dict, backend: str, shots: int) -> str:
+        """Submit circuit to IBM Quantum."""
+        response = self._make_request(
+            "POST",
+            f"{self.BASE_URL}/v1/jobs",
+            data={
+                "backend": backend,
+                "circuit": circuit,
+                "shots": shots
+            }
+        )
+        return f"ibm_job_{int(time.time())}"
+
+    def get_job_status(self, job_id: str) -> Dict:
+        """Get IBM Quantum job status."""
+        return {
+            "job_id": job_id,
+            "status": "QUEUED",
+            "position": 5,
+            "estimated_start": "2025-01-15T10:30:00Z"
+        }
+
+class BraketClient(QuantumAPIClient):
+    """Amazon Braket API client."""
+
+    def __init__(self, region: str = "us-east-1"):
+        super().__init__()
+        self.region = region
+        self.auth = BraketAuth()
+
+    def authenticate(self) -> bool:
+        """Authenticate with AWS for Braket."""
+        try:
+            self.auth.load_credentials()
+            self._authenticated = True
+            return True
+        except Exception as e:
+            print(f"Authentication failed: {e}")
+            return False
+
+    def list_backends(self) -> List[Dict]:
+        """List Braket devices."""
+        return [
+            {"arn": "arn:aws:braket:::device/qpu/ionq/Aria-1",
+             "name": "IonQ Aria", "qubits": 25, "status": "AVAILABLE"},
+            {"arn": "arn:aws:braket:::device/qpu/rigetti/Aspen-M-3",
+             "name": "Rigetti Aspen-M-3", "qubits": 80, "status": "AVAILABLE"},
+            {"arn": "arn:aws:braket:::device/qpu/quera/Aquila",
+             "name": "QuEra Aquila", "qubits": 256, "status": "AVAILABLE"}
+        ]
+
+    def submit_circuit(self, circuit: Dict, backend: str, shots: int) -> str:
+        """Submit circuit to Braket."""
+        return f"arn:aws:braket:task/{int(time.time())}"
+
+    def get_job_status(self, job_id: str) -> Dict:
+        """Get Braket task status."""
+        return {
+            "task_arn": job_id,
+            "status": "QUEUED",
+            "device": "ionq/Aria-1"
+        }
+
+# Usage
+ibm_client = IBMQuantumClient()
+print("\nUnified API clients ready")
+```
+
+## 6. Secure Credential Management
+
+Best practices for managing quantum API credentials.
+
+```python
+import hashlib
+import base64
+from typing import Any
+
+class SecureCredentialManager:
+    """Secure credential storage and retrieval."""
+
+    def __init__(self, master_key: Optional[str] = None):
+        self.master_key = master_key or os.environ.get("QC_MASTER_KEY")
+        self._credential_store: Dict[str, Dict] = {}
+
+    def _derive_key(self, salt: bytes) -> bytes:
+        """Derive encryption key from master key."""
+        if not self.master_key:
+            raise ValueError("Master key not set")
+        return hashlib.pbkdf2_hmac(
+            'sha256',
+            self.master_key.encode(),
+            salt,
+            100000
+        )
+
+    def store_credential(self, provider: str, credential: Dict) -> None:
+        """Store credential securely."""
+        # In production, use proper encryption (e.g., Fernet)
+        # This is a simplified example
+        encoded = base64.b64encode(
+            json.dumps(credential).encode()
+        ).decode()
+        self._credential_store[provider] = {
+            "data": encoded,
+            "timestamp": time.time()
+        }
+
+    def retrieve_credential(self, provider: str) -> Dict:
+        """Retrieve stored credential."""
+        if provider not in self._credential_store:
+            raise KeyError(f"No credential for {provider}")
+
+        encoded = self._credential_store[provider]["data"]
+        return json.loads(base64.b64decode(encoded).decode())
+
+    def rotate_credential(self, provider: str, new_credential: Dict) -> None:
+        """Rotate credential to new value."""
+        old_timestamp = self._credential_store.get(provider, {}).get("timestamp")
+        self.store_credential(provider, new_credential)
+        print(f"Credential rotated for {provider}")
+        if old_timestamp:
+            print(f"Previous credential was from {time.ctime(old_timestamp)}")
+
+    def list_providers(self) -> List[str]:
+        """List providers with stored credentials."""
+        return list(self._credential_store.keys())
+
+class EnvironmentCredentials:
+    """Load credentials from environment variables."""
+
+    PROVIDER_ENV_VARS = {
+        Provider.IBM: {
+            "token": "IBM_QUANTUM_TOKEN",
+            "instance": "IBM_QUANTUM_INSTANCE"
+        },
+        Provider.BRAKET: {
+            "access_key": "AWS_ACCESS_KEY_ID",
+            "secret_key": "AWS_SECRET_ACCESS_KEY",
+            "region": "AWS_DEFAULT_REGION"
+        },
+        Provider.GOOGLE: {
+            "credentials_file": "GOOGLE_APPLICATION_CREDENTIALS",
+            "project": "GOOGLE_CLOUD_PROJECT"
+        },
+        Provider.AZURE: {
+            "subscription": "AZURE_SUBSCRIPTION_ID",
+            "resource_group": "AZURE_RESOURCE_GROUP"
+        }
+    }
+
+    @classmethod
+    def get_credentials(cls, provider: Provider) -> Dict[str, Any]:
+        """Get credentials from environment for provider."""
+        env_vars = cls.PROVIDER_ENV_VARS.get(provider, {})
+        credentials = {}
+
+        for key, env_var in env_vars.items():
+            value = os.environ.get(env_var)
+            if value:
+                credentials[key] = value
+
+        return credentials
+
+    @classmethod
+    def validate_environment(cls, provider: Provider) -> bool:
+        """Check if required environment variables are set."""
+        env_vars = cls.PROVIDER_ENV_VARS.get(provider, {})
+        required = ["token", "access_key", "credentials_file", "subscription"]
+
+        for key, env_var in env_vars.items():
+            if key in required and not os.environ.get(env_var):
+                return False
+        return True
+
+# Example usage
+cred_manager = SecureCredentialManager()
+print("\nSecure credential management ready")
+```
+
+## 7. Error Handling and Retries
+
+```python
+from functools import wraps
+import random
+
+class QuantumAPIError(Exception):
+    """Base exception for quantum API errors."""
+    pass
+
+class AuthenticationError(QuantumAPIError):
+    """Authentication failed."""
+    pass
+
+class RateLimitError(QuantumAPIError):
+    """Rate limit exceeded."""
+    def __init__(self, retry_after: int = 60):
+        self.retry_after = retry_after
+        super().__init__(f"Rate limit exceeded. Retry after {retry_after}s")
+
+class BackendUnavailableError(QuantumAPIError):
+    """Backend is not available."""
+    pass
+
+def retry_with_backoff(max_retries: int = 3,
+                       base_delay: float = 1.0,
+                       max_delay: float = 60.0):
+    """Decorator for retrying failed API calls with exponential backoff."""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+
+                except RateLimitError as e:
+                    delay = e.retry_after
+                    print(f"Rate limited. Waiting {delay}s...")
+                    time.sleep(delay)
+                    last_exception = e
+
+                except (ConnectionError, TimeoutError) as e:
+                    if attempt == max_retries:
+                        raise
+
+                    delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1),
+                               max_delay)
+                    print(f"Attempt {attempt + 1} failed. Retrying in {delay:.1f}s...")
+                    time.sleep(delay)
+                    last_exception = e
+
+                except AuthenticationError:
+                    # Don't retry auth errors
+                    raise
+
+            raise last_exception
+
+        return wrapper
+    return decorator
+
+# Example with retry decorator
+@retry_with_backoff(max_retries=3)
+def submit_job_with_retry(client: QuantumAPIClient,
+                          circuit: Dict,
+                          backend: str,
+                          shots: int) -> str:
+    """Submit job with automatic retry on failure."""
+    return client.submit_circuit(circuit, backend, shots)
+
+print("\nError handling utilities ready")
+```
+
+## Summary
+
+Effective API access requires:
+
+1. **Authentication**: Proper credential setup per provider
+2. **Unified Interface**: Abstract client for multi-provider support
+3. **Security**: Encrypted credential storage, environment variables
+4. **Rate Limiting**: Respect API limits to avoid throttling
+5. **Error Handling**: Retry logic with exponential backoff
+
+Always store credentials securely and never commit them to version control.

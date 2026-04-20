@@ -1,0 +1,640 @@
+---
+title: "Feature Engineering for Fraud Detection"
+description: "Designing and engineering features that capture fraud patterns for classical and quantum models."
+---
+
+# Feature Engineering for Fraud Detection
+
+Effective fraud detection depends heavily on feature engineering. This lesson covers techniques for creating discriminative features from transaction data, applicable to both classical and quantum models.
+
+## Transaction-Level Features
+
+<Definition term="Transaction Features">
+Attributes derived directly from individual transactions, including amount characteristics, merchant information, timing, and payment method details.
+</Definition>
+
+### Basic Transaction Features
+
+```python
+import numpy as np
+from typing import Dict, List, Any, Optional
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from collections import defaultdict
+
+
+@dataclass
+class Transaction:
+    """Raw transaction data."""
+    transaction_id: str
+    customer_id: str
+    amount: float
+    merchant_id: str
+    merchant_category: str
+    timestamp: datetime
+    card_present: bool
+    is_international: bool
+    entry_mode: str  # 'chip', 'swipe', 'manual', 'online'
+    location_lat: float
+    location_lon: float
+
+
+class TransactionFeatureExtractor:
+    """
+    Extract features from individual transactions.
+    """
+
+    def __init__(self):
+        self.category_encoding = {}
+        self.entry_mode_encoding = {
+            'chip': 0, 'swipe': 1, 'manual': 2, 'online': 3
+        }
+
+    def extract_basic_features(self, txn: Transaction) -> Dict[str, float]:
+        """Extract basic transaction features."""
+        return {
+            # Amount features
+            'amount': txn.amount,
+            'log_amount': np.log1p(txn.amount),
+            'amount_cents': txn.amount % 1,  # Fractional part
+            'is_round_amount': float(txn.amount % 10 == 0),
+
+            # Timing features
+            'hour': txn.timestamp.hour,
+            'day_of_week': txn.timestamp.weekday(),
+            'is_weekend': float(txn.timestamp.weekday() >= 5),
+            'is_night': float(txn.timestamp.hour < 6 or txn.timestamp.hour > 22),
+
+            # Card presence
+            'card_present': float(txn.card_present),
+            'is_international': float(txn.is_international),
+            'entry_mode': self.entry_mode_encoding.get(txn.entry_mode, 3),
+        }
+
+    def extract_merchant_features(self, txn: Transaction) -> Dict[str, float]:
+        """Extract merchant-related features."""
+        # High-risk merchant categories
+        high_risk_categories = {
+            'gambling', 'wire_transfer', 'cryptocurrency',
+            'money_order', 'adult_entertainment'
+        }
+
+        return {
+            'is_high_risk_merchant': float(txn.merchant_category in high_risk_categories),
+            'merchant_category_encoded': self._encode_category(txn.merchant_category),
+        }
+
+    def _encode_category(self, category: str) -> float:
+        """Encode merchant category."""
+        if category not in self.category_encoding:
+            self.category_encoding[category] = len(self.category_encoding)
+        return self.category_encoding[category] / max(1, len(self.category_encoding))
+
+    def extract_all(self, txn: Transaction) -> Dict[str, float]:
+        """Extract all transaction features."""
+        features = {}
+        features.update(self.extract_basic_features(txn))
+        features.update(self.extract_merchant_features(txn))
+        return features
+```
+
+## Behavioral Features
+
+<Tip>
+Behavioral features capture how a customer typically transacts. Deviations from normal patterns are strong fraud indicators.
+</Tip>
+
+### Customer Profile Features
+
+```python
+class CustomerBehaviorProfile:
+    """
+    Track and compare customer behavior patterns.
+    """
+
+    def __init__(self, lookback_days: int = 30):
+        self.lookback_days = lookback_days
+        self.customer_history: Dict[str, List[Transaction]] = defaultdict(list)
+
+    def update(self, txn: Transaction):
+        """Add transaction to customer history."""
+        self.customer_history[txn.customer_id].append(txn)
+
+        # Keep only recent history
+        cutoff = txn.timestamp - timedelta(days=self.lookback_days)
+        self.customer_history[txn.customer_id] = [
+            t for t in self.customer_history[txn.customer_id]
+            if t.timestamp > cutoff
+        ]
+
+    def get_behavioral_features(self, txn: Transaction) -> Dict[str, float]:
+        """
+        Extract features comparing transaction to customer's history.
+        """
+        history = self.customer_history.get(txn.customer_id, [])
+
+        if len(history) < 5:
+            return self._get_default_features()
+
+        # Amount analysis
+        amounts = [t.amount for t in history]
+        mean_amount = np.mean(amounts)
+        std_amount = np.std(amounts) + 1e-8
+
+        amount_zscore = (txn.amount - mean_amount) / std_amount
+        amount_percentile = np.searchsorted(sorted(amounts), txn.amount) / len(amounts)
+
+        # Timing analysis
+        hours = [t.timestamp.hour for t in history]
+        hour_freq = hours.count(txn.timestamp.hour) / len(hours)
+
+        # Location analysis
+        if history:
+            last_txn = max(history, key=lambda t: t.timestamp)
+            distance = self._haversine_distance(
+                txn.location_lat, txn.location_lon,
+                last_txn.location_lat, last_txn.location_lon
+            )
+            time_diff = (txn.timestamp - last_txn.timestamp).total_seconds() / 3600
+            velocity = distance / max(time_diff, 0.01)  # km/h
+        else:
+            distance = 0
+            velocity = 0
+
+        # Category analysis
+        categories = [t.merchant_category for t in history]
+        category_freq = categories.count(txn.merchant_category) / len(categories)
+        is_new_category = float(txn.merchant_category not in categories)
+
+        return {
+            'amount_zscore': amount_zscore,
+            'amount_percentile': amount_percentile,
+            'amount_vs_mean_ratio': txn.amount / (mean_amount + 1e-8),
+            'hour_frequency': hour_freq,
+            'is_unusual_hour': float(hour_freq < 0.05),
+            'distance_from_last': distance,
+            'velocity': velocity,
+            'is_impossible_travel': float(velocity > 500),  # > 500 km/h
+            'category_frequency': category_freq,
+            'is_new_category': is_new_category,
+            'transaction_count_30d': len(history),
+        }
+
+    def _get_default_features(self) -> Dict[str, float]:
+        """Default features for new customers."""
+        return {
+            'amount_zscore': 0,
+            'amount_percentile': 0.5,
+            'amount_vs_mean_ratio': 1,
+            'hour_frequency': 0.1,
+            'is_unusual_hour': 0,
+            'distance_from_last': 0,
+            'velocity': 0,
+            'is_impossible_travel': 0,
+            'category_frequency': 0,
+            'is_new_category': 1,
+            'transaction_count_30d': 0,
+        }
+
+    def _haversine_distance(
+        self,
+        lat1: float, lon1: float,
+        lat2: float, lon2: float
+    ) -> float:
+        """Calculate distance between two points in km."""
+        R = 6371  # Earth radius in km
+
+        lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+
+        a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
+        c = 2 * np.arcsin(np.sqrt(a))
+
+        return R * c
+```
+
+## Velocity Features
+
+<Definition term="Velocity Features">
+Features that measure the rate of transactions or spending over various time windows, detecting unusual bursts of activity.
+</Definition>
+
+### Transaction Velocity Calculator
+
+```python
+class VelocityFeatureCalculator:
+    """
+    Calculate transaction velocity features.
+    """
+
+    def __init__(self):
+        self.time_windows = {
+            '1h': timedelta(hours=1),
+            '6h': timedelta(hours=6),
+            '24h': timedelta(hours=24),
+            '7d': timedelta(days=7),
+        }
+        self.transaction_cache: Dict[str, List[Transaction]] = defaultdict(list)
+
+    def update(self, txn: Transaction):
+        """Add transaction to velocity cache."""
+        self.transaction_cache[txn.customer_id].append(txn)
+
+        # Clean old transactions
+        cutoff = txn.timestamp - timedelta(days=30)
+        self.transaction_cache[txn.customer_id] = [
+            t for t in self.transaction_cache[txn.customer_id]
+            if t.timestamp > cutoff
+        ]
+
+    def get_velocity_features(self, txn: Transaction) -> Dict[str, float]:
+        """Calculate velocity features for a transaction."""
+        history = self.transaction_cache.get(txn.customer_id, [])
+
+        features = {}
+
+        for window_name, window_delta in self.time_windows.items():
+            cutoff = txn.timestamp - window_delta
+
+            # Count transactions in window
+            recent_txns = [t for t in history if t.timestamp > cutoff]
+            count = len(recent_txns)
+            total_amount = sum(t.amount for t in recent_txns)
+
+            features[f'txn_count_{window_name}'] = count
+            features[f'total_amount_{window_name}'] = total_amount
+            features[f'avg_amount_{window_name}'] = total_amount / max(count, 1)
+
+            # Unique merchants
+            unique_merchants = len(set(t.merchant_id for t in recent_txns))
+            features[f'unique_merchants_{window_name}'] = unique_merchants
+
+            # Unique countries (if international)
+            # For simplicity, using is_international as proxy
+            intl_count = sum(1 for t in recent_txns if t.is_international)
+            features[f'intl_count_{window_name}'] = intl_count
+
+        # Acceleration features (change in velocity)
+        if 'txn_count_1h' in features and 'txn_count_6h' in features:
+            recent_rate = features['txn_count_1h']
+            avg_rate = features['txn_count_6h'] / 6
+            features['velocity_acceleration'] = recent_rate - avg_rate
+
+        return features
+
+
+class AmountVelocityAnalyzer:
+    """
+    Analyze spending velocity patterns.
+    """
+
+    def __init__(self):
+        self.customer_limits: Dict[str, Dict] = {}
+
+    def learn_limits(self, customer_id: str, history: List[Transaction]):
+        """Learn customer's typical spending limits."""
+        if len(history) < 10:
+            return
+
+        amounts_24h = []
+        amounts_7d = []
+
+        # Calculate rolling sums
+        history = sorted(history, key=lambda t: t.timestamp)
+
+        for i, txn in enumerate(history):
+            # 24h sum
+            sum_24h = sum(
+                t.amount for t in history[:i+1]
+                if t.timestamp > txn.timestamp - timedelta(hours=24)
+            )
+            amounts_24h.append(sum_24h)
+
+            # 7d sum
+            sum_7d = sum(
+                t.amount for t in history[:i+1]
+                if t.timestamp > txn.timestamp - timedelta(days=7)
+            )
+            amounts_7d.append(sum_7d)
+
+        self.customer_limits[customer_id] = {
+            'max_24h': max(amounts_24h) if amounts_24h else 1000,
+            'p95_24h': np.percentile(amounts_24h, 95) if amounts_24h else 500,
+            'max_7d': max(amounts_7d) if amounts_7d else 5000,
+            'p95_7d': np.percentile(amounts_7d, 95) if amounts_7d else 2500,
+        }
+
+    def get_limit_features(
+        self,
+        customer_id: str,
+        amount_24h: float,
+        amount_7d: float
+    ) -> Dict[str, float]:
+        """Compare current spending to limits."""
+        limits = self.customer_limits.get(customer_id, {
+            'max_24h': 1000, 'p95_24h': 500,
+            'max_7d': 5000, 'p95_7d': 2500
+        })
+
+        return {
+            'pct_of_max_24h': amount_24h / (limits['max_24h'] + 1),
+            'pct_of_p95_24h': amount_24h / (limits['p95_24h'] + 1),
+            'exceeds_max_24h': float(amount_24h > limits['max_24h']),
+            'exceeds_p95_24h': float(amount_24h > limits['p95_24h']),
+            'pct_of_max_7d': amount_7d / (limits['max_7d'] + 1),
+            'exceeds_max_7d': float(amount_7d > limits['max_7d']),
+        }
+```
+
+## Network-Based Features
+
+<Warning>
+Network features can reveal fraud rings but require careful privacy handling. Only compute on aggregated, anonymized data.
+</Warning>
+
+### Fraud Network Analysis
+
+```python
+class NetworkFeatureExtractor:
+    """
+    Extract features from transaction network patterns.
+    """
+
+    def __init__(self):
+        self.merchant_stats: Dict[str, Dict] = {}
+        self.card_merchant_graph: Dict[str, set] = defaultdict(set)
+
+    def update_merchant_stats(self, txn: Transaction, is_fraud: bool = False):
+        """Update merchant statistics."""
+        mid = txn.merchant_id
+
+        if mid not in self.merchant_stats:
+            self.merchant_stats[mid] = {
+                'total_txns': 0,
+                'fraud_txns': 0,
+                'total_amount': 0,
+                'unique_customers': set()
+            }
+
+        self.merchant_stats[mid]['total_txns'] += 1
+        self.merchant_stats[mid]['total_amount'] += txn.amount
+        self.merchant_stats[mid]['unique_customers'].add(txn.customer_id)
+
+        if is_fraud:
+            self.merchant_stats[mid]['fraud_txns'] += 1
+
+        # Update card-merchant graph
+        self.card_merchant_graph[txn.customer_id].add(mid)
+
+    def get_merchant_features(self, txn: Transaction) -> Dict[str, float]:
+        """Get merchant-level risk features."""
+        mid = txn.merchant_id
+        stats = self.merchant_stats.get(mid, {
+            'total_txns': 1,
+            'fraud_txns': 0,
+            'total_amount': txn.amount,
+            'unique_customers': {txn.customer_id}
+        })
+
+        total_txns = stats['total_txns']
+        fraud_rate = stats['fraud_txns'] / max(total_txns, 1)
+        avg_amount = stats['total_amount'] / max(total_txns, 1)
+
+        return {
+            'merchant_fraud_rate': fraud_rate,
+            'merchant_txn_count': total_txns,
+            'merchant_avg_amount': avg_amount,
+            'amount_vs_merchant_avg': txn.amount / (avg_amount + 1),
+            'merchant_unique_customers': len(stats['unique_customers']),
+            'is_new_merchant': float(total_txns <= 1),
+            'is_high_risk_merchant': float(fraud_rate > 0.05),
+        }
+
+    def get_network_features(self, txn: Transaction) -> Dict[str, float]:
+        """Get network-based features."""
+        customer_merchants = self.card_merchant_graph.get(txn.customer_id, set())
+
+        # Find merchants shared with other high-risk cards
+        # This is simplified - real implementation would be more sophisticated
+        shared_count = 0
+        for other_customer, other_merchants in self.card_merchant_graph.items():
+            if other_customer != txn.customer_id:
+                overlap = len(customer_merchants & other_merchants)
+                if overlap >= 3:  # Significant overlap
+                    shared_count += 1
+
+        return {
+            'customer_merchant_count': len(customer_merchants),
+            'shared_merchant_connections': min(shared_count, 100) / 100,
+        }
+```
+
+## Quantum Feature Encoding
+
+<Formula>
+Encoded Feature = (normalized_value) × π for rotation angle encoding
+</Formula>
+
+### Preparing Features for Quantum Circuits
+
+```python
+class QuantumFeaturePreparator:
+    """
+    Prepare engineered features for quantum encoding.
+    """
+
+    def __init__(self, n_qubits: int = 8):
+        self.n_qubits = n_qubits
+        self.feature_ranges: Dict[str, tuple] = {}
+        self.selected_features: List[str] = []
+
+    def fit(self, feature_matrix: np.ndarray, feature_names: List[str]):
+        """Learn feature ranges for normalization."""
+        for i, name in enumerate(feature_names):
+            self.feature_ranges[name] = (
+                np.min(feature_matrix[:, i]),
+                np.max(feature_matrix[:, i])
+            )
+
+    def select_features(
+        self,
+        feature_importance: Dict[str, float],
+        n_features: int = None
+    ):
+        """Select top features for quantum encoding."""
+        n_features = n_features or self.n_qubits
+
+        sorted_features = sorted(
+            feature_importance.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        self.selected_features = [f[0] for f in sorted_features[:n_features]]
+
+    def encode_for_quantum(
+        self,
+        features: Dict[str, float]
+    ) -> np.ndarray:
+        """
+        Encode features for quantum circuit input.
+
+        Normalizes to [0, π] for rotation angles.
+        """
+        encoded = np.zeros(self.n_qubits)
+
+        for i, fname in enumerate(self.selected_features[:self.n_qubits]):
+            if fname not in features:
+                continue
+
+            value = features[fname]
+
+            # Get range
+            min_val, max_val = self.feature_ranges.get(fname, (0, 1))
+            range_val = max_val - min_val + 1e-8
+
+            # Normalize to [0, 1]
+            normalized = np.clip((value - min_val) / range_val, 0, 1)
+
+            # Scale to [0, π]
+            encoded[i] = normalized * np.pi
+
+        return encoded
+
+    def create_entanglement_features(
+        self,
+        features: Dict[str, float]
+    ) -> np.ndarray:
+        """
+        Create feature products for IQP-style encoding.
+        """
+        base_encoded = self.encode_for_quantum(features)
+
+        # Add pairwise products for first few features
+        products = []
+        for i in range(min(3, len(base_encoded))):
+            for j in range(i+1, min(4, len(base_encoded))):
+                products.append(base_encoded[i] * base_encoded[j] / np.pi)
+
+        return np.concatenate([base_encoded, np.array(products)])
+
+
+# Example usage
+np.random.seed(42)
+
+# Sample feature data
+feature_names = ['amount_zscore', 'velocity', 'is_international', 'hour', 'distance']
+n_samples = 100
+
+feature_matrix = np.random.randn(n_samples, len(feature_names))
+
+# Prepare for quantum encoding
+preparator = QuantumFeaturePreparator(n_qubits=6)
+preparator.fit(feature_matrix, feature_names)
+
+# Mock feature importance
+importance = {
+    'amount_zscore': 0.3,
+    'velocity': 0.25,
+    'is_international': 0.2,
+    'hour': 0.15,
+    'distance': 0.1
+}
+preparator.select_features(importance)
+
+# Encode sample
+sample_features = {
+    'amount_zscore': 2.5,
+    'velocity': 100,
+    'is_international': 1,
+    'hour': 3,
+    'distance': 500
+}
+
+encoded = preparator.encode_for_quantum(sample_features)
+print(f"Encoded features: {encoded}")
+print(f"Range: [{encoded.min():.3f}, {encoded.max():.3f}]")
+```
+
+## Feature Selection
+
+```python
+class FeatureSelector:
+    """
+    Select optimal features for fraud detection.
+    """
+
+    def __init__(self, n_features: int = 10):
+        self.n_features = n_features
+        self.selected_features = []
+        self.feature_scores = {}
+
+    def calculate_importance(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        feature_names: List[str]
+    ) -> Dict[str, float]:
+        """
+        Calculate feature importance using various methods.
+        """
+        importance = {}
+
+        for i, name in enumerate(feature_names):
+            feature_values = X[:, i]
+
+            # Method 1: Correlation with target
+            correlation = np.abs(np.corrcoef(feature_values, y)[0, 1])
+
+            # Method 2: Class separation (difference of means normalized by std)
+            fraud_mean = feature_values[y == 1].mean() if (y == 1).any() else 0
+            normal_mean = feature_values[y == 0].mean() if (y == 0).any() else 0
+            overall_std = feature_values.std() + 1e-8
+            separation = abs(fraud_mean - normal_mean) / overall_std
+
+            # Combined score
+            importance[name] = 0.5 * correlation + 0.5 * separation
+
+        self.feature_scores = importance
+        return importance
+
+    def select_features(
+        self,
+        importance: Dict[str, float]
+    ) -> List[str]:
+        """Select top n features."""
+        sorted_features = sorted(
+            importance.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        self.selected_features = [f[0] for f in sorted_features[:self.n_features]]
+        return self.selected_features
+
+    def transform(
+        self,
+        X: np.ndarray,
+        feature_names: List[str]
+    ) -> np.ndarray:
+        """Transform to selected features only."""
+        selected_indices = [
+            feature_names.index(f) for f in self.selected_features
+            if f in feature_names
+        ]
+
+        return X[:, selected_indices]
+```
+
+## Key Takeaways
+
+1. **Multi-Level Features**: Combine transaction, behavioral, velocity, and network features
+2. **Customer Profiling**: Compare transactions to individual customer patterns
+3. **Velocity Analysis**: Track transaction rates across multiple time windows
+4. **Network Signals**: Merchant and card relationships reveal fraud rings
+5. **Quantum Encoding**: Normalize features to rotation angle ranges
+6. **Feature Selection**: Choose features that maximize class separation
+
+Effective feature engineering is often more impactful than model choice. Design features that capture the specific fraud patterns relevant to your domain.

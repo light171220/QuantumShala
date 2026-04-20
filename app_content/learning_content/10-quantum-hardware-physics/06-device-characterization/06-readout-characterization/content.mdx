@@ -1,0 +1,342 @@
+---
+title: "Readout Characterization: Assignment Fidelity and Confusion Matrices"
+description: "Learn to characterize quantum measurement systems including assignment fidelity and confusion matrices."
+duration: 45
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Define and measure single-shot readout fidelity
+- Construct and interpret confusion matrices for multi-level systems
+- Optimize readout parameters for maximum assignment fidelity
+- Verify QND (quantum non-demolition) measurement properties
+- Implement readout error mitigation techniques
+
+## 1. Introduction to Readout Characterization
+
+Accurate state measurement is essential for quantum computing. Readout errors directly impact all experimental results and must be carefully characterized.
+
+<Definition term="Assignment Fidelity">
+Assignment fidelity is the probability of correctly identifying the qubit state. For a two-level system: F_assignment = (P(0|0) + P(1|1))/2, where P(m|n) is the probability of measuring outcome m given the qubit is in state n.
+</Definition>
+
+### Why Readout Matters
+
+- Limits quantum algorithm accuracy
+- Affects benchmarking results
+- Can be mitigated with proper characterization
+- Constrains fault-tolerant thresholds
+
+## 2. Single-Shot Readout
+
+### Dispersive Readout Review
+
+In superconducting qubits, readout uses state-dependent resonator frequency:
+
+<Formula>
+$$\omega_r^{(0,1)} = \omega_r \mp \chi$$
+</Formula>
+
+where $\chi$ is the dispersive shift.
+
+### IQ Plane Measurement
+
+The readout signal is characterized by in-phase (I) and quadrature (Q) components:
+
+```python
+import numpy as np
+
+def measure_iq_distributions(qubit, num_shots=10000):
+    """
+    Measure IQ distributions for |0> and |1> states.
+    """
+    iq_0 = []
+    iq_1 = []
+
+    # Measure |0> state
+    for _ in range(num_shots):
+        qubit.reset()
+        i, q = qubit.measure_iq()
+        iq_0.append((i, q))
+
+    # Measure |1> state
+    for _ in range(num_shots):
+        qubit.reset()
+        qubit.x()  # Prepare |1>
+        i, q = qubit.measure_iq()
+        iq_1.append((i, q))
+
+    return np.array(iq_0), np.array(iq_1)
+
+def find_optimal_threshold(iq_0, iq_1):
+    """
+    Find optimal discrimination threshold.
+    """
+    # Project onto optimal axis (line connecting centroids)
+    centroid_0 = np.mean(iq_0, axis=0)
+    centroid_1 = np.mean(iq_1, axis=0)
+
+    axis = centroid_1 - centroid_0
+    axis = axis / np.linalg.norm(axis)
+
+    # Project data
+    proj_0 = np.dot(iq_0, axis)
+    proj_1 = np.dot(iq_1, axis)
+
+    # Optimal threshold minimizes total error
+    thresholds = np.linspace(np.min(proj_0), np.max(proj_1), 1000)
+    errors = []
+
+    for thresh in thresholds:
+        err_0 = np.mean(proj_0 > thresh)  # False positive
+        err_1 = np.mean(proj_1 < thresh)  # False negative
+        errors.append((err_0 + err_1) / 2)
+
+    optimal_idx = np.argmin(errors)
+    return thresholds[optimal_idx], axis
+```
+
+## 3. The Confusion Matrix
+
+### Definition
+
+The confusion matrix captures all possible readout outcomes:
+
+<Formula>
+$$M = \begin{pmatrix} P(0|0) & P(0|1) \\ P(1|0) & P(1|1) \end{pmatrix}$$
+</Formula>
+
+For multi-level systems (including leakage):
+
+<Formula>
+$$M_{3\times3} = \begin{pmatrix} P(0|0) & P(0|1) & P(0|2) \\ P(1|0) & P(1|1) & P(1|2) \\ P(2|0) & P(2|1) & P(2|2) \end{pmatrix}$$
+</Formula>
+
+### Measuring the Confusion Matrix
+
+```python
+def measure_confusion_matrix(qubit, num_shots=10000):
+    """
+    Measure the readout confusion matrix.
+    """
+    states = ['0', '1']
+    confusion = np.zeros((2, 2))
+
+    for prep_state, prep_idx in enumerate(states):
+        for _ in range(num_shots):
+            qubit.reset()
+
+            # Prepare state
+            if prep_idx == 1:
+                qubit.x()
+
+            # Measure
+            result = qubit.measure()
+
+            confusion[result, prep_idx] += 1
+
+    # Normalize columns
+    confusion = confusion / num_shots
+
+    return confusion
+
+def assignment_fidelity(confusion_matrix):
+    """Calculate assignment fidelity from confusion matrix."""
+    return np.mean(np.diag(confusion_matrix))
+```
+
+### Interpreting the Confusion Matrix
+
+<Example>
+A typical confusion matrix might look like:
+
+```
+       Prepared |0>  Prepared |1>
+Meas 0:   0.98         0.03
+Meas 1:   0.02         0.97
+```
+
+This gives:
+- P(0|0) = 0.98: 98% correct when qubit is in |0>
+- P(1|1) = 0.97: 97% correct when qubit is in |1>
+- Assignment fidelity = (0.98 + 0.97)/2 = 97.5%
+- P(1|0) = 0.02: 2% false positive (thermal excitation or readout error)
+- P(0|1) = 0.03: 3% false negative (T1 decay during readout)
+</Example>
+
+## 4. QND Measurement Verification
+
+### What is QND?
+
+<Definition term="QND Measurement">
+A quantum non-demolition (QND) measurement leaves the measured eigenstate unchanged. After measuring |0>, the qubit should still be in |0>.
+</Definition>
+
+### Testing QND Property
+
+```python
+def verify_qnd(qubit, num_shots=1000):
+    """
+    Verify QND property by repeated measurement.
+    """
+    qnd_results = {'00': 0, '01': 0, '10': 0, '11': 0}
+
+    for _ in range(num_shots):
+        qubit.reset()
+
+        # First measurement
+        m1 = qubit.measure()
+
+        # Second measurement (no reset)
+        m2 = qubit.measure()
+
+        qnd_results[f'{m1}{m2}'] += 1
+
+    # QND fidelity: probability of getting same result twice
+    qnd_fidelity = (qnd_results['00'] + qnd_results['11']) / num_shots
+
+    # Conditional probabilities
+    p_0_given_0 = qnd_results['00'] / (qnd_results['00'] + qnd_results['01'])
+    p_1_given_1 = qnd_results['11'] / (qnd_results['10'] + qnd_results['11'])
+
+    return {
+        'qnd_fidelity': qnd_fidelity,
+        'p_0_stays_0': p_0_given_0,
+        'p_1_stays_1': p_1_given_1,
+        'raw_counts': qnd_results
+    }
+```
+
+## 5. Readout Optimization
+
+### Parameters to Optimize
+
+1. **Readout power**: Trade-off between SNR and QND
+2. **Readout duration**: Longer = better SNR, but more T1 decay
+3. **Readout frequency**: Optimal near dressed resonator frequency
+4. **Integration weights**: Matched filter for optimal discrimination
+
+### Optimizing Readout Duration
+
+```python
+def optimize_readout_duration(qubit, durations, num_shots=1000):
+    """
+    Find optimal readout duration.
+    """
+    results = []
+
+    for duration in durations:
+        qubit.set_readout_duration(duration)
+
+        # Measure confusion matrix
+        confusion = measure_confusion_matrix(qubit, num_shots)
+        fidelity = assignment_fidelity(confusion)
+
+        # Also check QND
+        qnd = verify_qnd(qubit, num_shots // 10)
+
+        results.append({
+            'duration': duration,
+            'assignment_fidelity': fidelity,
+            'qnd_fidelity': qnd['qnd_fidelity']
+        })
+
+    return results
+```
+
+### SNR and Separation
+
+Signal-to-noise ratio for discrimination:
+
+<Formula>
+$$\text{SNR} = \frac{|c_1 - c_0|}{\sqrt{(\sigma_0^2 + \sigma_1^2)/2}}$$
+</Formula>
+
+where $c_{0,1}$ are centroids and $\sigma_{0,1}$ are standard deviations.
+
+## 6. Readout Error Mitigation
+
+### Matrix Inversion Method
+
+Given measured probabilities $\vec{p}_{meas}$ and confusion matrix $M$:
+
+<Formula>
+$$\vec{p}_{true} = M^{-1} \cdot \vec{p}_{meas}$$
+</Formula>
+
+```python
+def mitigate_readout_errors(measured_probs, confusion_matrix):
+    """
+    Mitigate readout errors using matrix inversion.
+    """
+    # Invert confusion matrix
+    M_inv = np.linalg.inv(confusion_matrix)
+
+    # Apply correction
+    corrected = M_inv @ measured_probs
+
+    # Clip to valid probabilities
+    corrected = np.clip(corrected, 0, 1)
+    corrected = corrected / np.sum(corrected)
+
+    return corrected
+
+# Example
+confusion = np.array([[0.98, 0.03],
+                      [0.02, 0.97]])
+
+measured = np.array([0.55, 0.45])  # Measured probabilities
+corrected = mitigate_readout_errors(measured, confusion)
+
+print(f"Measured: P(0)={measured[0]:.3f}, P(1)={measured[1]:.3f}")
+print(f"Corrected: P(0)={corrected[0]:.3f}, P(1)={corrected[1]:.3f}")
+```
+
+### Tensor Product for Multi-Qubit
+
+For n qubits, the full confusion matrix is:
+
+<Formula>
+$$M_{full} = M_1 \otimes M_2 \otimes ... \otimes M_n$$
+</Formula>
+
+```python
+def multi_qubit_mitigation(measured_probs, single_qubit_confusions):
+    """
+    Mitigate readout errors for multi-qubit system.
+    """
+    # Build full confusion matrix
+    full_confusion = single_qubit_confusions[0]
+    for conf in single_qubit_confusions[1:]:
+        full_confusion = np.kron(full_confusion, conf)
+
+    # Invert and apply
+    return mitigate_readout_errors(measured_probs, full_confusion)
+```
+
+## 7. Summary
+
+Readout characterization is essential for accurate quantum experiments:
+
+1. **Confusion matrix**: Complete characterization of readout errors
+2. **Assignment fidelity**: Average probability of correct classification
+3. **QND verification**: Ensure measurement doesn't disturb the state
+4. **Error mitigation**: Correct results using inverse confusion matrix
+
+Key metrics for state-of-the-art systems:
+- Assignment fidelity: > 99%
+- QND fidelity: > 99%
+- Readout duration: 200-500 ns
+
+<Tip>
+Always characterize readout before other experiments. Readout errors affect all measurements and can bias results like RB and T1/T2 if not properly accounted for.
+</Tip>
+
+## Further Reading
+
+- Gambetta et al., "Qubit-photon interactions in a cavity"
+- Walter et al., "Rapid high-fidelity single-shot dispersive readout"
+- Next module: Control Systems

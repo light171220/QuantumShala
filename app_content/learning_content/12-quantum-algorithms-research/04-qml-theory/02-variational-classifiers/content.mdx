@@ -1,0 +1,878 @@
+---
+title: "Variational Quantum Classifiers: VQC Architecture and Training"
+description: "Comprehensive study of variational quantum classifiers including circuit architecture, cost functions, training strategies, and applications to binary and multi-class classification."
+duration: 80
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Design VQC architectures for classification tasks
+- Implement different encoding strategies for classical data
+- Construct appropriate cost functions for classification
+- Apply gradient-based training to VQC models
+- Evaluate and improve VQC performance
+
+## 1. Variational Quantum Classifier Architecture
+
+A Variational Quantum Classifier (VQC) consists of three main components:
+
+<Definition term="VQC Structure">
+A VQC maps classical input $x$ to a class prediction through: (1) Data encoding $S(x)$, (2) Variational circuit $W(\theta)$, and (3) Measurement and classical post-processing.
+</Definition>
+
+<Formula>
+$$|\psi(x, \theta)\rangle = W(\theta) S(x) |0\rangle^{\otimes n}$$
+</Formula>
+
+The prediction is derived from measurement:
+
+<Formula>
+$$\hat{y} = f\left(\langle\psi(x,\theta)|M|\psi(x,\theta)\rangle\right)$$
+</Formula>
+
+```python
+import numpy as np
+from typing import Callable, List, Tuple, Optional
+from dataclasses import dataclass
+
+@dataclass
+class VQCConfig:
+    """Configuration for Variational Quantum Classifier."""
+    num_qubits: int
+    num_layers: int
+    encoding_type: str = "angle"  # "angle", "amplitude", "iqp"
+    measurement_type: str = "expectation"  # "expectation", "probability"
+    entanglement: str = "linear"  # "linear", "circular", "full"
+
+class VariationalQuantumClassifier:
+    """
+    Complete VQC implementation with state vector simulation.
+    """
+
+    def __init__(self, config: VQCConfig):
+        self.config = config
+        self.dim = 2 ** config.num_qubits
+        self.num_params = self._count_parameters()
+        self.params = None
+        self.training_history = []
+
+    def _count_parameters(self) -> int:
+        """Count total variational parameters."""
+        n = self.config.num_qubits
+        L = self.config.num_layers
+        # Each layer: n rotation gates (Ry, Rz per qubit) = 2n params
+        return 2 * n * L
+
+    def _pauli_gates(self):
+        """Return Pauli matrices."""
+        return {
+            'I': np.eye(2),
+            'X': np.array([[0, 1], [1, 0]]),
+            'Y': np.array([[0, -1j], [1j, 0]]),
+            'Z': np.array([[1, 0], [0, -1]])
+        }
+
+    def _ry(self, theta: float) -> np.ndarray:
+        """Ry rotation gate."""
+        return np.array([
+            [np.cos(theta/2), -np.sin(theta/2)],
+            [np.sin(theta/2), np.cos(theta/2)]
+        ])
+
+    def _rz(self, theta: float) -> np.ndarray:
+        """Rz rotation gate."""
+        return np.array([
+            [np.exp(-1j * theta/2), 0],
+            [0, np.exp(1j * theta/2)]
+        ])
+
+    def _rx(self, theta: float) -> np.ndarray:
+        """Rx rotation gate."""
+        return np.array([
+            [np.cos(theta/2), -1j * np.sin(theta/2)],
+            [-1j * np.sin(theta/2), np.cos(theta/2)]
+        ])
+
+    def _tensor_product(self, ops: List[np.ndarray]) -> np.ndarray:
+        """Compute tensor product of operators."""
+        result = ops[0]
+        for op in ops[1:]:
+            result = np.kron(result, op)
+        return result
+
+    def _apply_single_qubit_gate(
+        self,
+        state: np.ndarray,
+        gate: np.ndarray,
+        qubit: int
+    ) -> np.ndarray:
+        """Apply single-qubit gate to state."""
+        n = self.config.num_qubits
+        ops = [np.eye(2)] * n
+        ops[qubit] = gate
+        full_gate = self._tensor_product(ops)
+        return full_gate @ state
+
+    def _apply_cnot(
+        self,
+        state: np.ndarray,
+        control: int,
+        target: int
+    ) -> np.ndarray:
+        """Apply CNOT gate."""
+        n = self.config.num_qubits
+        new_state = state.copy()
+
+        for i in range(self.dim):
+            # Check if control qubit is |1>
+            if (i >> (n - 1 - control)) & 1:
+                # Flip target qubit
+                j = i ^ (1 << (n - 1 - target))
+                new_state[i] = state[j]
+                new_state[j] = state[i]
+
+        return new_state
+
+    def encode_data(self, x: np.ndarray) -> np.ndarray:
+        """
+        Encode classical data into quantum state.
+        """
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1.0  # |0...0>
+
+        n = self.config.num_qubits
+
+        if self.config.encoding_type == "angle":
+            # Angle encoding: Ry(x_i) on qubit i
+            for i in range(min(len(x), n)):
+                state = self._apply_single_qubit_gate(state, self._ry(x[i]), i)
+
+        elif self.config.encoding_type == "amplitude":
+            # Amplitude encoding: normalize x and use as state
+            x_padded = np.zeros(self.dim)
+            x_padded[:len(x)] = x
+            norm = np.linalg.norm(x_padded)
+            if norm > 0:
+                state = x_padded / norm
+
+        elif self.config.encoding_type == "iqp":
+            # IQP-style encoding with entanglement
+            H = np.array([[1, 1], [1, -1]]) / np.sqrt(2)
+
+            # Hadamard layer
+            for i in range(n):
+                state = self._apply_single_qubit_gate(state, H, i)
+
+            # Rz encoding
+            for i in range(min(len(x), n)):
+                state = self._apply_single_qubit_gate(state, self._rz(x[i]), i)
+
+            # ZZ entangling layer
+            for i in range(min(len(x) - 1, n - 1)):
+                # Simplified ZZ: CNOT - Rz - CNOT
+                state = self._apply_cnot(state, i, i + 1)
+                state = self._apply_single_qubit_gate(
+                    state, self._rz(x[i] * x[i + 1]), i + 1
+                )
+                state = self._apply_cnot(state, i, i + 1)
+
+        return state
+
+    def variational_layer(
+        self,
+        state: np.ndarray,
+        params: np.ndarray
+    ) -> np.ndarray:
+        """
+        Apply one variational layer.
+
+        Args:
+            state: Current quantum state
+            params: Parameters for this layer (2n values)
+        """
+        n = self.config.num_qubits
+
+        # Rotation layer
+        for i in range(n):
+            state = self._apply_single_qubit_gate(state, self._ry(params[2*i]), i)
+            state = self._apply_single_qubit_gate(state, self._rz(params[2*i + 1]), i)
+
+        # Entanglement layer
+        if self.config.entanglement == "linear":
+            for i in range(n - 1):
+                state = self._apply_cnot(state, i, i + 1)
+
+        elif self.config.entanglement == "circular":
+            for i in range(n - 1):
+                state = self._apply_cnot(state, i, i + 1)
+            if n > 2:
+                state = self._apply_cnot(state, n - 1, 0)
+
+        elif self.config.entanglement == "full":
+            for i in range(n):
+                for j in range(i + 1, n):
+                    state = self._apply_cnot(state, i, j)
+
+        return state
+
+    def forward(self, x: np.ndarray, params: np.ndarray) -> np.ndarray:
+        """
+        Forward pass: encode data and apply variational circuit.
+        """
+        n = self.config.num_qubits
+        L = self.config.num_layers
+
+        # Encode data
+        state = self.encode_data(x)
+
+        # Apply variational layers
+        params_per_layer = 2 * n
+        for layer in range(L):
+            layer_params = params[layer * params_per_layer:(layer + 1) * params_per_layer]
+            state = self.variational_layer(state, layer_params)
+
+        return state
+
+    def predict_proba(self, x: np.ndarray, params: np.ndarray) -> float:
+        """
+        Get prediction probability (for binary classification).
+
+        Returns probability of class 1 based on first qubit measurement.
+        """
+        state = self.forward(x, params)
+
+        if self.config.measurement_type == "expectation":
+            # Expectation value of Z on first qubit
+            Z = self._pauli_gates()['Z']
+            ops = [Z] + [np.eye(2)] * (self.config.num_qubits - 1)
+            observable = self._tensor_product(ops)
+            exp_val = np.real(np.vdot(state, observable @ state))
+            # Convert from [-1, 1] to [0, 1]
+            prob = (1 - exp_val) / 2
+
+        elif self.config.measurement_type == "probability":
+            # Probability of measuring |1> on first qubit
+            prob = 0
+            for i in range(self.dim):
+                if (i >> (self.config.num_qubits - 1)) & 1:
+                    prob += np.abs(state[i]) ** 2
+
+        return prob
+
+    def predict(self, X: np.ndarray, params: np.ndarray) -> np.ndarray:
+        """Predict class labels for multiple samples."""
+        predictions = []
+        for x in X:
+            prob = self.predict_proba(x, params)
+            predictions.append(1 if prob > 0.5 else 0)
+        return np.array(predictions)
+```
+
+## 2. Cost Functions for Classification
+
+Different cost functions suit different classification scenarios:
+
+### Binary Cross-Entropy Loss
+
+<Formula>
+$$\mathcal{L}_{BCE} = -\frac{1}{N}\sum_{i=1}^{N}\left[y_i \log(p_i) + (1-y_i)\log(1-p_i)\right]$$
+</Formula>
+
+```python
+def binary_cross_entropy(y_true: np.ndarray, y_pred: np.ndarray, eps: float = 1e-7) -> float:
+    """
+    Binary cross-entropy loss.
+
+    Args:
+        y_true: True labels (0 or 1)
+        y_pred: Predicted probabilities
+        eps: Small value for numerical stability
+    """
+    y_pred = np.clip(y_pred, eps, 1 - eps)
+    loss = -np.mean(y_true * np.log(y_pred) + (1 - y_true) * np.log(1 - y_pred))
+    return loss
+
+def mse_loss(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Mean squared error loss."""
+    return np.mean((y_true - y_pred) ** 2)
+
+def hinge_loss(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """
+    Hinge loss for SVM-style classification.
+    Expects y_true in {-1, +1} and y_pred as raw scores.
+    """
+    return np.mean(np.maximum(0, 1 - y_true * y_pred))
+
+class VQCTrainer:
+    """
+    Training utilities for VQC.
+    """
+
+    def __init__(
+        self,
+        vqc: VariationalQuantumClassifier,
+        loss_fn: str = "bce"
+    ):
+        self.vqc = vqc
+        self.loss_fn = loss_fn
+
+    def compute_loss(
+        self,
+        params: np.ndarray,
+        X: np.ndarray,
+        y: np.ndarray
+    ) -> float:
+        """Compute loss over dataset."""
+        predictions = []
+        for x in X:
+            pred = self.vqc.predict_proba(x, params)
+            predictions.append(pred)
+        predictions = np.array(predictions)
+
+        if self.loss_fn == "bce":
+            return binary_cross_entropy(y, predictions)
+        elif self.loss_fn == "mse":
+            return mse_loss(y, predictions)
+        else:
+            raise ValueError(f"Unknown loss function: {self.loss_fn}")
+
+    def compute_gradient(
+        self,
+        params: np.ndarray,
+        X: np.ndarray,
+        y: np.ndarray,
+        shift: float = np.pi / 2
+    ) -> np.ndarray:
+        """
+        Compute gradient using parameter-shift rule.
+        """
+        gradient = np.zeros_like(params)
+
+        for i in range(len(params)):
+            # Shift parameter up
+            params_plus = params.copy()
+            params_plus[i] += shift
+            loss_plus = self.compute_loss(params_plus, X, y)
+
+            # Shift parameter down
+            params_minus = params.copy()
+            params_minus[i] -= shift
+            loss_minus = self.compute_loss(params_minus, X, y)
+
+            # Parameter-shift gradient
+            gradient[i] = (loss_plus - loss_minus) / (2 * np.sin(shift))
+
+        return gradient
+
+    def train(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        learning_rate: float = 0.1,
+        epochs: int = 100,
+        batch_size: Optional[int] = None,
+        verbose: bool = True
+    ) -> dict:
+        """
+        Train VQC using gradient descent.
+        """
+        # Initialize parameters
+        params = np.random.randn(self.vqc.num_params) * 0.1
+
+        history = {'loss': [], 'accuracy': []}
+
+        for epoch in range(epochs):
+            # Mini-batch or full batch
+            if batch_size is None:
+                X_batch, y_batch = X, y
+            else:
+                indices = np.random.choice(len(X), batch_size, replace=False)
+                X_batch, y_batch = X[indices], y[indices]
+
+            # Compute gradient
+            grad = self.compute_gradient(params, X_batch, y_batch)
+
+            # Update parameters
+            params = params - learning_rate * grad
+
+            # Compute metrics
+            loss = self.compute_loss(params, X, y)
+            predictions = self.vqc.predict(X, params)
+            accuracy = np.mean(predictions == y)
+
+            history['loss'].append(loss)
+            history['accuracy'].append(accuracy)
+
+            if verbose and (epoch + 1) % 10 == 0:
+                print(f"Epoch {epoch + 1}: Loss = {loss:.4f}, Accuracy = {accuracy:.4f}")
+
+        self.vqc.params = params
+        return {'params': params, 'history': history}
+```
+
+## 3. Data Re-uploading Classifier
+
+The data re-uploading strategy interleaves data encoding with variational layers:
+
+<Formula>
+$$|\psi\rangle = \prod_{l=1}^{L} W_l(\theta_l) S(x) |0\rangle$$
+</Formula>
+
+```python
+class DataReuploadingClassifier:
+    """
+    VQC with data re-uploading strategy.
+
+    Data is encoded multiple times, interleaved with variational layers.
+    This increases expressibility without adding qubits.
+    """
+
+    def __init__(self, num_qubits: int, num_layers: int):
+        self.num_qubits = num_qubits
+        self.num_layers = num_layers
+        self.dim = 2 ** num_qubits
+        # Parameters: each layer has encoding weights + variational params
+        # 3 params per qubit per layer (encoding Rx, Ry, Rz) + 2 variational
+        self.params_per_layer = 5 * num_qubits
+        self.num_params = self.params_per_layer * num_layers
+
+    def _rx(self, theta):
+        return np.array([
+            [np.cos(theta/2), -1j * np.sin(theta/2)],
+            [-1j * np.sin(theta/2), np.cos(theta/2)]
+        ])
+
+    def _ry(self, theta):
+        return np.array([
+            [np.cos(theta/2), -np.sin(theta/2)],
+            [np.sin(theta/2), np.cos(theta/2)]
+        ])
+
+    def _rz(self, theta):
+        return np.array([
+            [np.exp(-1j * theta/2), 0],
+            [0, np.exp(1j * theta/2)]
+        ])
+
+    def _tensor_product(self, ops):
+        result = ops[0]
+        for op in ops[1:]:
+            result = np.kron(result, op)
+        return result
+
+    def _apply_gate(self, state, gate, qubit):
+        n = self.num_qubits
+        ops = [np.eye(2)] * n
+        ops[qubit] = gate
+        return self._tensor_product(ops) @ state
+
+    def _apply_cnot(self, state, control, target):
+        n = self.num_qubits
+        new_state = state.copy()
+        for i in range(self.dim):
+            if (i >> (n - 1 - control)) & 1:
+                j = i ^ (1 << (n - 1 - target))
+                new_state[i], new_state[j] = state[j], state[i]
+        return new_state
+
+    def forward(self, x: np.ndarray, params: np.ndarray) -> np.ndarray:
+        """
+        Forward pass with data re-uploading.
+        """
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1.0
+
+        n = self.num_qubits
+
+        for layer in range(self.num_layers):
+            layer_params = params[layer * self.params_per_layer:
+                                  (layer + 1) * self.params_per_layer]
+
+            # Data encoding with trainable weights
+            for q in range(n):
+                # Trainable encoding: Rx(w0*x[0] + w1), Ry(w2*x[1] + w3), etc.
+                idx = q * 5
+
+                if q < len(x):
+                    angle_x = layer_params[idx] * x[q % len(x)] + layer_params[idx + 1]
+                    angle_y = layer_params[idx + 2] * x[(q + 1) % len(x)] + layer_params[idx + 3]
+                else:
+                    angle_x = layer_params[idx + 1]
+                    angle_y = layer_params[idx + 3]
+
+                angle_z = layer_params[idx + 4]
+
+                state = self._apply_gate(state, self._rx(angle_x), q)
+                state = self._apply_gate(state, self._ry(angle_y), q)
+                state = self._apply_gate(state, self._rz(angle_z), q)
+
+            # Entangling layer
+            for q in range(n - 1):
+                state = self._apply_cnot(state, q, q + 1)
+
+        return state
+
+    def predict_proba(self, x: np.ndarray, params: np.ndarray) -> float:
+        """Get probability of class 1."""
+        state = self.forward(x, params)
+
+        # Measure first qubit
+        prob_1 = 0
+        for i in range(self.dim):
+            if (i >> (self.num_qubits - 1)) & 1:
+                prob_1 += np.abs(state[i]) ** 2
+
+        return prob_1
+
+    def decision_boundary(
+        self,
+        params: np.ndarray,
+        x_range: Tuple[float, float] = (-2, 2),
+        y_range: Tuple[float, float] = (-2, 2),
+        resolution: int = 50
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Compute decision boundary for 2D visualization.
+        """
+        xx = np.linspace(x_range[0], x_range[1], resolution)
+        yy = np.linspace(y_range[0], y_range[1], resolution)
+
+        Z = np.zeros((resolution, resolution))
+
+        for i, x_val in enumerate(xx):
+            for j, y_val in enumerate(yy):
+                Z[j, i] = self.predict_proba(np.array([x_val, y_val]), params)
+
+        return xx, yy, Z
+```
+
+## 4. Multi-class Classification
+
+For multi-class problems, we can use one-vs-all or direct multi-class approaches:
+
+```python
+class MultiClassVQC:
+    """
+    Multi-class VQC using multiple measurement qubits.
+    """
+
+    def __init__(self, num_qubits: int, num_classes: int, num_layers: int):
+        self.num_qubits = num_qubits
+        self.num_classes = num_classes
+        self.num_layers = num_layers
+        self.dim = 2 ** num_qubits
+
+        # Need enough qubits to encode classes
+        self.measurement_qubits = int(np.ceil(np.log2(num_classes)))
+
+        if self.measurement_qubits > num_qubits:
+            raise ValueError("Need more qubits for multi-class classification")
+
+        self.num_params = 2 * num_qubits * num_layers
+
+    def _ry(self, theta):
+        return np.array([
+            [np.cos(theta/2), -np.sin(theta/2)],
+            [np.sin(theta/2), np.cos(theta/2)]
+        ])
+
+    def _rz(self, theta):
+        return np.array([
+            [np.exp(-1j * theta/2), 0],
+            [0, np.exp(1j * theta/2)]
+        ])
+
+    def _tensor_product(self, ops):
+        result = ops[0]
+        for op in ops[1:]:
+            result = np.kron(result, op)
+        return result
+
+    def _apply_gate(self, state, gate, qubit):
+        ops = [np.eye(2)] * self.num_qubits
+        ops[qubit] = gate
+        return self._tensor_product(ops) @ state
+
+    def _apply_cnot(self, state, control, target):
+        new_state = state.copy()
+        n = self.num_qubits
+        for i in range(self.dim):
+            if (i >> (n - 1 - control)) & 1:
+                j = i ^ (1 << (n - 1 - target))
+                new_state[i], new_state[j] = state[j], state[i]
+        return new_state
+
+    def encode_and_process(self, x: np.ndarray, params: np.ndarray) -> np.ndarray:
+        """Encode data and apply variational circuit."""
+        state = np.zeros(self.dim, dtype=complex)
+        state[0] = 1.0
+
+        n = self.num_qubits
+
+        # Angle encoding
+        for i in range(min(len(x), n)):
+            state = self._apply_gate(state, self._ry(x[i]), i)
+
+        # Variational layers
+        params_per_layer = 2 * n
+        for layer in range(self.num_layers):
+            lp = params[layer * params_per_layer:(layer + 1) * params_per_layer]
+
+            for q in range(n):
+                state = self._apply_gate(state, self._ry(lp[2 * q]), q)
+                state = self._apply_gate(state, self._rz(lp[2 * q + 1]), q)
+
+            for q in range(n - 1):
+                state = self._apply_cnot(state, q, q + 1)
+
+        return state
+
+    def predict_proba(self, x: np.ndarray, params: np.ndarray) -> np.ndarray:
+        """
+        Get class probabilities.
+
+        Uses measurement of first log2(num_classes) qubits.
+        """
+        state = self.encode_and_process(x, params)
+
+        # Compute probabilities for each class
+        probs = np.zeros(self.num_classes)
+        n = self.num_qubits
+        m = self.measurement_qubits
+
+        for i in range(self.dim):
+            # Extract class from first m qubits
+            class_idx = 0
+            for q in range(m):
+                if (i >> (n - 1 - q)) & 1:
+                    class_idx += 2 ** (m - 1 - q)
+
+            if class_idx < self.num_classes:
+                probs[class_idx] += np.abs(state[i]) ** 2
+
+        # Normalize
+        probs = probs / np.sum(probs)
+        return probs
+
+    def predict(self, X: np.ndarray, params: np.ndarray) -> np.ndarray:
+        """Predict class labels."""
+        predictions = []
+        for x in X:
+            probs = self.predict_proba(x, params)
+            predictions.append(np.argmax(probs))
+        return np.array(predictions)
+
+def categorical_cross_entropy(y_true: np.ndarray, y_pred: np.ndarray, eps: float = 1e-7) -> float:
+    """
+    Categorical cross-entropy for multi-class classification.
+
+    Args:
+        y_true: One-hot encoded true labels (n_samples, n_classes)
+        y_pred: Predicted probabilities (n_samples, n_classes)
+    """
+    y_pred = np.clip(y_pred, eps, 1 - eps)
+    return -np.mean(np.sum(y_true * np.log(y_pred), axis=1))
+```
+
+## 5. Training Strategies and Optimization
+
+### Gradient-Free Optimization
+
+```python
+from scipy.optimize import minimize
+
+def train_vqc_scipy(
+    vqc: VariationalQuantumClassifier,
+    X: np.ndarray,
+    y: np.ndarray,
+    method: str = "COBYLA",
+    maxiter: int = 200
+) -> dict:
+    """
+    Train VQC using scipy optimizers.
+    """
+    def objective(params):
+        predictions = []
+        for x in X:
+            pred = vqc.predict_proba(x, params)
+            predictions.append(pred)
+        predictions = np.array(predictions)
+        return binary_cross_entropy(y, predictions)
+
+    # Initialize parameters
+    x0 = np.random.randn(vqc.num_params) * 0.1
+
+    # Optimize
+    result = minimize(
+        objective,
+        x0,
+        method=method,
+        options={'maxiter': maxiter, 'disp': True}
+    )
+
+    return {
+        'params': result.x,
+        'loss': result.fun,
+        'success': result.success,
+        'iterations': result.nfev
+    }
+```
+
+### SPSA Optimizer
+
+```python
+def spsa_optimize(
+    objective: Callable,
+    x0: np.ndarray,
+    max_iterations: int = 100,
+    a: float = 0.1,
+    c: float = 0.1,
+    A: float = 10,
+    alpha: float = 0.602,
+    gamma: float = 0.101
+) -> dict:
+    """
+    Simultaneous Perturbation Stochastic Approximation optimizer.
+
+    Efficient for noisy objective functions common in VQC.
+    """
+    x = x0.copy()
+    history = []
+
+    for k in range(max_iterations):
+        # Decay rates
+        ak = a / (k + 1 + A) ** alpha
+        ck = c / (k + 1) ** gamma
+
+        # Random perturbation direction
+        delta = 2 * np.random.randint(0, 2, len(x)) - 1  # +/- 1
+
+        # Evaluate objective at perturbed points
+        y_plus = objective(x + ck * delta)
+        y_minus = objective(x - ck * delta)
+
+        # Gradient estimate
+        g = (y_plus - y_minus) / (2 * ck * delta)
+
+        # Update
+        x = x - ak * g
+
+        # Record
+        current_val = objective(x)
+        history.append(current_val)
+
+    return {'x': x, 'fun': history[-1], 'history': history}
+```
+
+## 6. Evaluation and Model Selection
+
+```python
+def evaluate_vqc(
+    vqc: VariationalQuantumClassifier,
+    params: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray
+) -> dict:
+    """
+    Comprehensive VQC evaluation.
+    """
+    predictions = vqc.predict(X_test, params)
+    probs = np.array([vqc.predict_proba(x, params) for x in X_test])
+
+    # Accuracy
+    accuracy = np.mean(predictions == y_test)
+
+    # Confusion matrix elements
+    tp = np.sum((predictions == 1) & (y_test == 1))
+    tn = np.sum((predictions == 0) & (y_test == 0))
+    fp = np.sum((predictions == 1) & (y_test == 0))
+    fn = np.sum((predictions == 0) & (y_test == 1))
+
+    # Precision and recall
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+    # Loss
+    loss = binary_cross_entropy(y_test, probs)
+
+    return {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1_score': f1,
+        'loss': loss,
+        'confusion_matrix': {'tp': tp, 'tn': tn, 'fp': fp, 'fn': fn}
+    }
+
+def cross_validate_vqc(
+    config: VQCConfig,
+    X: np.ndarray,
+    y: np.ndarray,
+    k_folds: int = 5
+) -> dict:
+    """
+    K-fold cross-validation for VQC.
+    """
+    n = len(X)
+    fold_size = n // k_folds
+    indices = np.random.permutation(n)
+
+    fold_results = []
+
+    for fold in range(k_folds):
+        # Split data
+        test_idx = indices[fold * fold_size:(fold + 1) * fold_size]
+        train_idx = np.concatenate([
+            indices[:fold * fold_size],
+            indices[(fold + 1) * fold_size:]
+        ])
+
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+
+        # Train
+        vqc = VariationalQuantumClassifier(config)
+        trainer = VQCTrainer(vqc)
+        result = trainer.train(X_train, y_train, epochs=50, verbose=False)
+
+        # Evaluate
+        eval_result = evaluate_vqc(vqc, result['params'], X_test, y_test)
+        fold_results.append(eval_result)
+
+    # Aggregate results
+    avg_results = {}
+    for key in fold_results[0].keys():
+        if key != 'confusion_matrix':
+            values = [r[key] for r in fold_results]
+            avg_results[key] = {
+                'mean': np.mean(values),
+                'std': np.std(values)
+            }
+
+    return {'fold_results': fold_results, 'average': avg_results}
+```
+
+## Summary
+
+In this lesson, you learned about Variational Quantum Classifiers:
+
+1. **VQC Architecture**: Data encoding, variational layers, and measurement
+2. **Cost Functions**: BCE, MSE, and hinge loss for classification
+3. **Data Re-uploading**: Interleaved encoding for increased expressibility
+4. **Multi-class Extension**: Using multiple measurement qubits
+5. **Training Strategies**: Parameter-shift gradients, SPSA, and scipy optimizers
+6. **Evaluation**: Accuracy, precision, recall, F1, and cross-validation
+
+<Warning>
+VQC training can suffer from barren plateaus (vanishing gradients) for deep circuits. Start with shallow circuits and carefully initialize parameters.
+</Warning>
+
+## Further Reading
+
+- Next lesson: Quantum Neural Networks
+- Related: Barren Plateaus
+- Application: Image Classification with VQC

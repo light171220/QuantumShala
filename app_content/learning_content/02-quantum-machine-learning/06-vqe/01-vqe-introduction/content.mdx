@@ -1,0 +1,488 @@
+---
+title: "Introduction to VQE"
+description: "Learn the Variational Quantum Eigensolver algorithm, its motivation, and fundamental principles for finding ground state energies."
+---
+
+# Introduction to VQE
+
+The Variational Quantum Eigensolver (VQE) is one of the most promising hybrid quantum-classical algorithms for near-term quantum computers. It combines quantum state preparation with classical optimization to find ground state energies of quantum systems.
+
+## The Eigenvalue Problem
+
+Many problems in physics and chemistry reduce to finding the lowest eigenvalue (ground state energy) of a Hamiltonian operator.
+
+<Definition>
+**Eigenvalue Problem**: Given a Hamiltonian H, find the ground state energy E₀ = min⟨ψ|H|ψ⟩ where |ψ⟩ is a normalized quantum state.
+</Definition>
+
+The ground state energy determines:
+- Molecular stability and bond energies
+- Material properties
+- Chemical reaction rates
+- Phase transitions
+
+```python
+import numpy as np
+
+# Example: 2x2 Hamiltonian (single qubit)
+H = np.array([
+    [1.0, 0.5],
+    [0.5, -1.0]
+])
+
+# Exact diagonalization
+eigenvalues, eigenvectors = np.linalg.eigh(H)
+print(f"Ground state energy (exact): {eigenvalues[0]:.4f}")
+print(f"Excited state energy: {eigenvalues[1]:.4f}")
+
+# Ground state
+ground_state = eigenvectors[:, 0]
+print(f"Ground state: {ground_state}")
+```
+
+## The Variational Principle
+
+VQE is built on the variational principle, a cornerstone of quantum mechanics.
+
+<Formula>
+**Variational Principle**: For any trial state |ψ(θ)⟩:
+
+$$E(\theta) = \langle\psi(\theta)|H|\psi(\theta)\rangle \geq E_0$$
+
+The expectation value of the Hamiltonian provides an upper bound to the true ground state energy.
+</Formula>
+
+This principle has profound implications:
+1. Any guess gives an upper bound
+2. Better trial states give tighter bounds
+3. Minimizing over parameters approaches E₀
+
+```python
+import numpy as np
+
+def variational_principle_demo():
+    """Demonstrate the variational principle."""
+    # Hamiltonian: H = Z + 0.5*X for single qubit
+    H = np.array([
+        [1.0, 0.5],
+        [0.5, -1.0]
+    ])
+
+    # True ground state energy
+    E_exact = np.linalg.eigvalsh(H)[0]
+
+    # Trial states: |ψ(θ)⟩ = cos(θ/2)|0⟩ + sin(θ/2)|1⟩
+    thetas = np.linspace(0, 2*np.pi, 100)
+    energies = []
+
+    for theta in thetas:
+        # Trial state
+        psi = np.array([np.cos(theta/2), np.sin(theta/2)])
+        # Expectation value
+        E = np.real(psi.conj() @ H @ psi)
+        energies.append(E)
+
+    print(f"Exact ground state energy: {E_exact:.4f}")
+    print(f"Minimum variational energy: {min(energies):.4f}")
+    print(f"Variational bound satisfied: {min(energies) >= E_exact - 1e-10}")
+
+    return thetas, energies, E_exact
+
+thetas, energies, E_exact = variational_principle_demo()
+```
+
+## VQE Algorithm Overview
+
+VQE combines quantum and classical resources in a hybrid loop.
+
+<Tip>
+VQE is particularly suited for NISQ devices because the quantum circuits can be kept short, and the classical optimizer handles the bulk of the computation.
+</Tip>
+
+### Algorithm Steps
+
+1. **Prepare** a parameterized quantum state |ψ(θ)⟩
+2. **Measure** the expectation value ⟨H⟩
+3. **Optimize** parameters θ classically
+4. **Repeat** until convergence
+
+```python
+import numpy as np
+from typing import Callable, Tuple
+
+def vqe_simple(
+    hamiltonian: np.ndarray,
+    ansatz_fn: Callable,
+    n_params: int,
+    max_iterations: int = 100,
+    learning_rate: float = 0.1
+) -> Tuple[float, np.ndarray]:
+    """
+    Simple VQE implementation.
+
+    Args:
+        hamiltonian: Hamiltonian matrix
+        ansatz_fn: Function that creates state from parameters
+        n_params: Number of variational parameters
+        max_iterations: Maximum optimization iterations
+        learning_rate: Learning rate for gradient descent
+
+    Returns:
+        Tuple of (ground energy, optimal parameters)
+    """
+    # Initialize random parameters
+    params = np.random.uniform(0, 2*np.pi, n_params)
+
+    def compute_energy(params):
+        """Compute expectation value."""
+        state = ansatz_fn(params)
+        return np.real(state.conj() @ hamiltonian @ state)
+
+    def compute_gradient(params, epsilon=1e-4):
+        """Compute gradient via finite differences."""
+        grad = np.zeros_like(params)
+        for i in range(len(params)):
+            params_plus = params.copy()
+            params_minus = params.copy()
+            params_plus[i] += epsilon
+            params_minus[i] -= epsilon
+            grad[i] = (compute_energy(params_plus) - compute_energy(params_minus)) / (2 * epsilon)
+        return grad
+
+    # Optimization loop
+    history = []
+    for iteration in range(max_iterations):
+        energy = compute_energy(params)
+        history.append(energy)
+
+        grad = compute_gradient(params)
+        params = params - learning_rate * grad
+
+        if iteration % 20 == 0:
+            print(f"Iteration {iteration}: Energy = {energy:.6f}")
+
+    final_energy = compute_energy(params)
+    return final_energy, params
+
+# Example: Single qubit VQE
+H = np.array([[1.0, 0.5], [0.5, -1.0]])
+
+def single_qubit_ansatz(params):
+    """RY rotation ansatz."""
+    theta = params[0]
+    return np.array([np.cos(theta/2), np.sin(theta/2)])
+
+energy, optimal_params = vqe_simple(H, single_qubit_ansatz, n_params=1)
+print(f"\nVQE Result: {energy:.6f}")
+print(f"Exact: {np.linalg.eigvalsh(H)[0]:.6f}")
+```
+
+## Hamiltonian Decomposition
+
+Real Hamiltonians are decomposed into sums of Pauli terms for measurement.
+
+<Definition>
+**Pauli Decomposition**: Any Hermitian operator can be written as:
+
+$$H = \sum_i c_i P_i$$
+
+where $P_i$ are Pauli strings (tensor products of I, X, Y, Z) and $c_i$ are real coefficients.
+</Definition>
+
+```python
+import numpy as np
+
+# Pauli matrices
+I = np.array([[1, 0], [0, 1]], dtype=complex)
+X = np.array([[0, 1], [1, 0]], dtype=complex)
+Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+def decompose_1qubit(H):
+    """Decompose single-qubit Hamiltonian into Pauli basis."""
+    paulis = {'I': I, 'X': X, 'Y': Y, 'Z': Z}
+    coefficients = {}
+
+    for name, P in paulis.items():
+        # c = Tr(H @ P) / 2
+        coeff = np.real(np.trace(H @ P)) / 2
+        if abs(coeff) > 1e-10:
+            coefficients[name] = coeff
+
+    return coefficients
+
+# Example
+H = np.array([[1.0, 0.5], [0.5, -1.0]])
+coeffs = decompose_1qubit(H)
+print("Hamiltonian decomposition:")
+for pauli, coeff in coeffs.items():
+    print(f"  {coeff:+.4f} * {pauli}")
+
+# Verify reconstruction
+H_reconstructed = sum(c * {'I': I, 'X': X, 'Y': Y, 'Z': Z}[p]
+                       for p, c in coeffs.items())
+print(f"\nReconstruction error: {np.linalg.norm(H - H_reconstructed):.2e}")
+```
+
+## Expectation Value Estimation
+
+Each Pauli term is measured separately on the quantum computer.
+
+<Warning>
+The number of measurements needed scales with the number of Pauli terms and the desired precision. Grouping commuting terms can reduce measurement overhead.
+</Warning>
+
+```python
+import numpy as np
+
+def simulate_measurement(state, pauli, n_shots=1000):
+    """
+    Simulate measuring a Pauli observable.
+
+    Args:
+        state: Quantum state vector
+        pauli: Pauli matrix
+        n_shots: Number of measurement shots
+
+    Returns:
+        Estimated expectation value
+    """
+    # Get eigenvalues and eigenvectors of Pauli
+    eigenvalues, eigenvectors = np.linalg.eigh(pauli)
+
+    # Compute probability of each outcome
+    probs = np.abs(eigenvectors.T.conj() @ state) ** 2
+
+    # Sample measurements
+    outcomes = np.random.choice(eigenvalues, size=n_shots, p=probs)
+
+    return np.mean(outcomes)
+
+def estimate_energy(state, hamiltonian_terms, n_shots_per_term=1000):
+    """
+    Estimate Hamiltonian expectation value.
+
+    Args:
+        state: Quantum state
+        hamiltonian_terms: Dict of {pauli_name: (coefficient, matrix)}
+        n_shots_per_term: Shots per Pauli measurement
+
+    Returns:
+        Estimated energy
+    """
+    total_energy = 0.0
+
+    for name, (coeff, pauli) in hamiltonian_terms.items():
+        if name == 'I':
+            # Identity contributes coefficient directly
+            expectation = 1.0
+        else:
+            expectation = simulate_measurement(state, pauli, n_shots_per_term)
+
+        total_energy += coeff * expectation
+
+    return total_energy
+
+# Example
+I = np.eye(2, dtype=complex)
+X = np.array([[0, 1], [1, 0]], dtype=complex)
+Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+terms = {
+    'I': (0.0, I),      # 0*I
+    'Z': (1.0, Z),      # 1*Z
+    'X': (0.5, X)       # 0.5*X
+}
+
+# Test state
+theta = np.pi / 4
+state = np.array([np.cos(theta/2), np.sin(theta/2)])
+
+estimated = estimate_energy(state, terms, n_shots_per_term=10000)
+exact = np.real(state.conj() @ (Z + 0.5*X) @ state)
+
+print(f"Estimated energy: {estimated:.4f}")
+print(f"Exact energy: {exact:.4f}")
+```
+
+## VQE Applications
+
+VQE has broad applications across quantum chemistry and physics.
+
+### Chemistry Applications
+
+```python
+# Molecular energies and bond lengths
+molecules = {
+    'H2': {
+        'description': 'Hydrogen molecule',
+        'qubits': 4,
+        'parameters': '~10-20',
+        'application': 'Bond dissociation curve'
+    },
+    'LiH': {
+        'description': 'Lithium hydride',
+        'qubits': 12,
+        'parameters': '~50-100',
+        'application': 'Reaction energetics'
+    },
+    'H2O': {
+        'description': 'Water molecule',
+        'qubits': 14,
+        'parameters': '~100-200',
+        'application': 'Molecular geometry'
+    },
+    'N2': {
+        'description': 'Nitrogen molecule (challenging)',
+        'qubits': 20,
+        'parameters': '~500+',
+        'application': 'Strong correlation'
+    }
+}
+
+print("VQE Molecular Applications:")
+print("=" * 60)
+for mol, info in molecules.items():
+    print(f"\n{mol} ({info['description']}):")
+    print(f"  Qubits needed: {info['qubits']}")
+    print(f"  Parameters: {info['parameters']}")
+    print(f"  Application: {info['application']}")
+```
+
+### Advantages and Limitations
+
+```python
+advantages = [
+    "Short circuit depth suitable for NISQ",
+    "Classical optimizer handles most computation",
+    "Naturally incorporates hardware constraints",
+    "Can target specific symmetry sectors",
+    "Error mitigation techniques applicable"
+]
+
+limitations = [
+    "Measurement overhead for large Hamiltonians",
+    "Barren plateaus in expressible ansätze",
+    "Local minima in optimization landscape",
+    "Shot noise affects gradient estimation",
+    "Limited to ground state (extensions for excited states exist)"
+]
+
+print("VQE Advantages:")
+for i, adv in enumerate(advantages, 1):
+    print(f"  {i}. {adv}")
+
+print("\nVQE Limitations:")
+for i, lim in enumerate(limitations, 1):
+    print(f"  {i}. {lim}")
+```
+
+## Complete VQE Example
+
+Let's implement a complete VQE for a 2-qubit system.
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+
+class SimpleVQE:
+    """Complete VQE implementation for demonstration."""
+
+    def __init__(self, hamiltonian, ansatz, n_params):
+        self.H = hamiltonian
+        self.ansatz = ansatz
+        self.n_params = n_params
+        self.history = []
+
+    def energy(self, params):
+        """Compute energy expectation value."""
+        state = self.ansatz(params)
+        E = np.real(state.conj() @ self.H @ state)
+        self.history.append(E)
+        return E
+
+    def run(self, initial_params=None, method='COBYLA'):
+        """Run VQE optimization."""
+        if initial_params is None:
+            initial_params = np.random.uniform(0, 2*np.pi, self.n_params)
+
+        self.history = []
+        result = minimize(
+            self.energy,
+            initial_params,
+            method=method,
+            options={'maxiter': 200}
+        )
+
+        return {
+            'energy': result.fun,
+            'params': result.x,
+            'iterations': len(self.history),
+            'success': result.success
+        }
+
+# 2-qubit Hamiltonian: H = ZZ + 0.5*(XI + IX)
+def kron(A, B):
+    return np.kron(A, B)
+
+I = np.eye(2, dtype=complex)
+X = np.array([[0, 1], [1, 0]], dtype=complex)
+Z = np.array([[1, 0], [0, -1]], dtype=complex)
+
+H_2qubit = kron(Z, Z) + 0.5 * (kron(X, I) + kron(I, X))
+
+def two_qubit_ansatz(params):
+    """Simple 2-qubit ansatz with RY rotations and CNOT."""
+    # RY gates
+    def ry(theta):
+        c, s = np.cos(theta/2), np.sin(theta/2)
+        return np.array([[c, -s], [s, c]])
+
+    # Start from |00⟩
+    state = np.array([1, 0, 0, 0], dtype=complex)
+
+    # Apply RY to each qubit
+    U1 = kron(ry(params[0]), ry(params[1]))
+    state = U1 @ state
+
+    # CNOT
+    CNOT = np.array([
+        [1, 0, 0, 0],
+        [0, 1, 0, 0],
+        [0, 0, 0, 1],
+        [0, 0, 1, 0]
+    ], dtype=complex)
+    state = CNOT @ state
+
+    # More RY rotations
+    U2 = kron(ry(params[2]), ry(params[3]))
+    state = U2 @ state
+
+    return state
+
+# Run VQE
+vqe = SimpleVQE(H_2qubit, two_qubit_ansatz, n_params=4)
+result = vqe.run()
+
+# Compare with exact
+exact_energy = np.linalg.eigvalsh(H_2qubit)[0]
+
+print("VQE Results:")
+print("=" * 40)
+print(f"VQE Energy: {result['energy']:.6f}")
+print(f"Exact Energy: {exact_energy:.6f}")
+print(f"Error: {abs(result['energy'] - exact_energy):.2e}")
+print(f"Iterations: {result['iterations']}")
+```
+
+## Summary
+
+VQE is a foundational algorithm for near-term quantum computing:
+
+1. **Variational Principle** provides theoretical foundation
+2. **Hybrid approach** leverages both quantum and classical resources
+3. **Pauli decomposition** enables efficient measurement
+4. **Classical optimization** finds ground state parameters
+5. **NISQ-friendly** with short circuit depths
+
+The next lessons will cover molecular Hamiltonians, ansatz design, and practical implementation details.

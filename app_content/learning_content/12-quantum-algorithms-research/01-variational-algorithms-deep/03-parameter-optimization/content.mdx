@@ -1,0 +1,811 @@
+---
+title: "Parameter Optimization: Classical Optimizers for Quantum Circuits"
+description: "Master the classical optimization techniques used in variational quantum algorithms. Learn gradient-free and gradient-based methods, their convergence properties, and strategies for navigating complex quantum landscapes."
+duration: 70
+difficulty: "advanced"
+---
+
+## Learning Objectives
+
+After completing this lesson, you will be able to:
+
+- Compare gradient-free and gradient-based optimization approaches
+- Implement COBYLA, Nelder-Mead, and Powell optimizers for VQE
+- Apply gradient descent variants including Adam and natural gradients
+- Analyze convergence behavior and landscape characteristics
+- Select appropriate optimizers based on problem structure and noise
+- Implement advanced techniques like layer-wise training and warm starts
+
+## 1. The Optimization Challenge in VQE
+
+The classical optimization loop is the heart of VQE. Given a parameterized circuit $U(\boldsymbol{\theta})$ and Hamiltonian $H$, we seek:
+
+<Formula>
+$$\boldsymbol{\theta}^* = \arg\min_{\boldsymbol{\theta}} E(\boldsymbol{\theta}) = \arg\min_{\boldsymbol{\theta}} \langle 0|U^\dagger(\boldsymbol{\theta}) H U(\boldsymbol{\theta})|0\rangle$$
+</Formula>
+
+<Definition term="VQE Optimization">
+The process of iteratively adjusting variational parameters $\boldsymbol{\theta}$ to minimize the measured expectation value of the Hamiltonian, using a classical optimizer with quantum-measured cost function evaluations.
+</Definition>
+
+### Unique Challenges
+
+| Challenge | Impact | Mitigation |
+|-----------|--------|------------|
+| **Shot noise** | Stochastic cost function | Increase shots, robust optimizers |
+| **Non-convexity** | Local minima | Global search, multiple restarts |
+| **Barren plateaus** | Vanishing gradients | Shallow circuits, local cost |
+| **Hardware noise** | Biased estimates | Error mitigation, noise-aware optimization |
+
+## 2. Gradient-Free Optimizers
+
+Gradient-free methods evaluate only the cost function, making them naturally robust to shot noise.
+
+### COBYLA (Constrained Optimization BY Linear Approximations)
+
+<Definition term="COBYLA">
+A derivative-free optimization algorithm that constructs linear approximations to the objective function and constraints using a simplex of points, then iteratively improves the solution.
+</Definition>
+
+```python
+import numpy as np
+from typing import Callable, List, Tuple, Optional
+from dataclasses import dataclass, field
+
+@dataclass
+class OptimizationResult:
+    """Result container for optimization."""
+    optimal_params: np.ndarray
+    optimal_value: float
+    num_iterations: int
+    num_function_evals: int
+    convergence_history: List[float] = field(default_factory=list)
+    success: bool = True
+    message: str = ""
+
+class COBYLAOptimizer:
+    """
+    COBYLA optimizer implementation for VQE.
+
+    Uses trust-region method with linear models.
+    """
+
+    def __init__(
+        self,
+        rhobeg: float = 0.5,
+        rhoend: float = 1e-4,
+        maxiter: int = 1000
+    ):
+        self.rhobeg = rhobeg  # Initial trust region radius
+        self.rhoend = rhoend  # Final trust region radius
+        self.maxiter = maxiter
+
+    def minimize(
+        self,
+        cost_function: Callable[[np.ndarray], float],
+        initial_params: np.ndarray,
+        bounds: Optional[List[Tuple[float, float]]] = None
+    ) -> OptimizationResult:
+        """
+        Minimize the cost function using COBYLA.
+
+        Args:
+            cost_function: Function to minimize
+            initial_params: Starting point
+            bounds: Optional parameter bounds
+
+        Returns:
+            OptimizationResult with optimal parameters
+        """
+        from scipy.optimize import minimize as scipy_minimize
+
+        history = []
+        num_evals = [0]
+
+        def tracked_cost(params):
+            num_evals[0] += 1
+            value = cost_function(params)
+            history.append(value)
+            return value
+
+        # Convert bounds to constraints for COBYLA
+        constraints = []
+        if bounds:
+            for i, (lb, ub) in enumerate(bounds):
+                if lb is not None:
+                    constraints.append({
+                        'type': 'ineq',
+                        'fun': lambda x, i=i, lb=lb: x[i] - lb
+                    })
+                if ub is not None:
+                    constraints.append({
+                        'type': 'ineq',
+                        'fun': lambda x, i=i, ub=ub: ub - x[i]
+                    })
+
+        result = scipy_minimize(
+            tracked_cost,
+            initial_params,
+            method='COBYLA',
+            constraints=constraints,
+            options={
+                'rhobeg': self.rhobeg,
+                'maxiter': self.maxiter,
+                'tol': self.rhoend
+            }
+        )
+
+        return OptimizationResult(
+            optimal_params=result.x,
+            optimal_value=result.fun,
+            num_iterations=result.nfev,
+            num_function_evals=num_evals[0],
+            convergence_history=history,
+            success=result.success,
+            message=result.message
+        )
+```
+
+### Nelder-Mead (Simplex Method)
+
+```python
+class NelderMeadOptimizer:
+    """
+    Nelder-Mead simplex optimizer for VQE.
+
+    Maintains a simplex of n+1 points and iteratively
+    improves by reflection, expansion, and contraction.
+    """
+
+    def __init__(
+        self,
+        adaptive: bool = True,
+        xatol: float = 1e-4,
+        fatol: float = 1e-4,
+        maxiter: int = None
+    ):
+        self.adaptive = adaptive
+        self.xatol = xatol
+        self.fatol = fatol
+        self.maxiter = maxiter
+
+    def minimize(
+        self,
+        cost_function: Callable[[np.ndarray], float],
+        initial_params: np.ndarray
+    ) -> OptimizationResult:
+        """Minimize using Nelder-Mead simplex method."""
+        from scipy.optimize import minimize as scipy_minimize
+
+        history = []
+
+        def tracked_cost(params):
+            value = cost_function(params)
+            history.append(value)
+            return value
+
+        n = len(initial_params)
+        maxiter = self.maxiter or n * 200
+
+        result = scipy_minimize(
+            tracked_cost,
+            initial_params,
+            method='Nelder-Mead',
+            options={
+                'adaptive': self.adaptive,
+                'xatol': self.xatol,
+                'fatol': self.fatol,
+                'maxiter': maxiter
+            }
+        )
+
+        return OptimizationResult(
+            optimal_params=result.x,
+            optimal_value=result.fun,
+            num_iterations=result.nit,
+            num_function_evals=result.nfev,
+            convergence_history=history,
+            success=result.success
+        )
+```
+
+### Powell's Method
+
+```python
+class PowellOptimizer:
+    """
+    Powell's conjugate direction method.
+
+    Performs sequential 1D optimizations along
+    conjugate directions without computing gradients.
+    """
+
+    def __init__(
+        self,
+        xtol: float = 1e-4,
+        ftol: float = 1e-4,
+        maxiter: int = None,
+        maxfev: int = None
+    ):
+        self.xtol = xtol
+        self.ftol = ftol
+        self.maxiter = maxiter
+        self.maxfev = maxfev
+
+    def minimize(
+        self,
+        cost_function: Callable[[np.ndarray], float],
+        initial_params: np.ndarray
+    ) -> OptimizationResult:
+        """Minimize using Powell's method."""
+        from scipy.optimize import minimize as scipy_minimize
+
+        history = []
+
+        def tracked_cost(params):
+            value = cost_function(params)
+            history.append(value)
+            return value
+
+        result = scipy_minimize(
+            tracked_cost,
+            initial_params,
+            method='Powell',
+            options={
+                'xtol': self.xtol,
+                'ftol': self.ftol,
+                'maxiter': self.maxiter,
+                'maxfev': self.maxfev
+            }
+        )
+
+        return OptimizationResult(
+            optimal_params=result.x,
+            optimal_value=result.fun,
+            num_iterations=result.nit,
+            num_function_evals=result.nfev,
+            convergence_history=history,
+            success=result.success
+        )
+```
+
+## 3. Gradient-Based Optimizers
+
+Gradient-based methods can be more efficient but require gradient computation.
+
+### Vanilla Gradient Descent
+
+<Formula>
+$$\boldsymbol{\theta}_{t+1} = \boldsymbol{\theta}_t - \eta \nabla_{\boldsymbol{\theta}} E(\boldsymbol{\theta}_t)$$
+</Formula>
+
+```python
+class GradientDescentOptimizer:
+    """
+    Basic gradient descent optimizer.
+    """
+
+    def __init__(
+        self,
+        learning_rate: float = 0.1,
+        maxiter: int = 1000,
+        tol: float = 1e-6
+    ):
+        self.learning_rate = learning_rate
+        self.maxiter = maxiter
+        self.tol = tol
+
+    def minimize(
+        self,
+        cost_function: Callable[[np.ndarray], float],
+        gradient_function: Callable[[np.ndarray], np.ndarray],
+        initial_params: np.ndarray
+    ) -> OptimizationResult:
+        """
+        Minimize using gradient descent.
+
+        Args:
+            cost_function: Function to minimize
+            gradient_function: Function returning gradient vector
+            initial_params: Starting point
+        """
+        params = initial_params.copy()
+        history = []
+
+        for iteration in range(self.maxiter):
+            cost = cost_function(params)
+            history.append(cost)
+
+            gradient = gradient_function(params)
+
+            # Check convergence
+            if np.linalg.norm(gradient) < self.tol:
+                break
+
+            # Update parameters
+            params = params - self.learning_rate * gradient
+
+        return OptimizationResult(
+            optimal_params=params,
+            optimal_value=history[-1],
+            num_iterations=iteration + 1,
+            num_function_evals=len(history),
+            convergence_history=history,
+            success=True
+        )
+```
+
+### Adam Optimizer
+
+<Definition term="Adam">
+Adaptive Moment Estimation (Adam) combines momentum with adaptive learning rates, using exponential moving averages of gradients and squared gradients.
+</Definition>
+
+<Formula>
+$$m_t = \beta_1 m_{t-1} + (1-\beta_1) g_t$$
+$$v_t = \beta_2 v_{t-1} + (1-\beta_2) g_t^2$$
+$$\hat{m}_t = \frac{m_t}{1-\beta_1^t}, \quad \hat{v}_t = \frac{v_t}{1-\beta_2^t}$$
+$$\theta_{t+1} = \theta_t - \frac{\eta}{\sqrt{\hat{v}_t} + \epsilon} \hat{m}_t$$
+</Formula>
+
+```python
+class AdamOptimizer:
+    """
+    Adam optimizer with momentum and adaptive learning rates.
+    """
+
+    def __init__(
+        self,
+        learning_rate: float = 0.01,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        epsilon: float = 1e-8,
+        maxiter: int = 1000,
+        tol: float = 1e-6
+    ):
+        self.learning_rate = learning_rate
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.epsilon = epsilon
+        self.maxiter = maxiter
+        self.tol = tol
+
+    def minimize(
+        self,
+        cost_function: Callable[[np.ndarray], float],
+        gradient_function: Callable[[np.ndarray], np.ndarray],
+        initial_params: np.ndarray
+    ) -> OptimizationResult:
+        """Minimize using Adam optimizer."""
+        params = initial_params.copy()
+        history = []
+
+        # Initialize moment estimates
+        m = np.zeros_like(params)
+        v = np.zeros_like(params)
+
+        for t in range(1, self.maxiter + 1):
+            cost = cost_function(params)
+            history.append(cost)
+
+            gradient = gradient_function(params)
+
+            # Update biased first moment estimate
+            m = self.beta1 * m + (1 - self.beta1) * gradient
+
+            # Update biased second moment estimate
+            v = self.beta2 * v + (1 - self.beta2) * (gradient ** 2)
+
+            # Compute bias-corrected estimates
+            m_hat = m / (1 - self.beta1 ** t)
+            v_hat = v / (1 - self.beta2 ** t)
+
+            # Check convergence
+            update = self.learning_rate * m_hat / (np.sqrt(v_hat) + self.epsilon)
+            if np.linalg.norm(update) < self.tol:
+                break
+
+            # Update parameters
+            params = params - update
+
+        return OptimizationResult(
+            optimal_params=params,
+            optimal_value=history[-1],
+            num_iterations=t,
+            num_function_evals=len(history),
+            convergence_history=history,
+            success=True
+        )
+```
+
+### Quantum Natural Gradient
+
+<Definition term="Quantum Natural Gradient">
+QNG uses the Fubini-Study metric tensor (quantum Fisher information) to define a geometry-aware update that accounts for the curvature of the quantum state space.
+</Definition>
+
+<Formula>
+$$\boldsymbol{\theta}_{t+1} = \boldsymbol{\theta}_t - \eta \, g^{-1}(\boldsymbol{\theta}_t) \nabla_{\boldsymbol{\theta}} E(\boldsymbol{\theta}_t)$$
+</Formula>
+
+where $g_{ij}(\boldsymbol{\theta}) = \text{Re}\left[\langle \partial_i \psi | \partial_j \psi \rangle - \langle \partial_i \psi | \psi \rangle \langle \psi | \partial_j \psi \rangle\right]$
+
+```python
+class QuantumNaturalGradientOptimizer:
+    """
+    Quantum Natural Gradient optimizer.
+
+    Uses the quantum geometric tensor to precondition gradients.
+    """
+
+    def __init__(
+        self,
+        learning_rate: float = 0.01,
+        regularization: float = 1e-3,
+        maxiter: int = 200
+    ):
+        self.learning_rate = learning_rate
+        self.regularization = regularization
+        self.maxiter = maxiter
+
+    def compute_fubini_study_metric(
+        self,
+        state_function: Callable[[np.ndarray], np.ndarray],
+        params: np.ndarray,
+        epsilon: float = 1e-5
+    ) -> np.ndarray:
+        """
+        Compute the Fubini-Study metric tensor.
+
+        Uses finite differences to approximate derivatives.
+        """
+        n_params = len(params)
+        psi = state_function(params)
+
+        # Compute state derivatives
+        dpsi = []
+        for i in range(n_params):
+            params_plus = params.copy()
+            params_plus[i] += epsilon
+            params_minus = params.copy()
+            params_minus[i] -= epsilon
+
+            psi_plus = state_function(params_plus)
+            psi_minus = state_function(params_minus)
+
+            dpsi_i = (psi_plus - psi_minus) / (2 * epsilon)
+            dpsi.append(dpsi_i)
+
+        # Compute metric tensor
+        g = np.zeros((n_params, n_params))
+        for i in range(n_params):
+            for j in range(n_params):
+                # <dpsi_i|dpsi_j>
+                inner_ij = np.vdot(dpsi[i], dpsi[j])
+                # <dpsi_i|psi><psi|dpsi_j>
+                inner_i_psi = np.vdot(dpsi[i], psi)
+                inner_psi_j = np.vdot(psi, dpsi[j])
+
+                g[i, j] = np.real(inner_ij - inner_i_psi * inner_psi_j)
+
+        return g
+
+    def minimize(
+        self,
+        cost_function: Callable[[np.ndarray], float],
+        gradient_function: Callable[[np.ndarray], np.ndarray],
+        state_function: Callable[[np.ndarray], np.ndarray],
+        initial_params: np.ndarray
+    ) -> OptimizationResult:
+        """Minimize using quantum natural gradient."""
+        params = initial_params.copy()
+        history = []
+
+        for iteration in range(self.maxiter):
+            cost = cost_function(params)
+            history.append(cost)
+
+            gradient = gradient_function(params)
+
+            # Compute metric tensor
+            g = self.compute_fubini_study_metric(state_function, params)
+
+            # Regularize for numerical stability
+            g_reg = g + self.regularization * np.eye(len(params))
+
+            # Compute natural gradient
+            try:
+                nat_grad = np.linalg.solve(g_reg, gradient)
+            except np.linalg.LinAlgError:
+                nat_grad = gradient  # Fall back to standard gradient
+
+            # Update parameters
+            params = params - self.learning_rate * nat_grad
+
+        return OptimizationResult(
+            optimal_params=params,
+            optimal_value=history[-1],
+            num_iterations=self.maxiter,
+            num_function_evals=len(history),
+            convergence_history=history,
+            success=True
+        )
+```
+
+## 4. SPSA: Simultaneous Perturbation Stochastic Approximation
+
+<Definition term="SPSA">
+SPSA estimates gradients using only two function evaluations per iteration, regardless of parameter dimension, making it efficient for high-dimensional noisy optimization.
+</Definition>
+
+<Formula>
+$$\hat{g}_k(\boldsymbol{\theta}) = \frac{E(\boldsymbol{\theta} + c_k \boldsymbol{\Delta}_k) - E(\boldsymbol{\theta} - c_k \boldsymbol{\Delta}_k)}{2c_k} \boldsymbol{\Delta}_k^{-1}$$
+</Formula>
+
+```python
+class SPSAOptimizer:
+    """
+    SPSA optimizer for noisy quantum optimization.
+
+    Efficient gradient estimation with only 2 function evaluations.
+    """
+
+    def __init__(
+        self,
+        a: float = 0.1,
+        c: float = 0.1,
+        A: float = 10,
+        alpha: float = 0.602,
+        gamma: float = 0.101,
+        maxiter: int = 500
+    ):
+        """
+        Initialize SPSA with standard gain sequences.
+
+        a_k = a / (A + k + 1)^alpha
+        c_k = c / (k + 1)^gamma
+        """
+        self.a = a
+        self.c = c
+        self.A = A
+        self.alpha = alpha
+        self.gamma = gamma
+        self.maxiter = maxiter
+
+    def minimize(
+        self,
+        cost_function: Callable[[np.ndarray], float],
+        initial_params: np.ndarray
+    ) -> OptimizationResult:
+        """Minimize using SPSA."""
+        params = initial_params.copy()
+        history = []
+
+        for k in range(self.maxiter):
+            # Compute gain sequences
+            a_k = self.a / (self.A + k + 1) ** self.alpha
+            c_k = self.c / (k + 1) ** self.gamma
+
+            # Generate random perturbation (Bernoulli +/- 1)
+            delta = 2 * (np.random.randint(0, 2, len(params)) - 0.5)
+
+            # Evaluate cost at perturbed points
+            params_plus = params + c_k * delta
+            params_minus = params - c_k * delta
+
+            cost_plus = cost_function(params_plus)
+            cost_minus = cost_function(params_minus)
+
+            # Estimate gradient
+            gradient_estimate = (cost_plus - cost_minus) / (2 * c_k * delta)
+
+            # Update parameters
+            params = params - a_k * gradient_estimate
+
+            # Track cost at current point
+            cost = cost_function(params)
+            history.append(cost)
+
+        return OptimizationResult(
+            optimal_params=params,
+            optimal_value=history[-1],
+            num_iterations=self.maxiter,
+            num_function_evals=3 * self.maxiter,
+            convergence_history=history,
+            success=True
+        )
+```
+
+## 5. Optimizer Selection Guide
+
+<Tip>
+The choice of optimizer depends heavily on the noise level, parameter count, and available computational budget. Start with robust methods like COBYLA or SPSA, then try gradient-based methods if needed.
+</Tip>
+
+```python
+def select_optimizer(
+    num_parameters: int,
+    noise_level: str,  # 'low', 'medium', 'high'
+    gradient_available: bool,
+    budget: str  # 'low', 'medium', 'high'
+) -> dict:
+    """
+    Recommend an optimizer based on problem characteristics.
+
+    Returns recommendation with rationale.
+    """
+    recommendations = {
+        ('low', True, 'high'): {
+            'optimizer': 'Adam',
+            'rationale': 'Low noise allows gradient-based methods; Adam handles non-convexity well',
+            'alternatives': ['QNG', 'L-BFGS-B']
+        },
+        ('low', True, 'medium'): {
+            'optimizer': 'Gradient Descent',
+            'rationale': 'Simple and effective with clean gradients',
+            'alternatives': ['Adam']
+        },
+        ('low', False, 'any'): {
+            'optimizer': 'Powell',
+            'rationale': 'Efficient gradient-free method for smooth landscapes',
+            'alternatives': ['Nelder-Mead']
+        },
+        ('medium', True, 'high'): {
+            'optimizer': 'SPSA',
+            'rationale': 'Robust to noise, efficient gradient estimation',
+            'alternatives': ['Adam with large batch']
+        },
+        ('medium', False, 'any'): {
+            'optimizer': 'COBYLA',
+            'rationale': 'Robust gradient-free method, handles constraints',
+            'alternatives': ['Nelder-Mead']
+        },
+        ('high', any, any): {
+            'optimizer': 'SPSA',
+            'rationale': 'Most robust to shot noise; only 2 evaluations per gradient',
+            'alternatives': ['COBYLA', 'Bayesian optimization']
+        }
+    }
+
+    # Find matching recommendation
+    for key, rec in recommendations.items():
+        if key[0] == noise_level:
+            if key[1] == gradient_available or key[1] == any:
+                return rec
+
+    # Default
+    return {
+        'optimizer': 'COBYLA',
+        'rationale': 'Safe default for unknown conditions',
+        'alternatives': ['SPSA', 'Nelder-Mead']
+    }
+
+# Example usage
+rec = select_optimizer(
+    num_parameters=20,
+    noise_level='medium',
+    gradient_available=True,
+    budget='high'
+)
+print(f"Recommended: {rec['optimizer']}")
+print(f"Rationale: {rec['rationale']}")
+```
+
+## 6. Advanced Optimization Strategies
+
+### Layer-wise Training
+
+```python
+class LayerwiseOptimizer:
+    """
+    Train circuit layer-by-layer to avoid barren plateaus.
+    """
+
+    def __init__(
+        self,
+        base_optimizer: object,
+        params_per_layer: int
+    ):
+        self.base_optimizer = base_optimizer
+        self.params_per_layer = params_per_layer
+
+    def minimize(
+        self,
+        cost_function_builder: Callable[[int], Callable],
+        num_layers: int,
+        initial_params: np.ndarray = None
+    ) -> OptimizationResult:
+        """
+        Train layer by layer.
+
+        Args:
+            cost_function_builder: Function(depth) -> cost_function
+            num_layers: Total number of layers
+        """
+        all_params = []
+        total_history = []
+
+        for layer in range(1, num_layers + 1):
+            # Initialize new layer near identity
+            new_layer_params = np.random.uniform(
+                -0.1, 0.1, self.params_per_layer
+            )
+            current_params = np.concatenate([all_params, new_layer_params]) \
+                if all_params else new_layer_params
+
+            # Build cost function for current depth
+            cost_fn = cost_function_builder(layer)
+
+            # Optimize
+            result = self.base_optimizer.minimize(cost_fn, current_params)
+
+            all_params = list(result.optimal_params)
+            total_history.extend(result.convergence_history)
+
+            print(f"Layer {layer}: E = {result.optimal_value:.6f}")
+
+        return OptimizationResult(
+            optimal_params=np.array(all_params),
+            optimal_value=total_history[-1],
+            num_iterations=num_layers,
+            num_function_evals=len(total_history),
+            convergence_history=total_history,
+            success=True
+        )
+```
+
+### Multiple Random Restarts
+
+```python
+def multi_start_optimization(
+    optimizer,
+    cost_function: Callable,
+    num_params: int,
+    num_restarts: int = 10,
+    param_range: Tuple[float, float] = (0, 2*np.pi)
+) -> OptimizationResult:
+    """
+    Run optimization from multiple random starting points.
+
+    Returns the best result found.
+    """
+    best_result = None
+    all_results = []
+
+    for restart in range(num_restarts):
+        # Random initialization
+        initial_params = np.random.uniform(
+            param_range[0], param_range[1], num_params
+        )
+
+        result = optimizer.minimize(cost_function, initial_params)
+        all_results.append(result)
+
+        if best_result is None or result.optimal_value < best_result.optimal_value:
+            best_result = result
+
+        print(f"Restart {restart+1}: E = {result.optimal_value:.6f}")
+
+    print(f"\nBest energy: {best_result.optimal_value:.6f}")
+    return best_result
+```
+
+## Summary
+
+In this lesson, you learned the essential optimization techniques for VQE:
+
+1. **Gradient-Free Methods**: COBYLA, Nelder-Mead, Powell for noisy landscapes
+2. **Gradient-Based Methods**: GD, Adam, QNG for efficient convergence
+3. **SPSA**: Efficient gradient estimation for quantum systems
+4. **Optimizer Selection**: Match optimizer to noise level and resources
+5. **Advanced Strategies**: Layer-wise training and multiple restarts
+
+<Warning>
+No single optimizer works best for all problems. Always benchmark multiple optimizers on your specific problem, as performance varies dramatically with ansatz structure and noise characteristics.
+</Warning>
+
+## Further Reading
+
+- Next lesson: Gradient Computation Methods
+- Related: SPSA Theory and Analysis
+- Application: VQE on Real Hardware
